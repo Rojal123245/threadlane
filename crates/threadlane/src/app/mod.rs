@@ -1871,6 +1871,13 @@ impl MatchEvent for App {
             }
         }
 
+        if let Some(action) = actions
+            .iter()
+            .find_map(|action| action.downcast_ref::<StarterPromptAction>().copied())
+        {
+            self.apply_starter_prompt(cx, action);
+        }
+
         if self.ui.button(cx, ids!(login_btn)).clicked(actions) {
             self.auth_workspace = self.workspace_state.active_key().cloned();
             self.push_chat(MsgRole::System, "Initiating ChatGPT device code login...");
@@ -2155,31 +2162,12 @@ impl AppMain for App {
         }
         if let Event::MouseDown(mouse_event) = event {
             if mouse_event.button.is_primary() {
-                let action = self
+                if let Some(action) = self
                     .ui
                     .chat_list(cx, ids!(chat_list))
-                    .starter_prompt_at(cx, mouse_event.abs);
-                if let Some(action) = action {
-                    let prompt = match action {
-                        StarterPromptAction::Explore => "Explore and explain the codebase — walk me through the project structure, key files, and how things connect.",
-                        StarterPromptAction::Build => "Let’s build a new feature. Describe what you’d like and I’ll help design and implement it.",
-                        StarterPromptAction::Review => "Review my code and suggest improvements — look for bugs, style issues, and simplification opportunities.",
-                        StarterPromptAction::Fix => "Help me diagnose and fix an issue. Describe the problem or share an error message to get started.",
-                    };
-                    self.set_prompt_text(cx, prompt);
-                    self.ui
-                        .threadlane_command_text_input(cx, ids!(prompt_input))
-                        .text_input_ref(cx)
-                        .set_cursor(
-                            cx,
-                            Cursor {
-                                index: prompt.len(),
-                                prefer_next_row: false,
-                            },
-                            false,
-                        );
-                    self.starter_prompt_focus_pending = true;
-                    cx.redraw_all();
+                    .starter_prompt_at(cx, mouse_event.abs)
+                {
+                    self.apply_starter_prompt(cx, action);
                 }
             }
         }
@@ -2190,8 +2178,9 @@ impl AppMain for App {
             let mut scope = Scope::with_data(&mut self.workspace_state);
             self.ui.handle_event(cx, event, &mut scope);
         }
-        if matches!(event, Event::MouseUp(mouse_event) if mouse_event.button.is_primary())
-            && self.starter_prompt_focus_pending
+        if self.starter_prompt_focus_pending
+            && (matches!(event, Event::MouseUp(mouse_event) if mouse_event.button.is_primary())
+                || matches!(event, Event::Actions(_)))
         {
             self.starter_prompt_focus_pending = false;
             let composer = self
@@ -2750,6 +2739,30 @@ impl App {
             .threadlane_command_text_input(cx, ids!(prompt_input))
             .text_input_ref(cx)
             .text()
+    }
+
+    fn apply_starter_prompt(&mut self, cx: &mut Cx, action: StarterPromptAction) {
+        let prompt = match action {
+            StarterPromptAction::Explore => "Explore and explain the codebase — walk me through the project structure, key files, and how things connect.",
+            StarterPromptAction::Build => "Let’s build a new feature. Describe what you’d like and I’ll help design and implement it.",
+            StarterPromptAction::Review => "Review my code and suggest improvements — look for bugs, style issues, and simplification opportunities.",
+            StarterPromptAction::Fix => "Help me diagnose and fix an issue. Describe the problem or share an error message to get started.",
+            StarterPromptAction::None => return,
+        };
+        self.set_prompt_text(cx, prompt);
+        self.ui
+            .threadlane_command_text_input(cx, ids!(prompt_input))
+            .text_input_ref(cx)
+            .set_cursor(
+                cx,
+                Cursor {
+                    index: prompt.len(),
+                    prefer_next_row: false,
+                },
+                false,
+            );
+        self.starter_prompt_focus_pending = true;
+        cx.redraw_all();
     }
 
     fn set_prompt_text(&self, cx: &mut Cx, text: &str) {

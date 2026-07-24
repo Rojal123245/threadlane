@@ -287,12 +287,14 @@ fn draw_markdown_item(
     item_widget.draw_all_unscoped(cx);
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StarterPromptAction {
     Explore,
     Build,
     Review,
     Fix,
+    #[default]
+    None,
 }
 
 #[derive(Script, ScriptHook, Widget)]
@@ -614,10 +616,31 @@ impl Widget for ChatList {
             _ => {}
         }
         self.view.handle_event(cx, event, scope);
+
+        if matches!(event, Event::KeyDown(key_event) if matches!(key_event.key_code, KeyCode::ReturnKey | KeyCode::Space))
+        {
+            if let Some(action) = self.focused_starter_action(cx) {
+                cx.action(action);
+            }
+        }
     }
 }
 
 impl ChatList {
+    fn focused_starter_action(&self, cx: &Cx) -> Option<StarterPromptAction> {
+        [
+            (ids!(explore_btn), StarterPromptAction::Explore),
+            (ids!(build_btn), StarterPromptAction::Build),
+            (ids!(review_btn), StarterPromptAction::Review),
+            (ids!(fix_btn), StarterPromptAction::Fix),
+        ]
+        .into_iter()
+        .find_map(|(path, action)| {
+            cx.has_key_focus(self.view.widget(cx, path).area())
+                .then_some(action)
+        })
+    }
+
     fn set_starter_feedback(
         &mut self,
         cx: &mut Cx,
