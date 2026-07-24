@@ -72,7 +72,8 @@ impl Widget for SessionList {
                                 continue;
                             };
                             let active = data.is_active(&session.work_dir, &session.id);
-                            let context_target = data.is_context_target(&session.work_dir, &session.id);
+                            let context_target =
+                                data.is_context_target(&session.work_dir, &session.id);
                             let last = *session_idx + 1 == project.sessions.len();
                             let template = match (context_target, active, last) {
                                 (true, _, true) => id!(SessionRowContextLast),

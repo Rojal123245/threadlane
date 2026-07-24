@@ -59,7 +59,14 @@ pub enum ComposerStatus {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ComposerPresentation {
     pub show_model: bool,
+    pub show_attach: bool,
     pub working: bool,
+}
+
+impl ComposerPresentation {
+    pub fn show_stop(&self, has_generation: bool) -> bool {
+        self.working && has_generation
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -81,6 +88,7 @@ impl ComposerState {
     pub fn presentation(&self) -> ComposerPresentation {
         ComposerPresentation {
             show_model: true,
+            show_attach: true,
             working: self.status == ComposerStatus::Working,
         }
     }
@@ -184,6 +192,7 @@ mod tests {
             state.presentation(),
             ComposerPresentation {
                 show_model: true,
+                show_attach: true,
                 working: false,
             }
         );
@@ -196,6 +205,9 @@ mod tests {
         let presentation = state.presentation();
         assert!(presentation.working);
         assert!(presentation.show_model);
+        assert!(presentation.show_attach);
+        assert!(presentation.show_stop(true));
+        assert!(!presentation.show_stop(false));
     }
 
     #[test]
@@ -205,5 +217,7 @@ mod tests {
         let presentation = state.presentation();
         assert!(!presentation.working);
         assert!(presentation.show_model);
+        assert!(presentation.show_attach);
+        assert!(!presentation.show_stop(true));
     }
 }

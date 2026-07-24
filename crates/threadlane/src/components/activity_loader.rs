@@ -16,45 +16,50 @@ script_mod! {
         height: 10
         show_bg: true
         draw_bg +: {
-            color: uniform(#x70a7ff)
-            color_mid: uniform(#x8c8df4)
-            color_tail: uniform(#x9c72d8)
-            speed: uniform(3.2)
+            color: uniform(#x66d9ff)
+            color_mid: uniform(#x6fa8ff)
+            color_tail: uniform(#xa78bfa)
+            color_idle: uniform(#x7067d9)
+            speed: uniform(7.0)
             dot_radius: uniform(1.15)
 
             pixel: fn() {
                 let p = self.pos * self.rect_size
-                let center = self.rect_size * 0.5
-                let orbit = vec2(self.rect_size.x * 0.29, self.rect_size.y * 0.24)
-                let angle = self.draw_pass.time * self.speed
+                let padding = max(1.0, min(self.rect_size.x, self.rect_size.y) * 0.10)
+                let content_size = max(
+                    vec2(1.0, 1.0),
+                    self.rect_size - vec2(padding * 2.0, padding * 2.0)
+                )
+                let grid_size = vec2(6.0, 4.0)
+                let cell_size = content_size / grid_size
+                let grid = (p - vec2(padding, padding)) / cell_size
 
-                let p0 = center + vec2(cos(angle), sin(angle)) * orbit
-                let p1 = center + vec2(cos(angle - 0.72), sin(angle - 0.72)) * orbit
-                let p2 = center + vec2(cos(angle - 1.44), sin(angle - 1.44)) * orbit
+                if grid.x < 0.0 || grid.y < 0.0 || grid.x >= 6.0 || grid.y >= 4.0 {
+                    return #x00000000
+                }
 
-                let d0 = length(p - p0)
-                let d1 = length(p - p1)
-                let d2 = length(p - p2)
+                let column = floor(grid.x)
+                let row = floor(grid.y)
+                let odd_row = row - floor(row * 0.5) * 2.0
+                let snake_column = if odd_row < 0.5 column else 5.0 - column
+                let index = row * 6.0 + snake_column
+                let center = vec2(padding, padding)
+                    + (vec2(column, row) + vec2(0.5, 0.5)) * cell_size
+                let radius = min(self.dot_radius, min(cell_size.x, cell_size.y) * 0.34)
+                let distance = length(p - center)
+                let coverage = smoothstep(radius + 0.65, radius - 0.35, distance)
 
-                let a0 = smoothstep(self.dot_radius + 0.8, self.dot_radius - 0.45, d0)
-                let a1 = smoothstep(self.dot_radius + 0.65, self.dot_radius - 0.35, d1) * 0.72
-                let a2 = smoothstep(self.dot_radius + 0.5, self.dot_radius - 0.25, d2) * 0.42
+                let phase = fract(self.draw_pass.time * self.speed / 24.0) * 24.0
+                let age = if phase >= index phase - index else phase + 24.0 - index
+                let head = smoothstep(1.0, 0.0, age)
+                let trail = smoothstep(5.0, 0.0, age) * (1.0 - head)
+                let active_color = self.color_mid.mix(self.color, head)
+                let dot_color = self.color_idle
+                    .mix(self.color_tail, trail)
+                    .mix(active_color, max(head, trail * 0.72))
+                let alpha = coverage
 
-                let g0 = smoothstep(self.dot_radius + 2.6, self.dot_radius, d0) * 0.20
-                let g1 = smoothstep(self.dot_radius + 2.2, self.dot_radius, d1) * 0.11
-                let g2 = smoothstep(self.dot_radius + 1.8, self.dot_radius, d2) * 0.06
-
-                let w0 = a0 + g0
-                let w1 = a1 + g1
-                let w2 = a2 + g2
-                let energy = w0 + w1 + w2
-                let rgb = (
-                    self.color.xyz * w0
-                    + self.color_mid.xyz * w1
-                    + self.color_tail.xyz * w2
-                ) / max(energy, 0.001)
-
-                return Pal.premul(vec4(rgb, clamp(energy, 0.0, 1.0)))
+                return Pal.premul(vec4(dot_color.xyz, alpha))
             }
         }
     }
@@ -78,6 +83,15 @@ script_mod! {
             height: 5
             draw_bg +: {
                 color: #x68a982
+                border_radius: 2.5
+            }
+        }
+        status_cancelled_indicator := mod.components.StatusDot {
+            width: 5
+            height: 5
+            visible: false
+            draw_bg +: {
+                color: #x667180
                 border_radius: 2.5
             }
         }

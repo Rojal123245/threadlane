@@ -10,19 +10,19 @@ script_mod! {
         height: Fit
         text: ""
         draw_text +: {
-            color: #x7f8b9b
-            text_style: theme.font_bold { font_size: 8.5 }
+            color: #x5d6878
+            text_style: theme.font_bold { font_size: 9.0 }
         }
     }
 
     mod.components.SectionHeader = View {
         width: Fill
-        height: 34
+        height: 30
         cursor: MouseCursor.Arrow
         flow: Right
         spacing: 8
         align: Align{y: 0.5}
-        padding: Inset{left: 7 right: 4 bottom: 4}
+        padding: Inset{left: 7 right: 4 top: 2}
         section_label := mod.components.SectionLabel {}
     }
 }

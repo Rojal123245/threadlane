@@ -68,12 +68,14 @@ pub fn normalize_session_title(value: &str) -> String {
     // either order until neither is present.
     loop {
         let before = title.clone();
-        if title.get(..6).is_some_and(|p| p.eq_ignore_ascii_case("title:")) {
+        if title
+            .get(..6)
+            .is_some_and(|p| p.eq_ignore_ascii_case("title:"))
+        {
             title = title[6..].trim().to_string();
         }
         let is_double_quoted = title.starts_with('"') && title.ends_with('"') && title.len() >= 2;
-        let is_single_quoted =
-            title.starts_with('\'') && title.ends_with('\'') && title.len() >= 2;
+        let is_single_quoted = title.starts_with('\'') && title.ends_with('\'') && title.len() >= 2;
         if is_double_quoted || is_single_quoted {
             // Safe: both delimiters are ASCII (1 byte each).
             title = title[1..title.len() - 1].trim().to_string();
@@ -142,10 +144,7 @@ pub fn first_existing_user_prompt(tree: &SessionTree) -> Option<String> {
 }
 
 pub fn begin_title_generation(work_dir: &Path, session_id: &str) -> bool {
-    let key = (
-        canonicalize_path(work_dir),
-        session_id.to_string(),
-    );
+    let key = (canonicalize_path(work_dir), session_id.to_string());
     // This is deliberately a lifetime attempt marker, not an in-flight guard.
     // Failed requests must not become eligible again later in this process.
     TITLE_ATTEMPTED.write().unwrap().insert(key)

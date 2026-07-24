@@ -1,3 +1,7 @@
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tempfile::tempdir;
 use threadlane_agent::{
     compact_messages, repair_interrupted_tool_turn, AfterToolCallHook, AfterToolCallResult, Agent,
     AgentLoop, AgentMessage, AgentState, AgentToolCall, AgentToolDefinition, AgentToolResult,
@@ -5,10 +9,6 @@ use threadlane_agent::{
     SessionTree, TokenUsage, ToolExecutionMode, ToolExecutor,
 };
 use threadlane_provider::openai::{ToolCall, ToolCallFunction};
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use tempfile::tempdir;
 use tokio::sync::Notify;
 
 struct TestBeforeHook;
@@ -335,6 +335,7 @@ fn interrupted_tool_turn_is_removed_before_provider_replay() {
                         name: "read_file".into(),
                         arguments: "{}".into(),
                     },
+                    thought_signature: None,
                 },
                 ToolCall {
                     id: "call-b".into(),
@@ -343,6 +344,7 @@ fn interrupted_tool_turn_is_removed_before_provider_replay() {
                         name: "read_file".into(),
                         arguments: "{}".into(),
                     },
+                    thought_signature: None,
                 },
             ]),
         },
@@ -371,6 +373,7 @@ fn completed_tool_turn_is_preserved_for_provider_replay() {
                     name: "read_file".into(),
                     arguments: "{}".into(),
                 },
+                thought_signature: None,
             }]),
         },
         AgentMessage::Tool {
@@ -405,6 +408,7 @@ fn test_convert_to_codex_llm_structure() {
                     name: "list_dir".to_string(),
                     arguments: "{\"path\":\".\"}".to_string(),
                 },
+                thought_signature: None,
             }]),
         },
         AgentMessage::Tool {
@@ -485,6 +489,7 @@ fn tool_call(id: &str, name: &str) -> ToolCall {
             name: name.to_string(),
             arguments: "{}".to_string(),
         },
+        thought_signature: None,
     }
 }
 

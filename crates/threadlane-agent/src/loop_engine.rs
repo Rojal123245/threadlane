@@ -12,14 +12,15 @@ use crate::types::{
     AgentMessage, AgentState, AgentToolCall, AgentToolDefinition, AgentToolResult, QueueMode,
     TokenUsage, ToolExecutionMode,
 };
-use threadlane_provider::openai::{
-    clamp_prompt_cache_key, OpenAIClient, ProviderUsage, StreamEvent, ToolCall,
-};
-use threadlane_tools::{execute_tool, execute_tool_in_workspace, get_available_tools, get_codex_tools};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use threadlane_provider::openai::{clamp_prompt_cache_key, ProviderUsage, StreamEvent, ToolCall};
+use threadlane_provider::router::ProviderClient;
+use threadlane_tools::{
+    execute_tool, execute_tool_in_workspace, get_available_tools, get_codex_tools,
+};
 use tokio::sync::{broadcast, mpsc, Mutex};
 
 /// Removes an assistant tool-call turn that was interrupted before every call
@@ -275,7 +276,7 @@ pub struct AgentLoop {
     pub state: Arc<Mutex<AgentState>>,
     pub api_key: String,
     pub account_id: Option<String>,
-    provider_client: OpenAIClient,
+    provider_client: ProviderClient,
     pub prompt_cache_key: Option<String>,
     pub tool_execution_mode: ToolExecutionMode,
     allowed_tool_names: Option<HashSet<String>>,
@@ -291,6 +292,7 @@ pub struct AgentLoop {
     /// `register_tool_executor` so ordering and schema conflicts are validated.
     pub extension_manager: Option<Arc<dyn ToolExecutor>>,
     pub work_dir: Option<PathBuf>,
+    pub stream_rules: Vec<crate::rules::StreamRule>,
 }
 
 impl AgentLoop {
@@ -305,7 +307,7 @@ impl AgentLoop {
             "You are threadlane AI coding agent.",
         )));
         let api_key = api_key.into();
-        let provider_client = OpenAIClient::new(api_key.clone(), account_id.clone());
+        let provider_client = ProviderClient::new(api_key.clone(), account_id.clone());
 
         Self {
             state,
@@ -325,7 +327,16 @@ impl AgentLoop {
             tool_executors: Vec::new(),
             extension_manager: None,
             work_dir: None,
+            stream_rules: Vec::new(),
         }
+    }
+
+    pub fn add_stream_rule(&mut self, rule: crate::rules::StreamRule) {
+        self.stream_rules.push(rule);
+    }
+
+    pub fn set_stream_rules(&mut self, rules: Vec<crate::rules::StreamRule>) {
+        self.stream_rules = rules;
     }
 
     pub fn set_prompt_cache_key(&mut self, key: Option<String>) {
@@ -633,10 +644,17 @@ impl AgentLoop {
             let mut current_turn_reasoning = String::new();
             let mut captured_tool_calls: Vec<ToolCall> = Vec::new();
 
+            let mut stream_monitor = crate::rules::StreamRuleMonitor::new(self.stream_rules.clone());
+            let mut rule_triggered = None;
+
             while let Some(evt) = stream_rx.recv().await {
                 match evt {
                     StreamEvent::ContentToken(token) => {
                         current_turn_text.push_str(&token);
+                        if let Some(rule_match) = stream_monitor.push_chunk(&token) {
+                            rule_triggered = Some(rule_match);
+                            break;
+                        }
                         let _ = self.event_tx.send(AgentEvent::MessageUpdate {
                             text_delta: Some(token),
                             reasoning_delta: None,
@@ -684,6 +702,28 @@ impl AgentLoop {
                         return;
                     }
                 }
+            }
+
+            if let Some(rule_match) = rule_triggered {
+                let _ = self.event_tx.send(AgentEvent::StreamRuleTriggered {
+                    rule_id: rule_match.rule_id.clone(),
+                    rule_name: rule_match.rule_name.clone(),
+                    matched_text: rule_match.matched_text.clone(),
+                    reminder: rule_match.reminder.clone(),
+                });
+
+                let reminder_msg = AgentMessage::System {
+                    content: format!(
+                        "⚠ STREAM RULE INJECTION [{}: {}]: Matched invalid pattern '{}'. Reminder: {}. Please adjust your output and try again.",
+                        rule_match.rule_id, rule_match.rule_name, rule_match.matched_text, rule_match.reminder
+                    ),
+                };
+
+                let mut state = self.state.lock().await;
+                state.messages.push(reminder_msg);
+                drop(state);
+
+                continue 'turn_loop;
             }
 
             let assistant_msg = AgentMessage::Assistant {

@@ -8,12 +8,6 @@ use crate::skills::{LoadSkillToolExecutor, SkillManager, SkillRegistry};
 use crate::system_prompt::{build_system_prompt, SystemPromptBuildOptions, SystemPromptConfig};
 use crate::wasi_extension::{WasiExtensionManager, WasiLegacyEffect};
 use async_trait::async_trait;
-use threadlane_agent::{
-    repair_interrupted_tool_turn, AfterToolCallHook, AfterToolCallResult, Agent, AgentEvent,
-    AgentMessage, AgentState, AgentToolCall, AgentToolDefinition, AgentToolResult,
-    BeforeToolCallHook, BeforeToolCallResult, ImageAttachment, ReasoningEffort, SessionTree,
-    ToolExecutor,
-};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fs;
@@ -23,12 +17,21 @@ use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use threadlane_agent::{
+    repair_interrupted_tool_turn, AfterToolCallHook, AfterToolCallResult, Agent, AgentEvent,
+    AgentMessage, AgentState, AgentToolCall, AgentToolDefinition, AgentToolResult,
+    BeforeToolCallHook, BeforeToolCallResult, ImageAttachment, ReasoningEffort, SessionTree,
+    ToolExecutor,
+};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::broadcast;
 use tokio::time::{timeout, Duration};
 
 const CAPABILITY_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_CAPABILITY_BUFFER_BYTES: usize = 64 * 1024;
+const MAX_PROCESS_TIMEOUT_MS: u64 = 120_000;
+const MAX_PROCESS_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_BROKER_CONTINUATION_ROUNDS: usize = 4;
 const MAX_SUBAGENT_TASKS: usize = 8;
 const MAX_SUBAGENT_TASK_CHARS: usize = 32_000;
 const SUBAGENT_CONCURRENCY_LIMIT: usize = 4;
@@ -356,6 +359,7 @@ impl HostCapabilityHandler {
             return unknown_operation(self.capability, &request.operation);
         }
         let program = string_argument(&request.arguments, "program")?;
+        let limits = process_run_limits(&request.arguments)?;
         let args = request
             .arguments
             .get("args")
@@ -382,10 +386,20 @@ impl HostCapabilityHandler {
             .stderr
             .take()
             .ok_or_else(|| internal_error("process stderr pipe unavailable"))?;
-        let (stdout, stderr, status) = timeout(CAPABILITY_TIMEOUT, async {
+        let (stdout, stderr, status) = timeout(limits.timeout, async {
             tokio::try_join!(
-                read_limited(stdout, "process_output_too_large", "process stdout"),
-                read_limited(stderr, "process_output_too_large", "process stderr"),
+                read_limited(
+                    stdout,
+                    "process_output_too_large",
+                    "process stdout",
+                    limits.max_output_bytes,
+                ),
+                read_limited(
+                    stderr,
+                    "process_output_too_large",
+                    "process stderr",
+                    limits.max_output_bytes,
+                ),
                 async { child.wait().await.map_err(host_error) },
             )
         })
@@ -431,6 +445,7 @@ impl HostCapabilityHandler {
                 &mut stream,
                 "network_response_too_large",
                 "network response",
+                MAX_CAPABILITY_BUFFER_BYTES,
             )
             .await?;
             String::from_utf8(response).map_err(|_| invalid_argument("response was not UTF-8"))
@@ -492,6 +507,7 @@ async fn read_limited(
     mut reader: impl AsyncRead + Unpin,
     code: &'static str,
     source: &'static str,
+    max_bytes: usize,
 ) -> Result<Vec<u8>, BrokerError> {
     let mut bytes = Vec::new();
     let mut chunk = [0; 8192];
@@ -500,16 +516,55 @@ async fn read_limited(
         if read == 0 {
             return Ok(bytes);
         }
-        if bytes.len().saturating_add(read) > MAX_CAPABILITY_BUFFER_BYTES {
+        if bytes.len().saturating_add(read) > max_bytes {
             return Err(BrokerError {
                 code: code.into(),
-                message: format!(
-                    "{source} exceeds the {MAX_CAPABILITY_BUFFER_BYTES}-byte buffer limit"
-                ),
+                message: format!("{source} exceeds the {max_bytes}-byte buffer limit"),
             });
         }
         bytes.extend_from_slice(&chunk[..read]);
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProcessRunLimits {
+    timeout: Duration,
+    max_output_bytes: usize,
+}
+
+fn process_run_limits(arguments: &Value) -> Result<ProcessRunLimits, BrokerError> {
+    let timeout_ms = bounded_positive_integer_argument(
+        arguments,
+        "timeout_ms",
+        CAPABILITY_TIMEOUT.as_millis() as u64,
+        MAX_PROCESS_TIMEOUT_MS,
+    )?;
+    let max_output_bytes = bounded_positive_integer_argument(
+        arguments,
+        "max_output_bytes",
+        MAX_CAPABILITY_BUFFER_BYTES as u64,
+        MAX_PROCESS_OUTPUT_BYTES as u64,
+    )? as usize;
+    Ok(ProcessRunLimits {
+        timeout: Duration::from_millis(timeout_ms),
+        max_output_bytes,
+    })
+}
+
+fn bounded_positive_integer_argument(
+    arguments: &Value,
+    name: &str,
+    default: u64,
+    max: u64,
+) -> Result<u64, BrokerError> {
+    let Some(value) = arguments.get(name) else {
+        return Ok(default);
+    };
+    let value = value
+        .as_u64()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| invalid_argument(format!("`{name}` must be a positive integer")))?;
+    Ok(value.min(max))
 }
 
 fn timeout_error(operation: &str) -> BrokerError {
@@ -751,52 +806,68 @@ impl ToolExecutor for BrokerAwareWasiToolExecutor {
     }
 
     async fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {
-        let invocation = match self
-            .extensions
-            .execute_tool_with_broker_requests(name, args)?
-        {
-            Ok(invocation) => invocation,
-            Err(error) => return Some(Err(error)),
-        };
-        if let Some(error) = invocation.response.error {
-            return Some(Err(error));
-        }
-        let immediate_message = invocation.response.message.unwrap_or_default();
-        let requests = invocation.host_broker_requests;
-        if requests.is_empty() {
-            return Some(Ok(immediate_message));
-        }
+        let mut continuation_rounds = 0;
+        loop {
+            let invocation = match self
+                .extensions
+                .execute_tool_with_broker_requests(name, args)?
+            {
+                Ok(invocation) => invocation,
+                Err(error) => return Some(Err(error)),
+            };
+            if let Some(error) = invocation.response.error {
+                return Some(Err(error));
+            }
+            let continue_after_broker = invocation.response.continue_after_broker;
+            let immediate_message = invocation.response.message.unwrap_or_default();
+            let requests = invocation.host_broker_requests;
+            if requests.is_empty() {
+                return Some(Ok(immediate_message));
+            }
+            if continue_after_broker && continuation_rounds >= MAX_BROKER_CONTINUATION_ROUNDS {
+                return Some(Err(format!(
+                    "WASI tool `{name}` exceeded the broker continuation limit of \
+                     {MAX_BROKER_CONTINUATION_ROUNDS} rounds; clear `continue_after_broker` after \
+                     processing `broker_response` events"
+                )));
+            }
 
-        let dispatch = match self.broker_dispatcher.dispatch_envelopes(requests).await {
-            Ok(dispatch) => dispatch,
-            Err(error) => return Some(Err(error.message)),
-        };
-        let operation_results = dispatch.operation_results;
-        self.extensions
-            .enqueue_broker_results(operation_results.clone());
+            let dispatch = match self.broker_dispatcher.dispatch_envelopes(requests).await {
+                Ok(dispatch) => dispatch,
+                Err(error) => return Some(Err(error.message)),
+            };
+            let operation_results = dispatch.operation_results;
+            self.extensions
+                .enqueue_broker_results(operation_results.clone());
 
-        if let Some(error) = operation_results
-            .iter()
-            .find_map(|result| result.error.as_ref())
-        {
-            return Some(Err(error.message.clone()));
+            if continue_after_broker {
+                continuation_rounds += 1;
+                continue;
+            }
+
+            if let Some(error) = operation_results
+                .iter()
+                .find_map(|result| result.error.as_ref())
+            {
+                return Some(Err(error.message.clone()));
+            }
+
+            let broker_message = operation_results
+                .iter()
+                .find(|result| {
+                    result.request.capability == "agent" && result.request.operation == "run"
+                })
+                .or_else(|| operation_results.last())
+                .and_then(|result| {
+                    result
+                        .value
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .or_else(|| result.value.get("output").and_then(Value::as_str))
+                        .map(str::to_owned)
+                });
+            return Some(Ok(broker_message.unwrap_or(immediate_message)));
         }
-
-        let broker_message = operation_results
-            .iter()
-            .find(|result| {
-                result.request.capability == "agent" && result.request.operation == "run"
-            })
-            .or_else(|| operation_results.last())
-            .and_then(|result| {
-                result
-                    .value
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .or_else(|| result.value.get("output").and_then(Value::as_str))
-                    .map(str::to_owned)
-            });
-        Some(Ok(broker_message.unwrap_or(immediate_message)))
     }
 }
 
@@ -917,7 +988,6 @@ async fn dispatch_hook_requests_isolated(
 
 impl CodingAgent {
     pub fn new(options: CodingAgentOptions) -> Self {
-        let mut agent = Agent::new(&options.api_key, options.account_id, &options.model);
         let project_context = ProjectContext::discover(&options.work_dir);
         let mut skill_manager = SkillManager::new();
         skill_manager.discover_skills(Some(&options.work_dir));
@@ -927,7 +997,7 @@ impl CodingAgent {
         // A missing session file represents an unsaved draft. GUI startup uses
         // this mode so merely opening the app neither creates nor selects a
         // conversation; the first send binds the draft to a new session.
-        let session_tree = if let Some(session_path) = options.session_file.clone() {
+        let mut session_tree = if let Some(session_path) = options.session_file.clone() {
             if session_path.exists() {
                 SessionTree::load_from_file(&session_path)
                     .unwrap_or_else(|_| SessionTree::new("session"))
@@ -942,6 +1012,14 @@ impl CodingAgent {
         } else {
             SessionTree::new("draft")
         };
+        let effective_model = session_tree
+            .model
+            .clone()
+            .unwrap_or_else(|| options.model.clone());
+        session_tree
+            .model
+            .get_or_insert_with(|| effective_model.clone());
+        let mut agent = Agent::new(&options.api_key, options.account_id, &effective_model);
 
         agent.set_prompt_cache_key(Some(session_tree.session_id.clone()));
 
@@ -1064,6 +1142,12 @@ impl CodingAgent {
             state.messages.push(AgentMessage::System {
                 content: base_system_prompt.clone(),
             });
+            state.messages.extend(
+                session_tree
+                    .get_active_branch_messages()
+                    .into_iter()
+                    .filter(|message| !matches!(message, AgentMessage::System { .. })),
+            );
         }
 
         Self {
@@ -1228,6 +1312,7 @@ impl CodingAgent {
         };
 
         let branch = session_tree.get_active_branch_messages();
+        let session_model = session_tree.model.clone();
         self.wasi_extensions
             .set_session_scope(session_tree.session_id.clone())
             .unwrap_or_else(|error| {
@@ -1239,6 +1324,11 @@ impl CodingAgent {
         self.session_tree = session_tree;
 
         let mut state = self.agent.loop_engine.state.lock().await;
+        if let Some(model) = session_model {
+            state.model = model;
+        } else {
+            self.session_tree.model = Some(state.model.clone());
+        }
         let system_prompt = state.system_prompt.clone();
         state.messages.clear();
         state.messages.push(AgentMessage::System {
@@ -1756,6 +1846,7 @@ fn format_subagent_results(
 mod tests {
     use super::*;
     use crate::extension_broker::CapabilityHandler;
+    use crate::wasi_extension::{WasiExtension, WasiExtensionInvocation, WasiExtensionResponse};
     use std::sync::Mutex;
     use std::time::{Duration as StdDuration, Instant};
 
@@ -1801,6 +1892,98 @@ mod tests {
             .unwrap()
             .iter()
             .all(|item| item["type"] != "function_call"));
+    }
+
+    #[tokio::test]
+    async fn model_switch_preserves_antigravity_provider_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut coding_agent = CodingAgent::new(coding_agent_options(dir.path().to_path_buf()));
+
+        let output = coding_agent
+            .handle_input("/model antigravity/gemini-3.6-flash")
+            .await;
+
+        assert_eq!(
+            output.as_deref(),
+            Some("Switched model to: antigravity/gemini-3.6-flash")
+        );
+        let (chat, codex) = coding_agent.agent.loop_engine.build_api_payloads().await;
+        assert_eq!(chat["model"], "antigravity/gemini-3.6-flash");
+        assert_eq!(codex["model"], "antigravity/gemini-3.6-flash");
+        assert_eq!(
+            coding_agent.session_tree.model.as_deref(),
+            Some("antigravity/gemini-3.6-flash")
+        );
+    }
+
+    #[tokio::test]
+    async fn persisted_session_history_is_loaded_into_provider_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("session.jsonl");
+        let messages = vec![
+            AgentMessage::User {
+                content: "Choose a scrollbar behavior".into(),
+            },
+            AgentMessage::Assistant {
+                content: Some("A. Always visible\nB. Visible while scrolling\nC. Hidden".into()),
+                tool_calls: None,
+            },
+            AgentMessage::User {
+                content: "B".into(),
+            },
+        ];
+        let mut tree = SessionTree::new("session");
+        tree.file_path = Some(session_file.clone());
+        for message in messages.clone() {
+            tree.add_message(message);
+        }
+
+        let mut options = coding_agent_options(dir.path().to_path_buf());
+        options.session_file = Some(session_file);
+        let coding_agent = CodingAgent::new(options);
+
+        let state = coding_agent.agent.get_state().await;
+        assert!(matches!(
+            state.messages.first(),
+            Some(AgentMessage::System { .. })
+        ));
+        assert_eq!(
+            serde_json::to_value(&state.messages[1..]).unwrap(),
+            serde_json::to_value(&messages).unwrap()
+        );
+
+        let (chat, codex) = coding_agent.agent.loop_engine.build_api_payloads().await;
+        assert_eq!(chat["messages"][2]["role"], "assistant");
+        assert_eq!(chat["messages"][3]["content"], "B");
+        assert_eq!(codex["input"][1]["role"], "assistant");
+        assert_eq!(codex["input"][2]["content"][0]["text"], "B");
+    }
+
+    #[tokio::test]
+    async fn persisted_session_model_overrides_constructor_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("session.jsonl");
+        let mut tree = SessionTree::new("session");
+        tree.file_path = Some(session_file.clone());
+        tree.add_message(AgentMessage::User {
+            content: "continue".into(),
+        });
+        tree.set_model("antigravity/claude-opus-4-6".into())
+            .unwrap();
+
+        let mut options = coding_agent_options(dir.path().to_path_buf());
+        options.model = "fallback-model".into();
+        options.session_file = Some(session_file);
+        let coding_agent = CodingAgent::new(options);
+
+        assert_eq!(
+            coding_agent.session_tree.model.as_deref(),
+            Some("antigravity/claude-opus-4-6")
+        );
+        assert_eq!(
+            coding_agent.agent.get_state().await.model,
+            "antigravity/claude-opus-4-6"
+        );
     }
 
     #[tokio::test]
@@ -2031,6 +2214,142 @@ mod tests {
         wasm
     }
 
+    const CONTINUATION_EXTENSION_NAME: &str = "continuation_tool_ext";
+    const CONTINUATION_TOOL_NAME: &str = "continuation_tool";
+    const CONTINUATION_TOOL_ARGS: &str = r#"{"sentinel":"same args"}"#;
+
+    fn broker_tool_wasm(
+        operation: &str,
+        continue_after_broker: bool,
+        finish_after_event: bool,
+    ) -> Vec<u8> {
+        let manifest = serde_json::json!({
+            "api_version": BROKER_API_VERSION,
+            "name": CONTINUATION_EXTENSION_NAME,
+            "version": "1.0.0",
+            "description": "broker continuation fixture",
+            "capabilities": ["tools"],
+            "tools": [{
+                "name": CONTINUATION_TOOL_NAME,
+                "description": "exercise broker continuation",
+                "parameters": {"type": "object"}
+            }]
+        })
+        .to_string();
+        let request = serde_json::json!({
+            "api_version": BROKER_API_VERSION,
+            "capability": "tools",
+            "operation": operation,
+            "arguments": Value::Null
+        })
+        .to_string();
+        let initial_response = serde_json::json!({
+            "message": "waiting for broker response",
+            "continue_after_broker": continue_after_broker
+        })
+        .to_string();
+        let final_response = serde_json::json!({
+            "message": "post-processed broker response"
+        })
+        .to_string();
+        let initial_invocation_len = serde_json::to_vec(&WasiExtensionInvocation {
+            api_version: BROKER_API_VERSION,
+            kind: "tool".into(),
+            name: CONTINUATION_TOOL_NAME.into(),
+            arguments: serde_json::from_str(CONTINUATION_TOOL_ARGS).unwrap(),
+            state: serde_json::json!({}),
+            events: Vec::new(),
+        })
+        .unwrap()
+        .len();
+
+        let initial_response_offset = 1024usize;
+        let final_response_offset = 2048usize;
+        let request_offset = 4096usize;
+        let request_response_offset = 6144usize;
+        let mut data = vec![0; request_response_offset + 1024];
+        data[..manifest.len()].copy_from_slice(manifest.as_bytes());
+        data[initial_response_offset..initial_response_offset + initial_response.len()]
+            .copy_from_slice(initial_response.as_bytes());
+        data[final_response_offset..final_response_offset + final_response.len()]
+            .copy_from_slice(final_response.as_bytes());
+        data[request_offset..request_offset + request.len()].copy_from_slice(request.as_bytes());
+
+        let mut wasm = b"\0asm\x01\0\0\0".to_vec();
+        push_section(
+            &mut wasm,
+            1,
+            &[
+                4, 0x60, 0, 1, 0x7e, 0x60, 1, 0x7f, 1, 0x7f, 0x60, 2, 0x7f, 0x7f, 1, 0x7e, 0x60, 4,
+                0x7f, 0x7f, 0x7f, 0x7f, 1, 0x7f,
+            ],
+        );
+        let host_module = b"threadlane_host";
+        let mut imports = vec![1];
+        push_unsigned_leb(host_module.len() as u32, &mut imports);
+        imports.extend_from_slice(host_module);
+        imports.push(7);
+        imports.extend_from_slice(b"request");
+        imports.extend_from_slice(&[0, 3]);
+        push_section(&mut wasm, 2, &imports);
+        push_section(&mut wasm, 3, &[3, 0, 1, 2]);
+        push_section(&mut wasm, 5, &[1, 0, 2]);
+
+        let mut exports = vec![4];
+        for (name, kind, index) in [
+            ("extension_info", 0, 1),
+            ("alloc", 0, 2),
+            ("execute_tool", 0, 3),
+            ("memory", 2, 0),
+        ] {
+            push_unsigned_leb(name.len() as u32, &mut exports);
+            exports.extend_from_slice(name.as_bytes());
+            exports.extend_from_slice(&[kind, index]);
+        }
+        push_section(&mut wasm, 7, &exports);
+
+        let mut extension_info = vec![0, 0x42];
+        push_signed_leb(manifest.len() as i64, &mut extension_info);
+        extension_info.push(0x0b);
+        let alloc = vec![0, 0x41, 0, 0x0b];
+        let mut execute_tool = vec![0];
+        if finish_after_event {
+            execute_tool.extend_from_slice(&[0x20, 1, 0x41]);
+            push_signed_leb(initial_invocation_len as i64, &mut execute_tool);
+            execute_tool.extend_from_slice(&[0x4b, 0x04, 0x7e, 0x42]);
+            let packed = ((final_response_offset as u64) << 32) | final_response.len() as u64;
+            push_signed_leb(packed as i64, &mut execute_tool);
+            execute_tool.push(0x05);
+        }
+        execute_tool.push(0x41);
+        push_signed_leb(request_offset as i64, &mut execute_tool);
+        execute_tool.push(0x41);
+        push_signed_leb(request.len() as i64, &mut execute_tool);
+        execute_tool.push(0x41);
+        push_signed_leb(request_response_offset as i64, &mut execute_tool);
+        execute_tool.push(0x41);
+        push_signed_leb(1024, &mut execute_tool);
+        execute_tool.extend_from_slice(&[0x10, 0, 0x1a, 0x42]);
+        let packed = ((initial_response_offset as u64) << 32) | initial_response.len() as u64;
+        push_signed_leb(packed as i64, &mut execute_tool);
+        if finish_after_event {
+            execute_tool.push(0x0b);
+        }
+        execute_tool.push(0x0b);
+
+        let mut code = vec![3];
+        for body in [extension_info, alloc, execute_tool] {
+            push_unsigned_leb(body.len() as u32, &mut code);
+            code.extend_from_slice(&body);
+        }
+        push_section(&mut wasm, 10, &code);
+        let mut data_section = vec![1, 0, 0x41, 0, 0x0b];
+        push_unsigned_leb(data.len() as u32, &mut data_section);
+        data_section.extend_from_slice(&data);
+        push_section(&mut wasm, 11, &data_section);
+        wasm
+    }
+
     fn coding_agent_options(work_dir: PathBuf) -> CodingAgentOptions {
         CodingAgentOptions {
             api_key: "test-key".into(),
@@ -2054,6 +2373,7 @@ mod tests {
                 name: name.into(),
                 arguments: arguments.to_string(),
             },
+            thought_signature: None,
         }
     }
 
@@ -2401,6 +2721,169 @@ mod tests {
         assert_eq!(*operations.lock().unwrap(), vec!["first", "fail", "last"]);
     }
 
+    #[test]
+    fn wasi_extension_response_defaults_continuation_to_false() {
+        let response: WasiExtensionResponse =
+            serde_json::from_value(serde_json::json!({"message": "legacy"})).unwrap();
+
+        assert!(!response.continue_after_broker);
+    }
+
+    #[tokio::test]
+    async fn wasi_tool_continuation_post_processes_broker_operation_errors() {
+        let extension =
+            WasiExtension::load_from_bytes(broker_tool_wasm("fail", true, true)).unwrap();
+        let mut extensions = WasiExtensionManager::new();
+        extensions
+            .extensions
+            .insert(CONTINUATION_EXTENSION_NAME.into(), extension);
+        let extensions = Arc::new(extensions);
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let mut dispatcher = CapabilityDispatcher::new();
+        dispatcher.register(
+            "tools",
+            Arc::new(RecordingBrokerHandler {
+                operations: operations.clone(),
+            }),
+        );
+        let executor = BrokerAwareWasiToolExecutor {
+            extensions: extensions.clone(),
+            broker_dispatcher: Arc::new(dispatcher),
+        };
+
+        let output = executor
+            .execute_tool(CONTINUATION_TOOL_NAME, CONTINUATION_TOOL_ARGS)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(output, "post-processed broker response");
+        assert_eq!(*operations.lock().unwrap(), vec!["fail"]);
+        assert!(extensions
+            .drain_events_for(CONTINUATION_EXTENSION_NAME)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn wasi_tool_without_continuation_preserves_queued_broker_results() {
+        let extension =
+            WasiExtension::load_from_bytes(broker_tool_wasm("fail", false, false)).unwrap();
+        let mut extensions = WasiExtensionManager::new();
+        extensions
+            .extensions
+            .insert(CONTINUATION_EXTENSION_NAME.into(), extension);
+        let extensions = Arc::new(extensions);
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let mut dispatcher = CapabilityDispatcher::new();
+        dispatcher.register(
+            "tools",
+            Arc::new(RecordingBrokerHandler {
+                operations: operations.clone(),
+            }),
+        );
+        let executor = BrokerAwareWasiToolExecutor {
+            extensions: extensions.clone(),
+            broker_dispatcher: Arc::new(dispatcher),
+        };
+
+        let error = executor
+            .execute_tool(CONTINUATION_TOOL_NAME, CONTINUATION_TOOL_ARGS)
+            .await
+            .unwrap()
+            .unwrap_err();
+
+        assert_eq!(error, "expected test failure");
+        assert_eq!(*operations.lock().unwrap(), vec!["fail"]);
+        let events = extensions
+            .drain_events_for(CONTINUATION_EXTENSION_NAME)
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].payload["error"]["code"], "test_error");
+    }
+
+    #[tokio::test]
+    async fn wasi_tool_continuation_has_an_actionable_round_limit() {
+        let extension =
+            WasiExtension::load_from_bytes(broker_tool_wasm("loop", true, false)).unwrap();
+        let mut extensions = WasiExtensionManager::new();
+        extensions
+            .extensions
+            .insert(CONTINUATION_EXTENSION_NAME.into(), extension);
+        let extensions = Arc::new(extensions);
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let mut dispatcher = CapabilityDispatcher::new();
+        dispatcher.register(
+            "tools",
+            Arc::new(RecordingBrokerHandler {
+                operations: operations.clone(),
+            }),
+        );
+        let executor = BrokerAwareWasiToolExecutor {
+            extensions,
+            broker_dispatcher: Arc::new(dispatcher),
+        };
+
+        let error = executor
+            .execute_tool(CONTINUATION_TOOL_NAME, CONTINUATION_TOOL_ARGS)
+            .await
+            .unwrap()
+            .unwrap_err();
+
+        assert_eq!(
+            operations.lock().unwrap().len(),
+            MAX_BROKER_CONTINUATION_ROUNDS
+        );
+        assert!(error.contains(CONTINUATION_TOOL_NAME));
+        assert!(error.contains(&format!("{MAX_BROKER_CONTINUATION_ROUNDS} rounds")));
+        assert!(error.contains("broker_response"));
+    }
+
+    #[test]
+    fn process_run_limits_preserve_defaults_and_apply_hard_caps() {
+        assert_eq!(
+            process_run_limits(&serde_json::json!({})).unwrap(),
+            ProcessRunLimits {
+                timeout: CAPABILITY_TIMEOUT,
+                max_output_bytes: MAX_CAPABILITY_BUFFER_BYTES,
+            }
+        );
+        assert_eq!(
+            process_run_limits(&serde_json::json!({
+                "timeout_ms": 1_234,
+                "max_output_bytes": 4_096,
+            }))
+            .unwrap(),
+            ProcessRunLimits {
+                timeout: Duration::from_millis(1_234),
+                max_output_bytes: 4_096,
+            }
+        );
+        assert_eq!(
+            process_run_limits(&serde_json::json!({
+                "timeout_ms": MAX_PROCESS_TIMEOUT_MS + 1,
+                "max_output_bytes": MAX_PROCESS_OUTPUT_BYTES as u64 + 1,
+            }))
+            .unwrap(),
+            ProcessRunLimits {
+                timeout: Duration::from_millis(MAX_PROCESS_TIMEOUT_MS),
+                max_output_bytes: MAX_PROCESS_OUTPUT_BYTES,
+            }
+        );
+        assert_eq!(
+            process_run_limits(&serde_json::json!({"timeout_ms": 0}))
+                .unwrap_err()
+                .code,
+            "invalid_argument"
+        );
+        assert_eq!(
+            process_run_limits(&serde_json::json!({"max_output_bytes": "1024"}))
+                .unwrap_err()
+                .code,
+            "invalid_argument"
+        );
+    }
+
     #[tokio::test]
     async fn process_pipes_output_and_timeout_is_bounded() {
         let dir = tempfile::tempdir().unwrap();
@@ -2422,14 +2905,18 @@ mod tests {
         assert_eq!(output["stdout"], "stdout");
         assert_eq!(output["stderr"], "stderr");
 
-        request.arguments = serde_json::json!({"program": "sh", "args": ["-c", "sleep 10"]});
+        request.arguments = serde_json::json!({
+            "program": "sh",
+            "args": ["-c", "sleep 10"],
+            "timeout_ms": 25
+        });
         let started = Instant::now();
         let error = process
             .handle_for_extension_async(&request, "ext")
             .await
             .unwrap_err();
         assert_eq!(error.code, "timeout");
-        assert!(started.elapsed() < StdDuration::from_secs(4));
+        assert!(started.elapsed() < StdDuration::from_secs(1));
     }
 
     #[tokio::test]
@@ -2450,6 +2937,21 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.code, "process_output_too_large");
+
+        let request = BrokerRequest {
+            arguments: serde_json::json!({
+                "program": "sh",
+                "args": ["-c", "printf 123456789"],
+                "max_output_bytes": 8
+            }),
+            ..request
+        };
+        let error = process
+            .handle_for_extension_async(&request, "ext")
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "process_output_too_large");
+        assert!(error.message.contains("8-byte buffer limit"));
     }
 
     #[tokio::test]

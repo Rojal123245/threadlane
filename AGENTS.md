@@ -75,6 +75,7 @@ A normal `cargo run` may be unsuitable for testing installation: update installa
 6. Existing unused-code warnings are not part of unrelated tasks; do not remove meaningful code merely to silence them.
 
 ## Rust and Architecture Conventions
+- Prefer `edit_file_hashline` for high-precision edits using line:hash anchors (e.g. '12:a3f') returned from `read_file` to ensure edit safety and prevent line drift. Use range edits (`start_anchor` to `end_anchor`) for multi-line replacements/deletions, batch multiple edits into a single tool call, and re-read the target range with `read_file` if a hash mismatch occurs.
 
 - Keep edits surgical. Do not move unrelated symbols or reformat large files without need.
 - Reuse existing dependencies and runtime infrastructure.
@@ -98,7 +99,8 @@ Reusable script components are registered through `crates/threadlane/src/compone
 - Add every new component module to both the Rust module list and the `script_mod(vm)` registration sequence.
 - Use `mod.components.Name` for reusable templates.
 - Use `:=` IDs for widgets that Rust code must retrieve with `ids!(...)`.
-- Custom widgets should handle actions from their deeply nested child controls locally and emit a typed `cx.widget_action(...)` for the app shell. Do not rely on root-level widget lookup to resolve controls inside a custom widget's dereferenced view.
+- Custom widgets should handle actions from their deeply nested child controls locally and emit a typed `cx.widget_action(...)` for the app shell. Do not rely on root-level widget lookup to resolve controls inside a custom widget's dereferenced view. Check for child button actions inside `if let Event::Actions(actions) = event` using `self.view.button(cx, ids!(btn_id)).clicked(actions)` rather than listening for raw pointer events.
+- A custom widget that dereferences a `View` must delegate both `handle_event` and `draw_walk`; delegating events without drawing leaves the entire wrapper invisible.
 - **DSL inheritance**: `:= SomeName { ... }` creates an ID-bound widget instance, **not** a named prototype. An ID-bound instance cannot be used as a parent in another `:= SomeName { ... }` definition. Only `mod.components.Name` template names (defined with `=`, not `:=`) are valid prototype parents. Attempting to write `Child := ParentId { ... }` where `ParentId` was defined with `:=` will fail at runtime with "variable ParentId not found in scope".
 
 ### Layout
@@ -106,6 +108,7 @@ Reusable script components are registered through `crates/threadlane/src/compone
 - Explicitly set `width`, `height`, `flow`, `spacing`, `padding`, and alignment when they affect interaction geometry.
 - Use one source of truth for visual and interactive bounds. Do not draw a hover rectangle from hard-coded coordinates while text/click handling lives in another widget.
 - Fixed-height rows should vertically center their content with `align: Align{y: 0.5}`.
+- A fixed-height Makepad `Label` needs its own vertical `align`; parent alignment positions the label widget but does not center glyphs inside the label's draw walk. Start with `Align{y: 0.5}`, clear inherited padding with `padding: 0`, and adjust the label's `align.y` only when the font's ascender/baseline metrics remain optically off-center.
 - Makepad `DropDownFlat` defaults to top-left alignment. Closed composer dropdowns must explicitly preserve left alignment and set vertical centering:
 
 ```text
@@ -145,6 +148,7 @@ Keep the SVG view box itself centered. Do not compensate for inherited empty-lab
 Drawing in an overlay does not automatically stop widgets underneath from receiving pointer events.
 
 - Context menus and popups must account for both visual stacking and event routing.
+- `DockFlat` draws its configured dock tree, not arbitrary extra children declared inside it. Instantiate pass-wide overlay widgets inside a branch the dock actually draws (for example, a dock-tab template) and give the overlay a dedicated `DrawList2d`; a later window-body sibling after `DockFlat` can remain uninstantiated and unresolved by ID. A raw full-window overlay `View` can also obscure the dock even when intended to start hidden.
 - In an overlay, a later full-size sibling such as an empty `PortalList` can intercept pointer events intended for visible content beneath it. Hide inactive full-size siblings or place the interactive surface above them.
 - The session context menu uses real child buttons for row hover/click states; do not reintroduce a parent shader with hard-coded row coordinates.
 - While a session context target is active, the session list intentionally suspends its own event handling so rows under the popup cannot also hover or press.
@@ -161,26 +165,41 @@ Drawing in an overlay does not automatically stop widgets underneath from receiv
 - Makepad `PortalList::smooth_scroll_to` stops when a target row’s top edge is visible, even if the row is not fully revealed. When wrapping from the first command to the final command, use `scroll_to_end` so the selection and viewport reach the actual bottom.
 - Keep keyboard focus and pointer hover as separate states; keyboard movement should clear pointer hover before redrawing.
 
+### Chat Transcript
+
+- User submissions remain right-aligned chat bubbles. Assistant responses render as flat markdown aligned with the transcript rather than enclosed cards.
+- Bounded `Fit` markdown computes its intrinsic line width before applying the cap, so long pasted lines can clip. Keep short user messages on the compact `UserMsg` template and route long lines through `UserMsgWrapped`, whose bounded `Fill` bubble and `Fill` markdown wrap within the viewport.
+- Makepad Markdown tables divide the current concrete inner width among their columns. Assistant markdown must use bounded `Fill`, not bounded `Fit`; an unresolved `Fit` width collapses table cells into tall invisible strips.
+
 ### Chat Activity Groups
 
 - Consecutive thinking and tool messages are grouped into one collapsible `Working`/`Worked` display row by `panels/chat/view.rs`.
 - Grouping is presentation-only: preserve the underlying `ChatMessage` entries so tool output and persisted session history remain intact.
 - Streaming thinking merges into the trailing activity group; streaming assistant text remains a normal assistant message.
-- Keep summary categories concise and action-oriented (`Explored`, `Edited`, `Ran`, `Loaded`, `Delegated`) and bound expanded output rather than restoring every raw payload to the top-level transcript.
+- Treat `AgentEvent::MessageUpdate.tool_call_name` as the semantic boundary for an assistant tool-call preamble. Flush buffered assistant text into the activity group at that event rather than waiting to infer it from `MessageEnd`.
+- Aborting a generation suppresses the normal stream and tool-end events. Commit partial streaming content, mark running tools cancelled, clear the session working state, and redraw the session list so no activity loader remains visible.
+- Keep summary categories concise and action-oriented (`Explored`, `Edited`, `Ran`, `Loaded`, `Delegated`) and bound expanded tool output rather than restoring every raw tool payload to the top-level transcript.
+- Expanded activity groups must render complete persisted thinking segments and current streaming reasoning in event order alongside concise tool summaries; never replace finalized reasoning with only a completion/status placeholder.
+- Opening or closing `ToolFoldHeader` changes its `PortalList` item height. Preserve its `LayoutChanged` action and redraw the parent chat list so following messages are reflowed instead of overlapping the expanded body.
 - The chat `PortalList` range is based on display rows, not raw message count. If changing grouping, preserve stable ordering, auto-tail behavior, and non-reused fold widget state.
 
 ### Composer Drop-Ups
 
-The pinned Makepad `PopupMenuPosition` currently supports only `OnSelected` and `BelowInput`; it has no native `AboveInput` variant.
+The pinned Makepad `PopupMenuPosition` currently supports only `OnSelected` and `BelowInput`; it has no native `AboveInput` variant. `OnSelected` is the Rust enum's `#[pick]` default, but `PopupMenuPosition.OnSelected` is not available in component script scope, so omit the DSL property when selecting that default.
 
 Threadlane’s composer dropdown implementation relies on these invariants:
 
 - The selected model or reasoning effort is reordered to the final label position.
+- Keep the canonical model list separate from that temporary display order. Repeated selections must not write the selected-last anchor order back into provider ordering; OpenAI and Antigravity entries remain grouped.
 - The final selected popup row is a transparent anchor.
 - The visible popup surface ends above that anchor, leaving the closed picker visible.
 - `EffortDropDown` and `ModelDropDown` use popup widths matching their trigger widths.
+- The stock Makepad `PopupMenuItem` is text-only. `components/model_dropdown.rs` owns the shared icon-aware trigger and popup-row implementation used by both `ModelDropDown` and `EffortDropDown`.
+- Model rows select OpenAI or Google SVGs from the persisted model prefix; effort rows always use the reasoning SVG. Keep effort labels as raw `ReasoningEffort` values so parsing remains unchanged.
+- The model list is the union of dynamically fetched OpenAI models and models for other authenticated providers. OpenAI refresh events must preserve connected-provider entries, and successful provider login should update the picker immediately.
+- Model-picker changes run as internal `/model` commands. They must not consume, clear, or restore over the current composer draft and image attachments; only actual composer submissions own the submitted-draft and submitted-attachment lifecycle.
 
-If changing ordering, row height, popup padding, or selected-item behavior, update the transparent-anchor geometry in `components/dropdown.rs` as part of the same change.
+If changing ordering, row height, popup padding, or selected-item behavior, update the transparent-anchor geometry in `components/model_dropdown.rs`.
 
 ### Shaders and Colors
 
@@ -205,6 +224,18 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 - Archive and delete actions should flow through `SessionContextMenuAction` and the app’s existing action handler.
 - Keep popup row geometry, popup height constants, padding, and hit behavior synchronized.
 - Do not allow a context-menu interaction to activate or hover an underlying session row.
+
+## Model Provider Routing
+
+- Provider selection is encoded in the persisted model ID. Models prefixed with `antigravity/` route through `threadlane-provider::router::ProviderClient`; unprefixed models retain the OpenAI path. Preserve the prefix across model switching, sessions, subagents, and payload construction.
+- Persist each session's selected model in `SessionTree` metadata. Restore it before constructing the agent runtime and synchronize the model picker from that restored value; legacy metadata without a model continues to use the caller-provided default.
+- A restored session has two synchronized representations: the persisted `SessionTree` active branch and `AgentState.messages`, which supplies provider context. Every constructor or session-switch path must load the active branch into `AgentState.messages` after the current system prompt; populating only the chat UI makes old messages visible without sending them to the model and also breaks subsequent prefix-based persistence.
+- Keep the central agent loop provider-neutral. Provider clients must translate requests and stream results into the shared `StreamEvent`, `ToolCall`, and `ProviderUsage` contract so tool execution, hooks, compaction, persistence, and chat rendering are not duplicated.
+- OpenAI Responses events distinguish streaming `*.delta` events from final `*.done` snapshots. Emit only explicit text/reasoning deltas; never pass `response.*.done` fields through generic text fallbacks, or final output is duplicated and reasoning snapshots can leak into assistant content.
+- Antigravity uses Google Cloud Code Assist's `v1internal` endpoints and outer request envelope, not the public Gemini `streamGenerateContent` endpoint. Preserve project discovery, production/daily endpoint fallback, runtime-model mapping, wrapped SSE parsing, and provider-specific tool schemas when changing that client.
+- Gemini tool calls can include a required `thoughtSignature`. Preserve it on the shared persisted `ToolCall` and replay it on the assistant `functionCall` part; dropping it causes the next tool-result request to fail with HTTP 400.
+- Credential checks follow the selected model. Antigravity models require stored Antigravity OAuth credentials but must not require an OpenAI key; OpenAI models retain the existing OpenAI credential requirement.
+- Automatic session titles currently use the OpenAI title endpoint. Skip that side path for Antigravity sessions rather than consuming an OpenAI credential or permanently marking a failed Antigravity title attempt.
 
 ## Updater Behavior
 

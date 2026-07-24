@@ -121,9 +121,15 @@ pub fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> String {
         if available_tool_names.contains("read_file") {
             add_guideline("Inspect relevant files before making changes; do not guess about code you have not read.");
         }
-        if available_tool_names.contains("write_file") || available_tool_names.contains("edit_file")
+        if available_tool_names.contains("write_file") || available_tool_names.contains("edit_file") || available_tool_names.contains("edit_file_hashline")
         {
             add_guideline("Keep edits focused, preserve existing user work, and follow the project's established style.");
+        }
+        if available_tool_names.contains("edit_file_hashline") {
+            add_guideline("Prefer `edit_file_hashline` for high-precision edits using line:hash anchors (e.g. '12:a3f') returned from `read_file`.");
+            add_guideline("For multi-line code blocks or deletions, use range edits (start_anchor and end_anchor) rather than per-line edits.");
+            add_guideline("Batch all edits for a file into a single `edit_file_hashline` tool call's edits array.");
+            add_guideline("If a hashline mismatch occurs, re-read the relevant file range with `read_file` to obtain updated line hashes before retrying.");
         }
         if available_tool_names.contains("run_command") {
             add_guideline("Run focused validation after changes when practical, and never claim a command passed unless you ran it successfully.");
@@ -211,6 +217,28 @@ mod tests {
         assert!(prompt.contains("Inspect relevant files before making changes"));
         assert!(!prompt.contains("Run focused validation after changes"));
         assert!(prompt.ends_with("Current working directory: /workspace"));
+    }
+
+    #[test]
+    fn test_hashline_system_prompt_guidelines() {
+        let tools = vec![
+            tool("read_file", "Read a file."),
+            tool("edit_file_hashline", "Edit file with hashline."),
+        ];
+        let prompt = build_system_prompt(SystemPromptBuildOptions {
+            config: &SystemPromptConfig::default(),
+            work_dir: Path::new("/workspace"),
+            tools: &tools,
+            project_context: &ProjectContext::default(),
+            skill_catalog: None,
+            agent_catalog: None,
+            loaded_extension_count: 0,
+        });
+
+        assert!(prompt.contains("Prefer `edit_file_hashline` for high-precision edits using line:hash anchors (e.g. '12:a3f') returned from `read_file`."));
+        assert!(prompt.contains("For multi-line code blocks or deletions, use range edits (start_anchor and end_anchor) rather than per-line edits."));
+        assert!(prompt.contains("Batch all edits for a file into a single `edit_file_hashline` tool call's edits array."));
+        assert!(prompt.contains("If a hashline mismatch occurs, re-read the relevant file range with `read_file` to obtain updated line hashes before retrying."));
     }
 
     #[test]

@@ -1,13 +1,15 @@
+pub mod hashline;
+
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn tool_definitions() -> Vec<Value> {
     vec![
         json!({
             "name": "read_file",
-            "description": "Read content of a file, optionally specifying start and end lines (1-indexed).",
+            "description": "Read content of a file with line numbers and hash anchors (e.g. 12:a3f|content), optionally specifying start and end lines (1-indexed).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -41,6 +43,31 @@ fn tool_definitions() -> Vec<Value> {
                     "replacement": { "type": "string", "description": "New text to substitute in place of target" }
                 },
                 "required": ["path", "target", "replacement"]
+            }
+        }),
+        json!({
+            "name": "edit_file_hashline",
+            "description": "Edit a file using hash-anchored lines obtained from read_file. Supports line and range replace, insert_after, and delete operations. Format of start_anchor/end_anchor is 'line_number:hash' (e.g. '12:a3f'). Always batch multiple edits for the same file in one tool call.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Path to file to edit" },
+                    "edits": {
+                        "type": "array",
+                        "description": "List of hash-anchored edit operations to apply atomically (sorted descending automatically by start line).",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "start_anchor": { "type": "string", "description": "Starting line anchor formatted as 'line_number:hash' (e.g. '12:a3f')." },
+                                "end_anchor": { "type": "string", "description": "Optional ending line anchor for multi-line range edits (e.g. '15:9b2'). If omitted, edit targets single start_anchor line." },
+                                "action": { "type": "string", "enum": ["replace", "insert_after", "delete"], "description": "Edit action: 'replace' (replaces target line or range with new_content), 'insert_after' (inserts new_content after target line or range), or 'delete' (removes target line or range; new_content omitted/empty)." },
+                                "new_content": { "type": "string", "description": "New replacement or inserted content. Omit or leave empty for 'delete' actions." }
+                            },
+                            "required": ["start_anchor", "action"]
+                        }
+                    }
+                },
+                "required": ["path", "edits"]
             }
         }),
         json!({
@@ -252,7 +279,15 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
                         );
                     }
                     let selected = &lines[start_idx..end_idx];
-                    selected.join("\n")
+                    let formatted_lines: Vec<String> = selected
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, line)| {
+                            let line_no = start_idx + idx + 1;
+                            hashline::format_line_hashline(line_no, line)
+                        })
+                        .collect();
+                    formatted_lines.join("\n")
                 }
                 Err(e) => format!("Error reading file '{raw_path}': {e}"),
             }
@@ -279,7 +314,10 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
             }
 
             match fs::write(&validated_path, content) {
-                Ok(_) => format!("Successfully wrote {} bytes to '{raw_path}'", content.len()),
+                Ok(_) => {
+                    let diag = run_post_edit_diagnostics(workspace_root, raw_path);
+                    format!("Successfully wrote {} bytes to '{raw_path}'{diag}", content.len())
+                }
                 Err(e) => format!("Error writing to file '{raw_path}': {e}"),
             }
         }
@@ -309,10 +347,50 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
                     }
                     let new_content = content.replace(target, replacement);
                     match fs::write(&validated_path, new_content) {
-                        Ok(_) => format!("Successfully replaced target in '{raw_path}'"),
+                        Ok(_) => {
+                            let diag = run_post_edit_diagnostics(workspace_root, raw_path);
+                            format!("Successfully replaced target in '{raw_path}'{diag}")
+                        }
                         Err(e) => format!("Error writing file '{raw_path}': {e}"),
                     }
                 }
+                Err(e) => format!("Error reading file '{raw_path}': {e}"),
+            }
+        }
+        "edit_file_hashline" => {
+            let raw_path = match args.get("path").and_then(|v| v.as_str()) {
+                Some(p) => p,
+                None => return "Error: 'path' parameter is required".into(),
+            };
+            let validated_path = match validate_path_in_workspace(raw_path, workspace_root) {
+                Ok(p) => p,
+                Err(err) => return err,
+            };
+
+            let edits_value = match args.get("edits") {
+                Some(e) => e,
+                None => return "Error: 'edits' parameter is required".into(),
+            };
+
+            let edits: Vec<hashline::HashlineEdit> = match serde_json::from_value(edits_value.clone()) {
+                Ok(e) => e,
+                Err(err) => return format!("Error parsing 'edits' argument: {err}"),
+            };
+
+            match fs::read_to_string(&validated_path) {
+                Ok(content) => match hashline::apply_hashline_edits(&content, &edits) {
+                    Ok(new_content) => match fs::write(&validated_path, new_content) {
+                        Ok(_) => {
+                            let diag = run_post_edit_diagnostics(workspace_root, raw_path);
+                            format!(
+                                "Successfully applied {} hashline edit(s) to '{raw_path}'{diag}",
+                                edits.len()
+                            )
+                        }
+                        Err(e) => format!("Error writing file '{raw_path}': {e}"),
+                    },
+                    Err(e) => format!("Error applying hashline edits to '{raw_path}': {e}"),
+                },
                 Err(e) => format!("Error reading file '{raw_path}': {e}"),
             }
         }
@@ -370,15 +448,136 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
     }
 }
 
+pub fn run_post_edit_diagnostics(workspace_root: &Path, raw_path: &str) -> String {
+    if !raw_path.ends_with(".rs") {
+        return String::new();
+    }
+
+    let mut cmd = Command::new("cargo");
+    cmd.arg("check")
+        .arg("--message-format=json")
+        .current_dir(workspace_root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+
+    let output = match cmd.output() {
+        Ok(o) => o,
+        Err(_) => return String::new(),
+    };
+
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
+    let target_clean = raw_path.replace('\\', "/");
+
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+
+    for line in stdout_str.lines() {
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+
+        if val.get("reason").and_then(|v| v.as_str()) != Some("compiler-message") {
+            continue;
+        }
+
+        let Some(msg) = val.get("message") else {
+            continue;
+        };
+
+        let level = msg.get("level").and_then(|v| v.as_str()).unwrap_or("info");
+        let text_msg = msg.get("message").and_then(|v| v.as_str()).unwrap_or("");
+        let spans = msg.get("spans").and_then(|v| v.as_array());
+
+        let mut matched = false;
+        let mut line_no = 0;
+        let mut col_no = 0;
+
+        if let Some(spans) = spans {
+            for span in spans {
+                if let Some(file_name) = span.get("file_name").and_then(|v| v.as_str()) {
+                    let file_clean = file_name.replace('\\', "/");
+                    if file_clean.ends_with(&target_clean) || target_clean.ends_with(&file_clean) {
+                        matched = true;
+                        line_no = span.get("line_start").and_then(|v| v.as_u64()).unwrap_or(0);
+                        col_no = span.get("column_start").and_then(|v| v.as_u64()).unwrap_or(0);
+                        break;
+                    }
+                }
+            }
+        }
+
+        if matched {
+            if level == "error" {
+                errors.push(format!("- [ERROR] Line {line_no}, Col {col_no}: {text_msg}"));
+            } else if level == "warning" {
+                warnings.push(format!("- [WARNING] Line {line_no}, Col {col_no}: {text_msg}"));
+            }
+        }
+    }
+
+    if errors.is_empty() && warnings.is_empty() {
+        "\n\n[LSP Diagnostics Post-Check]\n✓ Clean (0 errors, 0 warnings)".to_string()
+    } else {
+        let mut res = format!(
+            "\n\n[LSP Diagnostics Post-Check]\n⚠ Found {} error(s), {} warning(s):",
+            errors.len(),
+            warnings.len()
+        );
+        for err in errors.iter().take(10) {
+            res.push('\n');
+            res.push_str(err);
+        }
+        for warn in warnings.iter().take(10) {
+            res.push('\n');
+            res.push_str(warn);
+        }
+        res
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
 
     #[test]
+    fn test_run_post_edit_diagnostics_non_rust_file() {
+        let dir = tempdir().unwrap();
+        let res = run_post_edit_diagnostics(dir.path(), "readme.txt");
+        assert_eq!(res, "");
+    }
+
+    #[test]
     fn test_list_dir_tool() {
         let res = execute_tool("list_dir", r#"{"path": "."}"#);
         assert!(res.contains("Cargo.toml"));
+    }
+    #[test]
+    fn test_edit_file_hashline_schema_description() {
+        let tools = get_available_tools();
+        let hashline_tool = tools
+            .iter()
+            .find(|t| t["function"]["name"] == "edit_file_hashline")
+            .expect("edit_file_hashline tool should exist");
+        
+        let desc = hashline_tool["function"]["description"].as_str().unwrap();
+        assert!(desc.contains("Supports line and range replace, insert_after, and delete operations"));
+        assert!(desc.contains("Always batch multiple edits for the same file in one tool call"));
+
+        let params = &hashline_tool["function"]["parameters"]["properties"];
+        let start_anchor_desc = params["edits"]["items"]["properties"]["start_anchor"]["description"].as_str().unwrap();
+        assert!(start_anchor_desc.contains("formatted as 'line_number:hash'"));
+
+        let end_anchor_desc = params["edits"]["items"]["properties"]["end_anchor"]["description"].as_str().unwrap();
+        assert!(end_anchor_desc.contains("multi-line range edits"));
+
+        let action_desc = params["edits"]["items"]["properties"]["action"]["description"].as_str().unwrap();
+        assert!(action_desc.contains("'replace'"));
+        assert!(action_desc.contains("'insert_after'"));
+        assert!(action_desc.contains("'delete'"));
+
+        let new_content_desc = params["edits"]["items"]["properties"]["new_content"]["description"].as_str().unwrap();
+        assert!(new_content_desc.contains("Omit or leave empty for 'delete' actions"));
     }
 
     #[test]

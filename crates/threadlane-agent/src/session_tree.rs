@@ -75,6 +75,8 @@ enum SessionRecord {
         title_attempted: bool,
         #[serde(default)]
         active_node_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
 }
 
@@ -83,6 +85,7 @@ pub struct SessionTree {
     pub session_id: String,
     pub name: Option<String>,
     pub title_attempted: bool,
+    pub model: Option<String>,
     pub nodes: HashMap<String, SessionNode>,
     /// Node IDs in persisted/insertion order. This is intentionally separate
     /// from `nodes`: the map is only an index and does not define ordering.
@@ -100,6 +103,7 @@ impl SessionTree {
             session_id: session_id.into(),
             name: None,
             title_attempted: false,
+            model: None,
             nodes: HashMap::new(),
             node_order: Vec::new(),
             active_node_id: None,
@@ -145,6 +149,45 @@ impl SessionTree {
         } else {
             Ok(())
         }
+    }
+
+    pub fn set_model(&mut self, model: String) -> std::io::Result<()> {
+        let model = model.trim();
+        if model.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "session model cannot be empty",
+            ));
+        }
+
+        let model = model.to_string();
+        let previous_model = self.model.clone();
+        self.model = Some(model.clone());
+        let Some(path) = self.file_path.clone() else {
+            return Ok(());
+        };
+
+        let _guard = session_file_lock().lock().unwrap();
+        let mut latest = if path.exists() {
+            match Self::load_from_file(&path) {
+                Ok(tree) => tree,
+                Err(error) => {
+                    self.model = previous_model;
+                    return Err(error);
+                }
+            }
+        } else {
+            self.clone()
+        };
+        latest.model = Some(model);
+        latest.metadata_present = true;
+        let result = latest.save_transactionally(&path);
+        if result.is_ok() {
+            *self = latest;
+        } else {
+            self.model = previous_model;
+        }
+        result
     }
 
     /// Persist the one-shot automatic title attempt before the provider is spawned.
@@ -278,6 +321,7 @@ impl SessionTree {
 
         let new_id = format!("{}_fork", self.session_id);
         let mut forked = SessionTree::new(new_id);
+        forked.model = self.model.clone();
 
         let mut curr = Some(node_id.to_string());
         let mut path_nodes = Vec::new();
@@ -310,11 +354,16 @@ impl SessionTree {
                 writeln!(file, "{}", serde_json::to_string(node)?)?;
             }
         }
-        if self.has_name() || self.title_attempted || self.active_node_id.is_some() {
+        if self.has_name()
+            || self.title_attempted
+            || self.active_node_id.is_some()
+            || self.model.is_some()
+        {
             let metadata = SessionRecord::Metadata {
                 name: self.name.clone(),
                 title_attempted: self.title_attempted,
                 active_node_id: self.active_node_id.clone(),
+                model: self.model.clone(),
             };
             writeln!(file, "{}", serde_json::to_string(&metadata)?)?;
         }
@@ -327,6 +376,7 @@ impl SessionTree {
             name: self.name.clone(),
             title_attempted: self.title_attempted,
             active_node_id: self.active_node_id.clone(),
+            model: self.model.clone(),
         };
         writeln!(file, "{}", serde_json::to_string(&metadata)?)?;
         Ok(())
@@ -360,11 +410,13 @@ impl SessionTree {
                 name,
                 title_attempted,
                 active_node_id,
+                model,
             }) = serde_json::from_str::<SessionRecord>(&l)
             {
                 tree.metadata_present = true;
                 tree.name = name;
                 tree.title_attempted = title_attempted;
+                tree.model = model;
                 if active_node_id.is_some() {
                     explicit_active = true;
                 }
@@ -401,6 +453,41 @@ mod tests {
         let loaded = SessionTree::load_from_file(&path).unwrap();
         assert_eq!(loaded.name.as_deref(), Some("Improve session titles"));
         assert_eq!(loaded.get_active_branch_messages().len(), 1);
+    }
+
+    #[test]
+    fn selected_model_round_trips_with_other_metadata_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut tree = SessionTree::new("session");
+        tree.file_path = Some(path.clone());
+        tree.add_message(AgentMessage::User {
+            content: "Help".into(),
+        });
+
+        tree.set_model("antigravity/claude-opus-4-6".into())
+            .unwrap();
+        tree.set_name("Persistent model".into()).unwrap();
+
+        let loaded = SessionTree::load_from_file(&path).unwrap();
+        assert_eq!(loaded.model.as_deref(), Some("antigravity/claude-opus-4-6"));
+        assert_eq!(loaded.name.as_deref(), Some("Persistent model"));
+        assert_eq!(loaded.nodes.len(), 1);
+    }
+
+    #[test]
+    fn legacy_metadata_without_model_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(
+            &path,
+            "{\"type\":\"session_metadata\",\"name\":\"Legacy\",\"title_attempted\":false,\"active_node_id\":null}\n",
+        )
+        .unwrap();
+
+        let loaded = SessionTree::load_from_file(&path).unwrap();
+        assert_eq!(loaded.name.as_deref(), Some("Legacy"));
+        assert!(loaded.model.is_none());
     }
 
     #[test]

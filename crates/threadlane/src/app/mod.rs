@@ -2,6 +2,7 @@
 //!
 //! Chat, sessions, and command palette panels are modularized under `crate::panels`.
 
+use crate::components::model_dropdown::IconDropDownWidgetRefExt;
 use crate::panels::chat::{
     accepts_generation_event, concise_status, draft_for_cancellation, submitted_draft, ChatList,
     ChatListWidgetRefExt, ComposerState, ComposerStatus, GenerationEvent, StarterPromptAction,
@@ -21,7 +22,7 @@ use crate::state::{
     CommandInfo, GuiAgentEvent, MsgRole, SessionEntry, ToolStatus,
 };
 use crate::updater::UpdateStatus;
-use crate::workspace::{AppState, SessionKey};
+use crate::workspace::{AppState, SessionKey, WorkspaceUiState};
 use base64::Engine as _;
 use makepad_widgets::text::selection::Cursor;
 use makepad_widgets::*;
@@ -38,6 +39,73 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
+
+const ANTIGRAVITY_MODELS: &[&str] = &[
+    "antigravity/gemini-3.6-flash",
+    "antigravity/gemini-3.5-flash",
+    "antigravity/gemini-3.1-pro",
+    "antigravity/claude-sonnet-4-6",
+    "antigravity/claude-opus-4-6",
+    "antigravity/gpt-oss-120b",
+];
+
+fn append_antigravity_models(models: &mut Vec<String>) {
+    for model in ANTIGRAVITY_MODELS {
+        if !models.iter().any(|existing| existing == model) {
+            models.push((*model).to_string());
+        }
+    }
+}
+
+fn include_connected_provider_models(mut models: Vec<String>) -> Vec<String> {
+    if threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some() {
+        append_antigravity_models(&mut models);
+    }
+    models
+}
+
+fn ordered_model_options(
+    models: Vec<String>,
+    selected_model: &str,
+) -> Option<(Vec<String>, Vec<String>)> {
+    let mut canonical = Vec::new();
+    for model in models {
+        if !model.is_empty() && !canonical.contains(&model) {
+            canonical.push(model);
+        }
+    }
+    if !selected_model.is_empty() && !canonical.iter().any(|model| model == selected_model) {
+        canonical.push(selected_model.to_string());
+    }
+    canonical.sort_by_key(|model| threadlane_provider::router::is_antigravity_model(model));
+    if canonical.is_empty() {
+        return None;
+    }
+
+    let selected_model = if selected_model.is_empty() {
+        canonical[0].clone()
+    } else {
+        selected_model.to_string()
+    };
+    let mut display = canonical.clone();
+    display.retain(|model| model != &selected_model);
+    display.push(selected_model);
+    Some((canonical, display))
+}
+
+fn model_credential_error(
+    model: &str,
+    has_openai_credentials: bool,
+    has_antigravity_credentials: bool,
+) -> Option<&'static str> {
+    if threadlane_provider::router::is_antigravity_model(model) {
+        (!has_antigravity_credentials)
+            .then_some("Sign in with Google Antigravity before using this model.")
+    } else {
+        (!has_openai_credentials)
+            .then_some("Please provide an OpenAI API key or click 'Login ChatGPT' to authenticate.")
+    }
+}
 
 fn user_home_dir() -> Option<PathBuf> {
     directories::UserDirs::new()
@@ -575,23 +643,31 @@ script_mod! {
                 }
             }
 
+            UserMsgWrapped := View {
+                width: Fill
+                height: Fit
+                align: Align{x: 1.0}
+                margin: Inset{top: 5 bottom: 5 left: 28 right: 20}
+
+                user_bubble := ChatBubble {
+                    width: Fill{max: 680}
+                    padding: Inset{left: 13 top: 8 right: 13 bottom: 8}
+                    md +: { width: Fill }
+                    draw_bg +: {
+                        color: #x2a3547
+                        border_radius: 9.0
+                    }
+                }
+            }
+
             AssistantMsg := View {
                 width: Fill
                 height: Fit
                 align: Align{x: 0.0}
-                margin: Inset{top: 5 bottom: 7 left: 20 right: 52}
+                margin: Inset{top: 8 bottom: 12 left: 34 right: 66}
 
-                assistant_bubble := ChatBubble {
-                    width: Fit{max: FitBound.Abs(960)}
-                    md +: {
-                        width: Fit{max: FitBound.Abs(934)}
-                    }
-                    draw_bg +: {
-                        color: #x20252d
-                        border_radius: 10.0
-                        border_size: 1.0
-                        border_color: #x2d3540
-                    }
+                md := mod.components.ChatMarkdown {
+                    width: Fill{max: 934}
                 }
             }
 
@@ -817,8 +893,8 @@ script_mod! {
             SessionRowActive := SessionRowBase {
                 draw_bg +: {
                     is_active: 1.0
-                    color: #x00000000
-                    color_hover: #x00000000
+                    color: #x1a2535
+                    color_hover: #x1e2a3a
                     border_color: #x00000000
                     border_size: 0.0
                     border_radius: 7.0
@@ -842,8 +918,8 @@ script_mod! {
                 draw_bg +: {
                     tree_last: 1.0
                     is_active: 1.0
-                    color: #x00000000
-                    color_hover: #x00000000
+                    color: #x1a2535
+                    color_hover: #x1e2a3a
                     border_color: #x00000000
                     border_size: 0.0
                     border_radius: 7.0
@@ -914,10 +990,267 @@ script_mod! {
                 padding: Inset{left: 43 top: 4 right: 10 bottom: 8}
                 lbl +: {
                     text: "No sessions yet"
-                    draw_text +: { color: #x596474 text_style +: { font_size: 9.25 } }
+                    draw_text +: { color: #x596474 text_style +: { font_size: 9.5 } }
                 }
             }
         }
+    }
+
+    let ProvidersModal = #(ProviderSettingsModal::register_widget(vm)) {
+        width: Fill
+        height: Fill
+        flow: Overlay
+        align: Align{x: 0.5 y: 0.5}
+
+        modal_backdrop := View {
+            width: Fill
+            height: Fill
+            draw_bg +: { color: #x000000bb }
+        }
+
+        modal_card := RoundedView {
+                width: 460
+                height: Fit
+                flow: Down
+                padding: Inset{left: 22 top: 20 right: 22 bottom: 22}
+                spacing: 14
+                draw_bg +: {
+                    color: #x1a1d24
+                    border_radius: 12.0
+                    border_size: 1.0
+                    border_color: #x323a48
+                }
+
+                modal_header := View {
+                    width: Fill
+                    height: Fit
+                    flow: Right
+                    align: Align{y: 0.5}
+
+                    modal_title := Label {
+                        width: Fill
+                        height: Fit
+                        text: "Provider Settings"
+                        draw_text +: {
+                            color: #xe7ebf0
+                            text_style: theme.font_bold { font_size: 14.0 }
+                        }
+                    }
+
+                    close_modal_btn := Button {
+                        width: 26
+                        height: 26
+                        padding: 0
+                        spacing: 0
+                        text: ""
+                        align: Align{x: 0.5 y: 0.5}
+                        icon_walk: Walk{width: 12 height: 12}
+                        draw_bg +: {
+                            color: #x00000000
+                            color_hover: #x2e3543
+                            color_focus: #x2e3543
+                            color_down: #x3e485a
+                            border_color: #x00000000
+                            border_color_hover: #x00000000
+                            border_color_focus: #x00000000
+                            border_color_down: #x00000000
+                            border_size: 0.0
+                            border_radius: 6.0
+                        }
+                        draw_icon +: {
+                            svg: crate_resource("self:resources/icons/close.svg")
+                            color: #x8b93a0
+                            color_hover: #xffffff
+                            color_focus: #xffffff
+                            color_down: #xffffff
+                        }
+                    }
+                }
+
+                modal_subtitle := Label {
+                    width: Fill
+                    height: Fit
+                    text: "Connect your AI model providers to use them in Threadlane."
+                    draw_text +: {
+                        color: #x7f8c9d
+                        text_style +: { font_size: 10.0 }
+                    }
+                }
+
+                // Google Antigravity Provider Card
+                antigravity_card := RoundedView {
+                    width: Fill
+                    height: Fit
+                    flow: Down
+                    padding: Inset{left: 14 top: 12 right: 14 bottom: 12}
+                    spacing: 8
+                    draw_bg +: {
+                        color: #x222631
+                        border_radius: 8.0
+                        border_size: 1.0
+                        border_color: #x323a48
+                    }
+
+                    ag_header := View {
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        align: Align{y: 0.5}
+
+                        ag_title := Label {
+                            width: Fill
+                            height: Fit
+                            text: "Google Antigravity"
+                            draw_text +: {
+                                color: #xe7ebf0
+                                text_style: theme.font_bold { font_size: 11.5 }
+                            }
+                        }
+
+                        antigravity_status_lbl := Label {
+                            width: Fit
+                            height: Fit
+                            text: "Not Connected"
+                            draw_text +: {
+                                color: #xe06c75
+                                text_style: theme.font_bold { font_size: 10.0 }
+                            }
+                        }
+                    }
+
+                    ag_desc := Label {
+                        width: Fill
+                        height: Fit
+                        text: "Cloud Code Assist, Gemini 3.6 Flash / Pro via Google OAuth PKCE"
+                        draw_text +: {
+                            color: #x7f8c9d
+                            text_style +: { font_size: 9.25 }
+                        }
+                    }
+
+                    ag_actions := View {
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{y: 0.5}
+
+                        antigravity_login_btn := Button {
+                            width: Fit
+                            height: 28
+                            padding: Inset{left: 12 right: 12 top: 4 bottom: 4}
+                            text: "Sign in with Google"
+                            draw_bg +: {
+                                color: #x3b669e
+                                color_hover: #x4a7bc0
+                                color_down: #x5a8de0
+                                border_radius: 6.0
+                            }
+                            draw_text +: {
+                                color: #xffffff
+                                text_style: theme.font_bold { font_size: 9.5 }
+                            }
+                        }
+
+                        antigravity_doctor_btn := Button {
+                            width: Fit
+                            height: 28
+                            padding: Inset{left: 10 right: 10 top: 4 bottom: 4}
+                            text: "Run Health Check"
+                            draw_bg +: {
+                                color: #x2b313d
+                                color_hover: #x363e4d
+                                color_down: #x444f62
+                                border_color: #x3a4354
+                                border_size: 1.0
+                                border_radius: 6.0
+                            }
+                            draw_text +: {
+                                color: #xa4b0c2
+                                color_hover: #xd8e0ec
+                                text_style +: { font_size: 9.0 }
+                            }
+                        }
+                    }
+                }
+
+                // OpenAI / ChatGPT Provider Card
+                openai_card := RoundedView {
+                    width: Fill
+                    height: Fit
+                    flow: Down
+                    padding: Inset{left: 14 top: 12 right: 14 bottom: 12}
+                    spacing: 8
+                    draw_bg +: {
+                        color: #x222631
+                        border_radius: 8.0
+                        border_size: 1.0
+                        border_color: #x323a48
+                    }
+
+                    oa_header := View {
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        align: Align{y: 0.5}
+
+                        oa_title := Label {
+                            width: Fill
+                            height: Fit
+                            text: "OpenAI / ChatGPT"
+                            draw_text +: {
+                                color: #xe7ebf0
+                                text_style: theme.font_bold { font_size: 11.5 }
+                            }
+                        }
+
+                        openai_status_lbl := Label {
+                            width: Fit
+                            height: Fit
+                            text: "Not Connected"
+                            draw_text +: {
+                                color: #xe06c75
+                                text_style: theme.font_bold { font_size: 10.0 }
+                            }
+                        }
+                    }
+
+                    oa_desc := Label {
+                        width: Fill
+                        height: Fit
+                        text: "GPT-4o, Codex, and OpenAI models via ChatGPT OAuth or API key"
+                        draw_text +: {
+                            color: #x7f8c9d
+                            text_style +: { font_size: 9.25 }
+                        }
+                    }
+
+                    oa_actions := View {
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{y: 0.5}
+
+                        openai_login_btn := Button {
+                            width: Fit
+                            height: 28
+                            padding: Inset{left: 12 right: 12 top: 4 bottom: 4}
+                            text: "Sign in with ChatGPT"
+                            draw_bg +: {
+                                color: #x2c6e49
+                                color_hover: #x358759
+                                color_down: #x3ea36c
+                                border_radius: 6.0
+                            }
+                            draw_text +: {
+                                color: #xffffff
+                                text_style: theme.font_bold { font_size: 9.5 }
+                            }
+                        }
+                    }
+                }
+            }
     }
 
     startup() do #(App::script_component(vm)){
@@ -927,7 +1260,12 @@ script_mod! {
                 window.title: "threadlane"
                 pass.clear_color: #x181a1f
                 body +: {
-                    dock := DockFlat {
+                    window_body := View {
+                        width: Fill
+                        height: Fill
+                        flow: Overlay
+
+                        dock := DockFlat {
                         width: Fill
                         height: Fill
                         padding: 0
@@ -939,8 +1277,8 @@ script_mod! {
                         splitter: Splitter {
                             size: 6.0
                             draw_bg +: {
-                                color: uniform(#x303641)
-                                color_hover: uniform(#x4b5665)
+                                color: uniform(#x242930)
+                                color_hover: uniform(#x3a4452)
                                 color_drag: uniform(#x6a7b91)
 
                                 pixel: fn() {
@@ -1004,12 +1342,22 @@ script_mod! {
 
                             sidebar_brand := View {
                                 width: Fill
-                                height: 38
+                                height: 44
                                 flow: Right
                                 align: Align{y: 0.5}
-                                padding: Inset{left: 7 right: 5}
+                                padding: Inset{left: 7 right: 5 bottom: 6}
+                                spacing: 7
+                                sidebar_brand_icon := Icon {
+                                    width: 16
+                                    height: 16
+                                    icon_walk: Walk{width: 16 height: 16}
+                                    draw_icon +: {
+                                        svg: crate_resource("self:resources/icons/logo.svg")
+                                        color: #xe7ebf0
+                                    }
+                                }
                                 sidebar_brand_label := Label {
-                                    width: Fill
+                                    width: Fit
                                     height: Fit
                                     text: "Threadlane"
                                     draw_text +: {
@@ -1017,6 +1365,35 @@ script_mod! {
                                         text_style: theme.font_bold { font_size: 14.0 }
                                     }
                                 }
+                                sidebar_brand_spacer := mod.components.FlexSpacer {}
+                                settings_btn := Button {
+                                    width: 26
+                                    height: 26
+                                    padding: 0
+                                    spacing: 0
+                                    text: ""
+                                    align: Align{x: 0.5 y: 0.5}
+                                    icon_walk: Walk{width: 14 height: 14}
+                                    draw_bg +: {
+                                        color: #x00000000
+                                        color_hover: #x252a32
+                                        color_down: #x323844
+                                        border_radius: 6.0
+                                    }
+                                    draw_icon +: {
+                                        svg: crate_resource("self:resources/icons/settings.svg")
+                                        color: #x9ba7b6
+                                        color_hover: #xe7ebf0
+                                        color_down: #xffffff
+                                    }
+                                }
+                            }
+                            sidebar_brand_divider := View {
+                                width: Fill
+                                height: 1
+                                margin: Inset{left: 6 right: 6 bottom: 4}
+                                show_bg: true
+                                draw_bg +: { color: #x2a303a }
                             }
 
                             projects_header := mod.components.SectionHeader {
@@ -1025,6 +1402,7 @@ script_mod! {
                             }
                             session_context_menu := SessionContextMenu {}
                             session_list := SessionList { height: Fill }
+                            providers_modal := ProvidersModal {}
                             update_action_row := View {
                                 width: Fill
                                 height: Fit
@@ -1063,40 +1441,52 @@ script_mod! {
                             width: Fill
                             height: Fill
                             flow: Down
-                            spacing: 7
+                            spacing: 5
                             padding: Inset{left: 10 top: 8 right: 12 bottom: 10}
 
                         header := PanelHeader {
-                            spacing: 7
+                            spacing: 8
                             padding: Inset{left: 4 top: 1 right: 2 bottom: 2}
 
-                            project_icon := Icon {
-                                width: 18
-                                height: 18
-                                icon_walk: Walk{width: 16 height: 16}
-                                draw_icon +: {
-                                    svg: crate_resource("self:resources/icons/folder.svg")
-                                    color: #x8fb9e8
-                                }
-                            }
                             project_identity := View {
                                 width: Fill
                                 height: Fit
                                 flow: Down
-                                spacing: 1
+                                spacing: 0
                                 clip_x: true
 
-                                project_name_label := mod.components.ClippedLabel {
-                                    height: 17
-                                    draw_text +: {
-                                        color: #xf0f4fa
-                                        text_style: theme.font_bold { font_size: 14.0 }
+                                project_title_row := View {
+                                    width: Fill
+                                    height: 18
+                                    flow: Right
+                                    spacing: 7
+                                    align: Align{y: 0.5}
+
+                                    project_icon := Icon {
+                                        width: 14
+                                        height: 14
+                                        icon_walk: Walk{width: 12 height: 12}
+                                        draw_icon +: {
+                                            svg: crate_resource("self:resources/icons/folder.svg")
+                                            color: #x8fb9e8
+                                        }
+                                    }
+                                    project_name_label := mod.components.ClippedLabel {
+                                        height: 18
+                                        padding: 0
+                                        align: Align{y: 0.6}
+                                        draw_text +: {
+                                            color: #xf0f4fa
+                                            text_style: theme.font_bold { font_size: 12.0 }
+                                        }
                                     }
                                 }
                                 workspace_label := mod.components.ClippedLabel {
-                                    height: 13
+                                    height: 14
+                                    padding: 0
+                                    align: Align{y: 0.5}
                                     draw_text +: {
-                                        color: #x7f8b9a
+                                        color: #x737f8e
                                         text_style +: { font_size: 9.0 }
                                     }
                                 }
@@ -1210,11 +1600,11 @@ script_mod! {
                                     visible: false
                                     align: Align{x: 0.0 y: 0.5}
                                     chat_working_spinner := ActivityLoader {
-                                        width: 22
-                                        height: 11
+                                        width: 28
+                                        height: 16
                                         draw_bg +: {
-                                            dot_radius: 1.25
-                                            speed: 3.0
+                                            dot_radius: 1.15
+                                            speed: 8.0
                                         }
                                     }
                                 }
@@ -1322,17 +1712,7 @@ script_mod! {
                                         }
                                     }
 
-                                    stop_btn := mod.components.ComposerAction {
-                                        width: Fit
-                                        height: 28
-                                        visible: false
-                                        text: "Stop"
-                                        draw_bg +: {
-                                            color: #xb85c55
-                                            color_hover: #xd4775f
-                                            color_down: #e39a5d
-                                        }
-                                    }
+
 
                                     attach_btn := mod.components.IconButton {
                                         width: 30
@@ -1362,9 +1742,8 @@ script_mod! {
                                             text_style +: { font_size: 8.5 }
                                         }
                                     }
-
                                     effort_picker := View {
-                                        width: 116
+                                        width: 92
                                         height: 28
                                         visible: false
                                         flow: Down
@@ -1373,19 +1752,19 @@ script_mod! {
 
                                         effort_drop := EffortDropDown {
                                             labels: [
-                                                "Thinking: Off",
-                                                "Thinking: Minimal",
-                                                "Thinking: Low",
-                                                "Thinking: High",
-                                                "Thinking: XHigh",
-                                                "Thinking: Max",
-                                                "Thinking: Medium"
+                                                "Off",
+                                                "Minimal",
+                                                "Low",
+                                                "High",
+                                                "XHigh",
+                                                "Max",
+                                                "Medium"
                                             ]
                                         }
                                     }
 
                                     model_picker := View {
-                                        width: 142
+                                        width: 226
                                         height: 28
                                         visible: false
                                         flow: Down
@@ -1394,6 +1773,12 @@ script_mod! {
 
                                         model_drop := ModelDropDown {
                                             labels: [
+                                                "antigravity/gemini-3.6-flash",
+                                                "antigravity/gemini-3.5-flash",
+                                                "antigravity/gemini-3.1-pro",
+                                                "antigravity/claude-sonnet-4-6",
+                                                "antigravity/claude-opus-4-6",
+                                                "antigravity/gpt-oss-120b",
                                                 "gpt-5.4",
                                                 "gpt-5.4-mini",
                                                 "gpt-5.5",
@@ -1408,18 +1793,54 @@ script_mod! {
 
                                     }
 
-                                    send_btn := mod.components.ComposerAction {
+                                    composer_action_slot := View {
                                         width: 34
                                         height: 30
-                                        margin: 0
-                                        padding: 0
-                                        spacing: 0
-                                        text: ""
-                                        align: Align{x: 0.5 y: 0.5}
-                                        icon_walk: Walk{width: 15 height: 15}
-                                        draw_icon +: {
-                                            svg: crate_resource("self:resources/icons/send.svg")
-                                            color: #xffffff
+                                        flow: Overlay
+
+                                        send_btn := mod.components.ComposerAction {
+                                            width: 34
+                                            height: 30
+                                            margin: 0
+                                            padding: 0
+                                            spacing: 0
+                                            text: ""
+                                            align: Align{x: 0.5 y: 0.5}
+                                            icon_walk: Walk{width: 15 height: 15}
+                                            draw_icon +: {
+                                                svg: crate_resource("self:resources/icons/send.svg")
+                                                color: #xffffff
+                                            }
+                                        }
+
+                                        stop_btn := mod.components.ComposerAction {
+                                            width: 34
+                                            height: 30
+                                            visible: false
+                                            margin: 0
+                                            padding: 0
+                                            spacing: 0
+                                            text: ""
+                                            align: Align{x: 0.5 y: 0.5}
+                                            icon_walk: Walk{width: 12 height: 12}
+                                            draw_bg +: {
+                                                color: #xb85c55
+                                                color_hover: #xd4775f
+                                                color_focus: #xd4775f
+                                                color_down: #xe39a5d
+                                                border_color: #x00000000
+                                                border_color_hover: #x00000000
+                                                border_color_focus: #x00000000
+                                                border_color_down: #x00000000
+                                                border_size: 0.0
+                                            }
+                                            draw_icon +: {
+                                                svg: crate_resource("self:resources/icons/stop.svg")
+                                                color: #xffffff
+                                                color_hover: #xffffff
+                                                color_focus: #xffffff
+                                                color_down: #xffffff
+                                            }
                                         }
                                     }
                                 }
@@ -1428,12 +1849,109 @@ script_mod! {
 
 
                         }
+                    }
 
-                        }
+
                     }
                 }
             }
         }
+    }
+}
+}
+
+#[derive(Script, Widget)]
+struct ProviderSettingsModal {
+    #[source]
+    source: ScriptObjectRef,
+    #[deref]
+    view: View,
+    #[rust]
+    draw_list: Option<DrawList2d>,
+    #[rust]
+    opened: bool,
+}
+
+impl ScriptHook for ProviderSettingsModal {
+    fn on_after_new(&mut self, vm: &mut ScriptVm) {
+        self.draw_list = Some(DrawList2d::script_new(vm));
+    }
+
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        _apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+        vm.with_cx_mut(|cx| {
+            if let Some(draw_list) = &self.draw_list {
+                draw_list.redraw(cx);
+            }
+        });
+    }
+}
+
+impl Widget for ProviderSettingsModal {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if !self.opened {
+            return;
+        }
+
+        self.view.handle_event(cx, event, scope);
+        let modal_rect = self.view.widget(cx, ids!(modal_card)).area().rect(cx);
+        let should_close = matches!(
+            event,
+            Event::MouseUp(event)
+                if event.button.is_primary() && !modal_rect.contains(event.abs)
+        ) || matches!(event, Event::KeyDown(event) if event.key_code == KeyCode::Escape)
+            || matches!(event, Event::BackPressed { .. });
+        if should_close {
+            self.close(cx);
+        }
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
+        let draw_list = self.draw_list.as_mut().unwrap();
+        draw_list.begin_overlay_reuse(cx);
+
+        let pass_size = cx.current_pass_size();
+        cx.begin_root_turtle(pass_size, Layout::flow_overlay());
+        if self.opened {
+            self.view.draw_walk_all(
+                cx,
+                scope,
+                Walk {
+                    width: Size::Fixed(pass_size.x),
+                    height: Size::Fixed(pass_size.y),
+                    ..Default::default()
+                },
+            );
+        }
+        cx.end_pass_sized_turtle();
+        draw_list.end(cx);
+        DrawStep::done()
+    }
+}
+
+impl ProviderSettingsModal {
+    fn open(&mut self, cx: &mut Cx) {
+        self.opened = true;
+        if let Some(draw_list) = &self.draw_list {
+            draw_list.redraw(cx);
+        }
+        self.view.redraw(cx);
+    }
+
+    fn close(&mut self, cx: &mut Cx) {
+        if !self.opened {
+            return;
+        }
+        self.opened = false;
+        if let Some(draw_list) = &self.draw_list {
+            draw_list.redraw(cx);
+        }
+        self.view.redraw(cx);
     }
 }
 
@@ -1544,6 +2062,25 @@ enum UiStatus {
     Error,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum InputOrigin {
+    Composer,
+    Internal,
+}
+
+impl InputOrigin {
+    fn consumes_composer(self) -> bool {
+        self == Self::Composer
+    }
+}
+
+fn clear_composer_for_dispatch(origin: InputOrigin, composer: &mut WorkspaceUiState) {
+    if origin.consumes_composer() {
+        composer.draft.clear();
+        composer.attachments.clear();
+    }
+}
+
 struct GenerationRun {
     id: u64,
     handle: tokio::task::JoinHandle<()>,
@@ -1635,7 +2172,7 @@ impl MatchEvent for App {
         self.rx = Some(Arc::new(Mutex::new(rx)));
         self.set_model_dropup_options(
             cx,
-            vec![
+            include_connected_provider_models(vec![
                 "gpt-5.6-luna".into(),
                 "gpt-5.4".into(),
                 "gpt-5.4-mini".into(),
@@ -1645,7 +2182,7 @@ impl MatchEvent for App {
                 "gpt-5.3-codex-spark".into(),
                 "gpt-4o".into(),
                 "gpt-4o-mini".into(),
-            ],
+            ]),
             "gpt-5.6-luna",
         );
         self.set_reasoning_effort_picker(cx, ReasoningEffort::Medium);
@@ -1771,6 +2308,11 @@ impl MatchEvent for App {
         };
 
         let coding_agent = CodingAgent::new(agent_opts);
+        let initial_model = coding_agent
+            .session_tree
+            .model
+            .clone()
+            .unwrap_or_else(|| "gpt-5.6-luna".to_string());
         let discovered_skills: Vec<_> = coding_agent
             .skills
             .list_skills()
@@ -1849,12 +2391,9 @@ impl MatchEvent for App {
         }
         self.session_runtimes.insert(
             initial_key,
-            SessionRuntime::new(
-                coding_agent,
-                "gpt-5.6-luna".to_string(),
-                ReasoningEffort::Medium,
-            ),
+            SessionRuntime::new(coding_agent, initial_model.clone(), ReasoningEffort::Medium),
         );
+        self.set_model_dropup_options(cx, self.available_models.clone(), &initial_model);
 
         self.spawn_model_fetch(api_key, account_id_opt);
         self.trigger_update_check(cx);
@@ -1871,6 +2410,57 @@ impl MatchEvent for App {
             }
         }
 
+        if self.ui.button(cx, ids!(settings_btn)).clicked(actions) {
+            self.open_providers_modal(cx);
+            if let Some(creds) =
+                threadlane_provider::antigravity_auth::load_antigravity_credentials()
+            {
+                let status_text = match creds.account_email {
+                    Some(ref email) => format!("✓ Connected ({email})"),
+                    None => "✓ Connected".to_string(),
+                };
+                self.ui
+                    .label(cx, ids!(antigravity_status_lbl))
+                    .set_text(cx, &status_text);
+            } else {
+                self.ui
+                    .label(cx, ids!(antigravity_status_lbl))
+                    .set_text(cx, "Not Connected");
+            }
+            if auth::load_credentials().is_some() {
+                self.ui
+                    .label(cx, ids!(openai_status_lbl))
+                    .set_text(cx, "✓ Connected");
+            } else {
+                self.ui
+                    .label(cx, ids!(openai_status_lbl))
+                    .set_text(cx, "Not Connected");
+            }
+            cx.redraw_all();
+        }
+
+        if self.ui.button(cx, ids!(close_modal_btn)).clicked(actions) {
+            self.dismiss_providers_modal(cx);
+        }
+
+        if self
+            .ui
+            .button(cx, ids!(antigravity_login_btn))
+            .clicked(actions)
+        {
+            self.dismiss_providers_modal(cx);
+            self.start_antigravity_login(cx);
+        }
+
+        if self
+            .ui
+            .button(cx, ids!(antigravity_doctor_btn))
+            .clicked(actions)
+        {
+            self.dismiss_providers_modal(cx);
+            self.start_antigravity_doctor(cx);
+        }
+
         if let Some(action) = actions
             .iter()
             .find_map(|action| action.downcast_ref::<StarterPromptAction>().copied())
@@ -1878,7 +2468,12 @@ impl MatchEvent for App {
             self.apply_starter_prompt(cx, action);
         }
 
-        if self.ui.button(cx, ids!(login_btn)).clicked(actions) {
+        let openai_login_clicked = self.ui.button(cx, ids!(openai_login_btn)).clicked(actions);
+        if openai_login_clicked {
+            self.dismiss_providers_modal(cx);
+        }
+
+        if openai_login_clicked || self.ui.button(cx, ids!(login_btn)).clicked(actions) {
             self.auth_workspace = self.workspace_state.active_key().cloned();
             self.push_chat(MsgRole::System, "Initiating ChatGPT device code login...");
             self.apply_status_ui(cx, UiStatus::Working, "Connecting to ChatGPT...");
@@ -1986,10 +2581,16 @@ impl MatchEvent for App {
                 };
                 if let Some(workspace) = self.workspace_state.active_workspace_mut() {
                     workspace.ui.draft = draft.clone();
-                    workspace.ui.attachments = restored_attachments.unwrap_or_default();
+                    if let Some(attachments) = restored_attachments {
+                        workspace.ui.attachments = attachments;
+                    }
                 }
                 self.set_prompt_text(cx, &draft);
                 self.refresh_attachment_ui(cx);
+                self.workspace_state
+                    .workspace_mut(key.clone())
+                    .chat
+                    .mark_generation_stopped();
                 self.set_session_status(cx, &key, UiStatus::Ready, "Stopped");
                 self.push_chat(MsgRole::System, "Generation stopped.");
                 self.ui.widget(cx, ids!(chat_list)).redraw(cx);
@@ -2104,11 +2705,14 @@ impl MatchEvent for App {
 
         if self
             .ui
-            .drop_down(cx, ids!(effort_drop))
+            .icon_drop_down(cx, ids!(effort_drop))
             .selected(actions)
             .is_some()
         {
-            let selected_label = self.ui.drop_down(cx, ids!(effort_drop)).selected_label();
+            let selected_label = self
+                .ui
+                .icon_drop_down(cx, ids!(effort_drop))
+                .selected_label();
             if !self.busy {
                 if let Some(effort) = ReasoningEffort::from_label(&selected_label) {
                     if let Some(key) = self.workspace_state.active_key() {
@@ -2123,14 +2727,17 @@ impl MatchEvent for App {
 
         if self
             .ui
-            .drop_down(cx, ids!(model_drop))
+            .icon_drop_down(cx, ids!(model_drop))
             .selected(actions)
             .is_some()
         {
-            let model_name = self.ui.drop_down(cx, ids!(model_drop)).selected_label();
+            let model_name = self
+                .ui
+                .icon_drop_down(cx, ids!(model_drop))
+                .selected_label();
             if !model_name.is_empty() && !self.busy {
                 self.set_model_dropup_options(cx, self.available_models.clone(), &model_name);
-                self.dispatch_input(cx, format!("/model {model_name}"), false);
+                self.dispatch_input(cx, format!("/model {model_name}"), InputOrigin::Internal);
             }
         }
 
@@ -2143,7 +2750,7 @@ impl MatchEvent for App {
                 .active_workspace()
                 .is_some_and(|workspace| !workspace.ui.attachments.is_empty());
             if !input_text.trim().is_empty() || has_attachments {
-                self.dispatch_input(cx, input_text, true);
+                self.dispatch_input(cx, input_text, InputOrigin::Composer);
             }
         }
     }
@@ -2264,6 +2871,92 @@ fn format_capabilities_summary(
 }
 
 impl App {
+    fn open_providers_modal(&mut self, cx: &mut Cx) {
+        if let Some(mut modal) = self
+            .ui
+            .widget(cx, ids!(providers_modal))
+            .borrow_mut::<ProviderSettingsModal>()
+        {
+            modal.open(cx);
+        }
+    }
+
+    fn dismiss_providers_modal(&mut self, cx: &mut Cx) {
+        if let Some(mut modal) = self
+            .ui
+            .widget(cx, ids!(providers_modal))
+            .borrow_mut::<ProviderSettingsModal>()
+        {
+            modal.close(cx);
+        }
+    }
+
+    fn start_antigravity_login(&mut self, cx: &mut Cx) {
+        self.push_chat(
+            MsgRole::System,
+            "Initiating Google Antigravity OAuth login...",
+        );
+        let (verifier, challenge) = threadlane_provider::antigravity_auth::generate_pkce_pair();
+        let (state, _) = threadlane_provider::antigravity_auth::generate_pkce_pair();
+        let auth_url =
+            threadlane_provider::antigravity_auth::build_authorization_url(&challenge, &state);
+
+        self.push_chat(
+            MsgRole::System,
+            format!("Opening Google sign-in in your browser...\n{}", auth_url),
+        );
+        let _ = robius_open::Uri::new(&auth_url).open();
+
+        let tx_clone = self.tx.clone();
+        get_runtime().spawn(async move {
+            match threadlane_provider::antigravity_auth::listen_for_oauth_callback(state).await {
+                Ok(code) => {
+                    match threadlane_provider::antigravity_auth::exchange_code_for_tokens(
+                        &code, &verifier,
+                    )
+                    .await
+                    {
+                        Ok(creds) => {
+                            if let Some(ref tx) = tx_clone {
+                                let _ = tx.send(GuiAgentEvent::AntigravityLoginSuccess {
+                                    email: creds.account_email,
+                                });
+                                SignalToUI::set_ui_signal();
+                            }
+                        }
+                        Err(e) => {
+                            if let Some(ref tx) = tx_clone {
+                                let _ = tx.send(GuiAgentEvent::AntigravityLoginError(e));
+                                SignalToUI::set_ui_signal();
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    if let Some(ref tx) = tx_clone {
+                        let _ = tx.send(GuiAgentEvent::AntigravityLoginError(e));
+                        SignalToUI::set_ui_signal();
+                    }
+                }
+            }
+        });
+        cx.redraw_all();
+    }
+
+    fn start_antigravity_doctor(&mut self, cx: &mut Cx) {
+        self.push_chat(MsgRole::System, "Running Antigravity Doctor diagnostics...");
+        let tx_clone = self.tx.clone();
+        get_runtime().spawn(async move {
+            let client = threadlane_provider::antigravity::AntigravityClient::new();
+            let report = client.run_diagnostics().await;
+            if let Some(ref tx) = tx_clone {
+                let _ = tx.send(GuiAgentEvent::AntigravityDoctorReport(report));
+                SignalToUI::set_ui_signal();
+            }
+        });
+        cx.redraw_all();
+    }
+
     fn sync_sidebar_action_visibility(&mut self, cx: &mut Cx, event: &Event) {
         match event {
             Event::MouseMove(event) => self.sidebar_pointer = Some(event.abs),
@@ -2320,28 +3013,14 @@ impl App {
     }
 
     fn set_model_dropup_options(&mut self, cx: &mut Cx, models: Vec<String>, selected_model: &str) {
-        let mut ordered = Vec::new();
-        for model in models {
-            if !model.is_empty() && !ordered.contains(&model) {
-                ordered.push(model);
-            }
-        }
-        if ordered.is_empty() {
+        let Some((canonical, display)) = ordered_model_options(models, selected_model) else {
             return;
-        }
-
-        let selected_model = if ordered.iter().any(|model| model == selected_model) {
-            selected_model.to_string()
-        } else {
-            ordered[0].clone()
         };
-        ordered.retain(|model| model != &selected_model);
-        ordered.push(selected_model);
 
-        let selected_item = ordered.len() - 1;
-        self.available_models = ordered.clone();
-        let model_drop = self.ui.drop_down(cx, ids!(model_drop));
-        model_drop.set_labels(cx, ordered);
+        let selected_item = display.len() - 1;
+        self.available_models = canonical;
+        let model_drop = self.ui.icon_drop_down(cx, ids!(model_drop));
+        model_drop.set_labels(cx, display);
         model_drop.set_selected_item(cx, selected_item);
     }
 
@@ -2363,9 +3042,9 @@ impl App {
 
         let labels = ordered
             .iter()
-            .map(|effort| format!("Thinking: {}", effort.label()))
+            .map(|effort| effort.label().to_string())
             .collect();
-        let effort_drop = self.ui.drop_down(cx, ids!(effort_drop));
+        let effort_drop = self.ui.icon_drop_down(cx, ids!(effort_drop));
         effort_drop.set_labels(cx, labels);
         effort_drop.set_selected_item(cx, ordered.len() - 1);
     }
@@ -2923,14 +3602,20 @@ impl App {
         let key = SessionKey::project_draft(work_dir.clone());
         if !self.session_runtimes.contains_key(&key) {
             let (api_key, account_id) = self.current_credentials(cx);
-            let model = self.ui.drop_down(cx, ids!(model_drop)).selected_label();
+            let model = self
+                .ui
+                .icon_drop_down(cx, ids!(model_drop))
+                .selected_label();
             let model = if model.is_empty() {
                 "gpt-5.6-luna".to_string()
             } else {
                 model
             };
             let effort = ReasoningEffort::from_label(
-                &self.ui.drop_down(cx, ids!(effort_drop)).selected_label(),
+                &self
+                    .ui
+                    .icon_drop_down(cx, ids!(effort_drop))
+                    .selected_label(),
             )
             .unwrap_or_default();
             let agent = CodingAgent::new(CodingAgentOptions {
@@ -3080,6 +3765,7 @@ impl App {
             runtime.status_text = text.to_string();
         }
         set_session_working(&key.work_dir, &key.session_id, status == UiStatus::Working);
+        self.ui.widget(cx, ids!(session_list)).redraw(cx);
         if self.workspace_state.is_active(key) {
             self.apply_status_ui(cx, status, text);
         }
@@ -3107,18 +3793,9 @@ impl App {
         self.composer_state.set_status(composer_status, text);
         self.busy = status == UiStatus::Working;
         let working = status == UiStatus::Working;
-        let has_generation = self
-            .workspace_state
-            .active_key()
-            .and_then(|key| self.session_runtimes.get(key))
-            .is_some_and(|runtime| runtime.generation.is_some());
         self.ui
             .widget(cx, ids!(chat_working_indicator))
             .set_visible(cx, working);
-        self.ui
-            .widget(cx, ids!(stop_btn))
-            .set_visible(cx, working && has_generation);
-        self.ui.widget(cx, ids!(send_btn)).set_visible(cx, !working);
         self.ui.widget(cx, ids!(chat_working_indicator)).redraw(cx);
         self.apply_composer_presentation(cx);
     }
@@ -3134,18 +3811,19 @@ impl App {
 
         self.ui
             .button(cx, ids!(attach_btn))
-            .set_visible(cx, !presentation.working);
-        self.ui
-            .button(cx, ids!(send_btn))
-            .set_visible(cx, !presentation.working);
+            .set_visible(cx, presentation.show_attach);
         let has_generation = self
             .workspace_state
             .active_key()
             .and_then(|key| self.session_runtimes.get(key))
             .is_some_and(|runtime| runtime.generation.is_some());
+        let show_stop = presentation.show_stop(has_generation);
+        self.ui
+            .button(cx, ids!(send_btn))
+            .set_visible(cx, !show_stop);
         self.ui
             .button(cx, ids!(stop_btn))
-            .set_visible(cx, presentation.working && has_generation);
+            .set_visible(cx, show_stop);
     }
 
     fn apply_session_context_action(
@@ -3257,14 +3935,20 @@ impl App {
 
         if !self.session_runtimes.contains_key(&key) {
             let (api_key, account_id) = self.current_credentials(cx);
-            let selected_model = self.ui.drop_down(cx, ids!(model_drop)).selected_label();
+            let selected_model = self
+                .ui
+                .icon_drop_down(cx, ids!(model_drop))
+                .selected_label();
             let model = if selected_model.is_empty() {
                 "gpt-5.6-luna".to_string()
             } else {
                 selected_model
             };
             let reasoning_effort = ReasoningEffort::from_label(
-                &self.ui.drop_down(cx, ids!(effort_drop)).selected_label(),
+                &self
+                    .ui
+                    .icon_drop_down(cx, ids!(effort_drop))
+                    .selected_label(),
             )
             .unwrap_or_default();
             let agent = CodingAgent::new(CodingAgentOptions {
@@ -3275,6 +3959,7 @@ impl App {
                 session_file: Some(entry.session_file.clone()),
                 system_prompt: Default::default(),
             });
+            let model = agent.session_tree.model.clone().unwrap_or(model);
             let messages = agent.session_tree.get_active_branch_messages();
             self.session_runtimes.insert(
                 key.clone(),
@@ -3314,8 +3999,21 @@ impl App {
         cti.set_items(cx, commands);
     }
 
-    fn dispatch_input(&mut self, cx: &mut Cx, input_text: String, show_in_chat: bool) {
-        let attachments = if show_in_chat {
+    fn dispatch_input(&mut self, cx: &mut Cx, input_text: String, origin: InputOrigin) {
+        let consumes_composer = origin.consumes_composer();
+        match input_text.trim() {
+            "/login antigravity" => {
+                self.start_antigravity_login(cx);
+                return;
+            }
+            "/antigravity.doctor" | "/doctor" => {
+                self.start_antigravity_doctor(cx);
+                return;
+            }
+            _ => {}
+        }
+
+        let attachments = if consumes_composer {
             self.workspace_state
                 .active_workspace()
                 .map(|workspace| workspace.ui.attachments.clone())
@@ -3324,30 +4022,39 @@ impl App {
             Vec::new()
         };
         let (api_key, account_id) = self.current_credentials(cx);
-        if api_key.is_empty() {
-            self.push_chat(
-                MsgRole::System,
-                "Please provide an OpenAI API key or click 'Login ChatGPT' to authenticate.",
-            );
-            cx.redraw_all();
-            return;
-        }
-
-        let selected_model = self.ui.drop_down(cx, ids!(model_drop)).selected_label();
+        let selected_model = self
+            .ui
+            .icon_drop_down(cx, ids!(model_drop))
+            .selected_label();
         let model_name = if selected_model.is_empty() {
             "gpt-5.6-luna".to_string()
         } else {
             selected_model
         };
-        let reasoning_effort =
-            ReasoningEffort::from_label(&self.ui.drop_down(cx, ids!(effort_drop)).selected_label())
-                .unwrap_or_default();
+        let has_antigravity_credentials =
+            threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some();
+        if let Some(error) = model_credential_error(
+            &model_name,
+            !api_key.is_empty(),
+            has_antigravity_credentials,
+        ) {
+            self.push_chat(MsgRole::System, error);
+            cx.redraw_all();
+            return;
+        }
+        let reasoning_effort = ReasoningEffort::from_label(
+            &self
+                .ui
+                .icon_drop_down(cx, ids!(effort_drop))
+                .selected_label(),
+        )
+        .unwrap_or_default();
         let Some(active_key) = self.workspace_state.active_key().cloned() else {
             return;
         };
         let work_dir = active_key.work_dir.clone();
 
-        if show_in_chat
+        if consumes_composer
             && active_session_entry().is_none()
             && input_text.trim_start().starts_with('/')
         {
@@ -3359,7 +4066,7 @@ impl App {
             return;
         }
 
-        if show_in_chat && active_key.is_draft() {
+        if consumes_composer && active_key.is_draft() {
             self.save_active_draft(cx);
             let Some(entry) = create_new_session(&work_dir) else {
                 self.push_chat(MsgRole::System, "Could not create a new session file.");
@@ -3425,7 +4132,10 @@ impl App {
             None if !attachments.is_empty() => (input_text.clone(), String::new()),
             None => return,
         };
-        if show_in_chat && !input_str.trim().is_empty() {
+        if consumes_composer
+            && !input_str.trim().is_empty()
+            && !threadlane_provider::router::is_antigravity_model(&model_name)
+        {
             if let Some(entry) = active_session_entry() {
                 self.spawn_session_title(
                     entry,
@@ -3439,7 +4149,7 @@ impl App {
         self.next_generation_id = self.next_generation_id.wrapping_add(1);
         let generation_id = self.next_generation_id;
 
-        if show_in_chat {
+        if consumes_composer {
             let attachment_names =
                 attachments
                     .iter()
@@ -3527,17 +4237,23 @@ impl App {
                 handle: generation_handle,
             });
             runtime.terminal_generation_id = None;
-            runtime.submitted_draft = Some((generation_id, submitted_draft));
-            runtime.submitted_attachments = Some((generation_id, attachments));
+            if consumes_composer {
+                runtime.submitted_draft = Some((generation_id, submitted_draft));
+                runtime.submitted_attachments = Some((generation_id, attachments));
+            } else {
+                runtime.submitted_draft = None;
+                runtime.submitted_attachments = None;
+            }
         }
         if let Some(workspace) = self.workspace_state.active_workspace_mut() {
-            workspace.ui.draft.clear();
-            workspace.ui.attachments.clear();
+            clear_composer_for_dispatch(origin, &mut workspace.ui);
         }
-        self.refresh_attachment_ui(cx);
-        self.ui
-            .threadlane_command_text_input(cx, ids!(prompt_input))
-            .reset(cx);
+        if consumes_composer {
+            self.refresh_attachment_ui(cx);
+            self.ui
+                .threadlane_command_text_input(cx, ids!(prompt_input))
+                .reset(cx);
+        }
         self.set_session_status(cx, &key, UiStatus::Working, "Working...");
     }
 
@@ -3659,7 +4375,7 @@ impl App {
             AgentEvent::MessageUpdate {
                 text_delta,
                 reasoning_delta,
-                ..
+                tool_call_name,
             } => {
                 let Some(key) = target_key else { return };
                 let workspace = self.workspace_state.workspace_mut(key);
@@ -3672,6 +4388,9 @@ impl App {
                     workspace
                         .chat
                         .push_stream_delta(crate::state::StreamingKind::Assistant, &delta);
+                }
+                if tool_call_name.is_some() {
+                    workspace.chat.flush_tool_call_preamble();
                 }
             }
             AgentEvent::MessageEnd { message } => {
@@ -3789,8 +4508,7 @@ impl App {
                             .submitted_attachments
                             .take()
                             .filter(|(attachment_id, _)| *attachment_id == id)
-                            .map(|(_, attachments)| attachments)
-                            .unwrap_or_default();
+                            .map(|(_, attachments)| attachments);
                         (draft, attachments)
                     })
                     .unwrap_or_default();
@@ -3814,7 +4532,9 @@ impl App {
                 let workspace = self.workspace_state.workspace_mut(key.clone());
                 workspace.chat.flush_streaming();
                 workspace.ui.draft = draft.clone();
-                workspace.ui.attachments = restored_attachments;
+                if let Some(attachments) = restored_attachments {
+                    workspace.ui.attachments = attachments;
+                }
                 workspace
                     .chat
                     .push_chat(MsgRole::System, format!("Agent error: {error}"));
@@ -3827,6 +4547,20 @@ impl App {
                 }
                 let status = concise_status(&error);
                 self.set_session_status(cx, &key, UiStatus::Error, &status);
+            }
+            AgentEvent::StreamRuleTriggered {
+                rule_name,
+                matched_text,
+                reminder,
+                ..
+            } => {
+                let Some(key) = target_key else { return };
+                let workspace = self.workspace_state.workspace_mut(key);
+                workspace.chat.flush_streaming();
+                workspace.chat.push_chat(
+                    MsgRole::System,
+                    format!("⚠ Injected stream rule '{rule_name}' after matching '{matched_text}': {reminder}"),
+                );
             }
             AgentEvent::TurnStart { .. } | AgentEvent::MessageStart { .. } => {}
         }
@@ -3907,8 +4641,15 @@ impl App {
                     self.refresh_registered_sessions();
                 }
                 GuiAgentEvent::AvailableModelsLoaded(models) => {
-                    let selected_model = self.ui.drop_down(cx, ids!(model_drop)).selected_label();
-                    self.set_model_dropup_options(cx, models, &selected_model);
+                    let selected_model = self
+                        .ui
+                        .icon_drop_down(cx, ids!(model_drop))
+                        .selected_label();
+                    self.set_model_dropup_options(
+                        cx,
+                        include_connected_provider_models(models),
+                        &selected_model,
+                    );
                 }
                 GuiAgentEvent::ProjectFolderPicked(result) => {
                     self.apply_project_folder_result(cx, result);
@@ -3923,6 +4664,7 @@ impl App {
                                  (waiting for authorization...)"
                             ),
                         );
+                        let _ = robius_open::Uri::new(&url).open();
                         if self.workspace_state.is_active(&key) {
                             self.apply_status_ui(
                                 cx,
@@ -3970,6 +4712,34 @@ impl App {
                         }
                     }
                 }
+                GuiAgentEvent::AntigravityLoginSuccess { email } => {
+                    let msg = match email {
+                        Some(e) => {
+                            format!("✓ Successfully authenticated with Google Antigravity ({e}).")
+                        }
+                        None => "✓ Successfully authenticated with Google Antigravity.".to_string(),
+                    };
+                    self.push_chat(MsgRole::System, msg);
+                    let selected_model = self
+                        .ui
+                        .icon_drop_down(cx, ids!(model_drop))
+                        .selected_label();
+                    let mut models = self.available_models.clone();
+                    append_antigravity_models(&mut models);
+                    self.set_model_dropup_options(cx, models, &selected_model);
+                    cx.redraw_all();
+                }
+                GuiAgentEvent::AntigravityLoginError(error) => {
+                    self.push_chat(
+                        MsgRole::System,
+                        format!("❌ Google Antigravity login error: {error}"),
+                    );
+                    cx.redraw_all();
+                }
+                GuiAgentEvent::AntigravityDoctorReport(report) => {
+                    self.push_chat(MsgRole::System, report);
+                    cx.redraw_all();
+                }
                 GuiAgentEvent::GenerationAgent {
                     generation_id,
                     work_dir,
@@ -3997,8 +4767,136 @@ impl App {
 
 #[cfg(test)]
 mod workspace_header_tests {
-    use super::{compact_workspace_path, project_name};
+    use super::{
+        append_antigravity_models, clear_composer_for_dispatch, compact_workspace_path,
+        model_credential_error, ordered_model_options, project_name, InputOrigin,
+        ANTIGRAVITY_MODELS,
+    };
+    use crate::workspace::WorkspaceUiState;
     use std::path::Path;
+    use threadlane_agent::ImageAttachment;
+
+    #[test]
+    fn internal_model_switch_preserves_composer_draft_and_attachments() {
+        let mut composer = WorkspaceUiState {
+            draft: "keep this draft".to_string(),
+            attachments: vec![ImageAttachment {
+                display_name: "diagram.png".to_string(),
+                data_url: "data:image/png;base64,AAAA".to_string(),
+            }],
+        };
+
+        clear_composer_for_dispatch(InputOrigin::Internal, &mut composer);
+
+        assert_eq!(composer.draft, "keep this draft");
+        assert_eq!(composer.attachments.len(), 1);
+        assert_eq!(composer.attachments[0].display_name, "diagram.png");
+
+        clear_composer_for_dispatch(InputOrigin::Composer, &mut composer);
+
+        assert!(composer.draft.is_empty());
+        assert!(composer.attachments.is_empty());
+    }
+
+    #[test]
+    fn provider_credentials_follow_the_selected_model() {
+        assert_eq!(
+            model_credential_error("antigravity/gemini-3.6-flash", false, true),
+            None
+        );
+        assert_eq!(
+            model_credential_error("antigravity/gemini-3.6-flash", true, false),
+            Some("Sign in with Google Antigravity before using this model.")
+        );
+        assert_eq!(
+            model_credential_error("gpt-5.6-luna", false, true),
+            Some("Please provide an OpenAI API key or click 'Login ChatGPT' to authenticate.")
+        );
+    }
+
+    #[test]
+    fn antigravity_models_merge_without_duplicates() {
+        let mut models = vec![
+            "gpt-5.6-luna".to_string(),
+            ANTIGRAVITY_MODELS[0].to_string(),
+        ];
+
+        append_antigravity_models(&mut models);
+
+        assert_eq!(
+            models
+                .iter()
+                .filter(|model| model.as_str() == ANTIGRAVITY_MODELS[0])
+                .count(),
+            1
+        );
+        assert!(ANTIGRAVITY_MODELS
+            .iter()
+            .all(|model| models.iter().any(|candidate| candidate == model)));
+    }
+
+    #[test]
+    fn model_order_stays_grouped_across_provider_switches() {
+        let models = vec![
+            "gpt-a".to_string(),
+            "antigravity/gemini-a".to_string(),
+            "gpt-b".to_string(),
+            "antigravity/gemini-b".to_string(),
+        ];
+
+        let (canonical, google_selected) =
+            ordered_model_options(models, "antigravity/gemini-a").unwrap();
+        assert_eq!(
+            canonical,
+            [
+                "gpt-a",
+                "gpt-b",
+                "antigravity/gemini-a",
+                "antigravity/gemini-b"
+            ]
+        );
+        assert_eq!(
+            google_selected,
+            [
+                "gpt-a",
+                "gpt-b",
+                "antigravity/gemini-b",
+                "antigravity/gemini-a"
+            ]
+        );
+
+        let (canonical, openai_selected) = ordered_model_options(canonical, "gpt-a").unwrap();
+        assert_eq!(
+            openai_selected,
+            [
+                "gpt-b",
+                "antigravity/gemini-a",
+                "antigravity/gemini-b",
+                "gpt-a"
+            ]
+        );
+
+        let (_, google_selected_again) =
+            ordered_model_options(canonical, "antigravity/gemini-b").unwrap();
+        assert_eq!(
+            google_selected_again,
+            [
+                "gpt-a",
+                "gpt-b",
+                "antigravity/gemini-a",
+                "antigravity/gemini-b"
+            ]
+        );
+    }
+
+    #[test]
+    fn persisted_model_missing_from_provider_results_remains_selected() {
+        let (canonical, display) =
+            ordered_model_options(vec!["gpt-a".into()], "antigravity/retired-model").unwrap();
+
+        assert_eq!(canonical, ["gpt-a", "antigravity/retired-model"]);
+        assert_eq!(display.last().unwrap(), "antigravity/retired-model");
+    }
 
     #[test]
     fn workspace_header_uses_final_directory_as_project_name() {

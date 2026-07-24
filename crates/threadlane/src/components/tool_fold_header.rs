@@ -11,6 +11,13 @@ fn activity_header_pressed_color() -> Vec4f {
     vec4(0.176, 0.216, 0.267, 0.42)
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub enum ToolFoldHeaderAction {
+    LayoutChanged,
+    #[default]
+    None,
+}
+
 #[derive(Script, ScriptHook, Widget, Animator)]
 pub struct ToolFoldHeader {
     #[uid]
@@ -184,5 +191,6 @@ impl ToolFoldHeader {
             fold_button.set_is_open(cx, open, Animate::Yes);
         }
         self.area.redraw(cx);
+        cx.widget_action(self.widget_uid(), ToolFoldHeaderAction::LayoutChanged);
     }
 }

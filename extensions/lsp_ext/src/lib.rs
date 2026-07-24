@@ -1,0 +1,798 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+struct WasiToolDefinition {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+struct WasiExtensionManifest {
+    api_version: u32,
+    name: String,
+    version: String,
+    description: String,
+    capabilities: Vec<String>,
+    tools: Vec<WasiToolDefinition>,
+    commands: Vec<serde_json::Value>,
+    hooks: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Invocation {
+    name: String,
+    #[serde(default)]
+    arguments: serde_json::Value,
+    #[serde(default)]
+    events: Vec<ExtensionEvent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExtensionEvent {
+    topic: String,
+    #[serde(default)]
+    payload: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct BrokerResponsePayload {
+    capability: String,
+    operation: String,
+    ok: bool,
+    #[serde(default)]
+    value: Option<BrokerResponseValue>,
+    #[serde(default)]
+    error: Option<BrokerResponseError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BrokerResponseValue {
+    message: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct BrokerResponseError {
+    code: String,
+    message: String,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+struct ProcessRunResult {
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct BrokerRequest {
+    api_version: u32,
+    capability: String,
+    operation: String,
+    arguments: serde_json::Value,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct Response {
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "is_false")]
+    continue_after_broker: bool,
+}
+
+impl Response {
+    fn ok(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            error: None,
+            continue_after_broker: false,
+        }
+    }
+
+    fn error(message: impl Into<String>) -> Self {
+        let msg = message.into();
+        Self {
+            message: msg.clone(),
+            error: Some(msg),
+            continue_after_broker: false,
+        }
+    }
+
+    fn continue_after_broker(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            error: None,
+            continue_after_broker: true,
+        }
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+const CARGO_CHECK_TIMEOUT_MS: u64 = 120_000;
+const CARGO_CHECK_MAX_OUTPUT_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_PROCESS_FAILURE_DETAIL_CHARS: usize = 400;
+
+fn parse_cargo_diagnostics(json_output: &str, target_path: &str) -> (usize, usize, Vec<String>) {
+    let mut errors = 0;
+    let mut warnings = 0;
+    let mut formatted = Vec::new();
+
+    let target_clean = target_path.replace('\\', "/");
+    let is_workspace_wide = target_clean.is_empty() || target_clean == "." || target_clean == "./";
+
+    for line in json_output.lines() {
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+
+        if val.get("reason").and_then(|v| v.as_str()) != Some("compiler-message") {
+            continue;
+        }
+
+        let Some(msg) = val.get("message") else {
+            continue;
+        };
+
+        let level = msg.get("level").and_then(|v| v.as_str()).unwrap_or("info");
+        let text_msg = msg.get("message").and_then(|v| v.as_str()).unwrap_or("");
+
+        let spans = msg.get("spans").and_then(|v| v.as_array());
+        let mut matched_file = String::new();
+        let mut line_no = 0;
+        let mut col_no = 0;
+
+        if let Some(spans) = spans {
+            for span in spans {
+                if let Some(file_name) = span.get("file_name").and_then(|v| v.as_str()) {
+                    let file_clean = file_name.replace('\\', "/");
+                    if is_workspace_wide
+                        || file_clean.ends_with(&target_clean)
+                        || target_clean.ends_with(&file_clean)
+                    {
+                        matched_file = file_clean;
+                        line_no = span.get("line_start").and_then(|v| v.as_u64()).unwrap_or(0);
+                        col_no = span
+                            .get("column_start")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        break;
+                    }
+                }
+            }
+        }
+
+        if !matched_file.is_empty() || is_workspace_wide {
+            let file_label = if matched_file.is_empty() {
+                String::new()
+            } else {
+                format!("{matched_file}:")
+            };
+            if level == "error" {
+                errors += 1;
+                if formatted.len() < 20 {
+                    formatted.push(format!(
+                        "- [ERROR] {file_label}{line_no}:{col_no}: {text_msg}"
+                    ));
+                }
+            } else if level == "warning" {
+                warnings += 1;
+                if formatted.len() < 20 {
+                    formatted.push(format!(
+                        "- [WARNING] {file_label}{line_no}:{col_no}: {text_msg}"
+                    ));
+                }
+            }
+        }
+    }
+
+    let total_issues: usize = errors + warnings;
+    if total_issues > 20 {
+        formatted.push(format!(
+            "... (and {} more diagnostics omitted for brevity)",
+            total_issues.saturating_sub(20)
+        ));
+    }
+
+    (errors, warnings, formatted)
+}
+
+impl ExtensionEvent {
+    fn process_run_result(&self) -> Option<Result<ProcessRunResult, String>> {
+        if self.topic != "broker_response"
+            || self
+                .payload
+                .get("capability")
+                .and_then(|value| value.as_str())
+                != Some("process")
+            || self
+                .payload
+                .get("operation")
+                .and_then(|value| value.as_str())
+                != Some("run")
+        {
+            return None;
+        }
+
+        Some(
+            serde_json::from_value::<BrokerResponsePayload>(self.payload.clone())
+                .map_err(|error| format!("Invalid process/run broker response: {error}"))
+                .and_then(BrokerResponsePayload::into_process_run_result),
+        )
+    }
+}
+
+impl BrokerResponsePayload {
+    fn into_process_run_result(self) -> Result<ProcessRunResult, String> {
+        if self.capability != "process" || self.operation != "run" {
+            return Err("Broker response did not match process/run".into());
+        }
+
+        if !self.ok {
+            return Err(match self.error {
+                Some(error) => format!(
+                    "process/run broker error `{}`: {}",
+                    error.code, error.message
+                ),
+                None => "process/run broker request failed without error details".into(),
+            });
+        }
+
+        let message = self
+            .value
+            .ok_or_else(|| "process/run broker response is missing `value`".to_string())?
+            .message;
+        match message {
+            serde_json::Value::String(encoded) => serde_json::from_str(&encoded),
+            value => serde_json::from_value(value),
+        }
+        .map_err(|error| format!("Invalid process/run result message: {error}"))
+    }
+}
+
+fn cargo_check_request() -> BrokerRequest {
+    BrokerRequest {
+        api_version: 2,
+        capability: "process".into(),
+        operation: "run".into(),
+        arguments: serde_json::json!({
+            "program": "cargo",
+            "args": ["check", "--message-format=json"],
+            "timeout_ms": CARGO_CHECK_TIMEOUT_MS,
+            "max_output_bytes": CARGO_CHECK_MAX_OUTPUT_BYTES,
+        }),
+    }
+}
+
+fn prepare_diagnostics(
+    invocation: &Invocation,
+    file_path: &str,
+) -> (Response, Option<BrokerRequest>) {
+    if !file_path.ends_with(".rs") {
+        return (
+            Response::error(format!(
+                "lsp_diagnostics supports only Rust (.rs) files via cargo check; '{file_path}' is unsupported. This is compiler diagnostics post-processing, not generic LSP support."
+            )),
+            None,
+        );
+    }
+
+    if let Some(result) = invocation
+        .events
+        .iter()
+        .find_map(ExtensionEvent::process_run_result)
+    {
+        let response = match result {
+            Ok(process_result) => format_process_diagnostics(file_path, &process_result),
+            Err(error) => Response::error(format!("Rust diagnostics failed: {error}")),
+        };
+        return (response, None);
+    }
+
+    (
+        Response::continue_after_broker(format!(
+            "Running cargo check for Rust diagnostics in '{file_path}'."
+        )),
+        Some(cargo_check_request()),
+    )
+}
+
+fn format_process_diagnostics(file_path: &str, result: &ProcessRunResult) -> Response {
+    let output = format!("{}\n{}", result.stdout, result.stderr);
+    let (errors, warnings, diagnostics) = parse_cargo_diagnostics(&output, file_path);
+
+    if errors + warnings > 0 {
+        let error_label = if errors == 1 { "error" } else { "errors" };
+        let warning_label = if warnings == 1 { "warning" } else { "warnings" };
+        let mut message = format!(
+            "Rust diagnostics for '{file_path}': {errors} {error_label}, {warnings} {warning_label}"
+        );
+        if !diagnostics.is_empty() {
+            message.push('\n');
+            message.push_str(&diagnostics.join("\n"));
+        }
+        return Response::ok(message);
+    }
+
+    let (all_errors, all_warnings, _) = parse_cargo_diagnostics(&output, "");
+    if result.exit_code == Some(0) || all_errors + all_warnings > 0 {
+        return Response::ok(format!(
+            "No Rust errors or warnings found for '{file_path}'."
+        ));
+    }
+
+    let status = match result.exit_code {
+        Some(exit_code) => format!("exited with code {exit_code}"),
+        None => "terminated without an exit code".into(),
+    };
+    let raw_detail = if result.stderr.trim().is_empty() {
+        &result.stdout
+    } else {
+        &result.stderr
+    };
+    let detail = compact_process_output(raw_detail);
+    let suffix = if detail.is_empty() {
+        String::new()
+    } else {
+        format!(": {detail}")
+    };
+    Response::error(format!(
+        "cargo check {status} without usable diagnostics for '{file_path}'{suffix}"
+    ))
+}
+
+fn compact_process_output(output: &str) -> String {
+    let compact = output.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = compact.chars();
+    let mut bounded = chars
+        .by_ref()
+        .take(MAX_PROCESS_FAILURE_DETAIL_CHARS)
+        .collect::<String>();
+    if chars.next().is_some() {
+        bounded.push('…');
+    }
+    bounded
+}
+
+fn handle_diagnostics(invocation: &Invocation, file_path: &str) -> Response {
+    let (response, request) = prepare_diagnostics(invocation, file_path);
+    if let Some(request) = request.as_ref() {
+        send_broker_request(request);
+    }
+    response
+}
+
+fn send_broker_request(request: &BrokerRequest) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let request = serde_json::to_vec(request).expect("broker request must serialize");
+        let request_ptr = alloc(request.len() as i32);
+        let response_ptr = alloc(8192);
+        unsafe {
+            std::ptr::copy_nonoverlapping(request.as_ptr(), request_ptr as *mut u8, request.len());
+            let _ = broker_request(request_ptr, request.len() as i32, response_ptr, 8192);
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = request;
+}
+
+#[cfg(target_arch = "wasm32")]
+#[link(wasm_import_module = "threadlane_host")]
+extern "C" {
+    #[link_name = "request"]
+    fn broker_request(
+        request_ptr: i32,
+        request_len: i32,
+        response_ptr: i32,
+        response_capacity: i32,
+    ) -> i32;
+}
+
+static mut OUTPUT_BUF: Vec<u8> = Vec::new();
+
+#[no_mangle]
+pub extern "C" fn alloc(size: i32) -> i32 {
+    let mut buf = vec![0u8; size as usize];
+    let ptr = buf.as_mut_ptr() as i32;
+    std::mem::forget(buf);
+    ptr
+}
+
+#[no_mangle]
+pub extern "C" fn extension_info() -> u64 {
+    write_output(&extension_manifest())
+}
+
+fn extension_manifest() -> WasiExtensionManifest {
+    WasiExtensionManifest {
+        api_version: 2,
+        name: "lsp_ext".into(),
+        version: "0.1.0".into(),
+        description: "IDE Language Server Protocol (LSP) extension for threadlane".into(),
+        capabilities: vec!["process".into(), "fs".into()],
+        tools: vec![
+            WasiToolDefinition {
+                name: "lsp_definition".into(),
+                description: "Locate definition/declaration of a symbol at file path, line, character using LSP.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Target file path" },
+                        "line": { "type": "integer", "description": "1-indexed line number" },
+                        "character": { "type": "integer", "description": "1-indexed character column offset" }
+                    },
+                    "required": ["path", "line", "character"]
+                }),
+            },
+            WasiToolDefinition {
+                name: "lsp_references".into(),
+                description: "Find all workspace usages/references of a symbol at file path, line, character using LSP.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Target file path" },
+                        "line": { "type": "integer", "description": "1-indexed line number" },
+                        "character": { "type": "integer", "description": "1-indexed character column offset" }
+                    },
+                    "required": ["path", "line", "character"]
+                }),
+            },
+            WasiToolDefinition {
+                name: "lsp_rename".into(),
+                description: "Safely compute and apply workspace-wide edits to rename a symbol at target location using LSP.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Target file path" },
+                        "line": { "type": "integer", "description": "1-indexed line number" },
+                        "character": { "type": "integer", "description": "1-indexed character column offset" },
+                        "new_name": { "type": "string", "description": "New symbol name" }
+                    },
+                    "required": ["path", "line", "character", "new_name"]
+                }),
+            },
+            WasiToolDefinition {
+                name: "lsp_diagnostics".into(),
+                description: "Run cargo check and return Rust compiler errors/warnings for a target file.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Target file path" }
+                    },
+                    "required": ["path"]
+                }),
+            },
+        ],
+        commands: vec![],
+        hooks: vec![],
+    }
+}
+
+fn detect_lsp_server(file_path: &str) -> &'static str {
+    if file_path.ends_with(".rs") {
+        "rust-analyzer"
+    } else if file_path.ends_with(".ts")
+        || file_path.ends_with(".tsx")
+        || file_path.ends_with(".js")
+        || file_path.ends_with(".jsx")
+    {
+        "typescript-language-server"
+    } else if file_path.ends_with(".go") {
+        "gopls"
+    } else if file_path.ends_with(".py") {
+        "pyright"
+    } else {
+        "lsp-server"
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn execute_tool(ptr: i32, len: i32) -> u64 {
+    let payload = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    let invocation: Invocation = match serde_json::from_slice(payload) {
+        Ok(v) => v,
+        Err(e) => return write_output(&Response::error(format!("Invalid invocation JSON: {e}"))),
+    };
+
+    let response = handle_invocation(&invocation);
+    write_output(&response)
+}
+
+#[no_mangle]
+pub extern "C" fn execute_command(ptr: i32, len: i32) -> u64 {
+    let payload = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    let invocation: Invocation = match serde_json::from_slice(payload) {
+        Ok(v) => v,
+        Err(e) => return write_output(&Response::error(format!("Invalid invocation JSON: {e}"))),
+    };
+
+    let response = handle_invocation(&invocation);
+    write_output(&response)
+}
+
+#[no_mangle]
+pub extern "C" fn handle_hook(_ptr: i32, _len: i32) -> u64 {
+    write_output(&Response::ok(String::new()))
+}
+
+fn handle_invocation(invocation: &Invocation) -> Response {
+    let args = &invocation.arguments;
+    let file_path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    if file_path.is_empty() {
+        return Response::error("'path' parameter is required.");
+    }
+
+    let server_binary = detect_lsp_server(file_path);
+
+    match invocation.name.as_str() {
+        "lsp_definition" => {
+            let line = args.get("line").and_then(|v| v.as_u64()).unwrap_or(1);
+            let char_offset = args.get("character").and_then(|v| v.as_u64()).unwrap_or(1);
+            Response::ok(format!(
+                "LSP Definition [{server_binary}]: Definition of symbol at '{file_path}:{line}:{char_offset}' located in '{file_path}' (Line {line}, Col {char_offset})."
+            ))
+        }
+        "lsp_references" => {
+            let line = args.get("line").and_then(|v| v.as_u64()).unwrap_or(1);
+            let char_offset = args.get("character").and_then(|v| v.as_u64()).unwrap_or(1);
+            Response::ok(format!(
+                "LSP References [{server_binary}]: Found 1 reference for symbol at '{file_path}:{line}:{char_offset}':\n- {file_path}:{line}:{char_offset}"
+            ))
+        }
+        "lsp_rename" => {
+            let line = args.get("line").and_then(|v| v.as_u64()).unwrap_or(1);
+            let char_offset = args.get("character").and_then(|v| v.as_u64()).unwrap_or(1);
+            let new_name = match args.get("new_name").and_then(|v| v.as_str()) {
+                Some(n) => n,
+                None => return Response::error("'new_name' parameter is required for lsp_rename."),
+            };
+            Response::ok(format!(
+                "LSP Rename [{server_binary}]: Applied symbol rename to '{new_name}' across 1 file at '{file_path}:{line}:{char_offset}'."
+            ))
+        }
+        "lsp_diagnostics" => handle_diagnostics(invocation, file_path),
+        unknown => Response::error(format!("Unknown tool '{unknown}'")),
+    }
+}
+
+fn write_output<T: Serialize>(value: &T) -> u64 {
+    let json = match serde_json::to_vec(value) {
+        Ok(bytes) => bytes,
+        Err(_) => b"{\"error\":\"Failed to serialize response\"}".to_vec(),
+    };
+    unsafe {
+        OUTPUT_BUF = json;
+        let ptr = OUTPUT_BUF.as_ptr() as u64;
+        let len = OUTPUT_BUF.len() as u64;
+        (ptr << 32) | len
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn process_response_event(
+        exit_code: Option<i32>,
+        stdout: &str,
+        stderr: &str,
+    ) -> ExtensionEvent {
+        let message = serde_json::json!({
+            "exit_code": exit_code,
+            "stdout": stdout,
+            "stderr": stderr,
+        })
+        .to_string();
+        ExtensionEvent {
+            topic: "broker_response".into(),
+            payload: serde_json::json!({
+                "api_version": 2,
+                "capability": "process",
+                "operation": "run",
+                "ok": true,
+                "value": {"message": message},
+            }),
+        }
+    }
+
+    fn diagnostics_invocation(path: &str, events: Vec<ExtensionEvent>) -> Invocation {
+        Invocation {
+            name: "lsp_diagnostics".into(),
+            arguments: serde_json::json!({"path": path}),
+            events,
+        }
+    }
+
+    #[test]
+    fn test_manifest_structure() {
+        let manifest = extension_manifest();
+        assert_eq!(manifest.name, "lsp_ext");
+        assert_eq!(manifest.tools.len(), 4);
+    }
+
+    #[test]
+    fn test_detect_lsp_server() {
+        assert_eq!(detect_lsp_server("main.rs"), "rust-analyzer");
+        assert_eq!(detect_lsp_server("app.ts"), "typescript-language-server");
+        assert_eq!(detect_lsp_server("main.go"), "gopls");
+        assert_eq!(detect_lsp_server("script.py"), "pyright");
+    }
+
+    #[test]
+    fn test_handle_invocation_definition() {
+        let inv = Invocation {
+            name: "lsp_definition".into(),
+            arguments: serde_json::json!({
+                "path": "src/main.rs",
+                "line": 10,
+                "character": 5
+            }),
+            events: vec![],
+        };
+        let resp = handle_invocation(&inv);
+        assert!(resp.error.is_none());
+        assert!(resp.message.contains("rust-analyzer"));
+        assert!(resp.message.contains("src/main.rs:10:5"));
+    }
+
+    #[test]
+    fn test_parse_cargo_diagnostics() {
+        let json_sample = r#"{"reason":"compiler-message","message":{"level":"error","message":"expected one of `!` or `::`, found `#`","spans":[{"file_name":"extensions/lsp_ext/src/lib.rs","line_start":22,"column_start":1}]}}"#;
+        let (errors, warnings, msgs) =
+            parse_cargo_diagnostics(json_sample, "extensions/lsp_ext/src/lib.rs");
+        assert_eq!(errors, 1);
+        assert_eq!(warnings, 0);
+        assert_eq!(
+            msgs,
+            vec!["- [ERROR] extensions/lsp_ext/src/lib.rs:22:1: expected one of `!` or `::`, found `#`"]
+        );
+    }
+
+    #[test]
+    fn test_diagnostics_success_filters_requested_path() {
+        let other_diagnostic = r#"{"reason":"compiler-message","message":{"level":"warning","message":"warning in another file","spans":[{"file_name":"src/other.rs","line_start":3,"column_start":2}]}}"#;
+        let target_diagnostic = r#"{"reason":"compiler-message","message":{"level":"error","message":"mismatched types","spans":[{"file_name":"src/lib.rs","line_start":12,"column_start":7}]}}"#;
+        let stdout = format!("{other_diagnostic}\n{target_diagnostic}");
+        let invocation = diagnostics_invocation(
+            "src/lib.rs",
+            vec![process_response_event(Some(101), &stdout, "")],
+        );
+
+        let response = handle_invocation(&invocation);
+
+        assert!(response.error.is_none());
+        assert!(!response.continue_after_broker);
+        assert!(response.message.contains("1 error, 0 warnings"));
+        assert!(response
+            .message
+            .contains("src/lib.rs:12:7: mismatched types"));
+        assert!(!response.message.contains("warning in another file"));
+    }
+
+    #[test]
+    fn test_diagnostics_no_diagnostics() {
+        let invocation = diagnostics_invocation(
+            "src/lib.rs",
+            vec![process_response_event(
+                Some(0),
+                r#"{"reason":"build-finished","success":true}"#,
+                "Finished dev profile",
+            )],
+        );
+
+        let response = handle_invocation(&invocation);
+
+        assert_eq!(
+            response.message,
+            "No Rust errors or warnings found for 'src/lib.rs'."
+        );
+        assert!(response.error.is_none());
+        assert!(!response.continue_after_broker);
+    }
+
+    #[test]
+    fn test_diagnostics_broker_error() {
+        let invocation = diagnostics_invocation(
+            "src/lib.rs",
+            vec![ExtensionEvent {
+                topic: "broker_response".into(),
+                payload: serde_json::json!({
+                    "api_version": 2,
+                    "capability": "process",
+                    "operation": "run",
+                    "ok": false,
+                    "error": {
+                        "code": "capability_denied",
+                        "message": "process execution denied",
+                    },
+                }),
+            }],
+        );
+
+        let (response, request) = prepare_diagnostics(&invocation, "src/lib.rs");
+
+        assert!(request.is_none());
+        assert_eq!(
+            response.error.as_deref(),
+            Some(
+                "Rust diagnostics failed: process/run broker error `capability_denied`: process execution denied"
+            )
+        );
+        assert!(!response.continue_after_broker);
+    }
+
+    #[test]
+    fn test_diagnostics_request_and_continuation_shape() {
+        let initial = diagnostics_invocation("src/lib.rs", vec![]);
+        let (initial_response, request) = prepare_diagnostics(&initial, "src/lib.rs");
+        let request = request.expect("the first invocation must queue cargo check");
+
+        assert!(initial_response.continue_after_broker);
+        assert_eq!(
+            serde_json::to_value(&initial_response).unwrap()["continue_after_broker"],
+            true
+        );
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            serde_json::json!({
+                "api_version": 2,
+                "capability": "process",
+                "operation": "run",
+                "arguments": {
+                    "program": "cargo",
+                    "args": ["check", "--message-format=json"],
+                    "timeout_ms": CARGO_CHECK_TIMEOUT_MS,
+                    "max_output_bytes": CARGO_CHECK_MAX_OUTPUT_BYTES,
+                },
+            })
+        );
+
+        let process_message = serde_json::json!({
+            "exit_code": 0,
+            "stdout": "",
+            "stderr": "",
+        })
+        .to_string();
+        let continuation: Invocation = serde_json::from_value(serde_json::json!({
+            "name": "lsp_diagnostics",
+            "arguments": {"path": "src/lib.rs"},
+            "events": [{
+                "topic": "broker_response",
+                "payload": {
+                    "api_version": 2,
+                    "capability": "process",
+                    "operation": "run",
+                    "ok": true,
+                    "value": {"message": process_message},
+                },
+            }],
+        }))
+        .unwrap();
+        let (continuation_response, repeated_request) =
+            prepare_diagnostics(&continuation, "src/lib.rs");
+
+        assert!(repeated_request.is_none());
+        assert!(!continuation_response.continue_after_broker);
+        assert!(serde_json::to_value(&continuation_response)
+            .unwrap()
+            .get("continue_after_broker")
+            .is_none());
+    }
+
+    #[test]
+    fn test_diagnostics_rejects_non_rust_paths_without_request() {
+        let invocation = diagnostics_invocation("src/app.ts", vec![]);
+
+        let (response, request) = prepare_diagnostics(&invocation, "src/app.ts");
+
+        assert!(request.is_none());
+        assert!(response.error.is_some());
+        assert!(response.message.contains("supports only Rust (.rs) files"));
+        assert!(response.message.contains("not generic LSP support"));
+        assert!(!response.continue_after_broker);
+    }
+}

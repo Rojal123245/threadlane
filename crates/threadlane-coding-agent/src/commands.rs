@@ -52,6 +52,8 @@ pub async fn execute_slash_command(
             if new_model.is_empty() {
                 let st = agent.get_state().await;
                 format!("Current model: {}", st.model)
+            } else if let Err(error) = session_tree.set_model(new_model.clone()) {
+                format!("Could not persist model switch: {error}")
             } else {
                 let mut st = agent.loop_engine.state.lock().await;
                 st.model = new_model.clone();

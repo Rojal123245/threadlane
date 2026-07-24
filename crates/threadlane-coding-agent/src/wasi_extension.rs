@@ -93,6 +93,9 @@ pub struct WasiExtensionResponse {
     pub message: Option<String>,
     #[serde(default)]
     pub error: Option<String>,
+    /// Reinvoke the same tool after queued broker outcomes are available.
+    #[serde(default)]
+    pub continue_after_broker: bool,
     #[serde(default)]
     pub state: Option<Value>,
     #[serde(default)]

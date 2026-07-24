@@ -1,6 +1,7 @@
 //! Chat panel main view & transcript list widget.
 
 use super::state::{ChatMessage, MsgRole, StreamingKind, ToolIcon, ToolStatus};
+use crate::components::tool_fold_header::ToolFoldHeaderAction;
 use crate::path_utils::{compact_workspace_path, truncate_chars};
 use crate::workspace::AppState;
 use makepad_widgets::*;
@@ -22,14 +23,23 @@ fn show_tool_icon(cx: &mut Cx, item: &WidgetRef, selected: ToolIcon) {
     }
 }
 
-fn update_activity_status(cx: &mut Cx, item_widget: &WidgetRef, running: bool, error: bool) {
+fn update_activity_status(
+    cx: &mut Cx,
+    item_widget: &WidgetRef,
+    running: bool,
+    error: bool,
+    cancelled: bool,
+) {
     let indicator = item_widget.widget(cx, ids!(status_indicator));
     indicator
         .widget(cx, ids!(status_running_indicator))
         .set_visible(cx, running);
     indicator
         .widget(cx, ids!(status_done_indicator))
-        .set_visible(cx, !running && !error);
+        .set_visible(cx, !running && !error && !cancelled);
+    indicator
+        .widget(cx, ids!(status_cancelled_indicator))
+        .set_visible(cx, !running && !error && cancelled);
     indicator
         .widget(cx, ids!(status_error_lbl))
         .set_visible(cx, !running && error);
@@ -190,6 +200,9 @@ fn pluralized(count: usize, singular: &str, plural: &str) -> String {
 
 fn activity_preview(counts: &ActivityCounts, has_thinking: bool) -> String {
     let mut parts = Vec::new();
+    if has_thinking {
+        parts.push("Reasoned".to_string());
+    }
     let mut explored = Vec::new();
     if counts.explored_files > 0 {
         explored.push(pluralized(counts.explored_files, "file", "files"));
@@ -233,9 +246,6 @@ fn activity_preview(counts: &ActivityCounts, has_thinking: bool) -> String {
             pluralized(counts.other, "tool", "tools")
         ));
     }
-    if parts.is_empty() && has_thinking {
-        parts.push("Reasoned".to_string());
-    }
     parts.join(" · ")
 }
 
@@ -267,12 +277,114 @@ fn activity_line(
     match status {
         ToolStatus::Running => line.push_str(" · Running"),
         ToolStatus::Error => line.push_str(" · Failed"),
+        ToolStatus::Cancelled if !result_metadata.is_empty() => {
+            line.push_str(&format!(" · {}", markdown_inline(result_metadata)))
+        }
+        ToolStatus::Cancelled => line.push_str(" · Stopped"),
         ToolStatus::Done if !result_metadata.is_empty() => {
             line.push_str(&format!(" · {}", markdown_inline(result_metadata)))
         }
         ToolStatus::Done => {}
     }
     line
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActivityDetailKind {
+    Thinking,
+    Tool,
+}
+
+fn append_activity_detail(
+    detail: &mut String,
+    previous_kind: &mut Option<ActivityDetailKind>,
+    kind: ActivityDetailKind,
+    block: &str,
+) {
+    if block.is_empty() {
+        return;
+    }
+    if !detail.is_empty() {
+        if *previous_kind == Some(ActivityDetailKind::Tool) && kind == ActivityDetailKind::Tool {
+            detail.push('\n');
+        } else {
+            detail.push_str("\n\n");
+        }
+    }
+    detail.push_str(block);
+    *previous_kind = Some(kind);
+}
+
+fn activity_detail(messages: &[ChatMessage], streaming_thinking: Option<&str>) -> String {
+    let mut detail = String::new();
+    let mut previous_kind = None;
+    let mut has_thinking = false;
+
+    for message in messages {
+        match message {
+            ChatMessage::Thinking { text } => {
+                has_thinking = true;
+                if !text.trim().is_empty() {
+                    append_activity_detail(
+                        &mut detail,
+                        &mut previous_kind,
+                        ActivityDetailKind::Thinking,
+                        &format!("**Thinking**\n\n{text}"),
+                    );
+                }
+            }
+            ChatMessage::Tool {
+                name,
+                status,
+                presentation,
+                result_metadata,
+                ..
+            } => {
+                let kind = activity_kind(name, presentation.icon);
+                append_activity_detail(
+                    &mut detail,
+                    &mut previous_kind,
+                    ActivityDetailKind::Tool,
+                    &activity_line(
+                        kind,
+                        &presentation.title,
+                        &presentation.primary,
+                        result_metadata,
+                        *status,
+                    ),
+                );
+            }
+            ChatMessage::Text { .. } => {}
+        }
+    }
+
+    if let Some(text) = streaming_thinking {
+        has_thinking = true;
+        let block = if text.trim().is_empty() {
+            "**Thinking…**".to_string()
+        } else {
+            format!("**Thinking…**\n\n{text}")
+        };
+        append_activity_detail(
+            &mut detail,
+            &mut previous_kind,
+            ActivityDetailKind::Thinking,
+            &block,
+        );
+    }
+
+    if detail.is_empty() && has_thinking {
+        "Reasoning completed.".to_string()
+    } else {
+        detail
+    }
+}
+
+fn user_message_needs_wrapping(text: &str) -> bool {
+    const COMPACT_LINE_CHAR_LIMIT: usize = 88;
+
+    text.lines()
+        .any(|line| line.chars().count() > COMPACT_LINE_CHAR_LIMIT)
 }
 
 fn draw_markdown_item(
@@ -397,10 +509,10 @@ impl Widget for ChatList {
                         } => {
                             let item_widget = list.item(cx, item_id, id!(ActivityGroupMsg));
                             let mut counts = ActivityCounts::default();
-                            let mut lines = Vec::new();
                             let mut has_thinking = streaming_thinking;
                             let mut running = streaming_thinking;
                             let mut has_error = false;
+                            let mut has_cancelled = false;
                             let mut first_icon = None;
                             let mut mixed_icons = false;
 
@@ -411,35 +523,27 @@ impl Widget for ChatList {
                                         name,
                                         status,
                                         presentation,
-                                        result_metadata,
                                         ..
                                     } => {
                                         let kind = activity_kind(name, presentation.icon);
                                         counts.add(kind);
                                         running |= *status == ToolStatus::Running;
                                         has_error |= *status == ToolStatus::Error;
+                                        has_cancelled |= *status == ToolStatus::Cancelled;
                                         if let Some(icon) = first_icon {
                                             mixed_icons |= icon != presentation.icon;
                                         } else {
                                             first_icon = Some(presentation.icon);
                                         }
-                                        lines.push(activity_line(
-                                            kind,
-                                            &presentation.title,
-                                            &presentation.primary,
-                                            result_metadata,
-                                            *status,
-                                        ));
                                     }
                                     ChatMessage::Text { .. } => {}
                                 }
                             }
 
-                            if streaming_thinking {
-                                lines.push("- **Thinking…**".to_string());
-                            } else if lines.is_empty() && has_thinking {
-                                lines.push("- Reasoning completed.".to_string());
-                            }
+                            let detail = activity_detail(
+                                &data.messages[start..end],
+                                streaming_thinking.then_some(data.streaming_text.as_str()),
+                            );
 
                             show_tool_icon(
                                 cx,
@@ -450,16 +554,25 @@ impl Widget for ChatList {
                                     first_icon.unwrap_or(ToolIcon::Generic)
                                 },
                             );
-                            item_widget
-                                .label(cx, ids!(title_lbl))
-                                .set_text(cx, if running { "Working" } else { "Worked" });
+                            let title = if running {
+                                "Working"
+                            } else if has_cancelled {
+                                "Stopped"
+                            } else {
+                                "Worked"
+                            };
+                            item_widget.label(cx, ids!(title_lbl)).set_text(cx, title);
                             item_widget
                                 .label(cx, ids!(preview_lbl))
                                 .set_text(cx, &activity_preview(&counts, has_thinking));
-                            update_activity_status(cx, &item_widget, running, has_error);
-                            item_widget
-                                .markdown(cx, ids!(md))
-                                .set_text(cx, &lines.join("\n"));
+                            update_activity_status(
+                                cx,
+                                &item_widget,
+                                running,
+                                has_error,
+                                has_cancelled,
+                            );
+                            item_widget.markdown(cx, ids!(md)).set_text(cx, &detail);
                             item_widget.draw_all_unscoped(cx);
                         }
                         DisplayRow::Message(message_index) => {
@@ -469,13 +582,12 @@ impl Widget for ChatList {
                             match message {
                                 ChatMessage::Text { role, text } => match role {
                                     MsgRole::User => {
-                                        draw_markdown_item(
-                                            &mut list,
-                                            cx,
-                                            item_id,
-                                            id!(UserMsg),
-                                            text,
-                                        );
+                                        let template = if user_message_needs_wrapping(text) {
+                                            id!(UserMsgWrapped)
+                                        } else {
+                                            id!(UserMsg)
+                                        };
+                                        draw_markdown_item(&mut list, cx, item_id, template, text);
                                     }
                                     MsgRole::Assistant => {
                                         draw_markdown_item(
@@ -554,6 +666,7 @@ impl Widget for ChatList {
                                         &item_widget,
                                         *status == ToolStatus::Running,
                                         *status == ToolStatus::Error,
+                                        *status == ToolStatus::Cancelled,
                                     );
                                     item_widget
                                         .widget(cx, ids!(args_section))
@@ -616,6 +729,26 @@ impl Widget for ChatList {
             _ => {}
         }
         self.view.handle_event(cx, event, scope);
+
+        if let Event::Actions(actions) = event {
+            let list = self.view.portal_list(cx, ids!(list));
+            let layout_changed = list
+                .items_with_actions(actions)
+                .into_iter()
+                .any(|(_, item)| {
+                    actions
+                        .find_widget_action(item.widget_uid())
+                        .is_some_and(|action| {
+                            matches!(
+                                action.cast::<ToolFoldHeaderAction>(),
+                                ToolFoldHeaderAction::LayoutChanged
+                            )
+                        })
+                });
+            if layout_changed {
+                list.redraw(cx);
+            }
+        }
 
         if matches!(event, Event::KeyDown(key_event) if matches!(key_event.key_code, KeyCode::ReturnKey | KeyCode::Space))
         {
@@ -758,6 +891,15 @@ mod tests {
     }
 
     #[test]
+    fn long_user_lines_use_the_wrapped_message_layout() {
+        assert!(!user_message_needs_wrapping("A short user message"));
+        assert!(!user_message_needs_wrapping(
+            "Several short lines\nstill stay compact"
+        ));
+        assert!(user_message_needs_wrapping(&"word ".repeat(90)));
+    }
+
+    #[test]
     fn consecutive_activity_messages_share_one_display_row() {
         let messages = vec![
             ChatMessage::Thinking {
@@ -801,6 +943,34 @@ mod tests {
     }
 
     #[test]
+    fn activity_detail_preserves_finalized_and_streaming_thinking_in_order() {
+        let completed = format!(
+            "Starting analysis. {}Final persisted reasoning sentence.",
+            "Detailed reasoning step. ".repeat(400)
+        );
+        let messages = vec![
+            ChatMessage::Thinking {
+                text: completed.clone(),
+            },
+            tool("read", "read_file", r#"{"path":"src/app.rs"}"#),
+            ChatMessage::Thinking {
+                text: "Reasoning after the tool.".into(),
+            },
+        ];
+
+        let detail = activity_detail(&messages, Some("Current streaming reasoning."));
+
+        assert!(detail.contains(&completed));
+        let completed_index = detail.find("Final persisted reasoning sentence.").unwrap();
+        let tool_index = detail.find("src/app.rs").unwrap();
+        let resumed_index = detail.find("Reasoning after the tool.").unwrap();
+        let streaming_index = detail.find("Current streaming reasoning.").unwrap();
+        assert!(completed_index < tool_index);
+        assert!(tool_index < resumed_index);
+        assert!(resumed_index < streaming_index);
+    }
+
+    #[test]
     fn activity_preview_distinguishes_exploration_types() {
         let counts = ActivityCounts {
             explored_files: 2,
@@ -814,6 +984,10 @@ mod tests {
         assert_eq!(
             activity_preview(&counts, false),
             "Explored 2 files, 1 folder, 1 search · Edited 3 files · Ran 1 command"
+        );
+        assert_eq!(
+            activity_preview(&counts, true),
+            "Reasoned · Explored 2 files, 1 folder, 1 search · Edited 3 files · Ran 1 command"
         );
     }
 }

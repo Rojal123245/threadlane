@@ -2,9 +2,9 @@
 //!
 //! Panel-specific state slices live in `crate::panels::<panel>::state`.
 
+use std::path::PathBuf;
 use threadlane_agent::AgentEvent;
 use threadlane_coding_agent::TaskAgentEvent;
-use std::path::PathBuf;
 
 pub use crate::panels::chat::*;
 pub use crate::panels::command_palette::*;
@@ -45,4 +45,9 @@ pub enum GuiAgentEvent {
         work_dir: PathBuf,
         session_id: String,
     },
+    AntigravityLoginSuccess {
+        email: Option<String>,
+    },
+    AntigravityLoginError(String),
+    AntigravityDoctorReport(String),
 }

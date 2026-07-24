@@ -46,4 +46,10 @@ pub enum AgentEvent {
     AgentError {
         error: String,
     },
+    StreamRuleTriggered {
+        rule_id: String,
+        rule_name: String,
+        matched_text: String,
+        reminder: String,
+    },
 }
