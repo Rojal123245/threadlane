@@ -74,15 +74,18 @@ fn ordered_model_options(
             canonical.push(model);
         }
     }
+    if !selected_model.is_empty() && !canonical.iter().any(|model| model == selected_model) {
+        canonical.push(selected_model.to_string());
+    }
     canonical.sort_by_key(|model| threadlane_provider::router::is_antigravity_model(model));
     if canonical.is_empty() {
         return None;
     }
 
-    let selected_model = if canonical.iter().any(|model| model == selected_model) {
-        selected_model.to_string()
-    } else {
+    let selected_model = if selected_model.is_empty() {
         canonical[0].clone()
+    } else {
+        selected_model.to_string()
     };
     let mut display = canonical.clone();
     display.retain(|model| model != &selected_model);
@@ -640,6 +643,23 @@ script_mod! {
                 }
             }
 
+            UserMsgWrapped := View {
+                width: Fill
+                height: Fit
+                align: Align{x: 1.0}
+                margin: Inset{top: 5 bottom: 5 left: 28 right: 20}
+
+                user_bubble := ChatBubble {
+                    width: Fill{max: 680}
+                    padding: Inset{left: 13 top: 8 right: 13 bottom: 8}
+                    md +: { width: Fill }
+                    draw_bg +: {
+                        color: #x2a3547
+                        border_radius: 9.0
+                    }
+                }
+            }
+
             AssistantMsg := View {
                 width: Fill
                 height: Fit
@@ -647,7 +667,7 @@ script_mod! {
                 margin: Inset{top: 8 bottom: 12 left: 34 right: 66}
 
                 md := mod.components.ChatMarkdown {
-                    width: Fit{max: FitBound.Abs(934)}
+                    width: Fill{max: 934}
                 }
             }
 
@@ -2288,6 +2308,11 @@ impl MatchEvent for App {
         };
 
         let coding_agent = CodingAgent::new(agent_opts);
+        let initial_model = coding_agent
+            .session_tree
+            .model
+            .clone()
+            .unwrap_or_else(|| "gpt-5.6-luna".to_string());
         let discovered_skills: Vec<_> = coding_agent
             .skills
             .list_skills()
@@ -2366,12 +2391,9 @@ impl MatchEvent for App {
         }
         self.session_runtimes.insert(
             initial_key,
-            SessionRuntime::new(
-                coding_agent,
-                "gpt-5.6-luna".to_string(),
-                ReasoningEffort::Medium,
-            ),
+            SessionRuntime::new(coding_agent, initial_model.clone(), ReasoningEffort::Medium),
         );
+        self.set_model_dropup_options(cx, self.available_models.clone(), &initial_model);
 
         self.spawn_model_fetch(api_key, account_id_opt);
         self.trigger_update_check(cx);
@@ -3937,6 +3959,7 @@ impl App {
                 session_file: Some(entry.session_file.clone()),
                 system_prompt: Default::default(),
             });
+            let model = agent.session_tree.model.clone().unwrap_or(model);
             let messages = agent.session_tree.get_active_branch_messages();
             self.session_runtimes.insert(
                 key.clone(),
@@ -4864,6 +4887,15 @@ mod workspace_header_tests {
                 "antigravity/gemini-b"
             ]
         );
+    }
+
+    #[test]
+    fn persisted_model_missing_from_provider_results_remains_selected() {
+        let (canonical, display) =
+            ordered_model_options(vec!["gpt-a".into()], "antigravity/retired-model").unwrap();
+
+        assert_eq!(canonical, ["gpt-a", "antigravity/retired-model"]);
+        assert_eq!(display.last().unwrap(), "antigravity/retired-model");
     }
 
     #[test]

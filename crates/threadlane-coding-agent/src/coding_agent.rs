@@ -988,7 +988,6 @@ async fn dispatch_hook_requests_isolated(
 
 impl CodingAgent {
     pub fn new(options: CodingAgentOptions) -> Self {
-        let mut agent = Agent::new(&options.api_key, options.account_id, &options.model);
         let project_context = ProjectContext::discover(&options.work_dir);
         let mut skill_manager = SkillManager::new();
         skill_manager.discover_skills(Some(&options.work_dir));
@@ -998,7 +997,7 @@ impl CodingAgent {
         // A missing session file represents an unsaved draft. GUI startup uses
         // this mode so merely opening the app neither creates nor selects a
         // conversation; the first send binds the draft to a new session.
-        let session_tree = if let Some(session_path) = options.session_file.clone() {
+        let mut session_tree = if let Some(session_path) = options.session_file.clone() {
             if session_path.exists() {
                 SessionTree::load_from_file(&session_path)
                     .unwrap_or_else(|_| SessionTree::new("session"))
@@ -1013,6 +1012,14 @@ impl CodingAgent {
         } else {
             SessionTree::new("draft")
         };
+        let effective_model = session_tree
+            .model
+            .clone()
+            .unwrap_or_else(|| options.model.clone());
+        session_tree
+            .model
+            .get_or_insert_with(|| effective_model.clone());
+        let mut agent = Agent::new(&options.api_key, options.account_id, &effective_model);
 
         agent.set_prompt_cache_key(Some(session_tree.session_id.clone()));
 
@@ -1299,6 +1306,7 @@ impl CodingAgent {
         };
 
         let branch = session_tree.get_active_branch_messages();
+        let session_model = session_tree.model.clone();
         self.wasi_extensions
             .set_session_scope(session_tree.session_id.clone())
             .unwrap_or_else(|error| {
@@ -1310,6 +1318,11 @@ impl CodingAgent {
         self.session_tree = session_tree;
 
         let mut state = self.agent.loop_engine.state.lock().await;
+        if let Some(model) = session_model {
+            state.model = model;
+        } else {
+            self.session_tree.model = Some(state.model.clone());
+        }
         let system_prompt = state.system_prompt.clone();
         state.messages.clear();
         state.messages.push(AgentMessage::System {
@@ -1891,6 +1904,37 @@ mod tests {
         let (chat, codex) = coding_agent.agent.loop_engine.build_api_payloads().await;
         assert_eq!(chat["model"], "antigravity/gemini-3.6-flash");
         assert_eq!(codex["model"], "antigravity/gemini-3.6-flash");
+        assert_eq!(
+            coding_agent.session_tree.model.as_deref(),
+            Some("antigravity/gemini-3.6-flash")
+        );
+    }
+
+    #[tokio::test]
+    async fn persisted_session_model_overrides_constructor_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("session.jsonl");
+        let mut tree = SessionTree::new("session");
+        tree.file_path = Some(session_file.clone());
+        tree.add_message(AgentMessage::User {
+            content: "continue".into(),
+        });
+        tree.set_model("antigravity/claude-opus-4-6".into())
+            .unwrap();
+
+        let mut options = coding_agent_options(dir.path().to_path_buf());
+        options.model = "fallback-model".into();
+        options.session_file = Some(session_file);
+        let coding_agent = CodingAgent::new(options);
+
+        assert_eq!(
+            coding_agent.session_tree.model.as_deref(),
+            Some("antigravity/claude-opus-4-6")
+        );
+        assert_eq!(
+            coding_agent.agent.get_state().await.model,
+            "antigravity/claude-opus-4-6"
+        );
     }
 
     #[tokio::test]

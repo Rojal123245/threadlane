@@ -380,6 +380,13 @@ fn activity_detail(messages: &[ChatMessage], streaming_thinking: Option<&str>) -
     }
 }
 
+fn user_message_needs_wrapping(text: &str) -> bool {
+    const COMPACT_LINE_CHAR_LIMIT: usize = 88;
+
+    text.lines()
+        .any(|line| line.chars().count() > COMPACT_LINE_CHAR_LIMIT)
+}
+
 fn draw_markdown_item(
     list: &mut PortalList,
     cx: &mut Cx2d,
@@ -575,13 +582,12 @@ impl Widget for ChatList {
                             match message {
                                 ChatMessage::Text { role, text } => match role {
                                     MsgRole::User => {
-                                        draw_markdown_item(
-                                            &mut list,
-                                            cx,
-                                            item_id,
-                                            id!(UserMsg),
-                                            text,
-                                        );
+                                        let template = if user_message_needs_wrapping(text) {
+                                            id!(UserMsgWrapped)
+                                        } else {
+                                            id!(UserMsg)
+                                        };
+                                        draw_markdown_item(&mut list, cx, item_id, template, text);
                                     }
                                     MsgRole::Assistant => {
                                         draw_markdown_item(
@@ -882,6 +888,15 @@ mod tests {
             result_metadata: String::new(),
             started_at: Instant::now(),
         }
+    }
+
+    #[test]
+    fn long_user_lines_use_the_wrapped_message_layout() {
+        assert!(!user_message_needs_wrapping("A short user message"));
+        assert!(!user_message_needs_wrapping(
+            "Several short lines\nstill stay compact"
+        ));
+        assert!(user_message_needs_wrapping(&"word ".repeat(90)));
     }
 
     #[test]

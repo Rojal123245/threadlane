@@ -168,6 +168,8 @@ Drawing in an overlay does not automatically stop widgets underneath from receiv
 ### Chat Transcript
 
 - User submissions remain right-aligned chat bubbles. Assistant responses render as flat markdown aligned with the transcript rather than enclosed cards.
+- Bounded `Fit` markdown computes its intrinsic line width before applying the cap, so long pasted lines can clip. Keep short user messages on the compact `UserMsg` template and route long lines through `UserMsgWrapped`, whose bounded `Fill` bubble and `Fill` markdown wrap within the viewport.
+- Makepad Markdown tables divide the current concrete inner width among their columns. Assistant markdown must use bounded `Fill`, not bounded `Fit`; an unresolved `Fit` width collapses table cells into tall invisible strips.
 
 ### Chat Activity Groups
 
@@ -226,6 +228,7 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 ## Model Provider Routing
 
 - Provider selection is encoded in the persisted model ID. Models prefixed with `antigravity/` route through `threadlane-provider::router::ProviderClient`; unprefixed models retain the OpenAI path. Preserve the prefix across model switching, sessions, subagents, and payload construction.
+- Persist each session's selected model in `SessionTree` metadata. Restore it before constructing the agent runtime and synchronize the model picker from that restored value; legacy metadata without a model continues to use the caller-provided default.
 - Keep the central agent loop provider-neutral. Provider clients must translate requests and stream results into the shared `StreamEvent`, `ToolCall`, and `ProviderUsage` contract so tool execution, hooks, compaction, persistence, and chat rendering are not duplicated.
 - OpenAI Responses events distinguish streaming `*.delta` events from final `*.done` snapshots. Emit only explicit text/reasoning deltas; never pass `response.*.done` fields through generic text fallbacks, or final output is duplicated and reasoning snapshots can leak into assistant content.
 - Antigravity uses Google Cloud Code Assist's `v1internal` endpoints and outer request envelope, not the public Gemini `streamGenerateContent` endpoint. Preserve project discovery, production/daily endpoint fallback, runtime-model mapping, wrapped SSE parsing, and provider-specific tool schemas when changing that client.
