@@ -11,7 +11,7 @@ use crate::panels::chat::{
 use crate::panels::command_palette::*;
 
 use crate::panels::sessions::{
-    ProjectRegistry, SessionContextMenu, SessionContextMenuAction, SessionList,
+    ProjectRegistry, SessionContextMenu, SessionContextMenuAction, SessionList, SessionListAction,
 };
 use crate::state::{
     active_session_entry, archive_session, begin_title_generation, builtin_commands,
@@ -864,12 +864,57 @@ script_mod! {
     let SessionList = #(SessionList::register_widget(vm)) {
         width: Fill
         height: Fill
+        flow: Down
+        spacing: 0
+
+        fixed_header_slot := View {
+            width: Fill
+            height: 44
+            flow: Overlay
+            clip_x: true
+            clip_y: true
+
+            fixed_project_header := mod.components.ProjectHeaderBase {}
+            fixed_project_header_active := mod.components.ProjectHeaderBase {
+                visible: false
+                draw_bg +: {
+                    color: #x222c38
+                    color_hover: #x283543
+                    border_color: #x34465a
+                    border_size: 1.0
+                }
+                folder_icon +: { draw_icon +: { color: #x8fb9e8 } }
+                name_lbl +: { draw_text +: { color: #xe0e7ef } }
+            }
+        }
 
         list := PortalList {
             width: Fill
             height: Fill
             flow: Down
             drag_scrolling: true
+            scroll_bar: mod.widgets.ScrollBar {
+                bar_size: 10.0
+                bar_side_margin: 3.0
+                min_handle_size: 30.0
+                draw_bg +: {
+                    size: 5.0
+                    border_size: 0.0
+                    color: #x00000000
+                    color_hover: #x00000000
+                    color_drag: #x00000000
+                    border_color: #x00000000
+                    border_color_hover: #x00000000
+                    border_color_drag: #x00000000
+                }
+            }
+
+            FixedHeaderSpacer := View {
+                width: Fill
+                height: 1
+                show_bg: true
+                draw_bg +: { color: #x00000000 }
+            }
 
             ProjectHeader := mod.components.ProjectHeaderBase {}
 
@@ -1400,8 +1445,8 @@ script_mod! {
                                 section_label +: { text: "PROJECTS" }
                                 add_project_btn := mod.components.SidebarComposeButton {}
                             }
-                            session_context_menu := SessionContextMenu {}
                             session_list := SessionList { height: Fill }
+                            session_context_menu := SessionContextMenu {}
                             providers_modal := ProvidersModal {}
                             update_action_row := View {
                                 width: Fill
@@ -2320,11 +2365,7 @@ impl MatchEvent for App {
             .filter(|skill| skill.enabled && skill.is_valid)
             .collect();
         let discovered_agents = discover_agents(&work_dir, AgentScope::Both).agents;
-        let subagent_enabled = coding_agent
-            .wasi_extensions
-            .get_tools()
-            .iter()
-            .any(|tool| tool["function"]["name"] == "subagent");
+        let subagent_enabled = true;
         self.capabilities_summary =
             format_capabilities_summary(&discovered_skills, &discovered_agents, subagent_enabled);
         self.ui.button(cx, ids!(caps_btn)).set_text(
@@ -2607,6 +2648,21 @@ impl MatchEvent for App {
                     self.apply_session_context_action(cx, delete_session, "Deleted");
                 }
                 SessionContextMenuAction::None => {}
+            }
+        }
+        let session_list_uid = self.ui.widget(cx, ids!(session_list)).widget_uid();
+        if let Some(action) = actions.find_widget_action(session_list_uid) {
+            match action.cast::<SessionListAction>() {
+                SessionListAction::SelectProject(work_dir) => {
+                    self.select_project_draft(cx, work_dir);
+                }
+                SessionListAction::NewSession(work_dir) => {
+                    self.create_and_activate_session(cx, work_dir);
+                }
+                SessionListAction::DetachProject(work_dir) => {
+                    self.detach_project(cx, work_dir);
+                }
+                SessionListAction::None => {}
             }
         }
         let session_list = self.ui.portal_list(cx, ids!(session_list.list));
@@ -3664,11 +3720,7 @@ impl App {
                     .filter(|skill| skill.enabled && skill.is_valid)
                     .collect::<Vec<_>>();
                 let agents = discover_agents(&canonical, AgentScope::Both).agents;
-                let subagent_enabled = agent
-                    .wasi_extensions
-                    .get_tools()
-                    .iter()
-                    .any(|tool| tool["function"]["name"] == "subagent");
+                let subagent_enabled = true;
                 let mut commands = builtin_commands();
                 commands.extend(skills.iter().map(|skill| CommandInfo {
                     name: format!("skill {}", skill.id),

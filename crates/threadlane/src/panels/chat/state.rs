@@ -546,8 +546,8 @@ fn subagent_presentation(
         }
     };
     let mut detail = format!(
-        "Mode: {}\nTasks:",
-        if parallel { "Parallel" } else { "Sequential" }
+        "### Subagent Delegation ({})\n",
+        if parallel { "Parallel Execution" } else { "Sequential Chain" }
     );
     for (index, task) in visible_tasks.iter().enumerate() {
         let agent = task
@@ -556,11 +556,20 @@ fn subagent_presentation(
             .map(|agent| truncate_chars(agent, MAX_VISIBLE_AGENT_CHARS))
             .unwrap_or_else(|| "subagent".into());
         let summary = task_summary(task);
-        detail.push_str(&format!("\n{}. {} — {}", index + 1, agent, summary));
+        detail.push_str(&format!("\n**Subagent Session {} (`{}`)**\n- **Task**: {}\n", index + 1, agent, summary));
+        if let Some(inst) = task.get("instructions").and_then(serde_json::Value::as_str) {
+            detail.push_str(&format!("- **Instructions**: {}\n", normalize_whitespace_bounded(inst, 180)));
+        }
+        if let Some(tools) = task.get("tools").and_then(serde_json::Value::as_array) {
+            let tool_names: Vec<_> = tools.iter().filter_map(serde_json::Value::as_str).collect();
+            if !tool_names.is_empty() {
+                detail.push_str(&format!("- **Tools**: `{}`\n", tool_names.join("`, `")));
+            }
+        }
     }
     if tasks.len() > visible_tasks.len() {
         detail.push_str(&format!(
-            "\n… {} additional tasks omitted",
+            "\n… {} additional subagent tasks omitted",
             tasks.len() - visible_tasks.len()
         ));
     }
@@ -968,10 +977,10 @@ mod tests {
         assert_eq!(presentation.title, "Delegate");
         assert_eq!(presentation.primary, "2 tasks");
         assert_eq!(presentation.metadata, "parallel · scout, reviewer");
-        assert!(presentation.arguments_detail.contains("Mode: Parallel"));
+        assert!(presentation.arguments_detail.contains("Subagent Delegation (Parallel Execution)"));
         assert!(presentation
             .arguments_detail
-            .contains("1. scout — Inspect the repository structure"));
+            .contains("Subagent Session 1 (`scout`)"));
         assert!(presentation.output_markdown);
     }
 

@@ -14,4 +14,4 @@ pub use state::{
     session_title_eligible, set_active_project, set_active_session, set_session_context_target,
     set_session_working, title_prompt_for_submission, SessionEntry,
 };
-pub use view::SessionList;
+pub use view::{SessionList, SessionListAction};

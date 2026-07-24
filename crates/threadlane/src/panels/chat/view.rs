@@ -338,20 +338,32 @@ fn activity_detail(messages: &[ChatMessage], streaming_thinking: Option<&str>) -
                 status,
                 presentation,
                 result_metadata,
+                output,
                 ..
             } => {
                 let kind = activity_kind(name, presentation.icon);
+                let mut line = activity_line(
+                    kind,
+                    &presentation.title,
+                    &presentation.primary,
+                    result_metadata,
+                    *status,
+                );
+                if name == "subagent" || presentation.icon == ToolIcon::Subagent {
+                    if !presentation.arguments_detail.is_empty() {
+                        line.push_str("\n\n");
+                        line.push_str(&presentation.arguments_detail);
+                    }
+                    if !output.trim().is_empty() {
+                        line.push_str("\n\n");
+                        line.push_str(output.trim());
+                    }
+                }
                 append_activity_detail(
                     &mut detail,
                     &mut previous_kind,
                     ActivityDetailKind::Tool,
-                    &activity_line(
-                        kind,
-                        &presentation.title,
-                        &presentation.primary,
-                        result_metadata,
-                        *status,
-                    ),
+                    &line,
                 );
             }
             ChatMessage::Text { .. } => {}
