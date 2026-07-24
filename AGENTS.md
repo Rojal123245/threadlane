@@ -98,6 +98,7 @@ Reusable script components are registered through `crates/threadlane/src/compone
 - Add every new component module to both the Rust module list and the `script_mod(vm)` registration sequence.
 - Use `mod.components.Name` for reusable templates.
 - Use `:=` IDs for widgets that Rust code must retrieve with `ids!(...)`.
+- Custom widgets should handle actions from their deeply nested child controls locally and emit a typed `cx.widget_action(...)` for the app shell. Do not rely on root-level widget lookup to resolve controls inside a custom widget's dereferenced view.
 - **DSL inheritance**: `:= SomeName { ... }` creates an ID-bound widget instance, **not** a named prototype. An ID-bound instance cannot be used as a parent in another `:= SomeName { ... }` definition. Only `mod.components.Name` template names (defined with `=`, not `:=`) are valid prototype parents. Attempting to write `Child := ParentId { ... }` where `ParentId` was defined with `:=` will fail at runtime with "variable ParentId not found in scope".
 
 ### Layout
@@ -136,12 +137,15 @@ Keep the SVG view box itself centered. Do not compensate for inherited empty-lab
 - The widget that owns text and click handling should also own its hover/pressed background.
 - Use matching interaction and drawing bounds so the hover surface always contains the label.
 - Include keyboard focus behavior when restyling interactive controls; do not optimize only for mouse hover.
+- When a pointer action should move focus to another control, assign that focus after `self.ui.handle_event(...)`; assigning it before UI event dispatch allows the clicked surface to take focus back during the same mouse event. For press-driven controls, defer the request until primary mouse-up and use the target component's pending-focus API when available so the release phase cannot immediately clear it.
+- Makepad `TextInput` cursor indices are UTF-8 byte offsets. To place the caret at the end of inserted text, use `text.len()`, not `text.chars().count()`; multibyte characters otherwise leave the caret before the final characters.
 
 ### Overlays and Event Routing
 
 Drawing in an overlay does not automatically stop widgets underneath from receiving pointer events.
 
 - Context menus and popups must account for both visual stacking and event routing.
+- In an overlay, a later full-size sibling such as an empty `PortalList` can intercept pointer events intended for visible content beneath it. Hide inactive full-size siblings or place the interactive surface above them.
 - The session context menu uses real child buttons for row hover/click states; do not reintroduce a parent shader with hard-coded row coordinates.
 - While a session context target is active, the session list intentionally suspends its own event handling so rows under the popup cannot also hover or press.
 - Be careful with `sweep_lock`: standard `Button` uses `event.hits(...)` with the default sweep area. Locking a different area can prevent popup buttons from receiving events unless those controls explicitly use `hits_with_sweep_area`.

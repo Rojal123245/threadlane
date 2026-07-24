@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Horizontal bar of the T (top, three thread-like strokes) -->
+  <line x1="3" y1="5.5" x2="21" y2="5.5"/>
+  <line x1="3" y1="7.5" x2="21" y2="7.5"/>
+  <line x1="3" y1="9.5" x2="21" y2="9.5"/>
+  <!-- Vertical stem of the T (center, three thread-like strokes) -->
+  <line x1="10.5" y1="9.5" x2="10.5" y2="20"/>
+  <line x1="12"   y1="9.5" x2="12"   y2="20"/>
+  <line x1="13.5" y1="9.5" x2="13.5" y2="20"/>
+</svg>
