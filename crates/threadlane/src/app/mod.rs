@@ -2256,11 +2256,14 @@ impl MatchEvent for App {
             cx.redraw_all();
         }
 
+        if let Some(finger_up) = self.ui.view(cx, ids!(modal_backdrop)).finger_up(actions) {
+            if finger_up.is_over && finger_up.is_primary_hit() && finger_up.was_tap() {
+                self.dismiss_providers_modal(cx);
+            }
+        }
+
         if self.ui.button(cx, ids!(close_modal_btn)).clicked(actions) {
-            self.ui
-                .widget(cx, ids!(providers_modal))
-                .set_visible(cx, false);
-            cx.redraw_all();
+            self.dismiss_providers_modal(cx);
         }
 
         if self
@@ -2268,65 +2271,8 @@ impl MatchEvent for App {
             .button(cx, ids!(antigravity_login_btn))
             .clicked(actions)
         {
-            self.ui
-                .widget(cx, ids!(providers_modal))
-                .set_visible(cx, false);
-            self.push_chat(
-                MsgRole::System,
-                "Initiating Google Antigravity OAuth login...",
-            );
-            let (verifier, challenge) = threadlane_provider::antigravity_auth::generate_pkce_pair();
-            let state = format!(
-                "{:x}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos()
-            );
-            let auth_url =
-                threadlane_provider::antigravity_auth::build_authorization_url(&challenge, &state);
-
-            self.push_chat(
-                MsgRole::System,
-                format!("Opening Google sign-in in your browser...\n{}", auth_url),
-            );
-            let _ = robius_open::Uri::new(&auth_url).open();
-
-            let tx_clone = self.tx.clone();
-            get_runtime().spawn(async move {
-                match threadlane_provider::antigravity_auth::listen_for_oauth_callback(state).await
-                {
-                    Ok(code) => {
-                        match threadlane_provider::antigravity_auth::exchange_code_for_tokens(
-                            &code, &verifier,
-                        )
-                        .await
-                        {
-                            Ok(creds) => {
-                                if let Some(ref tx) = tx_clone {
-                                    let _ = tx.send(GuiAgentEvent::AntigravityLoginSuccess {
-                                        email: creds.account_email,
-                                    });
-                                    SignalToUI::set_ui_signal();
-                                }
-                            }
-                            Err(e) => {
-                                if let Some(ref tx) = tx_clone {
-                                    let _ = tx.send(GuiAgentEvent::AntigravityLoginError(e));
-                                    SignalToUI::set_ui_signal();
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        if let Some(ref tx) = tx_clone {
-                            let _ = tx.send(GuiAgentEvent::AntigravityLoginError(e));
-                            SignalToUI::set_ui_signal();
-                        }
-                    }
-                }
-            });
-            cx.redraw_all();
+            self.dismiss_providers_modal(cx);
+            self.start_antigravity_login(cx);
         }
 
         if self
@@ -2334,20 +2280,8 @@ impl MatchEvent for App {
             .button(cx, ids!(antigravity_doctor_btn))
             .clicked(actions)
         {
-            self.ui
-                .widget(cx, ids!(providers_modal))
-                .set_visible(cx, false);
-            self.push_chat(MsgRole::System, "Running Antigravity Doctor diagnostics...");
-            let tx_clone = self.tx.clone();
-            get_runtime().spawn(async move {
-                let client = threadlane_provider::antigravity::AntigravityClient::new();
-                let report = client.run_diagnostics().await;
-                if let Some(ref tx) = tx_clone {
-                    let _ = tx.send(GuiAgentEvent::AntigravityDoctorReport(report));
-                    SignalToUI::set_ui_signal();
-                }
-            });
-            cx.redraw_all();
+            self.dismiss_providers_modal(cx);
+            self.start_antigravity_doctor(cx);
         }
 
         if let Some(action) = actions
@@ -2649,6 +2583,25 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        let providers_modal = self.ui.widget(cx, ids!(providers_modal));
+        if providers_modal.visible() {
+            let dismiss = matches!(event, Event::KeyDown(event) if event.key_code == KeyCode::Escape)
+                || matches!(event, Event::BackPressed { .. });
+            if dismiss {
+                self.dismiss_providers_modal(cx);
+                return;
+            }
+
+            self.match_event(cx, event);
+            self.poll_agent_events(cx);
+            self.poll_update_status(cx);
+            if providers_modal.visible() {
+                let mut scope = Scope::with_data(&mut self.workspace_state);
+                providers_modal.handle_event(cx, event, &mut scope);
+            }
+            return;
+        }
+
         if self.handle_clipboard_image_paste(cx, event) {
             return;
         }
@@ -2756,6 +2709,79 @@ fn format_capabilities_summary(
 }
 
 impl App {
+    fn dismiss_providers_modal(&mut self, cx: &mut Cx) {
+        self.ui
+            .widget(cx, ids!(providers_modal))
+            .set_visible(cx, false);
+        cx.redraw_all();
+    }
+
+    fn start_antigravity_login(&mut self, cx: &mut Cx) {
+        self.push_chat(
+            MsgRole::System,
+            "Initiating Google Antigravity OAuth login...",
+        );
+        let (verifier, challenge) = threadlane_provider::antigravity_auth::generate_pkce_pair();
+        let (state, _) = threadlane_provider::antigravity_auth::generate_pkce_pair();
+        let auth_url =
+            threadlane_provider::antigravity_auth::build_authorization_url(&challenge, &state);
+
+        self.push_chat(
+            MsgRole::System,
+            format!("Opening Google sign-in in your browser...\n{}", auth_url),
+        );
+        let _ = robius_open::Uri::new(&auth_url).open();
+
+        let tx_clone = self.tx.clone();
+        get_runtime().spawn(async move {
+            match threadlane_provider::antigravity_auth::listen_for_oauth_callback(state).await {
+                Ok(code) => {
+                    match threadlane_provider::antigravity_auth::exchange_code_for_tokens(
+                        &code, &verifier,
+                    )
+                    .await
+                    {
+                        Ok(creds) => {
+                            if let Some(ref tx) = tx_clone {
+                                let _ = tx.send(GuiAgentEvent::AntigravityLoginSuccess {
+                                    email: creds.account_email,
+                                });
+                                SignalToUI::set_ui_signal();
+                            }
+                        }
+                        Err(e) => {
+                            if let Some(ref tx) = tx_clone {
+                                let _ = tx.send(GuiAgentEvent::AntigravityLoginError(e));
+                                SignalToUI::set_ui_signal();
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    if let Some(ref tx) = tx_clone {
+                        let _ = tx.send(GuiAgentEvent::AntigravityLoginError(e));
+                        SignalToUI::set_ui_signal();
+                    }
+                }
+            }
+        });
+        cx.redraw_all();
+    }
+
+    fn start_antigravity_doctor(&mut self, cx: &mut Cx) {
+        self.push_chat(MsgRole::System, "Running Antigravity Doctor diagnostics...");
+        let tx_clone = self.tx.clone();
+        get_runtime().spawn(async move {
+            let client = threadlane_provider::antigravity::AntigravityClient::new();
+            let report = client.run_diagnostics().await;
+            if let Some(ref tx) = tx_clone {
+                let _ = tx.send(GuiAgentEvent::AntigravityDoctorReport(report));
+                SignalToUI::set_ui_signal();
+            }
+        });
+        cx.redraw_all();
+    }
+
     fn sync_sidebar_action_visibility(&mut self, cx: &mut Cx, event: &Event) {
         match event {
             Event::MouseMove(event) => self.sidebar_pointer = Some(event.abs),
@@ -3805,6 +3831,18 @@ impl App {
     }
 
     fn dispatch_input(&mut self, cx: &mut Cx, input_text: String, show_in_chat: bool) {
+        match input_text.trim() {
+            "/login antigravity" => {
+                self.start_antigravity_login(cx);
+                return;
+            }
+            "/antigravity.doctor" | "/doctor" => {
+                self.start_antigravity_doctor(cx);
+                return;
+            }
+            _ => {}
+        }
+
         let attachments = if show_in_chat {
             self.workspace_state
                 .active_workspace()
@@ -3823,22 +3861,16 @@ impl App {
         } else {
             selected_model
         };
-        let provider_management_command = matches!(
-            input_text.trim(),
-            "/login antigravity" | "/antigravity.doctor" | "/doctor"
-        );
-        if !provider_management_command {
-            let has_antigravity_credentials =
-                threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some();
-            if let Some(error) = model_credential_error(
-                &model_name,
-                !api_key.is_empty(),
-                has_antigravity_credentials,
-            ) {
-                self.push_chat(MsgRole::System, error);
-                cx.redraw_all();
-                return;
-            }
+        let has_antigravity_credentials =
+            threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some();
+        if let Some(error) = model_credential_error(
+            &model_name,
+            !api_key.is_empty(),
+            has_antigravity_credentials,
+        ) {
+            self.push_chat(MsgRole::System, error);
+            cx.redraw_all();
+            return;
         }
         let reasoning_effort = ReasoningEffort::from_label(
             &self
@@ -3921,79 +3953,6 @@ impl App {
                     runtime.model = model.trim().to_string();
                 }
             }
-        }
-
-        if input_text.trim() == "/login antigravity" {
-            self.push_chat(
-                MsgRole::System,
-                "Initiating Google Antigravity OAuth login...",
-            );
-            let (verifier, challenge) = threadlane_provider::antigravity_auth::generate_pkce_pair();
-            let state = format!(
-                "{:x}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos()
-            );
-            let auth_url =
-                threadlane_provider::antigravity_auth::build_authorization_url(&challenge, &state);
-
-            self.push_chat(
-                MsgRole::System,
-                format!("Opening Google sign-in in your browser...\n{}", auth_url),
-            );
-            let _ = robius_open::Uri::new(&auth_url).open();
-
-            let tx_clone = self.tx.clone();
-            get_runtime().spawn(async move {
-                match threadlane_provider::antigravity_auth::listen_for_oauth_callback(state).await
-                {
-                    Ok(code) => {
-                        match threadlane_provider::antigravity_auth::exchange_code_for_tokens(
-                            &code, &verifier,
-                        )
-                        .await
-                        {
-                            Ok(creds) => {
-                                if let Some(ref tx) = tx_clone {
-                                    let _ = tx.send(GuiAgentEvent::AntigravityLoginSuccess {
-                                        email: creds.account_email,
-                                    });
-                                    SignalToUI::set_ui_signal();
-                                }
-                            }
-                            Err(e) => {
-                                if let Some(ref tx) = tx_clone {
-                                    let _ = tx.send(GuiAgentEvent::AntigravityLoginError(e));
-                                    SignalToUI::set_ui_signal();
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        if let Some(ref tx) = tx_clone {
-                            let _ = tx.send(GuiAgentEvent::AntigravityLoginError(e));
-                            SignalToUI::set_ui_signal();
-                        }
-                    }
-                }
-            });
-            return;
-        }
-
-        if input_text.trim() == "/antigravity.doctor" || input_text.trim() == "/doctor" {
-            self.push_chat(MsgRole::System, "Running Antigravity Doctor diagnostics...");
-            let tx_clone = self.tx.clone();
-            get_runtime().spawn(async move {
-                let client = threadlane_provider::antigravity::AntigravityClient::new();
-                let report = client.run_diagnostics().await;
-                if let Some(ref tx) = tx_clone {
-                    let _ = tx.send(GuiAgentEvent::AntigravityDoctorReport(report));
-                    SignalToUI::set_ui_signal();
-                }
-            });
-            return;
         }
 
         let Some(tx) = self.tx.clone() else { return };

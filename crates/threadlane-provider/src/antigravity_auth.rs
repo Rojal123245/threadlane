@@ -26,7 +26,9 @@ pub struct AntigravityCredentials {
 }
 
 pub fn get_antigravity_credentials_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
     let mut path = PathBuf::from(home);
     path.push(".threadlane");
     let _ = fs::create_dir_all(&path);
@@ -55,8 +57,9 @@ pub fn save_antigravity_credentials(creds: &AntigravityCredentials) -> Result<()
 }
 
 pub fn generate_pkce_pair() -> (String, String) {
-    let random_bytes: Vec<u8> = (0..32).map(|_| rand_byte()).collect();
-    let verifier = URL_SAFE_NO_PAD.encode(&random_bytes);
+    let mut random_bytes = [0u8; 32];
+    getrandom::fill(&mut random_bytes).expect("secure randomness should be available for PKCE");
+    let verifier = URL_SAFE_NO_PAD.encode(random_bytes);
 
     let mut hasher = Sha256::new();
     hasher.update(verifier.as_bytes());
@@ -64,14 +67,6 @@ pub fn generate_pkce_pair() -> (String, String) {
     let challenge = URL_SAFE_NO_PAD.encode(challenge_bytes);
 
     (verifier, challenge)
-}
-
-fn rand_byte() -> u8 {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    ((now ^ (now >> 8)) & 0xFF) as u8
 }
 
 fn current_timestamp() -> u64 {

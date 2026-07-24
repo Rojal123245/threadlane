@@ -4,9 +4,11 @@ use futures_util::StreamExt;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex, OnceCell};
 
 const PROD_BASE_URL: &str = "https://cloudcode-pa.googleapis.com";
 const DAILY_BASE_URL: &str = "https://daily-cloudcode-pa.sandbox.googleapis.com";
@@ -197,8 +199,10 @@ pub fn build_gemini_request(
     }
 }
 
+#[derive(Clone)]
 pub struct AntigravityClient {
     client: reqwest::Client,
+    project_cache: Arc<Mutex<HashMap<[u8; 32], Arc<OnceCell<String>>>>>,
 }
 
 impl Default for AntigravityClient {
@@ -211,11 +215,12 @@ impl AntigravityClient {
     pub fn new() -> Self {
         Self {
             client: reqwest::Client::new(),
+            project_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     /// Converts an OpenAI chat-completions payload and streams events understood by the
-    /// shared agent loop. Authentication and project discovery happen before each request.
+    /// shared agent loop.
     pub async fn stream_chat_completion(
         &self,
         api_payload: Value,
@@ -267,6 +272,23 @@ impl AntigravityClient {
     }
 
     async fn resolve_project(&self, token: &str) -> String {
+        let credential_key = credential_cache_key(token);
+        let project = {
+            let mut cache = self.project_cache.lock().await;
+            Arc::clone(
+                cache
+                    .entry(credential_key)
+                    .or_insert_with(|| Arc::new(OnceCell::new())),
+            )
+        };
+
+        project
+            .get_or_init(|| self.resolve_project_uncached(token))
+            .await
+            .clone()
+    }
+
+    async fn resolve_project_uncached(&self, token: &str) -> String {
         if let Ok(project) = std::env::var("ANTIGRAVITY_PROJECT_ID") {
             if !project.trim().is_empty() {
                 return project;
@@ -418,6 +440,38 @@ impl AntigravityClient {
         report.push("Diagnostics complete.".to_string());
         report.join("\n")
     }
+}
+
+fn credential_cache_key(token: &str) -> [u8; 32] {
+    let credentials = load_antigravity_credentials();
+    let mut hasher = Sha256::new();
+
+    if let Some(refresh_token) = credentials
+        .as_ref()
+        .and_then(|credentials| credentials.refresh_token.as_deref())
+    {
+        hasher.update(b"refresh-token\0");
+        hasher.update(refresh_token.as_bytes());
+    } else if let Some(account_email) = credentials
+        .as_ref()
+        .and_then(|credentials| credentials.account_email.as_deref())
+    {
+        hasher.update(b"account-email\0");
+        hasher.update(account_email.as_bytes());
+    } else {
+        hasher.update(b"access-token\0");
+        hasher.update(token.as_bytes());
+    }
+
+    if let Some(project_id) = credentials
+        .as_ref()
+        .and_then(|credentials| credentials.project_id.as_deref())
+    {
+        hasher.update(b"\0project-id\0");
+        hasher.update(project_id.as_bytes());
+    }
+
+    hasher.finalize().into()
 }
 
 fn endpoint_candidates() -> Vec<String> {

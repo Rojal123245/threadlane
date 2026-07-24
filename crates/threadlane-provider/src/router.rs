@@ -12,12 +12,14 @@ pub fn is_antigravity_model(model: &str) -> bool {
 #[derive(Clone)]
 pub struct ProviderClient {
     openai: OpenAIClient,
+    antigravity: AntigravityClient,
 }
 
 impl ProviderClient {
     pub fn new(api_key: impl Into<String>, account_id: Option<String>) -> Self {
         Self {
             openai: OpenAIClient::new(api_key.into(), account_id),
+            antigravity: AntigravityClient::new(),
         }
     }
 
@@ -33,7 +35,8 @@ impl ProviderClient {
             .and_then(Value::as_str)
             .unwrap_or_default();
         if is_antigravity_model(model) {
-            AntigravityClient::new()
+            self.antigravity
+                .clone()
                 .stream_chat_completion(api_payload, event_tx)
                 .await;
             return;

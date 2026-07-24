@@ -1,4 +1,5 @@
 use serde_json::json;
+use std::collections::HashSet;
 use threadlane_provider::antigravity::build_gemini_request;
 use threadlane_provider::antigravity_auth::{
     build_authorization_url, generate_pkce_pair, AntigravityCredentials,
@@ -6,10 +7,18 @@ use threadlane_provider::antigravity_auth::{
 
 #[test]
 fn test_pkce_generation() {
-    let (verifier, challenge) = generate_pkce_pair();
-    assert!(!verifier.is_empty(), "Verifier should not be empty");
-    assert!(!challenge.is_empty(), "Challenge should not be empty");
-    assert_ne!(verifier, challenge, "Verifier and challenge should differ");
+    let mut verifiers = HashSet::new();
+
+    for _ in 0..256 {
+        let (verifier, challenge) = generate_pkce_pair();
+        assert!(!verifier.is_empty(), "Verifier should not be empty");
+        assert!(!challenge.is_empty(), "Challenge should not be empty");
+        assert_ne!(verifier, challenge, "Verifier and challenge should differ");
+        assert!(
+            verifiers.insert(verifier),
+            "Each generated verifier should be unique"
+        );
+    }
 }
 
 #[test]

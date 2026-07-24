@@ -16,3 +16,4 @@ tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
 sha2 = "0.10"
 base64 = "0.22"
 url = "2.5"
+getrandom = "0.4"
