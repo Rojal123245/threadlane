@@ -178,6 +178,7 @@ Drawing in an overlay does not automatically stop widgets underneath from receiv
 - Aborting a generation suppresses the normal stream and tool-end events. Commit partial streaming content, mark running tools cancelled, clear the session working state, and redraw the session list so no activity loader remains visible.
 - Keep summary categories concise and action-oriented (`Explored`, `Edited`, `Ran`, `Loaded`, `Delegated`) and bound expanded tool output rather than restoring every raw tool payload to the top-level transcript.
 - Expanded activity groups must render complete persisted thinking segments and current streaming reasoning in event order alongside concise tool summaries; never replace finalized reasoning with only a completion/status placeholder.
+- Opening or closing `ToolFoldHeader` changes its `PortalList` item height. Preserve its `LayoutChanged` action and redraw the parent chat list so following messages are reflowed instead of overlapping the expanded body.
 - The chat `PortalList` range is based on display rows, not raw message count. If changing grouping, preserve stable ordering, auto-tail behavior, and non-reused fold widget state.
 
 ### Composer Drop-Ups

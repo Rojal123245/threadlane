@@ -1326,9 +1326,9 @@ script_mod! {
                                 flow: Right
                                 align: Align{y: 0.5}
                                 padding: Inset{left: 7 right: 5}
-                                spacing: 6
+                                spacing: 0
                                 sidebar_brand_icon := Icon {
-                                    width: 16
+                                    width: 26
                                     height: 16
                                     icon_walk: Walk{width: 16 height: 16}
                                     draw_icon +: {
@@ -1339,6 +1339,7 @@ script_mod! {
                                 sidebar_brand_label := Label {
                                     width: Fill
                                     height: Fit
+                                    align: Align{x: 0.5}
                                     text: "Threadlane"
                                     draw_text +: {
                                         color: #xe7ebf0

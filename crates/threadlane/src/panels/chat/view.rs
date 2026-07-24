@@ -1,6 +1,7 @@
 //! Chat panel main view & transcript list widget.
 
 use super::state::{ChatMessage, MsgRole, StreamingKind, ToolIcon, ToolStatus};
+use crate::components::tool_fold_header::ToolFoldHeaderAction;
 use crate::path_utils::{compact_workspace_path, truncate_chars};
 use crate::workspace::AppState;
 use makepad_widgets::*;
@@ -722,6 +723,26 @@ impl Widget for ChatList {
             _ => {}
         }
         self.view.handle_event(cx, event, scope);
+
+        if let Event::Actions(actions) = event {
+            let list = self.view.portal_list(cx, ids!(list));
+            let layout_changed = list
+                .items_with_actions(actions)
+                .into_iter()
+                .any(|(_, item)| {
+                    actions
+                        .find_widget_action(item.widget_uid())
+                        .is_some_and(|action| {
+                            matches!(
+                                action.cast::<ToolFoldHeaderAction>(),
+                                ToolFoldHeaderAction::LayoutChanged
+                            )
+                        })
+                });
+            if layout_changed {
+                list.redraw(cx);
+            }
+        }
 
         if matches!(event, Event::KeyDown(key_event) if matches!(key_event.key_code, KeyCode::ReturnKey | KeyCode::Space))
         {
