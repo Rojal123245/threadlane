@@ -22,7 +22,7 @@ script_mod! {
         flow: Right
         spacing: 8
         align: Align{y: 0.5}
-        padding: Inset{left: 7 right: 4 bottom: 4}
+        padding: Inset{left: 7 right: 4}
         section_label := mod.components.SectionLabel {}
     }
 }

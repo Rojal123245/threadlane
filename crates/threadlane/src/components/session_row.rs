@@ -127,7 +127,7 @@ script_mod! {
         flow: Right
         spacing: 8
         align: Align{y: 0.5}
-        margin: Inset{left: 3 right: 3 top: 7 bottom: 2}
+        margin: Inset{left: 3 right: 3 bottom: 2}
         padding: Inset{left: 8 top: 4 right: 4 bottom: 4}
         draw_bg +: {
             hover: instance(0.0)
