@@ -4,7 +4,8 @@
 
 use crate::panels::chat::{
     accepts_generation_event, concise_status, draft_for_cancellation, submitted_draft, ChatList,
-    ComposerState, ComposerStatus, GenerationEvent, ToolFoldHeader,
+    ChatListWidgetRefExt, ComposerState, ComposerStatus, GenerationEvent, StarterPromptAction,
+    ToolFoldHeader,
 };
 use crate::panels::command_palette::*;
 
@@ -92,6 +93,458 @@ script_mod! {
     let ChatList = #(ChatList::register_widget(vm)) {
         width: Fill
         height: Fill
+        flow: Overlay
+
+        // ── Empty-session welcome overlay (shown when no messages) ──────────
+        empty_state := View {
+            width: Fill
+            height: Fill
+            flow: Down
+            align: Align{x: 0.5 y: 0.5}
+            spacing: 0
+            padding: Inset{bottom: 60}
+            visible: false
+
+            // Hero icon — Threadlane logo in a rounded tile
+            empty_icon_wrap := RoundedView {
+                width: 60
+                height: 60
+                margin: Inset{bottom: 22}
+                align: Align{x: 0.5 y: 0.5}
+                draw_bg +: {
+                    color: #x20252d
+                    border_color: #x2d3745
+                    border_size: 1.0
+                    border_radius: 14.0
+                }
+                empty_hero_icon := Icon {
+                    width: 28
+                    height: 28
+                    icon_walk: Walk{width: 28 height: 28}
+                    draw_icon +: {
+                        svg: crate_resource("self:resources/icons/logo.svg")
+                        color: #x6b7a8e
+                    }
+                }
+            }
+
+            // Headline: "What should we build in {project}?"
+            headline_row := View {
+                width: Fit
+                height: Fit
+                flow: Right
+                align: Align{y: 0.5}
+                margin: Inset{bottom: 6}
+
+                headline_pre_lbl := Label {
+                    width: Fit
+                    height: Fit
+                    text: "What should we build in "
+                    draw_text +: {
+                        color: #xd0d8e4
+                        text_style: theme.font_bold { font_size: 20.0 }
+                    }
+                }
+                project_name_inline_lbl := Label {
+                    width: Fit
+                    height: Fit
+                    text: ""
+                    draw_text +: {
+                        color: #xe7ebf0
+                        text_style: theme.font_bold { font_size: 20.0 }
+                    }
+                }
+                headline_post_lbl := Label {
+                    width: Fit
+                    height: Fit
+                    text: "?"
+                    draw_text +: {
+                        color: #xd0d8e4
+                        text_style: theme.font_bold { font_size: 20.0 }
+                    }
+                }
+            }
+
+            // Workspace path subtitle
+            workspace_path_lbl := Label {
+                width: Fit
+                height: Fit
+                text: ""
+                margin: Inset{bottom: 28}
+                draw_text +: {
+                    color: #x5e6a7a
+                    text_style +: { font_size: 10.5 }
+                }
+            }
+
+            // Action suggestion cards
+            cards_row := View {
+                width: Fit
+                height: Fit
+                flow: Right
+                spacing: 10
+
+                explore_card := RoundedView {
+                    width: 160
+                    height: 108
+                    flow: Overlay
+                    draw_bg +: {
+                        color: #x1d232c
+                        border_color: #x2a3441
+                        border_size: 1.0
+                        border_radius: 10.0
+                    }
+                    explore_content := View {
+                        width: Fill
+                        height: Fill
+                        flow: Down
+                        spacing: 10
+                        padding: Inset{left: 14 top: 14 right: 14 bottom: 14}
+                        explore_header := View {
+                            width: Fill
+                            height: 26
+                            flow: Right
+                            spacing: 9
+                            align: Align{y: 0.5}
+                            explore_icon_wrap := RoundedView {
+                                width: 26
+                                height: 26
+                                align: Align{x: 0.5 y: 0.5}
+                                draw_bg +: {
+                                    color: #x5fa0de18
+                                    border_color: #x5fa0de35
+                                    border_size: 1.0
+                                    border_radius: 7.0
+                                }
+                                explore_icon := Icon {
+                                    width: 14
+                                    height: 14
+                                    icon_walk: Walk{width: 14 height: 14}
+                                    draw_icon +: {
+                                        svg: crate_resource("self:resources/icons/read-file.svg")
+                                        color: #x68b5f4
+                                    }
+                                }
+                            }
+                            explore_lbl := Label {
+                                width: Fill
+                                height: Fit
+                                text: "Explore code"
+                                draw_text +: {
+                                    color: #xe0e6ef
+                                    text_style: theme.font_bold { font_size: 11.0 }
+                                }
+                            }
+                        }
+                        explore_desc_lbl := Label {
+                            width: Fill
+                            height: Fit
+                            text: "Understand the structure and key files"
+                            draw_text +: {
+                                color: #x8592a4
+                                text_style +: { font_size: 9.5 }
+                            }
+                        }
+                    }
+                    explore_btn := Button {
+                        width: Fill
+                        height: Fill
+                        text: "Explore code"
+                        padding: 0
+                        spacing: 0
+                        icon_walk: Walk{width: 0 height: 0}
+                        draw_bg +: {
+                            color: #x00000000
+                            color_hover: #x5fa0de10
+                            color_focus: #x5fa0de10
+                            color_down: #x5fa0de22
+                            border_color: #x00000000
+                            border_color_hover: #x00000000
+                            border_color_focus: #x00000000
+                            border_color_down: #x00000000
+                            border_size: 0.0
+                            border_radius: 10.0
+                        }
+                        draw_text +: {
+                            color: #x00000000
+                            color_hover: #x00000000
+                            color_focus: #x00000000
+                            color_down: #x00000000
+                        }
+                    }
+                }
+
+                build_card := RoundedView {
+                    width: 160
+                    height: 108
+                    flow: Overlay
+                    draw_bg +: {
+                        color: #x1d232c
+                        border_color: #x2a3441
+                        border_size: 1.0
+                        border_radius: 10.0
+                    }
+                    build_content := View {
+                        width: Fill
+                        height: Fill
+                        flow: Down
+                        spacing: 10
+                        padding: Inset{left: 14 top: 14 right: 14 bottom: 14}
+                        build_header := View {
+                            width: Fill
+                            height: 26
+                            flow: Right
+                            spacing: 9
+                            align: Align{y: 0.5}
+                            build_icon_wrap := RoundedView {
+                                width: 26
+                                height: 26
+                                align: Align{x: 0.5 y: 0.5}
+                                draw_bg +: {
+                                    color: #x9a75d518
+                                    border_color: #x9a75d535
+                                    border_size: 1.0
+                                    border_radius: 7.0
+                                }
+                                build_icon := Icon {
+                                    width: 14
+                                    height: 14
+                                    icon_walk: Walk{width: 14 height: 14}
+                                    draw_icon +: {
+                                        svg: crate_resource("self:resources/icons/write-file.svg")
+                                        color: #xb18ae8
+                                    }
+                                }
+                            }
+                            build_lbl := Label {
+                                width: Fill
+                                height: Fit
+                                text: "Build something"
+                                draw_text +: {
+                                    color: #xe0e6ef
+                                    text_style: theme.font_bold { font_size: 11.0 }
+                                }
+                            }
+                        }
+                        build_desc_lbl := Label {
+                            width: Fill
+                            height: Fit
+                            text: "Start a feature, app, or tool"
+                            draw_text +: {
+                                color: #x8592a4
+                                text_style +: { font_size: 9.5 }
+                            }
+                        }
+                    }
+                    build_btn := Button {
+                        width: Fill
+                        height: Fill
+                        text: "Build something"
+                        padding: 0
+                        spacing: 0
+                        icon_walk: Walk{width: 0 height: 0}
+                        draw_bg +: {
+                            color: #x00000000
+                            color_hover: #x9370c810
+                            color_focus: #x9370c810
+                            color_down: #x9370c822
+                            border_color: #x00000000
+                            border_color_hover: #x00000000
+                            border_color_focus: #x00000000
+                            border_color_down: #x00000000
+                            border_size: 0.0
+                            border_radius: 10.0
+                        }
+                        draw_text +: {
+                            color: #x00000000
+                            color_hover: #x00000000
+                            color_focus: #x00000000
+                            color_down: #x00000000
+                        }
+                    }
+                }
+
+                review_card := RoundedView {
+                    width: 160
+                    height: 108
+                    flow: Overlay
+                    draw_bg +: {
+                        color: #x1d232c
+                        border_color: #x2a3441
+                        border_size: 1.0
+                        border_radius: 10.0
+                    }
+                    review_content := View {
+                        width: Fill
+                        height: Fill
+                        flow: Down
+                        spacing: 10
+                        padding: Inset{left: 14 top: 14 right: 14 bottom: 14}
+                        review_header := View {
+                            width: Fill
+                            height: 26
+                            flow: Right
+                            spacing: 9
+                            align: Align{y: 0.5}
+                            review_icon_wrap := RoundedView {
+                                width: 26
+                                height: 26
+                                align: Align{x: 0.5 y: 0.5}
+                                draw_bg +: {
+                                    color: #x3aaa7818
+                                    border_color: #x3aaa7835
+                                    border_size: 1.0
+                                    border_radius: 7.0
+                                }
+                                review_icon := Icon {
+                                    width: 14
+                                    height: 14
+                                    icon_walk: Walk{width: 14 height: 14}
+                                    draw_icon +: {
+                                        svg: crate_resource("self:resources/icons/edit-file.svg")
+                                        color: #x4bc98d
+                                    }
+                                }
+                            }
+                            review_lbl := Label {
+                                width: Fill
+                                height: Fit
+                                text: "Review code"
+                                draw_text +: {
+                                    color: #xe0e6ef
+                                    text_style: theme.font_bold { font_size: 11.0 }
+                                }
+                            }
+                        }
+                        review_desc_lbl := Label {
+                            width: Fill
+                            height: Fit
+                            text: "Find bugs and simplify changes"
+                            draw_text +: {
+                                color: #x8592a4
+                                text_style +: { font_size: 9.5 }
+                            }
+                        }
+                    }
+                    review_btn := Button {
+                        width: Fill
+                        height: Fill
+                        text: "Review code"
+                        padding: 0
+                        spacing: 0
+                        icon_walk: Walk{width: 0 height: 0}
+                        draw_bg +: {
+                            color: #x00000000
+                            color_hover: #x3aaa7810
+                            color_focus: #x3aaa7810
+                            color_down: #x3aaa7822
+                            border_color: #x00000000
+                            border_color_hover: #x00000000
+                            border_color_focus: #x00000000
+                            border_color_down: #x00000000
+                            border_size: 0.0
+                            border_radius: 10.0
+                        }
+                        draw_text +: {
+                            color: #x00000000
+                            color_hover: #x00000000
+                            color_focus: #x00000000
+                            color_down: #x00000000
+                        }
+                    }
+                }
+
+                fix_card := RoundedView {
+                    width: 160
+                    height: 108
+                    flow: Overlay
+                    draw_bg +: {
+                        color: #x1d232c
+                        border_color: #x2a3441
+                        border_size: 1.0
+                        border_radius: 10.0
+                    }
+                    fix_content := View {
+                        width: Fill
+                        height: Fill
+                        flow: Down
+                        spacing: 10
+                        padding: Inset{left: 14 top: 14 right: 14 bottom: 14}
+                        fix_header := View {
+                            width: Fill
+                            height: 26
+                            flow: Right
+                            spacing: 9
+                            align: Align{y: 0.5}
+                            fix_icon_wrap := RoundedView {
+                                width: 26
+                                height: 26
+                                align: Align{x: 0.5 y: 0.5}
+                                draw_bg +: {
+                                    color: #xc0703018
+                                    border_color: #xc0703035
+                                    border_size: 1.0
+                                    border_radius: 7.0
+                                }
+                                fix_icon := Icon {
+                                    width: 14
+                                    height: 14
+                                    icon_walk: Walk{width: 14 height: 14}
+                                    draw_icon +: {
+                                        svg: crate_resource("self:resources/icons/tool.svg")
+                                        color: #xe08a43
+                                    }
+                                }
+                            }
+                            fix_lbl := Label {
+                                width: Fill
+                                height: Fit
+                                text: "Fix an issue"
+                                draw_text +: {
+                                    color: #xe0e6ef
+                                    text_style: theme.font_bold { font_size: 11.0 }
+                                }
+                            }
+                        }
+                        fix_desc_lbl := Label {
+                            width: Fill
+                            height: Fit
+                            text: "Diagnose errors and failures"
+                            draw_text +: {
+                                color: #x8592a4
+                                text_style +: { font_size: 9.5 }
+                            }
+                        }
+                    }
+                    fix_btn := Button {
+                        width: Fill
+                        height: Fill
+                        text: "Fix an issue"
+                        padding: 0
+                        spacing: 0
+                        icon_walk: Walk{width: 0 height: 0}
+                        draw_bg +: {
+                            color: #x00000000
+                            color_hover: #xc0703010
+                            color_focus: #xc0703010
+                            color_down: #xc0703022
+                            border_color: #x00000000
+                            border_color_hover: #x00000000
+                            border_color_focus: #x00000000
+                            border_color_down: #x00000000
+                            border_size: 0.0
+                            border_radius: 10.0
+                        }
+                        draw_text +: {
+                            color: #x00000000
+                            color_hover: #x00000000
+                            color_focus: #x00000000
+                            color_down: #x00000000
+                        }
+                    }
+                }
+            }
+        }
 
         list := PortalList {
             width: Fill
@@ -138,51 +591,6 @@ script_mod! {
                         border_radius: 10.0
                         border_size: 1.0
                         border_color: #x2d3540
-                    }
-                }
-            }
-
-            EmptyChat := View {
-                width: Fill
-                height: Fit
-                margin: Inset{top: 80 bottom: 20 left: 36 right: 36}
-                flow: Down
-                spacing: 10
-                align: Align{x: 0.5}
-                title_lbl := Label {
-                    width: Fit
-                    height: Fit
-                    text: "What would you like to build?"
-                    draw_text +: {
-                        color: #xe7ebf0
-                        text_style: theme.font_bold { font_size: 18.0 }
-                    }
-                }
-                desc_lbl := Label {
-                    width: Fit
-                    height: Fit
-                    text: "Ask threadlane to inspect your project, explain code, edit files, or run tests."
-                    draw_text +: {
-                        color: #x9aa4b2
-                        text_style +: { font_size: 11.0 }
-                    }
-                }
-                examples_lbl := Label {
-                    width: Fit
-                    height: Fit
-                    text: "Try:  Review the authentication flow   ·   Find unused dependencies   ·   Run the test suite"
-                    draw_text +: {
-                        color: #x6f7a88
-                        text_style +: { font_size: 10.0 }
-                    }
-                }
-                hint_lbl := Label {
-                    width: Fit
-                    height: Fit
-                    text: "Type / for commands  ·  Enter to send  ·  Shift+Enter for a new line"
-                    draw_text +: {
-                        color: #x6fa8ff
-                        text_style +: { font_size: 10.0 }
                     }
                 }
             }
@@ -1214,6 +1622,8 @@ pub struct App {
     update_status: UpdateStatus,
     #[rust]
     update_rx: Option<Arc<Mutex<Receiver<UpdateStatus>>>>,
+    #[rust]
+    starter_prompt_focus_pending: bool,
 }
 
 impl ScriptHook for App {}
@@ -1743,12 +2153,52 @@ impl AppMain for App {
         if self.handle_clipboard_image_paste(cx, event) {
             return;
         }
+        if let Event::MouseDown(mouse_event) = event {
+            if mouse_event.button.is_primary() {
+                let action = self
+                    .ui
+                    .chat_list(cx, ids!(chat_list))
+                    .starter_prompt_at(cx, mouse_event.abs);
+                if let Some(action) = action {
+                    let prompt = match action {
+                        StarterPromptAction::Explore => "Explore and explain the codebase — walk me through the project structure, key files, and how things connect.",
+                        StarterPromptAction::Build => "Let’s build a new feature. Describe what you’d like and I’ll help design and implement it.",
+                        StarterPromptAction::Review => "Review my code and suggest improvements — look for bugs, style issues, and simplification opportunities.",
+                        StarterPromptAction::Fix => "Help me diagnose and fix an issue. Describe the problem or share an error message to get started.",
+                    };
+                    self.set_prompt_text(cx, prompt);
+                    self.ui
+                        .threadlane_command_text_input(cx, ids!(prompt_input))
+                        .text_input_ref(cx)
+                        .set_cursor(
+                            cx,
+                            Cursor {
+                                index: prompt.len(),
+                                prefer_next_row: false,
+                            },
+                            false,
+                        );
+                    self.starter_prompt_focus_pending = true;
+                    cx.redraw_all();
+                }
+            }
+        }
         self.match_event(cx, event);
         self.poll_agent_events(cx);
         self.poll_update_status(cx);
         {
             let mut scope = Scope::with_data(&mut self.workspace_state);
             self.ui.handle_event(cx, event, &mut scope);
+        }
+        if matches!(event, Event::MouseUp(mouse_event) if mouse_event.button.is_primary())
+            && self.starter_prompt_focus_pending
+        {
+            self.starter_prompt_focus_pending = false;
+            let composer = self
+                .ui
+                .threadlane_command_text_input(cx, ids!(prompt_input));
+            composer.request_text_input_focus();
+            composer.redraw(cx);
         }
         self.sync_sidebar_action_visibility(cx, event);
     }
@@ -2977,16 +3427,17 @@ impl App {
         let generation_id = self.next_generation_id;
 
         if show_in_chat {
-            let attachment_names = attachments.iter().enumerate().fold(
-                String::new(),
-                |mut acc, (i, attachment)| {
-                    if i > 0 {
-                        acc.push_str(", ");
-                    }
-                    acc.push_str(&attachment.display_name);
-                    acc
-                },
-            );
+            let attachment_names =
+                attachments
+                    .iter()
+                    .enumerate()
+                    .fold(String::new(), |mut acc, (i, attachment)| {
+                        if i > 0 {
+                            acc.push_str(", ");
+                        }
+                        acc.push_str(&attachment.display_name);
+                        acc
+                    });
             let visible_input = if attachment_names.is_empty() {
                 input_str.clone()
             } else if input_str.is_empty() {

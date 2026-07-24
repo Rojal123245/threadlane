@@ -1,6 +1,7 @@
 //! Chat panel main view & transcript list widget.
 
 use super::state::{ChatMessage, MsgRole, StreamingKind, ToolIcon, ToolStatus};
+use crate::path_utils::{compact_workspace_path, truncate_chars};
 use crate::workspace::AppState;
 use makepad_widgets::*;
 
@@ -274,10 +275,24 @@ fn activity_line(
     line
 }
 
-fn draw_markdown_item(list: &mut PortalList, cx: &mut Cx2d, item_id: usize, template: LiveId, text: &str) {
+fn draw_markdown_item(
+    list: &mut PortalList,
+    cx: &mut Cx2d,
+    item_id: usize,
+    template: LiveId,
+    text: &str,
+) {
     let item_widget = list.item(cx, item_id, template);
     item_widget.markdown(cx, ids!(md)).set_text(cx, text);
     item_widget.draw_all_unscoped(cx);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StarterPromptAction {
+    Explore,
+    Build,
+    Review,
+    Fix,
 }
 
 #[derive(Script, ScriptHook, Widget)]
@@ -293,6 +308,10 @@ pub struct ChatList {
     cached_streaming_kind: Option<StreamingKind>,
     #[rust]
     cached_streaming_text_len: usize,
+    #[rust]
+    hovered_starter: Option<StarterPromptAction>,
+    #[rust]
+    pressed_starter: Option<StarterPromptAction>,
 }
 
 impl Widget for ChatList {
@@ -321,6 +340,35 @@ impl Widget for ChatList {
         }
         let rows = &self.cached_rows;
 
+        let is_empty = data.messages.is_empty() && data.streaming_text.is_empty();
+
+        // Toggle the empty-state overlay — it lives as a sibling to the PortalList
+        // so it can use height: Fill and truly center its content.
+        let empty_state = self.view.widget(cx, ids!(empty_state));
+        if is_empty {
+            if let Some(key) = scope.data.get::<AppState>().and_then(|s| s.active_key()) {
+                let name = key
+                    .work_dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| key.work_dir.display().to_string());
+                let name = truncate_chars(&name, 40);
+                empty_state
+                    .label(cx, ids!(project_name_inline_lbl))
+                    .set_text(cx, &name);
+                let home_dir = std::env::var_os("HOME").map(std::path::PathBuf::from);
+                let path = compact_workspace_path(&key.work_dir, home_dir.as_deref());
+                empty_state
+                    .label(cx, ids!(workspace_path_lbl))
+                    .set_text(cx, &path);
+            }
+        }
+        empty_state.set_visible(cx, is_empty);
+        // The PortalList is the later sibling in this overlay and otherwise sits above the
+        // welcome cards, intercepting their pointer events even when it has no rows.
+        self.view.widget(cx, ids!(list)).set_visible(cx, !is_empty);
+
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
                 list.set_item_range(cx, 0, rows.len());
@@ -332,7 +380,13 @@ impl Widget for ChatList {
 
                     match row {
                         DisplayRow::StreamingAssistant => {
-                            draw_markdown_item(&mut list, cx, item_id, id!(AssistantMsg), &data.streaming_text);
+                            draw_markdown_item(
+                                &mut list,
+                                cx,
+                                item_id,
+                                id!(AssistantMsg),
+                                &data.streaming_text,
+                            );
                         }
                         DisplayRow::ActivityGroup {
                             start,
@@ -413,10 +467,22 @@ impl Widget for ChatList {
                             match message {
                                 ChatMessage::Text { role, text } => match role {
                                     MsgRole::User => {
-                                        draw_markdown_item(&mut list, cx, item_id, id!(UserMsg), text);
+                                        draw_markdown_item(
+                                            &mut list,
+                                            cx,
+                                            item_id,
+                                            id!(UserMsg),
+                                            text,
+                                        );
                                     }
                                     MsgRole::Assistant => {
-                                        draw_markdown_item(&mut list, cx, item_id, id!(AssistantMsg), text);
+                                        draw_markdown_item(
+                                            &mut list,
+                                            cx,
+                                            item_id,
+                                            id!(AssistantMsg),
+                                            text,
+                                        );
                                     }
                                     MsgRole::System => {
                                         let item_widget = list.item(cx, item_id, id!(SystemMsg));
@@ -531,7 +597,121 @@ impl Widget for ChatList {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        match event {
+            Event::MouseMove(mouse_event) => {
+                let hovered = self.starter_prompt_at(cx, mouse_event.abs);
+                self.set_starter_feedback(cx, hovered, self.pressed_starter);
+            }
+            Event::MouseDown(mouse_event) if mouse_event.button.is_primary() => {
+                let pressed = self.starter_prompt_at(cx, mouse_event.abs);
+                self.set_starter_feedback(cx, pressed, pressed);
+            }
+            Event::MouseUp(mouse_event) if mouse_event.button.is_primary() => {
+                let hovered = self.starter_prompt_at(cx, mouse_event.abs);
+                self.set_starter_feedback(cx, hovered, None);
+            }
+            Event::MouseLeave(_) => self.set_starter_feedback(cx, None, None),
+            _ => {}
+        }
         self.view.handle_event(cx, event, scope);
+    }
+}
+
+impl ChatList {
+    fn set_starter_feedback(
+        &mut self,
+        cx: &mut Cx,
+        hovered: Option<StarterPromptAction>,
+        pressed: Option<StarterPromptAction>,
+    ) {
+        if self.hovered_starter == hovered && self.pressed_starter == pressed {
+            return;
+        }
+        self.hovered_starter = hovered;
+        self.pressed_starter = pressed;
+
+        for (path, action) in [
+            (
+                ids!(empty_state.cards_row.explore_card),
+                StarterPromptAction::Explore,
+            ),
+            (
+                ids!(empty_state.cards_row.build_card),
+                StarterPromptAction::Build,
+            ),
+            (
+                ids!(empty_state.cards_row.review_card),
+                StarterPromptAction::Review,
+            ),
+            (
+                ids!(empty_state.cards_row.fix_card),
+                StarterPromptAction::Fix,
+            ),
+        ] {
+            let (color, border_color) = if pressed == Some(action) {
+                (
+                    vec4(0.145, 0.188, 0.247, 1.0),
+                    vec4(0.337, 0.463, 0.624, 1.0),
+                )
+            } else if hovered == Some(action) {
+                (
+                    vec4(0.129, 0.165, 0.212, 1.0),
+                    vec4(0.247, 0.322, 0.412, 1.0),
+                )
+            } else {
+                (
+                    vec4(0.114, 0.137, 0.173, 1.0),
+                    vec4(0.165, 0.204, 0.255, 1.0),
+                )
+            };
+            let mut card = self.view.widget(cx, path);
+            script_apply_eval!(cx, card, {
+                draw_bg +: {
+                    color: #(color)
+                    border_color: #(border_color)
+                }
+            });
+            card.redraw(cx);
+        }
+    }
+
+    fn starter_prompt_at(&self, cx: &Cx, position: Vec2d) -> Option<StarterPromptAction> {
+        if !self.view.widget(cx, ids!(empty_state)).visible() {
+            return None;
+        }
+        let cards = [
+            (
+                ids!(empty_state.cards_row.explore_card),
+                StarterPromptAction::Explore,
+            ),
+            (
+                ids!(empty_state.cards_row.build_card),
+                StarterPromptAction::Build,
+            ),
+            (
+                ids!(empty_state.cards_row.review_card),
+                StarterPromptAction::Review,
+            ),
+            (
+                ids!(empty_state.cards_row.fix_card),
+                StarterPromptAction::Fix,
+            ),
+        ];
+        cards.into_iter().find_map(|(path, action)| {
+            self.view
+                .widget(cx, path)
+                .area()
+                .rect(cx)
+                .contains(position)
+                .then_some(action)
+        })
+    }
+}
+
+impl ChatListRef {
+    pub fn starter_prompt_at(&self, cx: &Cx, position: Vec2d) -> Option<StarterPromptAction> {
+        self.borrow()
+            .and_then(|inner| inner.starter_prompt_at(cx, position))
     }
 }
 

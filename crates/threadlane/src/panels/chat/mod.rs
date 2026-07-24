@@ -14,4 +14,4 @@ pub use composer::{
 pub use state::{
     truncate_chars, ChatData, ChatMessage, MsgRole, StreamingKind, ToolPresentation, ToolStatus,
 };
-pub use view::ChatList;
+pub use view::{ChatList, ChatListWidgetRefExt, StarterPromptAction};
