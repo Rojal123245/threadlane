@@ -4,6 +4,10 @@ use makepad_widgets::widget::WidgetActionData;
 use makepad_widgets::*;
 use std::{cell::RefCell, rc::Rc};
 
+fn is_antigravity_model(model: &str) -> bool {
+    model.starts_with("antigravity/")
+}
+
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
@@ -18,9 +22,12 @@ script_mod! {
         align: Align{y: 0.5}
         padding: Inset{left: 10 right: 10}
         icon_walk: Walk{width: 13 height: 13 margin: Inset{right: 7}}
-        draw_icon +: {
+        draw_openai_icon +: {
             svg: crate_resource("self:resources/icons/openai.svg")
             color: #xc9d0da
+        }
+        draw_antigravity_icon +: {
+            svg: crate_resource("self:resources/icons/google.svg")
         }
         draw_text +: {
             color: #xc9d0da
@@ -86,7 +93,7 @@ script_mod! {
     // The selected model is kept last by the app. Its transparent 24px row
     // anchors OnSelected above the trigger, leaving the closed picker visible.
     mod.components.ModelPopupMenu = mod.components.ModelPopupMenuBase {
-        width: 166
+        width: 226
         height: Fit
         flow: Down
         padding: Inset{left: 4 top: 4 right: 4 bottom: 0}
@@ -128,9 +135,12 @@ script_mod! {
         align: Align{x: 0.0 y: 0.5}
         padding: Inset{left: 10 right: 24}
         icon_walk: Walk{width: 13 height: 13 margin: Inset{right: 7}}
-        draw_icon +: {
+        draw_openai_icon +: {
             svg: crate_resource("self:resources/icons/openai.svg")
             color: #xc7cdd6
+        }
+        draw_antigravity_icon +: {
+            svg: crate_resource("self:resources/icons/google.svg")
         }
         draw_bg +: {
             hover: instance(0.0)
@@ -278,7 +288,9 @@ struct ModelPopupMenuItem {
     #[live]
     draw_bg: DrawQuad,
     #[live]
-    draw_icon: DrawSvg,
+    draw_openai_icon: DrawSvg,
+    #[live]
+    draw_antigravity_icon: DrawSvg,
     #[live]
     draw_text: DrawText,
     #[live]
@@ -303,7 +315,11 @@ impl ModelPopupMenuItem {
         );
         self.draw_bg.begin(cx, self.walk, self.layout);
         if !is_anchor {
-            self.draw_icon.draw_walk(cx, self.icon_walk);
+            if is_antigravity_model(label) {
+                self.draw_antigravity_icon.draw_walk(cx, self.icon_walk);
+            } else {
+                self.draw_openai_icon.draw_walk(cx, self.icon_walk);
+            }
             self.draw_text
                 .draw_walk(cx, Walk::fit(), Align::default(), label);
         }
@@ -489,7 +505,9 @@ pub struct ModelDropDown {
     #[live]
     draw_bg: DrawQuad,
     #[live]
-    draw_icon: DrawSvg,
+    draw_openai_icon: DrawSvg,
+    #[live]
+    draw_antigravity_icon: DrawSvg,
     #[live]
     draw_text: DrawText,
     #[live]
@@ -557,12 +575,16 @@ impl ModelDropDown {
 
     fn draw_drop_down(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_bg.begin(cx, walk, self.layout);
-        self.draw_icon.draw_walk(cx, self.icon_walk);
         let label = self
             .labels
             .get(self.selected_item)
             .map(String::as_str)
             .unwrap_or(" ");
+        if is_antigravity_model(label) {
+            self.draw_antigravity_icon.draw_walk(cx, self.icon_walk);
+        } else {
+            self.draw_openai_icon.draw_walk(cx, self.icon_walk);
+        }
         self.draw_text
             .draw_walk(cx, Walk::fit(), Align::default(), label);
         self.draw_bg.end(cx);

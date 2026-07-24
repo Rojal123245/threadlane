@@ -8,12 +8,6 @@ use crate::skills::{LoadSkillToolExecutor, SkillManager, SkillRegistry};
 use crate::system_prompt::{build_system_prompt, SystemPromptBuildOptions, SystemPromptConfig};
 use crate::wasi_extension::{WasiExtensionManager, WasiLegacyEffect};
 use async_trait::async_trait;
-use threadlane_agent::{
-    repair_interrupted_tool_turn, AfterToolCallHook, AfterToolCallResult, Agent, AgentEvent,
-    AgentMessage, AgentState, AgentToolCall, AgentToolDefinition, AgentToolResult,
-    BeforeToolCallHook, BeforeToolCallResult, ImageAttachment, ReasoningEffort, SessionTree,
-    ToolExecutor,
-};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fs;
@@ -23,6 +17,12 @@ use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use threadlane_agent::{
+    repair_interrupted_tool_turn, AfterToolCallHook, AfterToolCallResult, Agent, AgentEvent,
+    AgentMessage, AgentState, AgentToolCall, AgentToolDefinition, AgentToolResult,
+    BeforeToolCallHook, BeforeToolCallResult, ImageAttachment, ReasoningEffort, SessionTree,
+    ToolExecutor,
+};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::broadcast;
 use tokio::time::{timeout, Duration};
@@ -1804,6 +1804,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn model_switch_preserves_antigravity_provider_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut coding_agent = CodingAgent::new(coding_agent_options(dir.path().to_path_buf()));
+
+        let output = coding_agent
+            .handle_input("/model antigravity/gemini-3.6-flash")
+            .await;
+
+        assert_eq!(
+            output.as_deref(),
+            Some("Switched model to: antigravity/gemini-3.6-flash")
+        );
+        let (chat, codex) = coding_agent.agent.loop_engine.build_api_payloads().await;
+        assert_eq!(chat["model"], "antigravity/gemini-3.6-flash");
+        assert_eq!(codex["model"], "antigravity/gemini-3.6-flash");
+    }
+
+    #[tokio::test]
     async fn switching_sessions_updates_prompt_cache_identity() {
         let dir = tempfile::tempdir().unwrap();
         let mut coding_agent = CodingAgent::new(coding_agent_options(dir.path().to_path_buf()));
@@ -2054,6 +2072,7 @@ mod tests {
                 name: name.into(),
                 arguments: arguments.to_string(),
             },
+            thought_signature: None,
         }
     }
 

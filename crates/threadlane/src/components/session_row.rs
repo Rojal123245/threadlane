@@ -9,14 +9,16 @@ script_mod! {
         width: Fill
         height: 18
         flow: Right
+        align: Align{y: 0.5}
         clip_x: true
         clip_y: false
         padding: 0
         title_lbl := Label {
             width: Fit
-            height: 18
+            height: 16
+            padding: 0
             text: ""
-            draw_text +: { color: #xaab3c0 text_style +: { font_size: 9.5 } }
+            draw_text +: { color: #xaab3c0 text_style +: { font_size: 10.0 } }
         }
     }
 
@@ -25,7 +27,7 @@ script_mod! {
         height: 32
         cursor: MouseCursor.Hand
         flow: Right
-        spacing: 8
+        spacing: 12
         align: Align{y: 0.5}
         margin: Inset{left: 10 right: 4 top: 1 bottom: 1}
         padding: Inset{left: 20 top: 4 right: 9 bottom: 4}
@@ -98,9 +100,7 @@ script_mod! {
             }
         }
         session_icon := Icon {
-            width: 14
-            height: 14
-            icon_walk: Walk{width: 14 height: 14}
+            icon_walk: Walk{width: 11 height: 11}
             draw_icon +: {
                 svg: crate_resource("self:resources/icons/conversation.svg")
                 color: #x667386
@@ -169,7 +169,7 @@ script_mod! {
         folder_icon := Icon {
             width: 16
             height: 16
-            icon_walk: Walk{width: 16 height: 16}
+            icon_walk: Walk{width: 14 height: 14}
             draw_icon +: {
                 svg: crate_resource("self:resources/icons/folder.svg")
                 color: #x8291a5

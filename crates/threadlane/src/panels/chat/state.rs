@@ -799,6 +799,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tool_call_boundary_separates_preamble_from_final_assistant_text() {
+        let mut data = ChatData::default();
+
+        data.push_stream_delta(
+            StreamingKind::Assistant,
+            "Using startup guidance to check for applicable skills. ",
+        );
+        data.flush_tool_call_preamble();
+        data.push_stream_delta(StreamingKind::Assistant, "Hey there! How can I help?");
+        data.flush_streaming();
+
+        assert!(matches!(
+            &data.messages[0],
+            ChatMessage::Thinking { text }
+                if text == "Using startup guidance to check for applicable skills. "
+        ));
+        assert!(matches!(
+            &data.messages[1],
+            ChatMessage::Text {
+                role: MsgRole::Assistant,
+                text
+            } if text == "Hey there! How can I help?"
+        ));
+    }
+
+    #[test]
     fn identical_consecutive_thinking_is_not_duplicated() {
         let mut data = ChatData::default();
 

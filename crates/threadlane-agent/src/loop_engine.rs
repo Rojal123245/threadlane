@@ -12,14 +12,15 @@ use crate::types::{
     AgentMessage, AgentState, AgentToolCall, AgentToolDefinition, AgentToolResult, QueueMode,
     TokenUsage, ToolExecutionMode,
 };
-use threadlane_provider::openai::{
-    clamp_prompt_cache_key, OpenAIClient, ProviderUsage, StreamEvent, ToolCall,
-};
-use threadlane_tools::{execute_tool, execute_tool_in_workspace, get_available_tools, get_codex_tools};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use threadlane_provider::openai::{clamp_prompt_cache_key, ProviderUsage, StreamEvent, ToolCall};
+use threadlane_provider::router::ProviderClient;
+use threadlane_tools::{
+    execute_tool, execute_tool_in_workspace, get_available_tools, get_codex_tools,
+};
 use tokio::sync::{broadcast, mpsc, Mutex};
 
 /// Removes an assistant tool-call turn that was interrupted before every call
@@ -275,7 +276,7 @@ pub struct AgentLoop {
     pub state: Arc<Mutex<AgentState>>,
     pub api_key: String,
     pub account_id: Option<String>,
-    provider_client: OpenAIClient,
+    provider_client: ProviderClient,
     pub prompt_cache_key: Option<String>,
     pub tool_execution_mode: ToolExecutionMode,
     allowed_tool_names: Option<HashSet<String>>,
@@ -305,7 +306,7 @@ impl AgentLoop {
             "You are threadlane AI coding agent.",
         )));
         let api_key = api_key.into();
-        let provider_client = OpenAIClient::new(api_key.clone(), account_id.clone());
+        let provider_client = ProviderClient::new(api_key.clone(), account_id.clone());
 
         Self {
             state,

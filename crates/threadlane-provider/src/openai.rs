@@ -47,6 +47,12 @@ pub struct ToolCall {
     pub id: String,
     pub r#type: String,
     pub function: ToolCallFunction,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "thoughtSignature"
+    )]
+    pub thought_signature: Option<String>,
 }
 
 pub const OPENAI_PROMPT_CACHE_KEY_MAX_CHARS: usize = 64;
@@ -419,11 +425,13 @@ impl ResponseAccumulator {
                     return ParsedEvent::ReceiverClosed;
                 }
             }
-        } else if let Some(delta) = value.get("delta") {
-            let token = delta
-                .as_str()
-                .or_else(|| delta.get("text").and_then(Value::as_str))
-                .or_else(|| delta.get("content").and_then(Value::as_str));
+        } else if !event_type.starts_with("response.") {
+            let token = value.get("delta").and_then(|delta| {
+                delta
+                    .as_str()
+                    .or_else(|| delta.get("text").and_then(Value::as_str))
+                    .or_else(|| delta.get("content").and_then(Value::as_str))
+            });
             if let Some(token) = token.filter(|token| !token.is_empty()) {
                 self.assistant_text.push_str(token);
                 if !self
@@ -435,7 +443,7 @@ impl ResponseAccumulator {
             }
         }
 
-        if !is_responses_text_delta(event_type) {
+        if !event_type.starts_with("response.") {
             if let Some(text) = value
                 .get("text")
                 .and_then(Value::as_str)
@@ -549,6 +557,7 @@ impl ResponseAccumulator {
                     name: name.clone(),
                     arguments: arguments.clone(),
                 },
+                thought_signature: None,
             })
             .collect()
     }
@@ -1153,11 +1162,12 @@ mod tests {
     use super::{
         api_error_details, clamp_prompt_cache_key, continuation_payload, parse_chat_usage,
         parse_responses_text_delta, parse_responses_usage, title_payload, title_response_text,
-        title_stream_text, CodexWsState, Continuation, OpenAIClient, ProviderUsage, StreamEvent,
-        OPENAI_PROMPT_CACHE_KEY_MAX_CHARS,
+        title_stream_text, CodexWsState, Continuation, OpenAIClient, ProviderUsage,
+        ResponseAccumulator, StreamEvent, OPENAI_PROMPT_CACHE_KEY_MAX_CHARS,
     };
     use serde_json::json;
     use std::time::{Duration, Instant};
+    use tokio::sync::mpsc;
 
     fn continuation() -> Continuation {
         Continuation {
@@ -1413,6 +1423,41 @@ mod tests {
             "type":"response.output_text.delta","delta":"answer"
         }));
         assert!(matches!(event, Some(StreamEvent::ContentToken(text)) if text == "answer"));
+    }
+
+    #[tokio::test]
+    async fn responses_done_snapshots_do_not_repeat_or_leak_text() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut accumulator = ResponseAccumulator::default();
+
+        accumulator
+            .process(
+                &json!({"type":"response.output_text.delta","delta":"answer"}),
+                &tx,
+            )
+            .await;
+        accumulator
+            .process(
+                &json!({"type":"response.output_text.done","text":"answer"}),
+                &tx,
+            )
+            .await;
+        accumulator
+            .process(
+                &json!({
+                    "type":"response.reasoning_summary_text.done",
+                    "text":"internal reasoning"
+                }),
+                &tx,
+            )
+            .await;
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(StreamEvent::ContentToken(text)) if text == "answer"
+        ));
+        assert!(rx.try_recv().is_err());
+        assert_eq!(accumulator.assistant_text, "answer");
     }
 
     #[test]

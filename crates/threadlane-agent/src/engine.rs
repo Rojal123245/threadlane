@@ -1,7 +1,8 @@
 use crate::session::Session;
-use threadlane_provider::openai::{OpenAIClient, StreamEvent};
-use threadlane_tools::{execute_tool, get_available_tools, get_codex_tools};
 use std::sync::{Arc, OnceLock};
+use threadlane_provider::openai::StreamEvent;
+use threadlane_provider::router::ProviderClient;
+use threadlane_tools::{execute_tool, get_available_tools, get_codex_tools};
 use tokio::runtime::Runtime;
 use tokio::sync::{mpsc, Mutex};
 
@@ -30,14 +31,14 @@ pub enum AgentUIEvent {
 
 pub struct AgentEngine {
     pub session: Arc<Mutex<Session>>,
-    client: OpenAIClient,
+    client: ProviderClient,
 }
 
 impl AgentEngine {
     pub fn new(api_key: String, account_id: Option<String>, model: &str) -> Self {
         Self {
             session: Arc::new(Mutex::new(Session::new(model))),
-            client: OpenAIClient::new(api_key, account_id),
+            client: ProviderClient::new(api_key, account_id),
         }
     }
 

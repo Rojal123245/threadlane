@@ -105,6 +105,7 @@ Reusable script components are registered through `crates/threadlane/src/compone
 - Explicitly set `width`, `height`, `flow`, `spacing`, `padding`, and alignment when they affect interaction geometry.
 - Use one source of truth for visual and interactive bounds. Do not draw a hover rectangle from hard-coded coordinates while text/click handling lives in another widget.
 - Fixed-height rows should vertically center their content with `align: Align{y: 0.5}`.
+- A fixed-height Makepad `Label` needs its own vertical `align`; parent alignment positions the label widget but does not center glyphs inside the label's draw walk. Start with `Align{y: 0.5}`, clear inherited padding with `padding: 0`, and adjust the label's `align.y` only when the font's ascender/baseline metrics remain optically off-center.
 - Makepad `DropDownFlat` defaults to top-left alignment. Closed composer dropdowns must explicitly preserve left alignment and set vertical centering:
 
 ```text
@@ -162,6 +163,7 @@ Drawing in an overlay does not automatically stop widgets underneath from receiv
 - Consecutive thinking and tool messages are grouped into one collapsible `Working`/`Worked` display row by `panels/chat/view.rs`.
 - Grouping is presentation-only: preserve the underlying `ChatMessage` entries so tool output and persisted session history remain intact.
 - Streaming thinking merges into the trailing activity group; streaming assistant text remains a normal assistant message.
+- Treat `AgentEvent::MessageUpdate.tool_call_name` as the semantic boundary for an assistant tool-call preamble. Flush buffered assistant text into the activity group at that event rather than waiting to infer it from `MessageEnd`.
 - Keep summary categories concise and action-oriented (`Explored`, `Edited`, `Ran`, `Loaded`, `Delegated`) and bound expanded output rather than restoring every raw payload to the top-level transcript.
 - The chat `PortalList` range is based on display rows, not raw message count. If changing grouping, preserve stable ordering, auto-tail behavior, and non-reused fold widget state.
 
@@ -172,10 +174,12 @@ The pinned Makepad `PopupMenuPosition` currently supports only `OnSelected` and 
 Threadlane’s composer dropdown implementation relies on these invariants:
 
 - The selected model or reasoning effort is reordered to the final label position.
+- Keep the canonical model list separate from that temporary display order. Repeated selections must not write the selected-last anchor order back into provider ordering; OpenAI and Antigravity entries remain grouped.
 - The final selected popup row is a transparent anchor.
 - The visible popup surface ends above that anchor, leaving the closed picker visible.
 - `EffortDropDown` and `ModelDropDown` use popup widths matching their trigger widths.
 - The stock Makepad `PopupMenuItem` is text-only. `components/model_dropdown.rs` owns the custom model trigger and popup rows so provider SVGs render in both places without changing model label values.
+- The model list is the union of dynamically fetched OpenAI models and models for other authenticated providers. OpenAI refresh events must preserve connected-provider entries, and successful provider login should update the picker immediately.
 
 If changing ordering, row height, popup padding, or selected-item behavior, update the transparent-anchor geometry in `components/dropdown.rs` and `components/model_dropdown.rs` as applicable.
 
@@ -202,6 +206,16 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 - Archive and delete actions should flow through `SessionContextMenuAction` and the app’s existing action handler.
 - Keep popup row geometry, popup height constants, padding, and hit behavior synchronized.
 - Do not allow a context-menu interaction to activate or hover an underlying session row.
+
+## Model Provider Routing
+
+- Provider selection is encoded in the persisted model ID. Models prefixed with `antigravity/` route through `threadlane-provider::router::ProviderClient`; unprefixed models retain the OpenAI path. Preserve the prefix across model switching, sessions, subagents, and payload construction.
+- Keep the central agent loop provider-neutral. Provider clients must translate requests and stream results into the shared `StreamEvent`, `ToolCall`, and `ProviderUsage` contract so tool execution, hooks, compaction, persistence, and chat rendering are not duplicated.
+- OpenAI Responses events distinguish streaming `*.delta` events from final `*.done` snapshots. Emit only explicit text/reasoning deltas; never pass `response.*.done` fields through generic text fallbacks, or final output is duplicated and reasoning snapshots can leak into assistant content.
+- Antigravity uses Google Cloud Code Assist's `v1internal` endpoints and outer request envelope, not the public Gemini `streamGenerateContent` endpoint. Preserve project discovery, production/daily endpoint fallback, runtime-model mapping, wrapped SSE parsing, and provider-specific tool schemas when changing that client.
+- Gemini tool calls can include a required `thoughtSignature`. Preserve it on the shared persisted `ToolCall` and replay it on the assistant `functionCall` part; dropping it causes the next tool-result request to fail with HTTP 400.
+- Credential checks follow the selected model. Antigravity models require stored Antigravity OAuth credentials but must not require an OpenAI key; OpenAI models retain the existing OpenAI credential requirement.
+- Automatic session titles currently use the OpenAI title endpoint. Skip that side path for Antigravity sessions rather than consuming an OpenAI credential or permanently marking a failed Antigravity title attempt.
 
 ## Updater Behavior
 

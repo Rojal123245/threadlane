@@ -39,6 +39,70 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
+const ANTIGRAVITY_MODELS: &[&str] = &[
+    "antigravity/gemini-3.6-flash",
+    "antigravity/gemini-3.5-flash",
+    "antigravity/gemini-3.1-pro",
+    "antigravity/claude-sonnet-4-6",
+    "antigravity/claude-opus-4-6",
+    "antigravity/gpt-oss-120b",
+];
+
+fn append_antigravity_models(models: &mut Vec<String>) {
+    for model in ANTIGRAVITY_MODELS {
+        if !models.iter().any(|existing| existing == model) {
+            models.push((*model).to_string());
+        }
+    }
+}
+
+fn include_connected_provider_models(mut models: Vec<String>) -> Vec<String> {
+    if threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some() {
+        append_antigravity_models(&mut models);
+    }
+    models
+}
+
+fn ordered_model_options(
+    models: Vec<String>,
+    selected_model: &str,
+) -> Option<(Vec<String>, Vec<String>)> {
+    let mut canonical = Vec::new();
+    for model in models {
+        if !model.is_empty() && !canonical.contains(&model) {
+            canonical.push(model);
+        }
+    }
+    canonical.sort_by_key(|model| threadlane_provider::router::is_antigravity_model(model));
+    if canonical.is_empty() {
+        return None;
+    }
+
+    let selected_model = if canonical.iter().any(|model| model == selected_model) {
+        selected_model.to_string()
+    } else {
+        canonical[0].clone()
+    };
+    let mut display = canonical.clone();
+    display.retain(|model| model != &selected_model);
+    display.push(selected_model);
+    Some((canonical, display))
+}
+
+fn model_credential_error(
+    model: &str,
+    has_openai_credentials: bool,
+    has_antigravity_credentials: bool,
+) -> Option<&'static str> {
+    if threadlane_provider::router::is_antigravity_model(model) {
+        (!has_antigravity_credentials)
+            .then_some("Sign in with Google Antigravity before using this model.")
+    } else {
+        (!has_openai_credentials)
+            .then_some("Please provide an OpenAI API key or click 'Login ChatGPT' to authenticate.")
+    }
+}
+
 fn user_home_dir() -> Option<PathBuf> {
     directories::UserDirs::new()
         .map(|u| u.home_dir().to_path_buf())
@@ -610,6 +674,27 @@ script_mod! {
                                         text_style: theme.font_bold { font_size: 14.0 }
                                     }
                                 }
+                                settings_btn := Button {
+                                    width: 26
+                                    height: 26
+                                    padding: 0
+                                    spacing: 0
+                                    text: ""
+                                    align: Align{x: 0.5 y: 0.5}
+                                    icon_walk: Walk{width: 14 height: 14}
+                                    draw_bg +: {
+                                        color: #x00000000
+                                        color_hover: #x252a32
+                                        color_down: #x323844
+                                        border_radius: 6.0
+                                    }
+                                    draw_icon +: {
+                                        svg: crate_resource("self:resources/icons/settings.svg")
+                                        color: #x9ba7b6
+                                        color_hover: #xe7ebf0
+                                        color_down: #xffffff
+                                    }
+                                }
                             }
 
                             projects_header := mod.components.SectionHeader {
@@ -656,40 +741,52 @@ script_mod! {
                             width: Fill
                             height: Fill
                             flow: Down
-                            spacing: 7
+                            spacing: 5
                             padding: Inset{left: 10 top: 8 right: 12 bottom: 10}
 
                         header := PanelHeader {
-                            spacing: 7
+                            spacing: 8
                             padding: Inset{left: 4 top: 1 right: 2 bottom: 2}
 
-                            project_icon := Icon {
-                                width: 18
-                                height: 18
-                                icon_walk: Walk{width: 16 height: 16}
-                                draw_icon +: {
-                                    svg: crate_resource("self:resources/icons/folder.svg")
-                                    color: #x8fb9e8
-                                }
-                            }
                             project_identity := View {
                                 width: Fill
                                 height: Fit
                                 flow: Down
-                                spacing: 1
+                                spacing: 0
                                 clip_x: true
 
-                                project_name_label := mod.components.ClippedLabel {
-                                    height: 17
-                                    draw_text +: {
-                                        color: #xf0f4fa
-                                        text_style: theme.font_bold { font_size: 14.0 }
+                                project_title_row := View {
+                                    width: Fill
+                                    height: 18
+                                    flow: Right
+                                    spacing: 7
+                                    align: Align{y: 0.5}
+
+                                    project_icon := Icon {
+                                        width: 14
+                                        height: 14
+                                        icon_walk: Walk{width: 12 height: 12}
+                                        draw_icon +: {
+                                            svg: crate_resource("self:resources/icons/folder.svg")
+                                            color: #x8fb9e8
+                                        }
+                                    }
+                                    project_name_label := mod.components.ClippedLabel {
+                                        height: 18
+                                        padding: 0
+                                        align: Align{y: 0.6}
+                                        draw_text +: {
+                                            color: #xf0f4fa
+                                            text_style: theme.font_bold { font_size: 12.0 }
+                                        }
                                     }
                                 }
                                 workspace_label := mod.components.ClippedLabel {
-                                    height: 13
+                                    height: 14
+                                    padding: 0
+                                    align: Align{y: 0.5}
                                     draw_text +: {
-                                        color: #x7f8b9a
+                                        color: #x737f8e
                                         text_style +: { font_size: 9.0 }
                                     }
                                 }
@@ -803,11 +900,11 @@ script_mod! {
                                     visible: false
                                     align: Align{x: 0.0 y: 0.5}
                                     chat_working_spinner := ActivityLoader {
-                                        width: 22
-                                        height: 11
+                                        width: 28
+                                        height: 16
                                         draw_bg +: {
-                                            dot_radius: 1.25
-                                            speed: 3.0
+                                            dot_radius: 1.15
+                                            speed: 8.0
                                         }
                                     }
                                 }
@@ -978,7 +1075,7 @@ script_mod! {
                                     }
 
                                     model_picker := View {
-                                        width: 166
+                                        width: 226
                                         height: 28
                                         visible: false
                                         flow: Down
@@ -988,8 +1085,11 @@ script_mod! {
                                         model_drop := ModelDropDown {
                                             labels: [
                                                 "antigravity/gemini-3.6-flash",
-                                                "antigravity/gemini-3.6-pro",
-                                                "antigravity/claude-3-5-sonnet",
+                                                "antigravity/gemini-3.5-flash",
+                                                "antigravity/gemini-3.1-pro",
+                                                "antigravity/claude-sonnet-4-6",
+                                                "antigravity/claude-opus-4-6",
+                                                "antigravity/gpt-oss-120b",
                                                 "gpt-5.4",
                                                 "gpt-5.4-mini",
                                                 "gpt-5.5",
@@ -1023,6 +1123,257 @@ script_mod! {
                             }
 
 
+                        }
+
+                        providers_modal := View {
+                            width: Fill
+                            height: Fill
+                            visible: false
+                            flow: Overlay
+                            align: Align{x: 0.5 y: 0.5}
+
+                            modal_backdrop := View {
+                                width: Fill
+                                height: Fill
+                                draw_bg +: {
+                                    color: #x000000bb
+                                }
+                            }
+
+                            modal_card := RoundedView {
+                                width: 460
+                                height: Fit
+                                flow: Down
+                                padding: Inset{left: 22 top: 20 right: 22 bottom: 22}
+                                spacing: 14
+                                draw_bg +: {
+                                    color: #x1a1d24
+                                    border_radius: 12.0
+                                    border_size: 1.0
+                                    border_color: #x323a48
+                                }
+
+                                modal_header := View {
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    align: Align{y: 0.5}
+
+                                    modal_title := Label {
+                                        width: Fill
+                                        height: Fit
+                                        text: "Provider Settings"
+                                        draw_text +: {
+                                            color: #xe7ebf0
+                                            text_style: theme.font_bold { font_size: 14.0 }
+                                        }
+                                    }
+
+                                    close_modal_btn := Button {
+                                        width: 26
+                                        height: 26
+                                        padding: 0
+                                        spacing: 0
+                                        text: "✕"
+                                        align: Align{x: 0.5 y: 0.5}
+                                        draw_bg +: {
+                                            color: #x00000000
+                                            color_hover: #x2e3543
+                                            color_down: #x3e485a
+                                            border_radius: 6.0
+                                        }
+                                        draw_text +: {
+                                            color: #x8b93a0
+                                            color_hover: #xffffff
+                                            text_style +: { font_size: 12.0 }
+                                        }
+                                    }
+                                }
+
+                                modal_subtitle := Label {
+                                    width: Fill
+                                    height: Fit
+                                    text: "Connect your AI model providers to use them in Threadlane."
+                                    draw_text +: {
+                                        color: #x7f8c9d
+                                        text_style +: { font_size: 10.0 }
+                                    }
+                                }
+
+                                // Google Antigravity Provider Card
+                                antigravity_card := RoundedView {
+                                    width: Fill
+                                    height: Fit
+                                    flow: Down
+                                    padding: Inset{left: 14 top: 12 right: 14 bottom: 12}
+                                    spacing: 8
+                                    draw_bg +: {
+                                        color: #x222631
+                                        border_radius: 8.0
+                                        border_size: 1.0
+                                        border_color: #x323a48
+                                    }
+
+                                    ag_header := View {
+                                        width: Fill
+                                        height: Fit
+                                        flow: Right
+                                        align: Align{y: 0.5}
+
+                                        ag_title := Label {
+                                            width: Fill
+                                            height: Fit
+                                            text: "Google Antigravity"
+                                            draw_text +: {
+                                                color: #xe7ebf0
+                                                text_style: theme.font_bold { font_size: 11.5 }
+                                            }
+                                        }
+
+                                        antigravity_status_lbl := Label {
+                                            width: Fit
+                                            height: Fit
+                                            text: "Not Connected"
+                                            draw_text +: {
+                                                color: #xe06c75
+                                                text_style: theme.font_bold { font_size: 10.0 }
+                                            }
+                                        }
+                                    }
+
+                                    ag_desc := Label {
+                                        width: Fill
+                                        height: Fit
+                                        text: "Cloud Code Assist, Gemini 3.6 Flash / Pro via Google OAuth PKCE"
+                                        draw_text +: {
+                                            color: #x7f8c9d
+                                            text_style +: { font_size: 9.25 }
+                                        }
+                                    }
+
+                                    ag_actions := View {
+                                        width: Fill
+                                        height: Fit
+                                        flow: Right
+                                        spacing: 8
+                                        align: Align{y: 0.5}
+
+                                        antigravity_login_btn := Button {
+                                            width: Fit
+                                            height: 28
+                                            padding: Inset{left: 12 right: 12 top: 4 bottom: 4}
+                                            text: "Sign in with Google"
+                                            draw_bg +: {
+                                                color: #x3b669e
+                                                color_hover: #x4a7bc0
+                                                color_down: #x5a8de0
+                                                border_radius: 6.0
+                                            }
+                                            draw_text +: {
+                                                color: #xffffff
+                                                text_style: theme.font_bold { font_size: 9.5 }
+                                            }
+                                        }
+
+                                        antigravity_doctor_btn := Button {
+                                            width: Fit
+                                            height: 28
+                                            padding: Inset{left: 10 right: 10 top: 4 bottom: 4}
+                                            text: "Run Health Check"
+                                            draw_bg +: {
+                                                color: #x2b313d
+                                                color_hover: #x363e4d
+                                                color_down: #x444f62
+                                                border_color: #x3a4354
+                                                border_size: 1.0
+                                                border_radius: 6.0
+                                            }
+                                            draw_text +: {
+                                                color: #xa4b0c2
+                                                color_hover: #xd8e0ec
+                                                text_style +: { font_size: 9.0 }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // OpenAI / ChatGPT Provider Card
+                                openai_card := RoundedView {
+                                    width: Fill
+                                    height: Fit
+                                    flow: Down
+                                    padding: Inset{left: 14 top: 12 right: 14 bottom: 12}
+                                    spacing: 8
+                                    draw_bg +: {
+                                        color: #x222631
+                                        border_radius: 8.0
+                                        border_size: 1.0
+                                        border_color: #x323a48
+                                    }
+
+                                    oa_header := View {
+                                        width: Fill
+                                        height: Fit
+                                        flow: Right
+                                        align: Align{y: 0.5}
+
+                                        oa_title := Label {
+                                            width: Fill
+                                            height: Fit
+                                            text: "OpenAI / ChatGPT"
+                                            draw_text +: {
+                                                color: #xe7ebf0
+                                                text_style: theme.font_bold { font_size: 11.5 }
+                                            }
+                                        }
+
+                                        openai_status_lbl := Label {
+                                            width: Fit
+                                            height: Fit
+                                            text: "Not Connected"
+                                            draw_text +: {
+                                                color: #xe06c75
+                                                text_style: theme.font_bold { font_size: 10.0 }
+                                            }
+                                        }
+                                    }
+
+                                    oa_desc := Label {
+                                        width: Fill
+                                        height: Fit
+                                        text: "GPT-4o, Codex, and OpenAI models via ChatGPT OAuth or API key"
+                                        draw_text +: {
+                                            color: #x7f8c9d
+                                            text_style +: { font_size: 9.25 }
+                                        }
+                                    }
+
+                                    oa_actions := View {
+                                        width: Fill
+                                        height: Fit
+                                        flow: Right
+                                        spacing: 8
+                                        align: Align{y: 0.5}
+
+                                        openai_login_btn := Button {
+                                            width: Fit
+                                            height: 28
+                                            padding: Inset{left: 12 right: 12 top: 4 bottom: 4}
+                                            text: "Sign in with ChatGPT"
+                                            draw_bg +: {
+                                                color: #x2c6e49
+                                                color_hover: #x358759
+                                                color_down: #x3ea36c
+                                                border_radius: 6.0
+                                            }
+                                            draw_text +: {
+                                                color: #xffffff
+                                                text_style: theme.font_bold { font_size: 9.5 }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
 
                         }
@@ -1229,7 +1580,7 @@ impl MatchEvent for App {
         self.rx = Some(Arc::new(Mutex::new(rx)));
         self.set_model_dropup_options(
             cx,
-            vec![
+            include_connected_provider_models(vec![
                 "gpt-5.6-luna".into(),
                 "gpt-5.4".into(),
                 "gpt-5.4-mini".into(),
@@ -1239,7 +1590,7 @@ impl MatchEvent for App {
                 "gpt-5.3-codex-spark".into(),
                 "gpt-4o".into(),
                 "gpt-4o-mini".into(),
-            ],
+            ]),
             "gpt-5.6-luna",
         );
         self.set_reasoning_effort_picker(cx, ReasoningEffort::Medium);
@@ -1465,7 +1816,135 @@ impl MatchEvent for App {
             }
         }
 
-        if self.ui.button(cx, ids!(login_btn)).clicked(actions) {
+        if self.ui.button(cx, ids!(settings_btn)).clicked(actions) {
+            self.ui
+                .widget(cx, ids!(providers_modal))
+                .set_visible(cx, true);
+            if let Some(creds) =
+                threadlane_provider::antigravity_auth::load_antigravity_credentials()
+            {
+                let status_text = match creds.account_email {
+                    Some(ref email) => format!("✓ Connected ({email})"),
+                    None => "✓ Connected".to_string(),
+                };
+                self.ui
+                    .label(cx, ids!(antigravity_status_lbl))
+                    .set_text(cx, &status_text);
+            } else {
+                self.ui
+                    .label(cx, ids!(antigravity_status_lbl))
+                    .set_text(cx, "Not Connected");
+            }
+            if auth::load_credentials().is_some() {
+                self.ui
+                    .label(cx, ids!(openai_status_lbl))
+                    .set_text(cx, "✓ Connected");
+            } else {
+                self.ui
+                    .label(cx, ids!(openai_status_lbl))
+                    .set_text(cx, "Not Connected");
+            }
+            cx.redraw_all();
+        }
+
+        if self.ui.button(cx, ids!(close_modal_btn)).clicked(actions) {
+            self.ui
+                .widget(cx, ids!(providers_modal))
+                .set_visible(cx, false);
+            cx.redraw_all();
+        }
+
+        if self
+            .ui
+            .button(cx, ids!(antigravity_login_btn))
+            .clicked(actions)
+        {
+            self.ui
+                .widget(cx, ids!(providers_modal))
+                .set_visible(cx, false);
+            self.push_chat(
+                MsgRole::System,
+                "Initiating Google Antigravity OAuth login...",
+            );
+            let (verifier, challenge) = threadlane_provider::antigravity_auth::generate_pkce_pair();
+            let state = format!(
+                "{:x}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            );
+            let auth_url =
+                threadlane_provider::antigravity_auth::build_authorization_url(&challenge, &state);
+
+            self.push_chat(
+                MsgRole::System,
+                format!("Opening Google sign-in in your browser...\n{}", auth_url),
+            );
+            let _ = robius_open::Uri::new(&auth_url).open();
+
+            let tx_clone = self.tx.clone();
+            get_runtime().spawn(async move {
+                match threadlane_provider::antigravity_auth::listen_for_oauth_callback(state).await
+                {
+                    Ok(code) => {
+                        match threadlane_provider::antigravity_auth::exchange_code_for_tokens(
+                            &code, &verifier,
+                        )
+                        .await
+                        {
+                            Ok(creds) => {
+                                if let Some(ref tx) = tx_clone {
+                                    let _ = tx.send(GuiAgentEvent::AntigravityLoginSuccess {
+                                        email: creds.account_email,
+                                    });
+                                    SignalToUI::set_ui_signal();
+                                }
+                            }
+                            Err(e) => {
+                                if let Some(ref tx) = tx_clone {
+                                    let _ = tx.send(GuiAgentEvent::AntigravityLoginError(e));
+                                    SignalToUI::set_ui_signal();
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(ref tx) = tx_clone {
+                            let _ = tx.send(GuiAgentEvent::AntigravityLoginError(e));
+                            SignalToUI::set_ui_signal();
+                        }
+                    }
+                }
+            });
+            cx.redraw_all();
+        }
+
+        if self
+            .ui
+            .button(cx, ids!(antigravity_doctor_btn))
+            .clicked(actions)
+        {
+            self.ui
+                .widget(cx, ids!(providers_modal))
+                .set_visible(cx, false);
+            self.push_chat(MsgRole::System, "Running Antigravity Doctor diagnostics...");
+            let tx_clone = self.tx.clone();
+            get_runtime().spawn(async move {
+                let client = threadlane_provider::antigravity::AntigravityClient::new();
+                let report = client.run_diagnostics().await;
+                if let Some(ref tx) = tx_clone {
+                    let _ = tx.send(GuiAgentEvent::AntigravityDoctorReport(report));
+                    SignalToUI::set_ui_signal();
+                }
+            });
+            cx.redraw_all();
+        }
+
+        if self.ui.button(cx, ids!(openai_login_btn)).clicked(actions) {
+            self.ui
+                .widget(cx, ids!(providers_modal))
+                .set_visible(cx, false);
             self.auth_workspace = self.workspace_state.active_key().cloned();
             self.push_chat(MsgRole::System, "Initiating ChatGPT device code login...");
             self.apply_status_ui(cx, UiStatus::Working, "Connecting to ChatGPT...");
@@ -1888,28 +2367,14 @@ impl App {
     }
 
     fn set_model_dropup_options(&mut self, cx: &mut Cx, models: Vec<String>, selected_model: &str) {
-        let mut ordered = Vec::new();
-        for model in models {
-            if !model.is_empty() && !ordered.contains(&model) {
-                ordered.push(model);
-            }
-        }
-        if ordered.is_empty() {
+        let Some((canonical, display)) = ordered_model_options(models, selected_model) else {
             return;
-        }
-
-        let selected_model = if ordered.iter().any(|model| model == selected_model) {
-            selected_model.to_string()
-        } else {
-            ordered[0].clone()
         };
-        ordered.retain(|model| model != &selected_model);
-        ordered.push(selected_model);
 
-        let selected_item = ordered.len() - 1;
-        self.available_models = ordered.clone();
+        let selected_item = display.len() - 1;
+        self.available_models = canonical;
         let model_drop = self.ui.model_drop_down(cx, ids!(model_drop));
-        model_drop.set_labels(cx, ordered);
+        model_drop.set_labels(cx, display);
         model_drop.set_selected_item(cx, selected_item);
     }
 
@@ -2874,15 +3339,6 @@ impl App {
             Vec::new()
         };
         let (api_key, account_id) = self.current_credentials(cx);
-        if api_key.is_empty() {
-            self.push_chat(
-                MsgRole::System,
-                "Please provide an OpenAI API key or click 'Login ChatGPT' to authenticate.",
-            );
-            cx.redraw_all();
-            return;
-        }
-
         let selected_model = self
             .ui
             .model_drop_down(cx, ids!(model_drop))
@@ -2892,6 +3348,23 @@ impl App {
         } else {
             selected_model
         };
+        let provider_management_command = matches!(
+            input_text.trim(),
+            "/login antigravity" | "/antigravity.doctor" | "/doctor"
+        );
+        if !provider_management_command {
+            let has_antigravity_credentials =
+                threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some();
+            if let Some(error) = model_credential_error(
+                &model_name,
+                !api_key.is_empty(),
+                has_antigravity_credentials,
+            ) {
+                self.push_chat(MsgRole::System, error);
+                cx.redraw_all();
+                return;
+            }
+        }
         let reasoning_effort =
             ReasoningEffort::from_label(&self.ui.drop_down(cx, ids!(effort_drop)).selected_label())
                 .unwrap_or_default();
@@ -2972,48 +3445,61 @@ impl App {
         }
 
         if input_text.trim() == "/login antigravity" {
-            self.push_chat(MsgRole::System, "Initiating Google Antigravity OAuth login...");
+            self.push_chat(
+                MsgRole::System,
+                "Initiating Google Antigravity OAuth login...",
+            );
             let (verifier, challenge) = threadlane_provider::antigravity_auth::generate_pkce_pair();
-            let state = format!("{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
-            let auth_url = threadlane_provider::antigravity_auth::build_authorization_url(&challenge, &state);
+            let state = format!(
+                "{:x}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            );
+            let auth_url =
+                threadlane_provider::antigravity_auth::build_authorization_url(&challenge, &state);
 
-            self.push_chat(MsgRole::System, format!("Please complete sign-in in your browser:\n{}", auth_url));
+            self.push_chat(
+                MsgRole::System,
+                format!("Opening Google sign-in in your browser...\n{}", auth_url),
+            );
+            let _ = robius_open::Uri::new(&auth_url).open();
 
-            if let Ok(rx) = threadlane_provider::antigravity_auth::listen_for_oauth_callback(state) {
-                let tx_clone = self.tx.clone();
-                get_runtime().spawn(async move {
-                    match rx.await {
-                        Ok(Ok(code)) => {
-                            match threadlane_provider::antigravity_auth::exchange_code_for_tokens(&code, &verifier).await {
-                                Ok(creds) => {
-                                    if let Some(ref tx) = tx_clone {
-                                        let _ = tx.send(GuiAgentEvent::AntigravityLoginSuccess { email: creds.account_email });
-                                        SignalToUI::set_ui_signal();
-                                    }
-                                }
-                                Err(e) => {
-                                    if let Some(ref tx) = tx_clone {
-                                        let _ = tx.send(GuiAgentEvent::AntigravityLoginError(e));
-                                        SignalToUI::set_ui_signal();
-                                    }
+            let tx_clone = self.tx.clone();
+            get_runtime().spawn(async move {
+                match threadlane_provider::antigravity_auth::listen_for_oauth_callback(state).await
+                {
+                    Ok(code) => {
+                        match threadlane_provider::antigravity_auth::exchange_code_for_tokens(
+                            &code, &verifier,
+                        )
+                        .await
+                        {
+                            Ok(creds) => {
+                                if let Some(ref tx) = tx_clone {
+                                    let _ = tx.send(GuiAgentEvent::AntigravityLoginSuccess {
+                                        email: creds.account_email,
+                                    });
+                                    SignalToUI::set_ui_signal();
                                 }
                             }
-                        }
-                        Ok(Err(e)) => {
-                            if let Some(ref tx) = tx_clone {
-                                let _ = tx.send(GuiAgentEvent::AntigravityLoginError(e));
-                                SignalToUI::set_ui_signal();
-                            }
-                        }
-                        Err(e) => {
-                            if let Some(ref tx) = tx_clone {
-                                let _ = tx.send(GuiAgentEvent::AntigravityLoginError(format!("{e:?}")));
-                                SignalToUI::set_ui_signal();
+                            Err(e) => {
+                                if let Some(ref tx) = tx_clone {
+                                    let _ = tx.send(GuiAgentEvent::AntigravityLoginError(e));
+                                    SignalToUI::set_ui_signal();
+                                }
                             }
                         }
                     }
-                });
-            }
+                    Err(e) => {
+                        if let Some(ref tx) = tx_clone {
+                            let _ = tx.send(GuiAgentEvent::AntigravityLoginError(e));
+                            SignalToUI::set_ui_signal();
+                        }
+                    }
+                }
+            });
             return;
         }
 
@@ -3038,7 +3524,10 @@ impl App {
             None if !attachments.is_empty() => (input_text.clone(), String::new()),
             None => return,
         };
-        if show_in_chat && !input_str.trim().is_empty() {
+        if show_in_chat
+            && !input_str.trim().is_empty()
+            && !threadlane_provider::router::is_antigravity_model(&model_name)
+        {
             if let Some(entry) = active_session_entry() {
                 self.spawn_session_title(
                     entry,
@@ -3272,7 +3761,7 @@ impl App {
             AgentEvent::MessageUpdate {
                 text_delta,
                 reasoning_delta,
-                ..
+                tool_call_name,
             } => {
                 let Some(key) = target_key else { return };
                 let workspace = self.workspace_state.workspace_mut(key);
@@ -3285,6 +3774,9 @@ impl App {
                     workspace
                         .chat
                         .push_stream_delta(crate::state::StreamingKind::Assistant, &delta);
+                }
+                if tool_call_name.is_some() {
+                    workspace.chat.flush_tool_call_preamble();
                 }
             }
             AgentEvent::MessageEnd { message } => {
@@ -3524,7 +4016,11 @@ impl App {
                         .ui
                         .model_drop_down(cx, ids!(model_drop))
                         .selected_label();
-                    self.set_model_dropup_options(cx, models, &selected_model);
+                    self.set_model_dropup_options(
+                        cx,
+                        include_connected_provider_models(models),
+                        &selected_model,
+                    );
                 }
                 GuiAgentEvent::ProjectFolderPicked(result) => {
                     self.apply_project_folder_result(cx, result);
@@ -3539,6 +4035,7 @@ impl App {
                                  (waiting for authorization...)"
                             ),
                         );
+                        let _ = robius_open::Uri::new(&url).open();
                         if self.workspace_state.is_active(&key) {
                             self.apply_status_ui(
                                 cx,
@@ -3588,14 +4085,26 @@ impl App {
                 }
                 GuiAgentEvent::AntigravityLoginSuccess { email } => {
                     let msg = match email {
-                        Some(e) => format!("✓ Successfully authenticated with Google Antigravity ({e})."),
+                        Some(e) => {
+                            format!("✓ Successfully authenticated with Google Antigravity ({e}).")
+                        }
                         None => "✓ Successfully authenticated with Google Antigravity.".to_string(),
                     };
                     self.push_chat(MsgRole::System, msg);
+                    let selected_model = self
+                        .ui
+                        .model_drop_down(cx, ids!(model_drop))
+                        .selected_label();
+                    let mut models = self.available_models.clone();
+                    append_antigravity_models(&mut models);
+                    self.set_model_dropup_options(cx, models, &selected_model);
                     cx.redraw_all();
                 }
                 GuiAgentEvent::AntigravityLoginError(error) => {
-                    self.push_chat(MsgRole::System, format!("❌ Google Antigravity login error: {error}"));
+                    self.push_chat(
+                        MsgRole::System,
+                        format!("❌ Google Antigravity login error: {error}"),
+                    );
                     cx.redraw_all();
                 }
                 GuiAgentEvent::AntigravityDoctorReport(report) => {
@@ -3629,8 +4138,102 @@ impl App {
 
 #[cfg(test)]
 mod workspace_header_tests {
-    use super::{compact_workspace_path, project_name};
+    use super::{
+        append_antigravity_models, compact_workspace_path, model_credential_error,
+        ordered_model_options, project_name, ANTIGRAVITY_MODELS,
+    };
     use std::path::Path;
+
+    #[test]
+    fn provider_credentials_follow_the_selected_model() {
+        assert_eq!(
+            model_credential_error("antigravity/gemini-3.6-flash", false, true),
+            None
+        );
+        assert_eq!(
+            model_credential_error("antigravity/gemini-3.6-flash", true, false),
+            Some("Sign in with Google Antigravity before using this model.")
+        );
+        assert_eq!(
+            model_credential_error("gpt-5.6-luna", false, true),
+            Some("Please provide an OpenAI API key or click 'Login ChatGPT' to authenticate.")
+        );
+    }
+
+    #[test]
+    fn antigravity_models_merge_without_duplicates() {
+        let mut models = vec![
+            "gpt-5.6-luna".to_string(),
+            ANTIGRAVITY_MODELS[0].to_string(),
+        ];
+
+        append_antigravity_models(&mut models);
+
+        assert_eq!(
+            models
+                .iter()
+                .filter(|model| model.as_str() == ANTIGRAVITY_MODELS[0])
+                .count(),
+            1
+        );
+        assert!(ANTIGRAVITY_MODELS
+            .iter()
+            .all(|model| models.iter().any(|candidate| candidate == model)));
+    }
+
+    #[test]
+    fn model_order_stays_grouped_across_provider_switches() {
+        let models = vec![
+            "gpt-a".to_string(),
+            "antigravity/gemini-a".to_string(),
+            "gpt-b".to_string(),
+            "antigravity/gemini-b".to_string(),
+        ];
+
+        let (canonical, google_selected) =
+            ordered_model_options(models, "antigravity/gemini-a").unwrap();
+        assert_eq!(
+            canonical,
+            [
+                "gpt-a",
+                "gpt-b",
+                "antigravity/gemini-a",
+                "antigravity/gemini-b"
+            ]
+        );
+        assert_eq!(
+            google_selected,
+            [
+                "gpt-a",
+                "gpt-b",
+                "antigravity/gemini-b",
+                "antigravity/gemini-a"
+            ]
+        );
+
+        let (canonical, openai_selected) = ordered_model_options(canonical, "gpt-a").unwrap();
+        assert_eq!(
+            openai_selected,
+            [
+                "gpt-b",
+                "antigravity/gemini-a",
+                "antigravity/gemini-b",
+                "gpt-a"
+            ]
+        );
+
+        let (_, google_selected_again) =
+            ordered_model_options(canonical, "antigravity/gemini-b").unwrap();
+        assert_eq!(
+            google_selected_again,
+            [
+                "gpt-a",
+                "gpt-b",
+                "antigravity/gemini-a",
+                "antigravity/gemini-b"
+            ]
+        );
+    }
 
     #[test]
     fn workspace_header_uses_final_directory_as_project_name() {

@@ -1,5 +1,5 @@
-use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_CLIENT_ID: &str =
-    "1036056723223-m8a62495g4c1r4k5t1s5.apps.googleusercontent.com";
-const DEFAULT_CLIENT_SECRET: &str = ""; // Public client PKCE
+    "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
+const DEFAULT_CLIENT_SECRET: &str = "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";
 const DEFAULT_REDIRECT_URI: &str = "http://localhost:51121/oauth-callback";
 const OAUTH_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -91,8 +91,8 @@ pub fn build_authorization_url(code_challenge: &str, state: &str) -> String {
     ]
     .join(" ");
 
-    let client_id = std::env::var("ANTIGRAVITY_CLIENT_ID")
-        .unwrap_or_else(|_| DEFAULT_CLIENT_ID.to_string());
+    let client_id =
+        std::env::var("ANTIGRAVITY_CLIENT_ID").unwrap_or_else(|_| DEFAULT_CLIENT_ID.to_string());
 
     let mut url = url::Url::parse(OAUTH_AUTH_URL).unwrap();
     url.query_pairs_mut()
@@ -113,8 +113,8 @@ pub async fn exchange_code_for_tokens(
     code: &str,
     code_verifier: &str,
 ) -> Result<AntigravityCredentials, String> {
-    let client_id = std::env::var("ANTIGRAVITY_CLIENT_ID")
-        .unwrap_or_else(|_| DEFAULT_CLIENT_ID.to_string());
+    let client_id =
+        std::env::var("ANTIGRAVITY_CLIENT_ID").unwrap_or_else(|_| DEFAULT_CLIENT_ID.to_string());
     let client_secret = std::env::var("ANTIGRAVITY_CLIENT_SECRET")
         .unwrap_or_else(|_| DEFAULT_CLIENT_SECRET.to_string());
 
@@ -208,8 +208,8 @@ pub async fn refresh_antigravity_token(
         .as_ref()
         .ok_or_else(|| "No refresh token available".to_string())?;
 
-    let client_id = std::env::var("ANTIGRAVITY_CLIENT_ID")
-        .unwrap_or_else(|_| DEFAULT_CLIENT_ID.to_string());
+    let client_id =
+        std::env::var("ANTIGRAVITY_CLIENT_ID").unwrap_or_else(|_| DEFAULT_CLIENT_ID.to_string());
     let client_secret = std::env::var("ANTIGRAVITY_CLIENT_SECRET")
         .unwrap_or_else(|_| DEFAULT_CLIENT_SECRET.to_string());
 
@@ -275,8 +275,9 @@ pub async fn refresh_antigravity_token(
 }
 
 pub async fn get_valid_antigravity_token() -> Result<String, String> {
-    let creds = load_antigravity_credentials()
-        .ok_or_else(|| "No stored Google Antigravity credentials found. Please run /login antigravity".to_string())?;
+    let creds = load_antigravity_credentials().ok_or_else(|| {
+        "No stored Google Antigravity credentials found. Please run /login antigravity".to_string()
+    })?;
 
     let now = current_timestamp();
     // Refresh if within 5 minutes (300 seconds) of expiration
@@ -291,9 +292,7 @@ pub async fn get_valid_antigravity_token() -> Result<String, String> {
 }
 
 /// Helper function to listen locally for the OAuth callback code
-pub fn listen_for_oauth_callback(
-    expected_state: String,
-) -> Result<tokio::sync::oneshot::Receiver<Result<String, String>>, String> {
+pub async fn listen_for_oauth_callback(expected_state: String) -> Result<String, String> {
     let listener = TcpListener::bind("127.0.0.1:51121")
         .map_err(|e| format!("Failed to bind loopback callback listener on port 51121: {e}"))?;
 
@@ -301,66 +300,59 @@ pub fn listen_for_oauth_callback(
         .set_nonblocking(true)
         .map_err(|e| format!("Failed to set listener non-blocking: {e}"))?;
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
+    let start_time = current_timestamp();
+    loop {
+        if current_timestamp() - start_time > 300 {
+            return Err("OAuth callback timed out after 5 minutes".to_string());
+        }
 
-    tokio::spawn(async move {
-        let start_time = current_timestamp();
-        loop {
-            if current_timestamp() - start_time > 300 {
-                let _ = tx.send(Err("OAuth callback timed out after 5 minutes".to_string()));
-                break;
-            }
-
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    let mut buffer = [0u8; 2048];
-                    if let Ok(bytes_read) = stream.read(&mut buffer) {
-                        let request_str = String::from_utf8_lossy(&buffer[..bytes_read]);
-                        if let Some(first_line) = request_str.lines().next() {
-                            if first_line.starts_with("GET /oauth-callback") {
-                                let path = first_line.split_whitespace().nth(1).unwrap_or("");
-                                if let Ok(parsed_url) = url::Url::parse(&format!("http://localhost:51121{path}")) {
-                                    let mut code = None;
-                                    let mut state = None;
-                                    for (k, v) in parsed_url.query_pairs() {
-                                        if k == "code" {
-                                            code = Some(v.to_string());
-                                        } else if k == "state" {
-                                            state = Some(v.to_string());
-                                        }
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                let mut buffer = [0u8; 2048];
+                if let Ok(bytes_read) = stream.read(&mut buffer) {
+                    let request_str = String::from_utf8_lossy(&buffer[..bytes_read]);
+                    if let Some(first_line) = request_str.lines().next() {
+                        if first_line.starts_with("GET /oauth-callback") {
+                            let path = first_line.split_whitespace().nth(1).unwrap_or("");
+                            if let Ok(parsed_url) =
+                                url::Url::parse(&format!("http://localhost:51121{path}"))
+                            {
+                                let mut code = None;
+                                let mut state = None;
+                                for (k, v) in parsed_url.query_pairs() {
+                                    if k == "code" {
+                                        code = Some(v.to_string());
+                                    } else if k == "state" {
+                                        state = Some(v.to_string());
                                     }
-
-                                    let html_response = if let (Some(code), Some(st)) = (code, state) {
-                                        if st == expected_state {
-                                            let _ = tx.send(Ok(code));
-                                            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html><html><body style='font-family:sans-serif;background:#0d1117;color:#58a6ff;padding:40px;text-align:center;'><h2>Google Antigravity Authentication Successful!</h2><p>You may now close this tab and return to Threadlane.</p></body></html>"
-                                        } else {
-                                            let _ = tx.send(Err("OAuth state mismatch".to_string()));
-                                            "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<html><body><h2>Authentication Error</h2><p>State mismatch.</p></body></html>"
-                                        }
-                                    } else {
-                                        let _ = tx.send(Err("Missing code or state in OAuth callback".to_string()));
-                                        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<html><body><h2>Authentication Error</h2><p>Missing parameters.</p></body></html>"
-                                    };
-
-                                    let _ = stream.write_all(html_response.as_bytes());
-                                    let _ = stream.flush();
-                                    break;
                                 }
+
+                                let (res_code, html_response) = if let (Some(code), Some(st)) =
+                                    (code, state)
+                                {
+                                    if st == expected_state {
+                                        (Ok(code), "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html><html><body style='font-family:sans-serif;background:#0d1117;color:#58a6ff;padding:40px;text-align:center;'><h2>Google Antigravity Authentication Successful!</h2><p>You may now close this tab and return to Threadlane.</p></body></html>")
+                                    } else {
+                                        (Err("OAuth state mismatch".to_string()), "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<html><body><h2>Authentication Error</h2><p>State mismatch.</p></body></html>")
+                                    }
+                                } else {
+                                    (Err("Missing code or state in OAuth callback".to_string()), "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<html><body><h2>Authentication Error</h2><p>Missing parameters.</p></body></html>")
+                                };
+
+                                let _ = stream.write_all(html_response.as_bytes());
+                                let _ = stream.flush();
+                                return res_code;
                             }
                         }
                     }
                 }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-                }
-                Err(e) => {
-                    let _ = tx.send(Err(format!("Error accepting callback connection: {e}")));
-                    break;
-                }
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+            }
+            Err(e) => {
+                return Err(format!("Error accepting callback connection: {e}"));
             }
         }
-    });
-
-    Ok(rx)
+    }
 }
