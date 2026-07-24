@@ -98,7 +98,8 @@ Reusable script components are registered through `crates/threadlane/src/compone
 - Add every new component module to both the Rust module list and the `script_mod(vm)` registration sequence.
 - Use `mod.components.Name` for reusable templates.
 - Use `:=` IDs for widgets that Rust code must retrieve with `ids!(...)`.
-- Custom widgets should handle actions from their deeply nested child controls locally and emit a typed `cx.widget_action(...)` for the app shell. Do not rely on root-level widget lookup to resolve controls inside a custom widget's dereferenced view.
+- Custom widgets should handle actions from their deeply nested child controls locally and emit a typed `cx.widget_action(...)` for the app shell. Do not rely on root-level widget lookup to resolve controls inside a custom widget's dereferenced view. Check for child button actions inside `if let Event::Actions(actions) = event` using `self.view.button(cx, ids!(btn_id)).clicked(actions)` rather than listening for raw pointer events.
+- A custom widget that dereferences a `View` must delegate both `handle_event` and `draw_walk`; delegating events without drawing leaves the entire wrapper invisible.
 - **DSL inheritance**: `:= SomeName { ... }` creates an ID-bound widget instance, **not** a named prototype. An ID-bound instance cannot be used as a parent in another `:= SomeName { ... }` definition. Only `mod.components.Name` template names (defined with `=`, not `:=`) are valid prototype parents. Attempting to write `Child := ParentId { ... }` where `ParentId` was defined with `:=` will fail at runtime with "variable ParentId not found in scope".
 
 ### Layout
@@ -146,6 +147,7 @@ Keep the SVG view box itself centered. Do not compensate for inherited empty-lab
 Drawing in an overlay does not automatically stop widgets underneath from receiving pointer events.
 
 - Context menus and popups must account for both visual stacking and event routing.
+- `DockFlat` draws its configured dock tree, not arbitrary extra children declared inside it. Instantiate pass-wide overlay widgets inside a branch the dock actually draws (for example, a dock-tab template) and give the overlay a dedicated `DrawList2d`; a later window-body sibling after `DockFlat` can remain uninstantiated and unresolved by ID. A raw full-window overlay `View` can also obscure the dock even when intended to start hidden.
 - In an overlay, a later full-size sibling such as an empty `PortalList` can intercept pointer events intended for visible content beneath it. Hide inactive full-size siblings or place the interactive surface above them.
 - The session context menu uses real child buttons for row hover/click states; do not reintroduce a parent shader with hard-coded row coordinates.
 - While a session context target is active, the session list intentionally suspends its own event handling so rows under the popup cannot also hover or press.

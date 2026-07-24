@@ -985,6 +985,263 @@ script_mod! {
         }
     }
 
+    let ProvidersModal = #(ProviderSettingsModal::register_widget(vm)) {
+        width: Fill
+        height: Fill
+        flow: Overlay
+        align: Align{x: 0.5 y: 0.5}
+
+        modal_backdrop := View {
+            width: Fill
+            height: Fill
+            draw_bg +: { color: #x000000bb }
+        }
+
+        modal_card := RoundedView {
+                width: 460
+                height: Fit
+                flow: Down
+                padding: Inset{left: 22 top: 20 right: 22 bottom: 22}
+                spacing: 14
+                draw_bg +: {
+                    color: #x1a1d24
+                    border_radius: 12.0
+                    border_size: 1.0
+                    border_color: #x323a48
+                }
+
+                modal_header := View {
+                    width: Fill
+                    height: Fit
+                    flow: Right
+                    align: Align{y: 0.5}
+
+                    modal_title := Label {
+                        width: Fill
+                        height: Fit
+                        text: "Provider Settings"
+                        draw_text +: {
+                            color: #xe7ebf0
+                            text_style: theme.font_bold { font_size: 14.0 }
+                        }
+                    }
+
+                    close_modal_btn := Button {
+                        width: 26
+                        height: 26
+                        padding: 0
+                        spacing: 0
+                        text: ""
+                        align: Align{x: 0.5 y: 0.5}
+                        icon_walk: Walk{width: 12 height: 12}
+                        draw_bg +: {
+                            color: #x00000000
+                            color_hover: #x2e3543
+                            color_focus: #x2e3543
+                            color_down: #x3e485a
+                            border_color: #x00000000
+                            border_color_hover: #x00000000
+                            border_color_focus: #x00000000
+                            border_color_down: #x00000000
+                            border_size: 0.0
+                            border_radius: 6.0
+                        }
+                        draw_icon +: {
+                            svg: crate_resource("self:resources/icons/close.svg")
+                            color: #x8b93a0
+                            color_hover: #xffffff
+                            color_focus: #xffffff
+                            color_down: #xffffff
+                        }
+                    }
+                }
+
+                modal_subtitle := Label {
+                    width: Fill
+                    height: Fit
+                    text: "Connect your AI model providers to use them in Threadlane."
+                    draw_text +: {
+                        color: #x7f8c9d
+                        text_style +: { font_size: 10.0 }
+                    }
+                }
+
+                // Google Antigravity Provider Card
+                antigravity_card := RoundedView {
+                    width: Fill
+                    height: Fit
+                    flow: Down
+                    padding: Inset{left: 14 top: 12 right: 14 bottom: 12}
+                    spacing: 8
+                    draw_bg +: {
+                        color: #x222631
+                        border_radius: 8.0
+                        border_size: 1.0
+                        border_color: #x323a48
+                    }
+
+                    ag_header := View {
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        align: Align{y: 0.5}
+
+                        ag_title := Label {
+                            width: Fill
+                            height: Fit
+                            text: "Google Antigravity"
+                            draw_text +: {
+                                color: #xe7ebf0
+                                text_style: theme.font_bold { font_size: 11.5 }
+                            }
+                        }
+
+                        antigravity_status_lbl := Label {
+                            width: Fit
+                            height: Fit
+                            text: "Not Connected"
+                            draw_text +: {
+                                color: #xe06c75
+                                text_style: theme.font_bold { font_size: 10.0 }
+                            }
+                        }
+                    }
+
+                    ag_desc := Label {
+                        width: Fill
+                        height: Fit
+                        text: "Cloud Code Assist, Gemini 3.6 Flash / Pro via Google OAuth PKCE"
+                        draw_text +: {
+                            color: #x7f8c9d
+                            text_style +: { font_size: 9.25 }
+                        }
+                    }
+
+                    ag_actions := View {
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{y: 0.5}
+
+                        antigravity_login_btn := Button {
+                            width: Fit
+                            height: 28
+                            padding: Inset{left: 12 right: 12 top: 4 bottom: 4}
+                            text: "Sign in with Google"
+                            draw_bg +: {
+                                color: #x3b669e
+                                color_hover: #x4a7bc0
+                                color_down: #x5a8de0
+                                border_radius: 6.0
+                            }
+                            draw_text +: {
+                                color: #xffffff
+                                text_style: theme.font_bold { font_size: 9.5 }
+                            }
+                        }
+
+                        antigravity_doctor_btn := Button {
+                            width: Fit
+                            height: 28
+                            padding: Inset{left: 10 right: 10 top: 4 bottom: 4}
+                            text: "Run Health Check"
+                            draw_bg +: {
+                                color: #x2b313d
+                                color_hover: #x363e4d
+                                color_down: #x444f62
+                                border_color: #x3a4354
+                                border_size: 1.0
+                                border_radius: 6.0
+                            }
+                            draw_text +: {
+                                color: #xa4b0c2
+                                color_hover: #xd8e0ec
+                                text_style +: { font_size: 9.0 }
+                            }
+                        }
+                    }
+                }
+
+                // OpenAI / ChatGPT Provider Card
+                openai_card := RoundedView {
+                    width: Fill
+                    height: Fit
+                    flow: Down
+                    padding: Inset{left: 14 top: 12 right: 14 bottom: 12}
+                    spacing: 8
+                    draw_bg +: {
+                        color: #x222631
+                        border_radius: 8.0
+                        border_size: 1.0
+                        border_color: #x323a48
+                    }
+
+                    oa_header := View {
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        align: Align{y: 0.5}
+
+                        oa_title := Label {
+                            width: Fill
+                            height: Fit
+                            text: "OpenAI / ChatGPT"
+                            draw_text +: {
+                                color: #xe7ebf0
+                                text_style: theme.font_bold { font_size: 11.5 }
+                            }
+                        }
+
+                        openai_status_lbl := Label {
+                            width: Fit
+                            height: Fit
+                            text: "Not Connected"
+                            draw_text +: {
+                                color: #xe06c75
+                                text_style: theme.font_bold { font_size: 10.0 }
+                            }
+                        }
+                    }
+
+                    oa_desc := Label {
+                        width: Fill
+                        height: Fit
+                        text: "GPT-4o, Codex, and OpenAI models via ChatGPT OAuth or API key"
+                        draw_text +: {
+                            color: #x7f8c9d
+                            text_style +: { font_size: 9.25 }
+                        }
+                    }
+
+                    oa_actions := View {
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{y: 0.5}
+
+                        openai_login_btn := Button {
+                            width: Fit
+                            height: 28
+                            padding: Inset{left: 12 right: 12 top: 4 bottom: 4}
+                            text: "Sign in with ChatGPT"
+                            draw_bg +: {
+                                color: #x2c6e49
+                                color_hover: #x358759
+                                color_down: #x3ea36c
+                                border_radius: 6.0
+                            }
+                            draw_text +: {
+                                color: #xffffff
+                                text_style: theme.font_bold { font_size: 9.5 }
+                            }
+                        }
+                    }
+                }
+            }
+    }
+
     startup() do #(App::script_component(vm)){
         ui: Root {
             main_window := Window {
@@ -992,7 +1249,12 @@ script_mod! {
                 window.title: "threadlane"
                 pass.clear_color: #x181a1f
                 body +: {
-                    dock := DockFlat {
+                    window_body := View {
+                        width: Fill
+                        height: Fill
+                        flow: Overlay
+
+                        dock := DockFlat {
                         width: Fill
                         height: Fill
                         padding: 0
@@ -1111,6 +1373,7 @@ script_mod! {
                             }
                             session_context_menu := SessionContextMenu {}
                             session_list := SessionList { height: Fill }
+                            providers_modal := ProvidersModal {}
                             update_action_row := View {
                                 width: Fill
                                 height: Fit
@@ -1531,263 +1794,109 @@ script_mod! {
 
 
                         }
+                    }
 
-                        providers_modal := View {
-                            width: Fill
-                            height: Fill
-                            visible: false
-                            flow: Overlay
-                            align: Align{x: 0.5 y: 0.5}
 
-                            modal_backdrop := View {
-                                width: Fill
-                                height: Fill
-                                draw_bg +: {
-                                    color: #x000000bb
-                                }
-                            }
-
-                            modal_card := RoundedView {
-                                width: 460
-                                height: Fit
-                                flow: Down
-                                padding: Inset{left: 22 top: 20 right: 22 bottom: 22}
-                                spacing: 14
-                                draw_bg +: {
-                                    color: #x1a1d24
-                                    border_radius: 12.0
-                                    border_size: 1.0
-                                    border_color: #x323a48
-                                }
-
-                                modal_header := View {
-                                    width: Fill
-                                    height: Fit
-                                    flow: Right
-                                    align: Align{y: 0.5}
-
-                                    modal_title := Label {
-                                        width: Fill
-                                        height: Fit
-                                        text: "Provider Settings"
-                                        draw_text +: {
-                                            color: #xe7ebf0
-                                            text_style: theme.font_bold { font_size: 14.0 }
-                                        }
-                                    }
-
-                                    close_modal_btn := Button {
-                                        width: 26
-                                        height: 26
-                                        padding: 0
-                                        spacing: 0
-                                        text: "✕"
-                                        align: Align{x: 0.5 y: 0.5}
-                                        draw_bg +: {
-                                            color: #x00000000
-                                            color_hover: #x2e3543
-                                            color_down: #x3e485a
-                                            border_radius: 6.0
-                                        }
-                                        draw_text +: {
-                                            color: #x8b93a0
-                                            color_hover: #xffffff
-                                            text_style +: { font_size: 12.0 }
-                                        }
-                                    }
-                                }
-
-                                modal_subtitle := Label {
-                                    width: Fill
-                                    height: Fit
-                                    text: "Connect your AI model providers to use them in Threadlane."
-                                    draw_text +: {
-                                        color: #x7f8c9d
-                                        text_style +: { font_size: 10.0 }
-                                    }
-                                }
-
-                                // Google Antigravity Provider Card
-                                antigravity_card := RoundedView {
-                                    width: Fill
-                                    height: Fit
-                                    flow: Down
-                                    padding: Inset{left: 14 top: 12 right: 14 bottom: 12}
-                                    spacing: 8
-                                    draw_bg +: {
-                                        color: #x222631
-                                        border_radius: 8.0
-                                        border_size: 1.0
-                                        border_color: #x323a48
-                                    }
-
-                                    ag_header := View {
-                                        width: Fill
-                                        height: Fit
-                                        flow: Right
-                                        align: Align{y: 0.5}
-
-                                        ag_title := Label {
-                                            width: Fill
-                                            height: Fit
-                                            text: "Google Antigravity"
-                                            draw_text +: {
-                                                color: #xe7ebf0
-                                                text_style: theme.font_bold { font_size: 11.5 }
-                                            }
-                                        }
-
-                                        antigravity_status_lbl := Label {
-                                            width: Fit
-                                            height: Fit
-                                            text: "Not Connected"
-                                            draw_text +: {
-                                                color: #xe06c75
-                                                text_style: theme.font_bold { font_size: 10.0 }
-                                            }
-                                        }
-                                    }
-
-                                    ag_desc := Label {
-                                        width: Fill
-                                        height: Fit
-                                        text: "Cloud Code Assist, Gemini 3.6 Flash / Pro via Google OAuth PKCE"
-                                        draw_text +: {
-                                            color: #x7f8c9d
-                                            text_style +: { font_size: 9.25 }
-                                        }
-                                    }
-
-                                    ag_actions := View {
-                                        width: Fill
-                                        height: Fit
-                                        flow: Right
-                                        spacing: 8
-                                        align: Align{y: 0.5}
-
-                                        antigravity_login_btn := Button {
-                                            width: Fit
-                                            height: 28
-                                            padding: Inset{left: 12 right: 12 top: 4 bottom: 4}
-                                            text: "Sign in with Google"
-                                            draw_bg +: {
-                                                color: #x3b669e
-                                                color_hover: #x4a7bc0
-                                                color_down: #x5a8de0
-                                                border_radius: 6.0
-                                            }
-                                            draw_text +: {
-                                                color: #xffffff
-                                                text_style: theme.font_bold { font_size: 9.5 }
-                                            }
-                                        }
-
-                                        antigravity_doctor_btn := Button {
-                                            width: Fit
-                                            height: 28
-                                            padding: Inset{left: 10 right: 10 top: 4 bottom: 4}
-                                            text: "Run Health Check"
-                                            draw_bg +: {
-                                                color: #x2b313d
-                                                color_hover: #x363e4d
-                                                color_down: #x444f62
-                                                border_color: #x3a4354
-                                                border_size: 1.0
-                                                border_radius: 6.0
-                                            }
-                                            draw_text +: {
-                                                color: #xa4b0c2
-                                                color_hover: #xd8e0ec
-                                                text_style +: { font_size: 9.0 }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // OpenAI / ChatGPT Provider Card
-                                openai_card := RoundedView {
-                                    width: Fill
-                                    height: Fit
-                                    flow: Down
-                                    padding: Inset{left: 14 top: 12 right: 14 bottom: 12}
-                                    spacing: 8
-                                    draw_bg +: {
-                                        color: #x222631
-                                        border_radius: 8.0
-                                        border_size: 1.0
-                                        border_color: #x323a48
-                                    }
-
-                                    oa_header := View {
-                                        width: Fill
-                                        height: Fit
-                                        flow: Right
-                                        align: Align{y: 0.5}
-
-                                        oa_title := Label {
-                                            width: Fill
-                                            height: Fit
-                                            text: "OpenAI / ChatGPT"
-                                            draw_text +: {
-                                                color: #xe7ebf0
-                                                text_style: theme.font_bold { font_size: 11.5 }
-                                            }
-                                        }
-
-                                        openai_status_lbl := Label {
-                                            width: Fit
-                                            height: Fit
-                                            text: "Not Connected"
-                                            draw_text +: {
-                                                color: #xe06c75
-                                                text_style: theme.font_bold { font_size: 10.0 }
-                                            }
-                                        }
-                                    }
-
-                                    oa_desc := Label {
-                                        width: Fill
-                                        height: Fit
-                                        text: "GPT-4o, Codex, and OpenAI models via ChatGPT OAuth or API key"
-                                        draw_text +: {
-                                            color: #x7f8c9d
-                                            text_style +: { font_size: 9.25 }
-                                        }
-                                    }
-
-                                    oa_actions := View {
-                                        width: Fill
-                                        height: Fit
-                                        flow: Right
-                                        spacing: 8
-                                        align: Align{y: 0.5}
-
-                                        openai_login_btn := Button {
-                                            width: Fit
-                                            height: 28
-                                            padding: Inset{left: 12 right: 12 top: 4 bottom: 4}
-                                            text: "Sign in with ChatGPT"
-                                            draw_bg +: {
-                                                color: #x2c6e49
-                                                color_hover: #x358759
-                                                color_down: #x3ea36c
-                                                border_radius: 6.0
-                                            }
-                                            draw_text +: {
-                                                color: #xffffff
-                                                text_style: theme.font_bold { font_size: 9.5 }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        }
                     }
                 }
             }
         }
+    }
+}
+}
+
+#[derive(Script, Widget)]
+struct ProviderSettingsModal {
+    #[source]
+    source: ScriptObjectRef,
+    #[deref]
+    view: View,
+    #[rust]
+    draw_list: Option<DrawList2d>,
+    #[rust]
+    opened: bool,
+}
+
+impl ScriptHook for ProviderSettingsModal {
+    fn on_after_new(&mut self, vm: &mut ScriptVm) {
+        self.draw_list = Some(DrawList2d::script_new(vm));
+    }
+
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        _apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+        vm.with_cx_mut(|cx| {
+            if let Some(draw_list) = &self.draw_list {
+                draw_list.redraw(cx);
+            }
+        });
+    }
+}
+
+impl Widget for ProviderSettingsModal {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if !self.opened {
+            return;
+        }
+
+        self.view.handle_event(cx, event, scope);
+        let modal_rect = self.view.widget(cx, ids!(modal_card)).area().rect(cx);
+        let should_close = matches!(
+            event,
+            Event::MouseUp(event)
+                if event.button.is_primary() && !modal_rect.contains(event.abs)
+        ) || matches!(event, Event::KeyDown(event) if event.key_code == KeyCode::Escape)
+            || matches!(event, Event::BackPressed { .. });
+        if should_close {
+            self.close(cx);
+        }
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
+        let draw_list = self.draw_list.as_mut().unwrap();
+        draw_list.begin_overlay_reuse(cx);
+
+        let pass_size = cx.current_pass_size();
+        cx.begin_root_turtle(pass_size, Layout::flow_overlay());
+        if self.opened {
+            self.view.draw_walk_all(
+                cx,
+                scope,
+                Walk {
+                    width: Size::Fixed(pass_size.x),
+                    height: Size::Fixed(pass_size.y),
+                    ..Default::default()
+                },
+            );
+        }
+        cx.end_pass_sized_turtle();
+        draw_list.end(cx);
+        DrawStep::done()
+    }
+}
+
+impl ProviderSettingsModal {
+    fn open(&mut self, cx: &mut Cx) {
+        self.opened = true;
+        if let Some(draw_list) = &self.draw_list {
+            draw_list.redraw(cx);
+        }
+        self.view.redraw(cx);
+    }
+
+    fn close(&mut self, cx: &mut Cx) {
+        if !self.opened {
+            return;
+        }
+        self.opened = false;
+        if let Some(draw_list) = &self.draw_list {
+            draw_list.redraw(cx);
+        }
+        self.view.redraw(cx);
     }
 }
 
@@ -2226,9 +2335,7 @@ impl MatchEvent for App {
         }
 
         if self.ui.button(cx, ids!(settings_btn)).clicked(actions) {
-            self.ui
-                .widget(cx, ids!(providers_modal))
-                .set_visible(cx, true);
+            self.open_providers_modal(cx);
             if let Some(creds) =
                 threadlane_provider::antigravity_auth::load_antigravity_credentials()
             {
@@ -2254,12 +2361,6 @@ impl MatchEvent for App {
                     .set_text(cx, "Not Connected");
             }
             cx.redraw_all();
-        }
-
-        if let Some(finger_up) = self.ui.view(cx, ids!(modal_backdrop)).finger_up(actions) {
-            if finger_up.is_over && finger_up.is_primary_hit() && finger_up.was_tap() {
-                self.dismiss_providers_modal(cx);
-            }
         }
 
         if self.ui.button(cx, ids!(close_modal_btn)).clicked(actions) {
@@ -2293,9 +2394,7 @@ impl MatchEvent for App {
 
         let openai_login_clicked = self.ui.button(cx, ids!(openai_login_btn)).clicked(actions);
         if openai_login_clicked {
-            self.ui
-                .widget(cx, ids!(providers_modal))
-                .set_visible(cx, false);
+            self.dismiss_providers_modal(cx);
         }
 
         if openai_login_clicked || self.ui.button(cx, ids!(login_btn)).clicked(actions) {
@@ -2583,25 +2682,6 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        let providers_modal = self.ui.widget(cx, ids!(providers_modal));
-        if providers_modal.visible() {
-            let dismiss = matches!(event, Event::KeyDown(event) if event.key_code == KeyCode::Escape)
-                || matches!(event, Event::BackPressed { .. });
-            if dismiss {
-                self.dismiss_providers_modal(cx);
-                return;
-            }
-
-            self.match_event(cx, event);
-            self.poll_agent_events(cx);
-            self.poll_update_status(cx);
-            if providers_modal.visible() {
-                let mut scope = Scope::with_data(&mut self.workspace_state);
-                providers_modal.handle_event(cx, event, &mut scope);
-            }
-            return;
-        }
-
         if self.handle_clipboard_image_paste(cx, event) {
             return;
         }
@@ -2709,11 +2789,24 @@ fn format_capabilities_summary(
 }
 
 impl App {
-    fn dismiss_providers_modal(&mut self, cx: &mut Cx) {
-        self.ui
+    fn open_providers_modal(&mut self, cx: &mut Cx) {
+        if let Some(mut modal) = self
+            .ui
             .widget(cx, ids!(providers_modal))
-            .set_visible(cx, false);
-        cx.redraw_all();
+            .borrow_mut::<ProviderSettingsModal>()
+        {
+            modal.open(cx);
+        }
+    }
+
+    fn dismiss_providers_modal(&mut self, cx: &mut Cx) {
+        if let Some(mut modal) = self
+            .ui
+            .widget(cx, ids!(providers_modal))
+            .borrow_mut::<ProviderSettingsModal>()
+        {
+            modal.close(cx);
+        }
     }
 
     fn start_antigravity_login(&mut self, cx: &mut Cx) {
