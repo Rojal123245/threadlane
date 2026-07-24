@@ -3,7 +3,7 @@ pub mod hashline;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn tool_definitions() -> Vec<Value> {
     vec![
@@ -314,7 +314,10 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
             }
 
             match fs::write(&validated_path, content) {
-                Ok(_) => format!("Successfully wrote {} bytes to '{raw_path}'", content.len()),
+                Ok(_) => {
+                    let diag = run_post_edit_diagnostics(workspace_root, raw_path);
+                    format!("Successfully wrote {} bytes to '{raw_path}'{diag}", content.len())
+                }
                 Err(e) => format!("Error writing to file '{raw_path}': {e}"),
             }
         }
@@ -344,7 +347,10 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
                     }
                     let new_content = content.replace(target, replacement);
                     match fs::write(&validated_path, new_content) {
-                        Ok(_) => format!("Successfully replaced target in '{raw_path}'"),
+                        Ok(_) => {
+                            let diag = run_post_edit_diagnostics(workspace_root, raw_path);
+                            format!("Successfully replaced target in '{raw_path}'{diag}")
+                        }
                         Err(e) => format!("Error writing file '{raw_path}': {e}"),
                     }
                 }
@@ -374,10 +380,13 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
             match fs::read_to_string(&validated_path) {
                 Ok(content) => match hashline::apply_hashline_edits(&content, &edits) {
                     Ok(new_content) => match fs::write(&validated_path, new_content) {
-                        Ok(_) => format!(
-                            "Successfully applied {} hashline edit(s) to '{raw_path}'",
-                            edits.len()
-                        ),
+                        Ok(_) => {
+                            let diag = run_post_edit_diagnostics(workspace_root, raw_path);
+                            format!(
+                                "Successfully applied {} hashline edit(s) to '{raw_path}'{diag}",
+                                edits.len()
+                            )
+                        }
                         Err(e) => format!("Error writing file '{raw_path}': {e}"),
                     },
                     Err(e) => format!("Error applying hashline edits to '{raw_path}': {e}"),
@@ -439,10 +448,104 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
     }
 }
 
+pub fn run_post_edit_diagnostics(workspace_root: &Path, raw_path: &str) -> String {
+    if !raw_path.ends_with(".rs") {
+        return String::new();
+    }
+
+    let mut cmd = Command::new("cargo");
+    cmd.arg("check")
+        .arg("--message-format=json")
+        .current_dir(workspace_root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+
+    let output = match cmd.output() {
+        Ok(o) => o,
+        Err(_) => return String::new(),
+    };
+
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
+    let target_clean = raw_path.replace('\\', "/");
+
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+
+    for line in stdout_str.lines() {
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+
+        if val.get("reason").and_then(|v| v.as_str()) != Some("compiler-message") {
+            continue;
+        }
+
+        let Some(msg) = val.get("message") else {
+            continue;
+        };
+
+        let level = msg.get("level").and_then(|v| v.as_str()).unwrap_or("info");
+        let text_msg = msg.get("message").and_then(|v| v.as_str()).unwrap_or("");
+        let spans = msg.get("spans").and_then(|v| v.as_array());
+
+        let mut matched = false;
+        let mut line_no = 0;
+        let mut col_no = 0;
+
+        if let Some(spans) = spans {
+            for span in spans {
+                if let Some(file_name) = span.get("file_name").and_then(|v| v.as_str()) {
+                    let file_clean = file_name.replace('\\', "/");
+                    if file_clean.ends_with(&target_clean) || target_clean.ends_with(&file_clean) {
+                        matched = true;
+                        line_no = span.get("line_start").and_then(|v| v.as_u64()).unwrap_or(0);
+                        col_no = span.get("column_start").and_then(|v| v.as_u64()).unwrap_or(0);
+                        break;
+                    }
+                }
+            }
+        }
+
+        if matched {
+            if level == "error" {
+                errors.push(format!("- [ERROR] Line {line_no}, Col {col_no}: {text_msg}"));
+            } else if level == "warning" {
+                warnings.push(format!("- [WARNING] Line {line_no}, Col {col_no}: {text_msg}"));
+            }
+        }
+    }
+
+    if errors.is_empty() && warnings.is_empty() {
+        "\n\n[LSP Diagnostics Post-Check]\n✓ Clean (0 errors, 0 warnings)".to_string()
+    } else {
+        let mut res = format!(
+            "\n\n[LSP Diagnostics Post-Check]\n⚠ Found {} error(s), {} warning(s):",
+            errors.len(),
+            warnings.len()
+        );
+        for err in errors.iter().take(10) {
+            res.push('\n');
+            res.push_str(err);
+        }
+        for warn in warnings.iter().take(10) {
+            res.push('\n');
+            res.push_str(warn);
+        }
+        res
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn test_run_post_edit_diagnostics_non_rust_file() {
+        let dir = tempdir().unwrap();
+        let res = run_post_edit_diagnostics(dir.path(), "readme.txt");
+        assert_eq!(res, "");
+    }
 
     #[test]
     fn test_list_dir_tool() {

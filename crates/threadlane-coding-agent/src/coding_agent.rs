@@ -1142,6 +1142,12 @@ impl CodingAgent {
             state.messages.push(AgentMessage::System {
                 content: base_system_prompt.clone(),
             });
+            state.messages.extend(
+                session_tree
+                    .get_active_branch_messages()
+                    .into_iter()
+                    .filter(|message| !matches!(message, AgentMessage::System { .. })),
+            );
         }
 
         Self {
@@ -1908,6 +1914,49 @@ mod tests {
             coding_agent.session_tree.model.as_deref(),
             Some("antigravity/gemini-3.6-flash")
         );
+    }
+
+    #[tokio::test]
+    async fn persisted_session_history_is_loaded_into_provider_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("session.jsonl");
+        let messages = vec![
+            AgentMessage::User {
+                content: "Choose a scrollbar behavior".into(),
+            },
+            AgentMessage::Assistant {
+                content: Some("A. Always visible\nB. Visible while scrolling\nC. Hidden".into()),
+                tool_calls: None,
+            },
+            AgentMessage::User {
+                content: "B".into(),
+            },
+        ];
+        let mut tree = SessionTree::new("session");
+        tree.file_path = Some(session_file.clone());
+        for message in messages.clone() {
+            tree.add_message(message);
+        }
+
+        let mut options = coding_agent_options(dir.path().to_path_buf());
+        options.session_file = Some(session_file);
+        let coding_agent = CodingAgent::new(options);
+
+        let state = coding_agent.agent.get_state().await;
+        assert!(matches!(
+            state.messages.first(),
+            Some(AgentMessage::System { .. })
+        ));
+        assert_eq!(
+            serde_json::to_value(&state.messages[1..]).unwrap(),
+            serde_json::to_value(&messages).unwrap()
+        );
+
+        let (chat, codex) = coding_agent.agent.loop_engine.build_api_payloads().await;
+        assert_eq!(chat["messages"][2]["role"], "assistant");
+        assert_eq!(chat["messages"][3]["content"], "B");
+        assert_eq!(codex["input"][1]["role"], "assistant");
+        assert_eq!(codex["input"][2]["content"][0]["text"], "B");
     }
 
     #[tokio::test]
