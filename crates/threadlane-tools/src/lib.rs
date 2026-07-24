@@ -47,21 +47,21 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "edit_file_hashline",
-            "description": "Edit a file using hash-anchored lines obtained from read_file. Format of start_anchor/end_anchor is 'line_number:hash' (e.g., '12:a3f'). Actions: 'replace', 'insert_after', 'delete'.",
+            "description": "Edit a file using hash-anchored lines obtained from read_file. Supports line and range replace, insert_after, and delete operations. Format of start_anchor/end_anchor is 'line_number:hash' (e.g. '12:a3f'). Always batch multiple edits for the same file in one tool call.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Path to file to edit" },
                     "edits": {
                         "type": "array",
-                        "description": "List of hash-anchored edit operations",
+                        "description": "List of hash-anchored edit operations to apply atomically (sorted descending automatically by start line).",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "start_anchor": { "type": "string", "description": "Starting line anchor e.g. '12:a3f'" },
-                                "end_anchor": { "type": "string", "description": "Optional ending line anchor for range edit e.g. '15:9b2'" },
-                                "action": { "type": "string", "enum": ["replace", "insert_after", "delete"], "description": "Edit action" },
-                                "new_content": { "type": "string", "description": "New replacement or inserted content" }
+                                "start_anchor": { "type": "string", "description": "Starting line anchor formatted as 'line_number:hash' (e.g. '12:a3f')." },
+                                "end_anchor": { "type": "string", "description": "Optional ending line anchor for multi-line range edits (e.g. '15:9b2'). If omitted, edit targets single start_anchor line." },
+                                "action": { "type": "string", "enum": ["replace", "insert_after", "delete"], "description": "Edit action: 'replace' (replaces target line or range with new_content), 'insert_after' (inserts new_content after target line or range), or 'delete' (removes target line or range; new_content omitted/empty)." },
+                                "new_content": { "type": "string", "description": "New replacement or inserted content. Omit or leave empty for 'delete' actions." }
                             },
                             "required": ["start_anchor", "action"]
                         }
@@ -448,6 +448,33 @@ mod tests {
     fn test_list_dir_tool() {
         let res = execute_tool("list_dir", r#"{"path": "."}"#);
         assert!(res.contains("Cargo.toml"));
+    }
+    #[test]
+    fn test_edit_file_hashline_schema_description() {
+        let tools = get_available_tools();
+        let hashline_tool = tools
+            .iter()
+            .find(|t| t["function"]["name"] == "edit_file_hashline")
+            .expect("edit_file_hashline tool should exist");
+        
+        let desc = hashline_tool["function"]["description"].as_str().unwrap();
+        assert!(desc.contains("Supports line and range replace, insert_after, and delete operations"));
+        assert!(desc.contains("Always batch multiple edits for the same file in one tool call"));
+
+        let params = &hashline_tool["function"]["parameters"]["properties"];
+        let start_anchor_desc = params["edits"]["items"]["properties"]["start_anchor"]["description"].as_str().unwrap();
+        assert!(start_anchor_desc.contains("formatted as 'line_number:hash'"));
+
+        let end_anchor_desc = params["edits"]["items"]["properties"]["end_anchor"]["description"].as_str().unwrap();
+        assert!(end_anchor_desc.contains("multi-line range edits"));
+
+        let action_desc = params["edits"]["items"]["properties"]["action"]["description"].as_str().unwrap();
+        assert!(action_desc.contains("'replace'"));
+        assert!(action_desc.contains("'insert_after'"));
+        assert!(action_desc.contains("'delete'"));
+
+        let new_content_desc = params["edits"]["items"]["properties"]["new_content"]["description"].as_str().unwrap();
+        assert!(new_content_desc.contains("Omit or leave empty for 'delete' actions"));
     }
 
     #[test]
