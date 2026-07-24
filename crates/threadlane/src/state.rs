@@ -45,4 +45,9 @@ pub enum GuiAgentEvent {
         work_dir: PathBuf,
         session_id: String,
     },
+    AntigravityLoginSuccess {
+        email: Option<String>,
+    },
+    AntigravityLoginError(String),
+    AntigravityDoctorReport(String),
 }
