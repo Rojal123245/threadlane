@@ -18,16 +18,16 @@ script_mod! {
             height: 16
             padding: 0
             text: ""
-            draw_text +: { color: #xaab3c0 text_style +: { font_size: 10.0 } }
+            draw_text +: { color: #xb4bcc8 text_style +: { font_size: 10.5 } }
         }
     }
 
     mod.components.SessionRowBase = RoundedView {
         width: Fill
-        height: 32
+        height: 34
         cursor: MouseCursor.Hand
         flow: Right
-        spacing: 12
+        spacing: 10
         align: Align{y: 0.5}
         margin: Inset{left: 10 right: 4 top: 1 bottom: 1}
         padding: Inset{left: 20 top: 4 right: 9 bottom: 4}
@@ -36,8 +36,8 @@ script_mod! {
             tree_last: instance(0.0)
             is_active: instance(0.0)
             color: #x00000000
-            color_hover: uniform(#x00000000)
-            tree_color: uniform(#x3b4552)
+            color_hover: uniform(#x1e2430)
+            tree_color: uniform(#x2f3844)
             hover_line_color: uniform(#x61748b)
             active_line_color: uniform(#x8fb9e8)
             border_radius: 7.0
@@ -100,10 +100,10 @@ script_mod! {
             }
         }
         session_icon := Icon {
-            icon_walk: Walk{width: 11 height: 11}
+            icon_walk: Walk{width: 12 height: 12}
             draw_icon +: {
                 svg: crate_resource("self:resources/icons/conversation.svg")
-                color: #x667386
+                color: #x6b7a8e
             }
         }
         title_surface := mod.components.SessionTitle {}
@@ -116,24 +116,24 @@ script_mod! {
             width: Fit
             height: Fit
             text: ""
-            draw_text +: { color: #x667180 text_style +: { font_size: 8.5 } }
+            draw_text +: { color: #x6d7888 text_style +: { font_size: 9.0 } }
         }
     }
 
     mod.components.ProjectHeaderBase = RoundedView {
         width: Fill
-        height: 34
+        height: 38
         cursor: MouseCursor.Hand
         flow: Right
         spacing: 8
         align: Align{y: 0.5}
-        margin: Inset{left: 3 right: 3 bottom: 2}
+        margin: Inset{left: 3 right: 3 top: 4 bottom: 2}
         padding: Inset{left: 8 top: 4 right: 4 bottom: 4}
         draw_bg +: {
             hover: instance(0.0)
-            tree_color: uniform(#x3b4552)
+            tree_color: uniform(#x2f3844)
             color: #x00000000
-            color_hover: #x222831
+            color_hover: #x252b35
             border_radius: 8.0
 
             pixel: fn() {
@@ -179,7 +179,7 @@ script_mod! {
             height: 18
             draw_text +: {
                 color: #xc2cad5
-                text_style: theme.font_bold { font_size: 9.75 }
+                text_style: theme.font_bold { font_size: 10.5 }
             }
         }
         detach_project_btn := mod.components.IconButton {

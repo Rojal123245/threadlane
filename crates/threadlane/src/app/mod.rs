@@ -873,8 +873,8 @@ script_mod! {
             SessionRowActive := SessionRowBase {
                 draw_bg +: {
                     is_active: 1.0
-                    color: #x00000000
-                    color_hover: #x00000000
+                    color: #x1a2535
+                    color_hover: #x1e2a3a
                     border_color: #x00000000
                     border_size: 0.0
                     border_radius: 7.0
@@ -898,8 +898,8 @@ script_mod! {
                 draw_bg +: {
                     tree_last: 1.0
                     is_active: 1.0
-                    color: #x00000000
-                    color_hover: #x00000000
+                    color: #x1a2535
+                    color_hover: #x1e2a3a
                     border_color: #x00000000
                     border_size: 0.0
                     border_radius: 7.0
@@ -970,7 +970,7 @@ script_mod! {
                 padding: Inset{left: 43 top: 4 right: 10 bottom: 8}
                 lbl +: {
                     text: "No sessions yet"
-                    draw_text +: { color: #x596474 text_style +: { font_size: 9.25 } }
+                    draw_text +: { color: #x596474 text_style +: { font_size: 9.5 } }
                 }
             }
         }
@@ -1257,8 +1257,8 @@ script_mod! {
                         splitter: Splitter {
                             size: 6.0
                             draw_bg +: {
-                                color: uniform(#x303641)
-                                color_hover: uniform(#x4b5665)
+                                color: uniform(#x242930)
+                                color_hover: uniform(#x3a4452)
                                 color_drag: uniform(#x6a7b91)
 
                                 pixel: fn() {
@@ -1322,13 +1322,13 @@ script_mod! {
 
                             sidebar_brand := View {
                                 width: Fill
-                                height: 38
+                                height: 44
                                 flow: Right
                                 align: Align{y: 0.5}
-                                padding: Inset{left: 7 right: 5}
-                                spacing: 0
+                                padding: Inset{left: 7 right: 5 bottom: 6}
+                                spacing: 7
                                 sidebar_brand_icon := Icon {
-                                    width: 26
+                                    width: 16
                                     height: 16
                                     icon_walk: Walk{width: 16 height: 16}
                                     draw_icon +: {
@@ -1337,15 +1337,15 @@ script_mod! {
                                     }
                                 }
                                 sidebar_brand_label := Label {
-                                    width: Fill
+                                    width: Fit
                                     height: Fit
-                                    align: Align{x: 0.5}
                                     text: "Threadlane"
                                     draw_text +: {
                                         color: #xe7ebf0
                                         text_style: theme.font_bold { font_size: 14.0 }
                                     }
                                 }
+                                sidebar_brand_spacer := mod.components.FlexSpacer {}
                                 settings_btn := Button {
                                     width: 26
                                     height: 26
@@ -1367,6 +1367,13 @@ script_mod! {
                                         color_down: #xffffff
                                     }
                                 }
+                            }
+                            sidebar_brand_divider := View {
+                                width: Fill
+                                height: 1
+                                margin: Inset{left: 6 right: 6 bottom: 4}
+                                show_bg: true
+                                draw_bg +: { color: #x2a303a }
                             }
 
                             projects_header := mod.components.SectionHeader {
