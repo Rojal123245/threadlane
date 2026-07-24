@@ -75,6 +75,7 @@ A normal `cargo run` may be unsuitable for testing installation: update installa
 6. Existing unused-code warnings are not part of unrelated tasks; do not remove meaningful code merely to silence them.
 
 ## Rust and Architecture Conventions
+- Prefer `edit_file_hashline` for high-precision edits using line:hash anchors (e.g. '12:a3f') returned from `read_file` to ensure edit safety and prevent line drift. Use range edits (`start_anchor` to `end_anchor`) for multi-line replacements/deletions, batch multiple edits into a single tool call, and re-read the target range with `read_file` if a hash mismatch occurs.
 
 - Keep edits surgical. Do not move unrelated symbols or reformat large files without need.
 - Reuse existing dependencies and runtime infrastructure.
