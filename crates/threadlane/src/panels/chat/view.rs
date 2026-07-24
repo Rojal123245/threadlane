@@ -274,7 +274,13 @@ fn activity_line(
     line
 }
 
-fn draw_markdown_item(list: &mut PortalList, cx: &mut Cx2d, item_id: usize, template: LiveId, text: &str) {
+fn draw_markdown_item(
+    list: &mut PortalList,
+    cx: &mut Cx2d,
+    item_id: usize,
+    template: LiveId,
+    text: &str,
+) {
     let item_widget = list.item(cx, item_id, template);
     item_widget.markdown(cx, ids!(md)).set_text(cx, text);
     item_widget.draw_all_unscoped(cx);
@@ -332,7 +338,13 @@ impl Widget for ChatList {
 
                     match row {
                         DisplayRow::StreamingAssistant => {
-                            draw_markdown_item(&mut list, cx, item_id, id!(AssistantMsg), &data.streaming_text);
+                            draw_markdown_item(
+                                &mut list,
+                                cx,
+                                item_id,
+                                id!(AssistantMsg),
+                                &data.streaming_text,
+                            );
                         }
                         DisplayRow::ActivityGroup {
                             start,
@@ -413,10 +425,22 @@ impl Widget for ChatList {
                             match message {
                                 ChatMessage::Text { role, text } => match role {
                                     MsgRole::User => {
-                                        draw_markdown_item(&mut list, cx, item_id, id!(UserMsg), text);
+                                        draw_markdown_item(
+                                            &mut list,
+                                            cx,
+                                            item_id,
+                                            id!(UserMsg),
+                                            text,
+                                        );
                                     }
                                     MsgRole::Assistant => {
-                                        draw_markdown_item(&mut list, cx, item_id, id!(AssistantMsg), text);
+                                        draw_markdown_item(
+                                            &mut list,
+                                            cx,
+                                            item_id,
+                                            id!(AssistantMsg),
+                                            text,
+                                        );
                                     }
                                     MsgRole::System => {
                                         let item_widget = list.item(cx, item_id, id!(SystemMsg));

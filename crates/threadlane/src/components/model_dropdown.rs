@@ -1,4 +1,4 @@
-//! Repository-local model dropdown with provider icons in the trigger and popup rows.
+//! Shared icon-aware dropdown for model-provider and reasoning-effort selection.
 
 use makepad_widgets::widget::WidgetActionData;
 use makepad_widgets::*;
@@ -12,22 +12,27 @@ script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
 
-    mod.components.ModelPopupMenuItemBase = #(ModelPopupMenuItem::script_component(vm))
-    mod.components.ModelPopupMenuBase = #(ModelPopupMenu::script_component(vm))
-    mod.components.ModelDropDownBase = #(ModelDropDown::register_widget(vm))
+    mod.components.IconPopupMenuItemBase = #(IconPopupMenuItem::script_component(vm))
+    mod.components.IconPopupMenuBase = #(IconPopupMenu::script_component(vm))
+    mod.components.IconDropDownBase = #(IconDropDown::register_widget(vm))
 
-    mod.components.ModelPopupMenuItem = mod.components.ModelPopupMenuItemBase {
+    mod.components.IconPopupMenuItem = mod.components.IconPopupMenuItemBase {
         width: Fill
         height: 24
         align: Align{y: 0.5}
         padding: Inset{left: 10 right: 10}
         icon_walk: Walk{width: 13 height: 13 margin: Inset{right: 7}}
+        use_provider_icons: true
         draw_openai_icon +: {
             svg: crate_resource("self:resources/icons/openai.svg")
             color: #xc9d0da
         }
         draw_antigravity_icon +: {
             svg: crate_resource("self:resources/icons/google.svg")
+        }
+        draw_icon +: {
+            svg: crate_resource("self:resources/icons/reasoning.svg")
+            color: #x9fc5f2
         }
         draw_text +: {
             color: #xc9d0da
@@ -90,14 +95,13 @@ script_mod! {
         }
     }
 
-    // The selected model is kept last by the app. Its transparent 24px row
+    // The selected option is kept last by the app. Its transparent 24px row
     // anchors OnSelected above the trigger, leaving the closed picker visible.
-    mod.components.ModelPopupMenu = mod.components.ModelPopupMenuBase {
-        width: 226
+    mod.components.IconPopupMenu = mod.components.IconPopupMenuBase {
         height: Fit
         flow: Down
         padding: Inset{left: 4 top: 4 right: 4 bottom: 0}
-        menu_item: mod.components.ModelPopupMenuItem {}
+        menu_item: mod.components.IconPopupMenuItem {}
         draw_bg +: {
             color: #x242932
             border_color: #x454e5b
@@ -128,19 +132,24 @@ script_mod! {
         }
     }
 
-    mod.components.ModelDropDown = mod.components.ModelDropDownBase {
+    mod.components.IconDropDown = mod.components.IconDropDownBase {
         width: Fill
         height: Fill
         margin: 0
         align: Align{x: 0.0 y: 0.5}
         padding: Inset{left: 10 right: 24}
         icon_walk: Walk{width: 13 height: 13 margin: Inset{right: 7}}
+        use_provider_icons: true
         draw_openai_icon +: {
             svg: crate_resource("self:resources/icons/openai.svg")
             color: #xc7cdd6
         }
         draw_antigravity_icon +: {
             svg: crate_resource("self:resources/icons/google.svg")
+        }
+        draw_icon +: {
+            svg: crate_resource("self:resources/icons/reasoning.svg")
+            color: #x9fc5f2
         }
         draw_bg +: {
             hover: instance(0.0)
@@ -211,7 +220,6 @@ script_mod! {
             }
             text_style: theme.font_regular { font_size: 9.5 }
         }
-        popup_menu: mod.components.ModelPopupMenu {}
         selected_item: 0
         animator: Animator {
             disabled: {
@@ -269,20 +277,40 @@ script_mod! {
             }
         }
     }
+
+    mod.components.ModelDropDown = mod.components.IconDropDown {
+        use_provider_icons: true
+        popup_menu: mod.components.IconPopupMenu {
+            width: 226
+            menu_item: mod.components.IconPopupMenuItem {
+                use_provider_icons: true
+            }
+        }
+    }
+
+    mod.components.EffortDropDown = mod.components.IconDropDown {
+        use_provider_icons: false
+        popup_menu: mod.components.IconPopupMenu {
+            width: 92
+            menu_item: mod.components.IconPopupMenuItem {
+                use_provider_icons: false
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
-pub enum ModelDropDownAction {
+pub enum IconDropDownAction {
     Select(usize),
     #[default]
     None,
 }
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
-struct ModelPopupMenuItemId(LiveId);
+struct IconPopupMenuItemId(LiveId);
 
 #[derive(Script, ScriptHook, Animator)]
-struct ModelPopupMenuItem {
+struct IconPopupMenuItem {
     #[source]
     source: ScriptObjectRef,
     #[live]
@@ -291,6 +319,10 @@ struct ModelPopupMenuItem {
     draw_openai_icon: DrawSvg,
     #[live]
     draw_antigravity_icon: DrawSvg,
+    #[live]
+    draw_icon: DrawSvg,
+    #[live]
+    use_provider_icons: bool,
     #[live]
     draw_text: DrawText,
     #[live]
@@ -303,7 +335,7 @@ struct ModelPopupMenuItem {
     animator: Animator,
 }
 
-impl ModelPopupMenuItem {
+impl IconPopupMenuItem {
     fn draw_item(&mut self, cx: &mut Cx2d, label: &str, is_anchor: bool) {
         self.animator_cut(
             cx,
@@ -315,10 +347,14 @@ impl ModelPopupMenuItem {
         );
         self.draw_bg.begin(cx, self.walk, self.layout);
         if !is_anchor {
-            if is_antigravity_model(label) {
-                self.draw_antigravity_icon.draw_walk(cx, self.icon_walk);
+            if self.use_provider_icons {
+                if is_antigravity_model(label) {
+                    self.draw_antigravity_icon.draw_walk(cx, self.icon_walk);
+                } else {
+                    self.draw_openai_icon.draw_walk(cx, self.icon_walk);
+                }
             } else {
-                self.draw_openai_icon.draw_walk(cx, self.icon_walk);
+                self.draw_icon.draw_walk(cx, self.icon_walk);
             }
             self.draw_text
                 .draw_walk(cx, Walk::fit(), Align::default(), label);
@@ -331,7 +367,7 @@ impl ModelPopupMenuItem {
         cx: &mut Cx,
         event: &Event,
         sweep_area: Area,
-        dispatch_action: &mut dyn FnMut(&mut Cx, ModelPopupMenuItemAction),
+        dispatch_action: &mut dyn FnMut(&mut Cx, IconPopupMenuItemAction),
     ) {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.area().redraw(cx);
@@ -344,12 +380,12 @@ impl ModelPopupMenuItem {
             Hit::FingerHoverIn(_) => self.animator_play(cx, ids!(hover.on)),
             Hit::FingerHoverOut(_) => self.animator_play(cx, ids!(hover.off)),
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                dispatch_action(cx, ModelPopupMenuItemAction::WasSweeped);
+                dispatch_action(cx, IconPopupMenuItemAction::WasSweeped);
                 self.animator_play(cx, ids!(hover.on));
             }
             Hit::FingerUp(fe) if fe.is_primary_hit() => {
                 if !fe.is_sweep {
-                    dispatch_action(cx, ModelPopupMenuItemAction::WasSelected);
+                    dispatch_action(cx, IconPopupMenuItemAction::WasSelected);
                 } else {
                     self.animator_play(cx, ids!(hover.off));
                 }
@@ -359,21 +395,21 @@ impl ModelPopupMenuItem {
     }
 }
 
-enum ModelPopupMenuItemAction {
+enum IconPopupMenuItemAction {
     WasSweeped,
     WasSelected,
 }
 
 #[derive(Clone, Default)]
-enum ModelPopupMenuAction {
+enum IconPopupMenuAction {
     WasSweeped,
-    WasSelected(ModelPopupMenuItemId),
+    WasSelected(IconPopupMenuItemId),
     #[default]
     None,
 }
 
 #[derive(Script)]
-struct ModelPopupMenu {
+struct IconPopupMenu {
     #[source]
     source: ScriptObjectRef,
     #[live]
@@ -387,12 +423,12 @@ struct ModelPopupMenu {
     #[walk]
     walk: Walk,
     #[rust]
-    menu_items: ComponentMap<ModelPopupMenuItemId, ModelPopupMenuItem>,
+    menu_items: ComponentMap<IconPopupMenuItemId, IconPopupMenuItem>,
     #[rust]
-    init_select_item: Option<ModelPopupMenuItemId>,
+    init_select_item: Option<IconPopupMenuItemId>,
 }
 
-impl ScriptHook for ModelPopupMenu {
+impl ScriptHook for IconPopupMenu {
     fn on_after_apply(
         &mut self,
         vm: &mut ScriptVm,
@@ -409,7 +445,7 @@ impl ScriptHook for ModelPopupMenu {
     }
 }
 
-impl ModelPopupMenu {
+impl IconPopupMenu {
     fn menu_contains_pos(&self, cx: &mut Cx, pos: Vec2d) -> bool {
         self.draw_bg.area().clipped_rect(cx).contains(pos)
     }
@@ -423,13 +459,13 @@ impl ModelPopupMenu {
     fn draw_item(
         &mut self,
         cx: &mut Cx2d,
-        item_id: ModelPopupMenuItemId,
+        item_id: IconPopupMenuItemId,
         label: &str,
         is_anchor: bool,
     ) {
         let template = self.menu_item;
         let item = self.menu_items.get_or_insert(cx, item_id, |cx| {
-            cx.with_vm(|vm| ModelPopupMenuItem::script_from_value(vm, template))
+            cx.with_vm(|vm| IconPopupMenuItem::script_from_value(vm, template))
         });
         item.draw_item(cx, label, is_anchor);
     }
@@ -444,11 +480,11 @@ impl ModelPopupMenu {
         }
     }
 
-    fn init_select_item(&mut self, item_id: ModelPopupMenuItemId) {
+    fn init_select_item(&mut self, item_id: IconPopupMenuItemId) {
         self.init_select_item = Some(item_id);
     }
 
-    fn select_item_state(&mut self, cx: &mut Cx, selected: ModelPopupMenuItemId) {
+    fn select_item_state(&mut self, cx: &mut Cx, selected: IconPopupMenuItemId) {
         for (item_id, item) in self.menu_items.iter_mut() {
             item.animator_cut(
                 cx,
@@ -466,7 +502,7 @@ impl ModelPopupMenu {
         cx: &mut Cx,
         event: &Event,
         sweep_area: Area,
-        dispatch_action: &mut dyn FnMut(&mut Cx, ModelPopupMenuAction),
+        dispatch_action: &mut dyn FnMut(&mut Cx, IconPopupMenuAction),
     ) {
         let mut actions = Vec::new();
         for (item_id, item) in self.menu_items.iter_mut() {
@@ -477,11 +513,11 @@ impl ModelPopupMenu {
         for (item_id, action) in actions {
             self.select_item_state(cx, item_id);
             match action {
-                ModelPopupMenuItemAction::WasSweeped => {
-                    dispatch_action(cx, ModelPopupMenuAction::WasSweeped);
+                IconPopupMenuItemAction::WasSweeped => {
+                    dispatch_action(cx, IconPopupMenuAction::WasSweeped);
                 }
-                ModelPopupMenuItemAction::WasSelected => {
-                    dispatch_action(cx, ModelPopupMenuAction::WasSelected(item_id));
+                IconPopupMenuItemAction::WasSelected => {
+                    dispatch_action(cx, IconPopupMenuAction::WasSelected(item_id));
                 }
             }
         }
@@ -489,12 +525,12 @@ impl ModelPopupMenu {
 }
 
 #[derive(Default, Clone)]
-struct ModelPopupMenuGlobal {
-    map: Rc<RefCell<ComponentMap<ScriptValue, ModelPopupMenu>>>,
+struct IconPopupMenuGlobal {
+    map: Rc<RefCell<ComponentMap<ScriptValue, IconPopupMenu>>>,
 }
 
 #[derive(Script, Widget, Animator)]
-pub struct ModelDropDown {
+pub struct IconDropDown {
     #[uid]
     uid: WidgetUid,
     #[source]
@@ -508,6 +544,10 @@ pub struct ModelDropDown {
     draw_openai_icon: DrawSvg,
     #[live]
     draw_antigravity_icon: DrawSvg,
+    #[live]
+    draw_icon: DrawSvg,
+    #[live]
+    use_provider_icons: bool,
     #[live]
     draw_text: DrawText,
     #[live]
@@ -531,7 +571,7 @@ pub struct ModelDropDown {
     action_data: WidgetActionData,
 }
 
-impl ScriptHook for ModelDropDown {
+impl ScriptHook for IconDropDown {
     fn on_after_apply(
         &mut self,
         vm: &mut ScriptVm,
@@ -543,23 +583,23 @@ impl ScriptHook for ModelDropDown {
             return;
         }
         vm.with_cx_mut(|cx| {
-            let global = cx.global::<ModelPopupMenuGlobal>().clone();
+            let global = cx.global::<IconPopupMenuGlobal>().clone();
             let Ok(mut map) = global.map.try_borrow_mut() else {
                 return;
             };
             let template = self.popup_menu;
             map.get_or_insert(cx, template, |cx| {
-                cx.with_vm(|vm| ModelPopupMenu::script_from_value(vm, template))
+                cx.with_vm(|vm| IconPopupMenu::script_from_value(vm, template))
             });
         });
     }
 }
 
-impl ModelDropDown {
+impl IconDropDown {
     fn set_active(&mut self, cx: &mut Cx) {
         self.is_active = true;
         self.draw_bg.redraw(cx);
-        let global = cx.global::<ModelPopupMenuGlobal>().clone();
+        let global = cx.global::<IconPopupMenuGlobal>().clone();
         let mut map = global.map.borrow_mut();
         if let Some(menu) = map.get_mut(&self.popup_menu) {
             menu.init_select_item(LiveId(self.selected_item as u64).into());
@@ -580,10 +620,14 @@ impl ModelDropDown {
             .get(self.selected_item)
             .map(String::as_str)
             .unwrap_or(" ");
-        if is_antigravity_model(label) {
-            self.draw_antigravity_icon.draw_walk(cx, self.icon_walk);
+        if self.use_provider_icons {
+            if is_antigravity_model(label) {
+                self.draw_antigravity_icon.draw_walk(cx, self.icon_walk);
+            } else {
+                self.draw_openai_icon.draw_walk(cx, self.icon_walk);
+            }
         } else {
-            self.draw_openai_icon.draw_walk(cx, self.icon_walk);
+            self.draw_icon.draw_walk(cx, self.icon_walk);
         }
         self.draw_text
             .draw_walk(cx, Walk::fit(), Align::default(), label);
@@ -591,7 +635,7 @@ impl ModelDropDown {
         cx.add_nav_stop(self.draw_bg.area(), NavRole::DropDown, Inset::default());
 
         if self.is_active && !self.popup_menu.is_nil() {
-            let global = cx.global::<ModelPopupMenuGlobal>().clone();
+            let global = cx.global::<IconPopupMenuGlobal>().clone();
             let mut map = global.map.borrow_mut();
             let Some(menu) = map.get_mut(&self.popup_menu) else {
                 return;
@@ -624,7 +668,7 @@ impl ModelDropDown {
     }
 }
 
-impl Widget for ModelDropDown {
+impl Widget for IconDropDown {
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         self.animator_toggle(
             cx,
@@ -644,17 +688,17 @@ impl Widget for ModelDropDown {
         let uid = self.widget_uid();
 
         if self.is_active && !self.popup_menu.is_nil() {
-            let global = cx.global::<ModelPopupMenuGlobal>().clone();
+            let global = cx.global::<IconPopupMenuGlobal>().clone();
             let mut map = global.map.borrow_mut();
             if let Some(menu) = map.get_mut(&self.popup_menu) {
                 let mut close = false;
                 menu.handle_event_with(cx, event, self.draw_bg.area(), &mut |cx, action| {
-                    if let ModelPopupMenuAction::WasSelected(item_id) = action {
+                    if let IconPopupMenuAction::WasSelected(item_id) = action {
                         self.selected_item = item_id.0 .0 as usize;
                         cx.widget_action_with_data(
                             &self.action_data,
                             uid,
-                            ModelDropDownAction::Select(self.selected_item),
+                            IconDropDownAction::Select(self.selected_item),
                         );
                         self.draw_bg.redraw(cx);
                         close = true;
@@ -685,7 +729,7 @@ impl Widget for ModelDropDown {
                     cx.widget_action_with_data(
                         &self.action_data,
                         uid,
-                        ModelDropDownAction::Select(self.selected_item),
+                        IconDropDownAction::Select(self.selected_item),
                     );
                     self.set_closed(cx);
                     self.draw_bg.redraw(cx);
@@ -695,7 +739,7 @@ impl Widget for ModelDropDown {
                     cx.widget_action_with_data(
                         &self.action_data,
                         uid,
-                        ModelDropDownAction::Select(self.selected_item),
+                        IconDropDownAction::Select(self.selected_item),
                     );
                     self.set_closed(cx);
                     self.draw_bg.redraw(cx);
@@ -734,7 +778,7 @@ impl Widget for ModelDropDown {
     }
 }
 
-impl ModelDropDownRef {
+impl IconDropDownRef {
     pub fn set_labels(&self, cx: &mut Cx, labels: Vec<String>) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.labels = labels;
@@ -764,8 +808,8 @@ impl ModelDropDownRef {
     pub fn selected(&self, actions: &Actions) -> Option<usize> {
         let action = actions.find_widget_action(self.widget_uid())?;
         match action.cast() {
-            ModelDropDownAction::Select(index) => Some(index),
-            ModelDropDownAction::None => None,
+            IconDropDownAction::Select(index) => Some(index),
+            IconDropDownAction::None => None,
         }
     }
 }

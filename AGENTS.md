@@ -178,10 +178,11 @@ Threadlane’s composer dropdown implementation relies on these invariants:
 - The final selected popup row is a transparent anchor.
 - The visible popup surface ends above that anchor, leaving the closed picker visible.
 - `EffortDropDown` and `ModelDropDown` use popup widths matching their trigger widths.
-- The stock Makepad `PopupMenuItem` is text-only. `components/model_dropdown.rs` owns the custom model trigger and popup rows so provider SVGs render in both places without changing model label values.
+- The stock Makepad `PopupMenuItem` is text-only. `components/model_dropdown.rs` owns the shared icon-aware trigger and popup-row implementation used by both `ModelDropDown` and `EffortDropDown`.
+- Model rows select OpenAI or Google SVGs from the persisted model prefix; effort rows always use the reasoning SVG. Keep effort labels as raw `ReasoningEffort` values so parsing remains unchanged.
 - The model list is the union of dynamically fetched OpenAI models and models for other authenticated providers. OpenAI refresh events must preserve connected-provider entries, and successful provider login should update the picker immediately.
 
-If changing ordering, row height, popup padding, or selected-item behavior, update the transparent-anchor geometry in `components/dropdown.rs` and `components/model_dropdown.rs` as applicable.
+If changing ordering, row height, popup padding, or selected-item behavior, update the transparent-anchor geometry in `components/model_dropdown.rs`.
 
 ### Shaders and Colors
 

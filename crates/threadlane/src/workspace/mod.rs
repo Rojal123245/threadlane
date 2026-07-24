@@ -1,7 +1,7 @@
 use crate::state::ChatData;
-use threadlane_agent::ImageAttachment;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use threadlane_agent::ImageAttachment;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct SessionKey {

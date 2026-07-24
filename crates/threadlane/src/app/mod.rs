@@ -2,7 +2,7 @@
 //!
 //! Chat, sessions, and command palette panels are modularized under `crate::panels`.
 
-use crate::components::model_dropdown::ModelDropDownWidgetRefExt;
+use crate::components::model_dropdown::IconDropDownWidgetRefExt;
 use crate::panels::chat::{
     accepts_generation_event, concise_status, draft_for_cancellation, submitted_draft, ChatList,
     ComposerState, ComposerStatus, GenerationEvent, ToolFoldHeader,
@@ -1052,9 +1052,8 @@ script_mod! {
                                             text_style +: { font_size: 8.5 }
                                         }
                                     }
-
                                     effort_picker := View {
-                                        width: 116
+                                        width: 92
                                         height: 28
                                         visible: false
                                         flow: Down
@@ -1063,13 +1062,13 @@ script_mod! {
 
                                         effort_drop := EffortDropDown {
                                             labels: [
-                                                "Thinking: Off",
-                                                "Thinking: Minimal",
-                                                "Thinking: Low",
-                                                "Thinking: High",
-                                                "Thinking: XHigh",
-                                                "Thinking: Max",
-                                                "Thinking: Medium"
+                                                "Off",
+                                                "Minimal",
+                                                "Low",
+                                                "High",
+                                                "XHigh",
+                                                "Max",
+                                                "Medium"
                                             ]
                                         }
                                     }
@@ -2170,11 +2169,14 @@ impl MatchEvent for App {
 
         if self
             .ui
-            .drop_down(cx, ids!(effort_drop))
+            .icon_drop_down(cx, ids!(effort_drop))
             .selected(actions)
             .is_some()
         {
-            let selected_label = self.ui.drop_down(cx, ids!(effort_drop)).selected_label();
+            let selected_label = self
+                .ui
+                .icon_drop_down(cx, ids!(effort_drop))
+                .selected_label();
             if !self.busy {
                 if let Some(effort) = ReasoningEffort::from_label(&selected_label) {
                     if let Some(key) = self.workspace_state.active_key() {
@@ -2189,13 +2191,13 @@ impl MatchEvent for App {
 
         if self
             .ui
-            .model_drop_down(cx, ids!(model_drop))
+            .icon_drop_down(cx, ids!(model_drop))
             .selected(actions)
             .is_some()
         {
             let model_name = self
                 .ui
-                .model_drop_down(cx, ids!(model_drop))
+                .icon_drop_down(cx, ids!(model_drop))
                 .selected_label();
             if !model_name.is_empty() && !self.busy {
                 self.set_model_dropup_options(cx, self.available_models.clone(), &model_name);
@@ -2373,7 +2375,7 @@ impl App {
 
         let selected_item = display.len() - 1;
         self.available_models = canonical;
-        let model_drop = self.ui.model_drop_down(cx, ids!(model_drop));
+        let model_drop = self.ui.icon_drop_down(cx, ids!(model_drop));
         model_drop.set_labels(cx, display);
         model_drop.set_selected_item(cx, selected_item);
     }
@@ -2396,9 +2398,9 @@ impl App {
 
         let labels = ordered
             .iter()
-            .map(|effort| format!("Thinking: {}", effort.label()))
+            .map(|effort| effort.label().to_string())
             .collect();
-        let effort_drop = self.ui.drop_down(cx, ids!(effort_drop));
+        let effort_drop = self.ui.icon_drop_down(cx, ids!(effort_drop));
         effort_drop.set_labels(cx, labels);
         effort_drop.set_selected_item(cx, ordered.len() - 1);
     }
@@ -2934,7 +2936,7 @@ impl App {
             let (api_key, account_id) = self.current_credentials(cx);
             let model = self
                 .ui
-                .model_drop_down(cx, ids!(model_drop))
+                .icon_drop_down(cx, ids!(model_drop))
                 .selected_label();
             let model = if model.is_empty() {
                 "gpt-5.6-luna".to_string()
@@ -2942,7 +2944,10 @@ impl App {
                 model
             };
             let effort = ReasoningEffort::from_label(
-                &self.ui.drop_down(cx, ids!(effort_drop)).selected_label(),
+                &self
+                    .ui
+                    .icon_drop_down(cx, ids!(effort_drop))
+                    .selected_label(),
             )
             .unwrap_or_default();
             let agent = CodingAgent::new(CodingAgentOptions {
@@ -3271,7 +3276,7 @@ impl App {
             let (api_key, account_id) = self.current_credentials(cx);
             let selected_model = self
                 .ui
-                .model_drop_down(cx, ids!(model_drop))
+                .icon_drop_down(cx, ids!(model_drop))
                 .selected_label();
             let model = if selected_model.is_empty() {
                 "gpt-5.6-luna".to_string()
@@ -3279,7 +3284,10 @@ impl App {
                 selected_model
             };
             let reasoning_effort = ReasoningEffort::from_label(
-                &self.ui.drop_down(cx, ids!(effort_drop)).selected_label(),
+                &self
+                    .ui
+                    .icon_drop_down(cx, ids!(effort_drop))
+                    .selected_label(),
             )
             .unwrap_or_default();
             let agent = CodingAgent::new(CodingAgentOptions {
@@ -3341,7 +3349,7 @@ impl App {
         let (api_key, account_id) = self.current_credentials(cx);
         let selected_model = self
             .ui
-            .model_drop_down(cx, ids!(model_drop))
+            .icon_drop_down(cx, ids!(model_drop))
             .selected_label();
         let model_name = if selected_model.is_empty() {
             "gpt-5.6-luna".to_string()
@@ -3365,9 +3373,13 @@ impl App {
                 return;
             }
         }
-        let reasoning_effort =
-            ReasoningEffort::from_label(&self.ui.drop_down(cx, ids!(effort_drop)).selected_label())
-                .unwrap_or_default();
+        let reasoning_effort = ReasoningEffort::from_label(
+            &self
+                .ui
+                .icon_drop_down(cx, ids!(effort_drop))
+                .selected_label(),
+        )
+        .unwrap_or_default();
         let Some(active_key) = self.workspace_state.active_key().cloned() else {
             return;
         };
@@ -4014,7 +4026,7 @@ impl App {
                 GuiAgentEvent::AvailableModelsLoaded(models) => {
                     let selected_model = self
                         .ui
-                        .model_drop_down(cx, ids!(model_drop))
+                        .icon_drop_down(cx, ids!(model_drop))
                         .selected_label();
                     self.set_model_dropup_options(
                         cx,
@@ -4093,7 +4105,7 @@ impl App {
                     self.push_chat(MsgRole::System, msg);
                     let selected_model = self
                         .ui
-                        .model_drop_down(cx, ids!(model_drop))
+                        .icon_drop_down(cx, ids!(model_drop))
                         .selected_label();
                     let mut models = self.available_models.clone();
                     append_antigravity_models(&mut models);

@@ -12,7 +12,6 @@ pub mod command_input;
 pub mod composer_action;
 pub mod composer_surface;
 pub mod context_menu;
-pub mod dropdown;
 pub mod empty_row;
 pub mod flex_spacer;
 pub mod icon_button;
@@ -45,7 +44,6 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     composer_action::script_mod(vm);
     composer_surface::script_mod(vm);
     context_menu::script_mod(vm);
-    dropdown::script_mod(vm);
     model_dropdown::script_mod(vm);
     empty_row::script_mod(vm);
     flex_spacer::script_mod(vm);
