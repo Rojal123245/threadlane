@@ -22,14 +22,23 @@ fn show_tool_icon(cx: &mut Cx, item: &WidgetRef, selected: ToolIcon) {
     }
 }
 
-fn update_activity_status(cx: &mut Cx, item_widget: &WidgetRef, running: bool, error: bool) {
+fn update_activity_status(
+    cx: &mut Cx,
+    item_widget: &WidgetRef,
+    running: bool,
+    error: bool,
+    cancelled: bool,
+) {
     let indicator = item_widget.widget(cx, ids!(status_indicator));
     indicator
         .widget(cx, ids!(status_running_indicator))
         .set_visible(cx, running);
     indicator
         .widget(cx, ids!(status_done_indicator))
-        .set_visible(cx, !running && !error);
+        .set_visible(cx, !running && !error && !cancelled);
+    indicator
+        .widget(cx, ids!(status_cancelled_indicator))
+        .set_visible(cx, !running && !error && cancelled);
     indicator
         .widget(cx, ids!(status_error_lbl))
         .set_visible(cx, !running && error);
@@ -267,6 +276,10 @@ fn activity_line(
     match status {
         ToolStatus::Running => line.push_str(" · Running"),
         ToolStatus::Error => line.push_str(" · Failed"),
+        ToolStatus::Cancelled if !result_metadata.is_empty() => {
+            line.push_str(&format!(" · {}", markdown_inline(result_metadata)))
+        }
+        ToolStatus::Cancelled => line.push_str(" · Stopped"),
         ToolStatus::Done if !result_metadata.is_empty() => {
             line.push_str(&format!(" · {}", markdown_inline(result_metadata)))
         }
@@ -401,6 +414,7 @@ impl Widget for ChatList {
                             let mut has_thinking = streaming_thinking;
                             let mut running = streaming_thinking;
                             let mut has_error = false;
+                            let mut has_cancelled = false;
                             let mut first_icon = None;
                             let mut mixed_icons = false;
 
@@ -418,6 +432,7 @@ impl Widget for ChatList {
                                         counts.add(kind);
                                         running |= *status == ToolStatus::Running;
                                         has_error |= *status == ToolStatus::Error;
+                                        has_cancelled |= *status == ToolStatus::Cancelled;
                                         if let Some(icon) = first_icon {
                                             mixed_icons |= icon != presentation.icon;
                                         } else {
@@ -450,13 +465,24 @@ impl Widget for ChatList {
                                     first_icon.unwrap_or(ToolIcon::Generic)
                                 },
                             );
-                            item_widget
-                                .label(cx, ids!(title_lbl))
-                                .set_text(cx, if running { "Working" } else { "Worked" });
+                            let title = if running {
+                                "Working"
+                            } else if has_cancelled {
+                                "Stopped"
+                            } else {
+                                "Worked"
+                            };
+                            item_widget.label(cx, ids!(title_lbl)).set_text(cx, title);
                             item_widget
                                 .label(cx, ids!(preview_lbl))
                                 .set_text(cx, &activity_preview(&counts, has_thinking));
-                            update_activity_status(cx, &item_widget, running, has_error);
+                            update_activity_status(
+                                cx,
+                                &item_widget,
+                                running,
+                                has_error,
+                                has_cancelled,
+                            );
                             item_widget
                                 .markdown(cx, ids!(md))
                                 .set_text(cx, &lines.join("\n"));
@@ -554,6 +580,7 @@ impl Widget for ChatList {
                                         &item_widget,
                                         *status == ToolStatus::Running,
                                         *status == ToolStatus::Error,
+                                        *status == ToolStatus::Cancelled,
                                     );
                                     item_widget
                                         .widget(cx, ids!(args_section))

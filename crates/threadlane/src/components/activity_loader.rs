@@ -86,6 +86,15 @@ script_mod! {
                 border_radius: 2.5
             }
         }
+        status_cancelled_indicator := mod.components.StatusDot {
+            width: 5
+            height: 5
+            visible: false
+            draw_bg +: {
+                color: #x667180
+                border_radius: 2.5
+            }
+        }
         status_error_lbl := Label {
             width: Fit
             height: Fit

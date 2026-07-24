@@ -16,6 +16,7 @@ pub enum ToolStatus {
     Running,
     Done,
     Error,
+    Cancelled,
 }
 
 impl ToolStatus {
@@ -24,6 +25,7 @@ impl ToolStatus {
             ToolStatus::Running => "◌",
             ToolStatus::Done => "✓",
             ToolStatus::Error => "✗",
+            ToolStatus::Cancelled => "-",
         }
     }
 }
@@ -116,6 +118,34 @@ impl ChatData {
         let text = std::mem::take(&mut self.streaming_text);
         self.streaming_kind = None;
         self.push_thinking(text);
+    }
+
+    /// Aborting the generation prevents normal stream and tool-end events, so
+    /// commit any partial stream and explicitly finalize running tool rows.
+    pub fn mark_generation_stopped(&mut self) {
+        self.flush_streaming();
+        for message in &mut self.messages {
+            let ChatMessage::Tool {
+                name,
+                output,
+                status,
+                result_preview,
+                result_metadata,
+                started_at,
+                ..
+            } = message
+            else {
+                continue;
+            };
+            if *status != ToolStatus::Running {
+                continue;
+            }
+
+            *status = ToolStatus::Cancelled;
+            *result_preview = tool_result_preview(output, 800);
+            *result_metadata =
+                result_metadata_for_tool(name, output, ToolStatus::Cancelled, started_at.elapsed());
+        }
     }
 
     pub fn push_tool(&mut self, id: String, name: String, arguments: String) {
@@ -778,6 +808,7 @@ fn result_metadata_for_tool(
     match status {
         ToolStatus::Running => String::new(),
         ToolStatus::Error => format!("Failed · {time_label}"),
+        ToolStatus::Cancelled => format!("Stopped · {time_label}"),
         ToolStatus::Done if name == "load_skill" => format!("Loaded · {time_label}"),
         ToolStatus::Done if name == "subagent" => format!("Completed · {time_label}"),
         ToolStatus::Done => {
@@ -797,6 +828,30 @@ pub use crate::path_utils::truncate_chars;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stopped_generation_finalizes_streaming_and_running_tools() {
+        let mut data = ChatData::default();
+        data.push_tool("running".into(), "read_file".into(), "{}".into());
+        data.push_stream_delta(StreamingKind::Thinking, "partial reasoning");
+
+        data.mark_generation_stopped();
+
+        assert!(data.streaming_text.is_empty());
+        assert_eq!(data.streaming_kind, None);
+        assert!(matches!(
+            &data.messages[0],
+            ChatMessage::Tool {
+                status: ToolStatus::Cancelled,
+                result_metadata,
+                ..
+            } if result_metadata.starts_with("Stopped · ")
+        ));
+        assert!(matches!(
+            &data.messages[1],
+            ChatMessage::Thinking { text } if text == "partial reasoning"
+        ));
+    }
 
     #[test]
     fn tool_call_boundary_separates_preamble_from_final_assistant_text() {

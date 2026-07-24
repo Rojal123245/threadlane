@@ -1683,17 +1683,7 @@ script_mod! {
                                         }
                                     }
 
-                                    stop_btn := mod.components.ComposerAction {
-                                        width: Fit
-                                        height: 28
-                                        visible: false
-                                        text: "Stop"
-                                        draw_bg +: {
-                                            color: #xb85c55
-                                            color_hover: #xd4775f
-                                            color_down: #e39a5d
-                                        }
-                                    }
+
 
                                     attach_btn := mod.components.IconButton {
                                         width: 30
@@ -1774,18 +1764,54 @@ script_mod! {
 
                                     }
 
-                                    send_btn := mod.components.ComposerAction {
+                                    composer_action_slot := View {
                                         width: 34
                                         height: 30
-                                        margin: 0
-                                        padding: 0
-                                        spacing: 0
-                                        text: ""
-                                        align: Align{x: 0.5 y: 0.5}
-                                        icon_walk: Walk{width: 15 height: 15}
-                                        draw_icon +: {
-                                            svg: crate_resource("self:resources/icons/send.svg")
-                                            color: #xffffff
+                                        flow: Overlay
+
+                                        send_btn := mod.components.ComposerAction {
+                                            width: 34
+                                            height: 30
+                                            margin: 0
+                                            padding: 0
+                                            spacing: 0
+                                            text: ""
+                                            align: Align{x: 0.5 y: 0.5}
+                                            icon_walk: Walk{width: 15 height: 15}
+                                            draw_icon +: {
+                                                svg: crate_resource("self:resources/icons/send.svg")
+                                                color: #xffffff
+                                            }
+                                        }
+
+                                        stop_btn := mod.components.ComposerAction {
+                                            width: 34
+                                            height: 30
+                                            visible: false
+                                            margin: 0
+                                            padding: 0
+                                            spacing: 0
+                                            text: ""
+                                            align: Align{x: 0.5 y: 0.5}
+                                            icon_walk: Walk{width: 12 height: 12}
+                                            draw_bg +: {
+                                                color: #xb85c55
+                                                color_hover: #xd4775f
+                                                color_focus: #xd4775f
+                                                color_down: #xe39a5d
+                                                border_color: #x00000000
+                                                border_color_hover: #x00000000
+                                                border_color_focus: #x00000000
+                                                border_color_down: #x00000000
+                                                border_size: 0.0
+                                            }
+                                            draw_icon +: {
+                                                svg: crate_resource("self:resources/icons/stop.svg")
+                                                color: #xffffff
+                                                color_hover: #xffffff
+                                                color_focus: #xffffff
+                                                color_down: #xffffff
+                                            }
                                         }
                                     }
                                 }
@@ -2509,6 +2535,10 @@ impl MatchEvent for App {
                 }
                 self.set_prompt_text(cx, &draft);
                 self.refresh_attachment_ui(cx);
+                self.workspace_state
+                    .workspace_mut(key.clone())
+                    .chat
+                    .mark_generation_stopped();
                 self.set_session_status(cx, &key, UiStatus::Ready, "Stopped");
                 self.push_chat(MsgRole::System, "Generation stopped.");
                 self.ui.widget(cx, ids!(chat_list)).redraw(cx);
@@ -3683,6 +3713,7 @@ impl App {
             runtime.status_text = text.to_string();
         }
         set_session_working(&key.work_dir, &key.session_id, status == UiStatus::Working);
+        self.ui.widget(cx, ids!(session_list)).redraw(cx);
         if self.workspace_state.is_active(key) {
             self.apply_status_ui(cx, status, text);
         }
@@ -3710,18 +3741,9 @@ impl App {
         self.composer_state.set_status(composer_status, text);
         self.busy = status == UiStatus::Working;
         let working = status == UiStatus::Working;
-        let has_generation = self
-            .workspace_state
-            .active_key()
-            .and_then(|key| self.session_runtimes.get(key))
-            .is_some_and(|runtime| runtime.generation.is_some());
         self.ui
             .widget(cx, ids!(chat_working_indicator))
             .set_visible(cx, working);
-        self.ui
-            .widget(cx, ids!(stop_btn))
-            .set_visible(cx, working && has_generation);
-        self.ui.widget(cx, ids!(send_btn)).set_visible(cx, !working);
         self.ui.widget(cx, ids!(chat_working_indicator)).redraw(cx);
         self.apply_composer_presentation(cx);
     }
@@ -3737,18 +3759,19 @@ impl App {
 
         self.ui
             .button(cx, ids!(attach_btn))
-            .set_visible(cx, !presentation.working);
-        self.ui
-            .button(cx, ids!(send_btn))
-            .set_visible(cx, !presentation.working);
+            .set_visible(cx, presentation.show_attach);
         let has_generation = self
             .workspace_state
             .active_key()
             .and_then(|key| self.session_runtimes.get(key))
             .is_some_and(|runtime| runtime.generation.is_some());
+        let show_stop = presentation.show_stop(has_generation);
+        self.ui
+            .button(cx, ids!(send_btn))
+            .set_visible(cx, !show_stop);
         self.ui
             .button(cx, ids!(stop_btn))
-            .set_visible(cx, presentation.working && has_generation);
+            .set_visible(cx, show_stop);
     }
 
     fn apply_session_context_action(

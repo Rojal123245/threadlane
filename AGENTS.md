@@ -170,6 +170,7 @@ Drawing in an overlay does not automatically stop widgets underneath from receiv
 - Grouping is presentation-only: preserve the underlying `ChatMessage` entries so tool output and persisted session history remain intact.
 - Streaming thinking merges into the trailing activity group; streaming assistant text remains a normal assistant message.
 - Treat `AgentEvent::MessageUpdate.tool_call_name` as the semantic boundary for an assistant tool-call preamble. Flush buffered assistant text into the activity group at that event rather than waiting to infer it from `MessageEnd`.
+- Aborting a generation suppresses the normal stream and tool-end events. Commit partial streaming content, mark running tools cancelled, clear the session working state, and redraw the session list so no activity loader remains visible.
 - Keep summary categories concise and action-oriented (`Explored`, `Edited`, `Ran`, `Loaded`, `Delegated`) and bound expanded output rather than restoring every raw payload to the top-level transcript.
 - The chat `PortalList` range is based on display rows, not raw message count. If changing grouping, preserve stable ordering, auto-tail behavior, and non-reused fold widget state.
 
