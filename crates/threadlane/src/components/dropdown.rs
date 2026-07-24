@@ -109,7 +109,4 @@ script_mod! {
         popup_menu: mod.components.ComposerPopupMenu { width: 116 }
     }
 
-    mod.components.ModelDropDown = mod.components.ComposerDropDown {
-        popup_menu: mod.components.ComposerPopupMenu { width: 142 }
-    }
 }

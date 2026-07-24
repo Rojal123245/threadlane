@@ -2,6 +2,7 @@
 //!
 //! Chat, sessions, and command palette panels are modularized under `crate::panels`.
 
+use crate::components::model_dropdown::ModelDropDownWidgetRefExt;
 use crate::panels::chat::{
     accepts_generation_event, concise_status, draft_for_cancellation, submitted_draft, ChatList,
     ComposerState, ComposerStatus, GenerationEvent, ToolFoldHeader,
@@ -977,7 +978,7 @@ script_mod! {
                                     }
 
                                     model_picker := View {
-                                        width: 142
+                                        width: 166
                                         height: 28
                                         visible: false
                                         flow: Down
@@ -1706,11 +1707,14 @@ impl MatchEvent for App {
 
         if self
             .ui
-            .drop_down(cx, ids!(model_drop))
+            .model_drop_down(cx, ids!(model_drop))
             .selected(actions)
             .is_some()
         {
-            let model_name = self.ui.drop_down(cx, ids!(model_drop)).selected_label();
+            let model_name = self
+                .ui
+                .model_drop_down(cx, ids!(model_drop))
+                .selected_label();
             if !model_name.is_empty() && !self.busy {
                 self.set_model_dropup_options(cx, self.available_models.clone(), &model_name);
                 self.dispatch_input(cx, format!("/model {model_name}"), false);
@@ -1901,7 +1905,7 @@ impl App {
 
         let selected_item = ordered.len() - 1;
         self.available_models = ordered.clone();
-        let model_drop = self.ui.drop_down(cx, ids!(model_drop));
+        let model_drop = self.ui.model_drop_down(cx, ids!(model_drop));
         model_drop.set_labels(cx, ordered);
         model_drop.set_selected_item(cx, selected_item);
     }
@@ -2460,7 +2464,10 @@ impl App {
         let key = SessionKey::project_draft(work_dir.clone());
         if !self.session_runtimes.contains_key(&key) {
             let (api_key, account_id) = self.current_credentials(cx);
-            let model = self.ui.drop_down(cx, ids!(model_drop)).selected_label();
+            let model = self
+                .ui
+                .model_drop_down(cx, ids!(model_drop))
+                .selected_label();
             let model = if model.is_empty() {
                 "gpt-5.6-luna".to_string()
             } else {
@@ -2794,7 +2801,10 @@ impl App {
 
         if !self.session_runtimes.contains_key(&key) {
             let (api_key, account_id) = self.current_credentials(cx);
-            let selected_model = self.ui.drop_down(cx, ids!(model_drop)).selected_label();
+            let selected_model = self
+                .ui
+                .model_drop_down(cx, ids!(model_drop))
+                .selected_label();
             let model = if selected_model.is_empty() {
                 "gpt-5.6-luna".to_string()
             } else {
@@ -2870,7 +2880,10 @@ impl App {
             return;
         }
 
-        let selected_model = self.ui.drop_down(cx, ids!(model_drop)).selected_label();
+        let selected_model = self
+            .ui
+            .model_drop_down(cx, ids!(model_drop))
+            .selected_label();
         let model_name = if selected_model.is_empty() {
             "gpt-5.6-luna".to_string()
         } else {
@@ -2977,16 +2990,17 @@ impl App {
         let generation_id = self.next_generation_id;
 
         if show_in_chat {
-            let attachment_names = attachments.iter().enumerate().fold(
-                String::new(),
-                |mut acc, (i, attachment)| {
-                    if i > 0 {
-                        acc.push_str(", ");
-                    }
-                    acc.push_str(&attachment.display_name);
-                    acc
-                },
-            );
+            let attachment_names =
+                attachments
+                    .iter()
+                    .enumerate()
+                    .fold(String::new(), |mut acc, (i, attachment)| {
+                        if i > 0 {
+                            acc.push_str(", ");
+                        }
+                        acc.push_str(&attachment.display_name);
+                        acc
+                    });
             let visible_input = if attachment_names.is_empty() {
                 input_str.clone()
             } else if input_str.is_empty() {
@@ -3443,7 +3457,10 @@ impl App {
                     self.refresh_registered_sessions();
                 }
                 GuiAgentEvent::AvailableModelsLoaded(models) => {
-                    let selected_model = self.ui.drop_down(cx, ids!(model_drop)).selected_label();
+                    let selected_model = self
+                        .ui
+                        .model_drop_down(cx, ids!(model_drop))
+                        .selected_label();
                     self.set_model_dropup_options(cx, models, &selected_model);
                 }
                 GuiAgentEvent::ProjectFolderPicked(result) => {

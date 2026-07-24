@@ -167,7 +167,7 @@ Drawing in an overlay does not automatically stop widgets underneath from receiv
 
 ### Composer Drop-Ups
 
-The pinned Makepad `PopupMenuPosition` currently supports only `OnSelected` and `BelowInput`; it has no native `AboveInput` variant.
+The pinned Makepad `PopupMenuPosition` currently supports only `OnSelected` and `BelowInput`; it has no native `AboveInput` variant. `OnSelected` is the Rust enum's `#[pick]` default, but `PopupMenuPosition.OnSelected` is not available in component script scope, so omit the DSL property when selecting that default.
 
 Threadlane’s composer dropdown implementation relies on these invariants:
 
@@ -175,8 +175,9 @@ Threadlane’s composer dropdown implementation relies on these invariants:
 - The final selected popup row is a transparent anchor.
 - The visible popup surface ends above that anchor, leaving the closed picker visible.
 - `EffortDropDown` and `ModelDropDown` use popup widths matching their trigger widths.
+- The stock Makepad `PopupMenuItem` is text-only. `components/model_dropdown.rs` owns the custom model trigger and popup rows so provider SVGs render in both places without changing model label values.
 
-If changing ordering, row height, popup padding, or selected-item behavior, update the transparent-anchor geometry in `components/dropdown.rs` as part of the same change.
+If changing ordering, row height, popup padding, or selected-item behavior, update the transparent-anchor geometry in `components/dropdown.rs` and `components/model_dropdown.rs` as applicable.
 
 ### Shaders and Colors
 

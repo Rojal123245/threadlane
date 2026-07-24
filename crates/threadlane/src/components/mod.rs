@@ -17,6 +17,7 @@ pub mod empty_row;
 pub mod flex_spacer;
 pub mod icon_button;
 pub mod init;
+pub mod model_dropdown;
 pub mod notice_banner;
 pub mod panel_header;
 pub mod panel_surface;
@@ -45,6 +46,7 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     composer_surface::script_mod(vm);
     context_menu::script_mod(vm);
     dropdown::script_mod(vm);
+    model_dropdown::script_mod(vm);
     empty_row::script_mod(vm);
     flex_spacer::script_mod(vm);
     panel_header::script_mod(vm);
