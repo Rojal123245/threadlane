@@ -1,10 +1,23 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-  <!-- Horizontal bar of the T (top, three thread-like strokes) -->
-  <line x1="3" y1="5.5" x2="21" y2="5.5"/>
-  <line x1="3" y1="7.5" x2="21" y2="7.5"/>
-  <line x1="3" y1="9.5" x2="21" y2="9.5"/>
-  <!-- Vertical stem of the T (center, three thread-like strokes) -->
-  <line x1="10.5" y1="9.5" x2="10.5" y2="20"/>
-  <line x1="12"   y1="9.5" x2="12"   y2="20"/>
-  <line x1="13.5" y1="9.5" x2="13.5" y2="20"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Three staggered crossbar lanes -->
+  <path d="M2 5h20"/>
+  <path d="M2 7.2h20"/>
+  <path d="M2 9.4h20"/>
+
+  <!-- Three stem threads descending from crossbar into lanes -->
+  <path d="M9.8 5L9.6 19.5"/>
+  <path d="M12 7.2V19.5"/>
+  <path d="M14.2 9.4L14.4 19.5"/>
+
+  <!-- Outer lane rails (thinner paths) -->
+  <path d="M8 11.5L7.9 19.5" stroke-width="0.6"/>
+  <path d="M16 11.5L16.1 19.5" stroke-width="0.6"/>
+
+  <!-- Lane divider dashes (short segments between threads) -->
+  <path d="M10.8 12.5v1.4" stroke-width="0.6"/>
+  <path d="M10.8 15.5v1.4" stroke-width="0.6"/>
+  <path d="M10.8 18.2v0.8" stroke-width="0.6"/>
+  <path d="M13.2 12.5v1.4" stroke-width="0.6"/>
+  <path d="M13.2 15.5v1.4" stroke-width="0.6"/>
+  <path d="M13.2 18.2v0.8" stroke-width="0.6"/>
 </svg>

@@ -199,6 +199,9 @@ fn pluralized(count: usize, singular: &str, plural: &str) -> String {
 
 fn activity_preview(counts: &ActivityCounts, has_thinking: bool) -> String {
     let mut parts = Vec::new();
+    if has_thinking {
+        parts.push("Reasoned".to_string());
+    }
     let mut explored = Vec::new();
     if counts.explored_files > 0 {
         explored.push(pluralized(counts.explored_files, "file", "files"));
@@ -242,9 +245,6 @@ fn activity_preview(counts: &ActivityCounts, has_thinking: bool) -> String {
             pluralized(counts.other, "tool", "tools")
         ));
     }
-    if parts.is_empty() && has_thinking {
-        parts.push("Reasoned".to_string());
-    }
     parts.join(" · ")
 }
 
@@ -286,6 +286,97 @@ fn activity_line(
         ToolStatus::Done => {}
     }
     line
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActivityDetailKind {
+    Thinking,
+    Tool,
+}
+
+fn append_activity_detail(
+    detail: &mut String,
+    previous_kind: &mut Option<ActivityDetailKind>,
+    kind: ActivityDetailKind,
+    block: &str,
+) {
+    if block.is_empty() {
+        return;
+    }
+    if !detail.is_empty() {
+        if *previous_kind == Some(ActivityDetailKind::Tool) && kind == ActivityDetailKind::Tool {
+            detail.push('\n');
+        } else {
+            detail.push_str("\n\n");
+        }
+    }
+    detail.push_str(block);
+    *previous_kind = Some(kind);
+}
+
+fn activity_detail(messages: &[ChatMessage], streaming_thinking: Option<&str>) -> String {
+    let mut detail = String::new();
+    let mut previous_kind = None;
+    let mut has_thinking = false;
+
+    for message in messages {
+        match message {
+            ChatMessage::Thinking { text } => {
+                has_thinking = true;
+                if !text.trim().is_empty() {
+                    append_activity_detail(
+                        &mut detail,
+                        &mut previous_kind,
+                        ActivityDetailKind::Thinking,
+                        &format!("**Thinking**\n\n{text}"),
+                    );
+                }
+            }
+            ChatMessage::Tool {
+                name,
+                status,
+                presentation,
+                result_metadata,
+                ..
+            } => {
+                let kind = activity_kind(name, presentation.icon);
+                append_activity_detail(
+                    &mut detail,
+                    &mut previous_kind,
+                    ActivityDetailKind::Tool,
+                    &activity_line(
+                        kind,
+                        &presentation.title,
+                        &presentation.primary,
+                        result_metadata,
+                        *status,
+                    ),
+                );
+            }
+            ChatMessage::Text { .. } => {}
+        }
+    }
+
+    if let Some(text) = streaming_thinking {
+        has_thinking = true;
+        let block = if text.trim().is_empty() {
+            "**Thinking…**".to_string()
+        } else {
+            format!("**Thinking…**\n\n{text}")
+        };
+        append_activity_detail(
+            &mut detail,
+            &mut previous_kind,
+            ActivityDetailKind::Thinking,
+            &block,
+        );
+    }
+
+    if detail.is_empty() && has_thinking {
+        "Reasoning completed.".to_string()
+    } else {
+        detail
+    }
 }
 
 fn draw_markdown_item(
@@ -410,7 +501,6 @@ impl Widget for ChatList {
                         } => {
                             let item_widget = list.item(cx, item_id, id!(ActivityGroupMsg));
                             let mut counts = ActivityCounts::default();
-                            let mut lines = Vec::new();
                             let mut has_thinking = streaming_thinking;
                             let mut running = streaming_thinking;
                             let mut has_error = false;
@@ -425,7 +515,6 @@ impl Widget for ChatList {
                                         name,
                                         status,
                                         presentation,
-                                        result_metadata,
                                         ..
                                     } => {
                                         let kind = activity_kind(name, presentation.icon);
@@ -438,23 +527,15 @@ impl Widget for ChatList {
                                         } else {
                                             first_icon = Some(presentation.icon);
                                         }
-                                        lines.push(activity_line(
-                                            kind,
-                                            &presentation.title,
-                                            &presentation.primary,
-                                            result_metadata,
-                                            *status,
-                                        ));
                                     }
                                     ChatMessage::Text { .. } => {}
                                 }
                             }
 
-                            if streaming_thinking {
-                                lines.push("- **Thinking…**".to_string());
-                            } else if lines.is_empty() && has_thinking {
-                                lines.push("- Reasoning completed.".to_string());
-                            }
+                            let detail = activity_detail(
+                                &data.messages[start..end],
+                                streaming_thinking.then_some(data.streaming_text.as_str()),
+                            );
 
                             show_tool_icon(
                                 cx,
@@ -483,9 +564,7 @@ impl Widget for ChatList {
                                 has_error,
                                 has_cancelled,
                             );
-                            item_widget
-                                .markdown(cx, ids!(md))
-                                .set_text(cx, &lines.join("\n"));
+                            item_widget.markdown(cx, ids!(md)).set_text(cx, &detail);
                             item_widget.draw_all_unscoped(cx);
                         }
                         DisplayRow::Message(message_index) => {
@@ -828,6 +907,34 @@ mod tests {
     }
 
     #[test]
+    fn activity_detail_preserves_finalized_and_streaming_thinking_in_order() {
+        let completed = format!(
+            "Starting analysis. {}Final persisted reasoning sentence.",
+            "Detailed reasoning step. ".repeat(400)
+        );
+        let messages = vec![
+            ChatMessage::Thinking {
+                text: completed.clone(),
+            },
+            tool("read", "read_file", r#"{"path":"src/app.rs"}"#),
+            ChatMessage::Thinking {
+                text: "Reasoning after the tool.".into(),
+            },
+        ];
+
+        let detail = activity_detail(&messages, Some("Current streaming reasoning."));
+
+        assert!(detail.contains(&completed));
+        let completed_index = detail.find("Final persisted reasoning sentence.").unwrap();
+        let tool_index = detail.find("src/app.rs").unwrap();
+        let resumed_index = detail.find("Reasoning after the tool.").unwrap();
+        let streaming_index = detail.find("Current streaming reasoning.").unwrap();
+        assert!(completed_index < tool_index);
+        assert!(tool_index < resumed_index);
+        assert!(resumed_index < streaming_index);
+    }
+
+    #[test]
     fn activity_preview_distinguishes_exploration_types() {
         let counts = ActivityCounts {
             explored_files: 2,
@@ -841,6 +948,10 @@ mod tests {
         assert_eq!(
             activity_preview(&counts, false),
             "Explored 2 files, 1 folder, 1 search · Edited 3 files · Ran 1 command"
+        );
+        assert_eq!(
+            activity_preview(&counts, true),
+            "Reasoned · Explored 2 files, 1 folder, 1 search · Edited 3 files · Ran 1 command"
         );
     }
 }

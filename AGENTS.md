@@ -165,6 +165,10 @@ Drawing in an overlay does not automatically stop widgets underneath from receiv
 - Makepad `PortalList::smooth_scroll_to` stops when a target row’s top edge is visible, even if the row is not fully revealed. When wrapping from the first command to the final command, use `scroll_to_end` so the selection and viewport reach the actual bottom.
 - Keep keyboard focus and pointer hover as separate states; keyboard movement should clear pointer hover before redrawing.
 
+### Chat Transcript
+
+- User submissions remain right-aligned chat bubbles. Assistant responses render as flat markdown aligned with the transcript rather than enclosed cards.
+
 ### Chat Activity Groups
 
 - Consecutive thinking and tool messages are grouped into one collapsible `Working`/`Worked` display row by `panels/chat/view.rs`.
@@ -172,7 +176,8 @@ Drawing in an overlay does not automatically stop widgets underneath from receiv
 - Streaming thinking merges into the trailing activity group; streaming assistant text remains a normal assistant message.
 - Treat `AgentEvent::MessageUpdate.tool_call_name` as the semantic boundary for an assistant tool-call preamble. Flush buffered assistant text into the activity group at that event rather than waiting to infer it from `MessageEnd`.
 - Aborting a generation suppresses the normal stream and tool-end events. Commit partial streaming content, mark running tools cancelled, clear the session working state, and redraw the session list so no activity loader remains visible.
-- Keep summary categories concise and action-oriented (`Explored`, `Edited`, `Ran`, `Loaded`, `Delegated`) and bound expanded output rather than restoring every raw payload to the top-level transcript.
+- Keep summary categories concise and action-oriented (`Explored`, `Edited`, `Ran`, `Loaded`, `Delegated`) and bound expanded tool output rather than restoring every raw tool payload to the top-level transcript.
+- Expanded activity groups must render complete persisted thinking segments and current streaming reasoning in event order alongside concise tool summaries; never replace finalized reasoning with only a completion/status placeholder.
 - The chat `PortalList` range is based on display rows, not raw message count. If changing grouping, preserve stable ordering, auto-tail behavior, and non-reused fold widget state.
 
 ### Composer Drop-Ups
@@ -189,6 +194,7 @@ Threadlane’s composer dropdown implementation relies on these invariants:
 - The stock Makepad `PopupMenuItem` is text-only. `components/model_dropdown.rs` owns the shared icon-aware trigger and popup-row implementation used by both `ModelDropDown` and `EffortDropDown`.
 - Model rows select OpenAI or Google SVGs from the persisted model prefix; effort rows always use the reasoning SVG. Keep effort labels as raw `ReasoningEffort` values so parsing remains unchanged.
 - The model list is the union of dynamically fetched OpenAI models and models for other authenticated providers. OpenAI refresh events must preserve connected-provider entries, and successful provider login should update the picker immediately.
+- Model-picker changes run as internal `/model` commands. They must not consume, clear, or restore over the current composer draft and image attachments; only actual composer submissions own the submitted-draft and submitted-attachment lifecycle.
 
 If changing ordering, row height, popup padding, or selected-item behavior, update the transparent-anchor geometry in `components/model_dropdown.rs`.
 

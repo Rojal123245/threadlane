@@ -22,7 +22,7 @@ use crate::state::{
     CommandInfo, GuiAgentEvent, MsgRole, SessionEntry, ToolStatus,
 };
 use crate::updater::UpdateStatus;
-use crate::workspace::{AppState, SessionKey};
+use crate::workspace::{AppState, SessionKey, WorkspaceUiState};
 use base64::Engine as _;
 use makepad_widgets::text::selection::Cursor;
 use makepad_widgets::*;
@@ -644,19 +644,10 @@ script_mod! {
                 width: Fill
                 height: Fit
                 align: Align{x: 0.0}
-                margin: Inset{top: 5 bottom: 7 left: 20 right: 52}
+                margin: Inset{top: 8 bottom: 12 left: 34 right: 66}
 
-                assistant_bubble := ChatBubble {
-                    width: Fit{max: FitBound.Abs(960)}
-                    md +: {
-                        width: Fit{max: FitBound.Abs(934)}
-                    }
-                    draw_bg +: {
-                        color: #x20252d
-                        border_radius: 10.0
-                        border_size: 1.0
-                        border_color: #x2d3540
-                    }
+                md := mod.components.ChatMarkdown {
+                    width: Fit{max: FitBound.Abs(934)}
                 }
             }
 
@@ -1335,6 +1326,16 @@ script_mod! {
                                 flow: Right
                                 align: Align{y: 0.5}
                                 padding: Inset{left: 7 right: 5}
+                                spacing: 6
+                                sidebar_brand_icon := Icon {
+                                    width: 16
+                                    height: 16
+                                    icon_walk: Walk{width: 16 height: 16}
+                                    draw_icon +: {
+                                        svg: crate_resource("self:resources/icons/logo.svg")
+                                        color: #xe7ebf0
+                                    }
+                                }
                                 sidebar_brand_label := Label {
                                     width: Fill
                                     height: Fit
@@ -2033,6 +2034,25 @@ enum UiStatus {
     Error,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum InputOrigin {
+    Composer,
+    Internal,
+}
+
+impl InputOrigin {
+    fn consumes_composer(self) -> bool {
+        self == Self::Composer
+    }
+}
+
+fn clear_composer_for_dispatch(origin: InputOrigin, composer: &mut WorkspaceUiState) {
+    if origin.consumes_composer() {
+        composer.draft.clear();
+        composer.attachments.clear();
+    }
+}
+
 struct GenerationRun {
     id: u64,
     handle: tokio::task::JoinHandle<()>,
@@ -2531,7 +2551,9 @@ impl MatchEvent for App {
                 };
                 if let Some(workspace) = self.workspace_state.active_workspace_mut() {
                     workspace.ui.draft = draft.clone();
-                    workspace.ui.attachments = restored_attachments.unwrap_or_default();
+                    if let Some(attachments) = restored_attachments {
+                        workspace.ui.attachments = attachments;
+                    }
                 }
                 self.set_prompt_text(cx, &draft);
                 self.refresh_attachment_ui(cx);
@@ -2685,7 +2707,7 @@ impl MatchEvent for App {
                 .selected_label();
             if !model_name.is_empty() && !self.busy {
                 self.set_model_dropup_options(cx, self.available_models.clone(), &model_name);
-                self.dispatch_input(cx, format!("/model {model_name}"), false);
+                self.dispatch_input(cx, format!("/model {model_name}"), InputOrigin::Internal);
             }
         }
 
@@ -2698,7 +2720,7 @@ impl MatchEvent for App {
                 .active_workspace()
                 .is_some_and(|workspace| !workspace.ui.attachments.is_empty());
             if !input_text.trim().is_empty() || has_attachments {
-                self.dispatch_input(cx, input_text, true);
+                self.dispatch_input(cx, input_text, InputOrigin::Composer);
             }
         }
     }
@@ -3946,7 +3968,8 @@ impl App {
         cti.set_items(cx, commands);
     }
 
-    fn dispatch_input(&mut self, cx: &mut Cx, input_text: String, show_in_chat: bool) {
+    fn dispatch_input(&mut self, cx: &mut Cx, input_text: String, origin: InputOrigin) {
+        let consumes_composer = origin.consumes_composer();
         match input_text.trim() {
             "/login antigravity" => {
                 self.start_antigravity_login(cx);
@@ -3959,7 +3982,7 @@ impl App {
             _ => {}
         }
 
-        let attachments = if show_in_chat {
+        let attachments = if consumes_composer {
             self.workspace_state
                 .active_workspace()
                 .map(|workspace| workspace.ui.attachments.clone())
@@ -4000,7 +4023,7 @@ impl App {
         };
         let work_dir = active_key.work_dir.clone();
 
-        if show_in_chat
+        if consumes_composer
             && active_session_entry().is_none()
             && input_text.trim_start().starts_with('/')
         {
@@ -4012,7 +4035,7 @@ impl App {
             return;
         }
 
-        if show_in_chat && active_key.is_draft() {
+        if consumes_composer && active_key.is_draft() {
             self.save_active_draft(cx);
             let Some(entry) = create_new_session(&work_dir) else {
                 self.push_chat(MsgRole::System, "Could not create a new session file.");
@@ -4078,7 +4101,7 @@ impl App {
             None if !attachments.is_empty() => (input_text.clone(), String::new()),
             None => return,
         };
-        if show_in_chat
+        if consumes_composer
             && !input_str.trim().is_empty()
             && !threadlane_provider::router::is_antigravity_model(&model_name)
         {
@@ -4095,7 +4118,7 @@ impl App {
         self.next_generation_id = self.next_generation_id.wrapping_add(1);
         let generation_id = self.next_generation_id;
 
-        if show_in_chat {
+        if consumes_composer {
             let attachment_names =
                 attachments
                     .iter()
@@ -4183,17 +4206,23 @@ impl App {
                 handle: generation_handle,
             });
             runtime.terminal_generation_id = None;
-            runtime.submitted_draft = Some((generation_id, submitted_draft));
-            runtime.submitted_attachments = Some((generation_id, attachments));
+            if consumes_composer {
+                runtime.submitted_draft = Some((generation_id, submitted_draft));
+                runtime.submitted_attachments = Some((generation_id, attachments));
+            } else {
+                runtime.submitted_draft = None;
+                runtime.submitted_attachments = None;
+            }
         }
         if let Some(workspace) = self.workspace_state.active_workspace_mut() {
-            workspace.ui.draft.clear();
-            workspace.ui.attachments.clear();
+            clear_composer_for_dispatch(origin, &mut workspace.ui);
         }
-        self.refresh_attachment_ui(cx);
-        self.ui
-            .threadlane_command_text_input(cx, ids!(prompt_input))
-            .reset(cx);
+        if consumes_composer {
+            self.refresh_attachment_ui(cx);
+            self.ui
+                .threadlane_command_text_input(cx, ids!(prompt_input))
+                .reset(cx);
+        }
         self.set_session_status(cx, &key, UiStatus::Working, "Working...");
     }
 
@@ -4448,8 +4477,7 @@ impl App {
                             .submitted_attachments
                             .take()
                             .filter(|(attachment_id, _)| *attachment_id == id)
-                            .map(|(_, attachments)| attachments)
-                            .unwrap_or_default();
+                            .map(|(_, attachments)| attachments);
                         (draft, attachments)
                     })
                     .unwrap_or_default();
@@ -4473,7 +4501,9 @@ impl App {
                 let workspace = self.workspace_state.workspace_mut(key.clone());
                 workspace.chat.flush_streaming();
                 workspace.ui.draft = draft.clone();
-                workspace.ui.attachments = restored_attachments;
+                if let Some(attachments) = restored_attachments {
+                    workspace.ui.attachments = attachments;
+                }
                 workspace
                     .chat
                     .push_chat(MsgRole::System, format!("Agent error: {error}"));
@@ -4707,10 +4737,35 @@ impl App {
 #[cfg(test)]
 mod workspace_header_tests {
     use super::{
-        append_antigravity_models, compact_workspace_path, model_credential_error,
-        ordered_model_options, project_name, ANTIGRAVITY_MODELS,
+        append_antigravity_models, clear_composer_for_dispatch, compact_workspace_path,
+        model_credential_error, ordered_model_options, project_name, InputOrigin,
+        ANTIGRAVITY_MODELS,
     };
+    use crate::workspace::WorkspaceUiState;
     use std::path::Path;
+    use threadlane_agent::ImageAttachment;
+
+    #[test]
+    fn internal_model_switch_preserves_composer_draft_and_attachments() {
+        let mut composer = WorkspaceUiState {
+            draft: "keep this draft".to_string(),
+            attachments: vec![ImageAttachment {
+                display_name: "diagram.png".to_string(),
+                data_url: "data:image/png;base64,AAAA".to_string(),
+            }],
+        };
+
+        clear_composer_for_dispatch(InputOrigin::Internal, &mut composer);
+
+        assert_eq!(composer.draft, "keep this draft");
+        assert_eq!(composer.attachments.len(), 1);
+        assert_eq!(composer.attachments[0].display_name, "diagram.png");
+
+        clear_composer_for_dispatch(InputOrigin::Composer, &mut composer);
+
+        assert!(composer.draft.is_empty());
+        assert!(composer.attachments.is_empty());
+    }
 
     #[test]
     fn provider_credentials_follow_the_selected_model() {
