@@ -16,10 +16,10 @@ script_mod! {
         height: 10
         show_bg: true
         draw_bg +: {
-            color: uniform(#x70a7ff)
-            color_mid: uniform(#x8c8df4)
-            color_tail: uniform(#x687386)
-            color_idle: uniform(#x3d4654)
+            color: uniform(#x66d9ff)
+            color_mid: uniform(#x6fa8ff)
+            color_tail: uniform(#xa78bfa)
+            color_idle: uniform(#x7067d9)
             speed: uniform(7.0)
             dot_radius: uniform(1.15)
 
@@ -57,7 +57,7 @@ script_mod! {
                 let dot_color = self.color_idle
                     .mix(self.color_tail, trail)
                     .mix(active_color, max(head, trail * 0.72))
-                let alpha = coverage * (0.42 + head * 0.58 + trail * 0.34)
+                let alpha = coverage
 
                 return Pal.premul(vec4(dot_color.xyz, alpha))
             }
