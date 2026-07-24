@@ -1,3 +1,5 @@
+pub mod hashline;
+
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -7,7 +9,7 @@ fn tool_definitions() -> Vec<Value> {
     vec![
         json!({
             "name": "read_file",
-            "description": "Read content of a file, optionally specifying start and end lines (1-indexed).",
+            "description": "Read content of a file with line numbers and hash anchors (e.g. 12:a3f|content), optionally specifying start and end lines (1-indexed).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -41,6 +43,31 @@ fn tool_definitions() -> Vec<Value> {
                     "replacement": { "type": "string", "description": "New text to substitute in place of target" }
                 },
                 "required": ["path", "target", "replacement"]
+            }
+        }),
+        json!({
+            "name": "edit_file_hashline",
+            "description": "Edit a file using hash-anchored lines obtained from read_file. Format of start_anchor/end_anchor is 'line_number:hash' (e.g., '12:a3f'). Actions: 'replace', 'insert_after', 'delete'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Path to file to edit" },
+                    "edits": {
+                        "type": "array",
+                        "description": "List of hash-anchored edit operations",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "start_anchor": { "type": "string", "description": "Starting line anchor e.g. '12:a3f'" },
+                                "end_anchor": { "type": "string", "description": "Optional ending line anchor for range edit e.g. '15:9b2'" },
+                                "action": { "type": "string", "enum": ["replace", "insert_after", "delete"], "description": "Edit action" },
+                                "new_content": { "type": "string", "description": "New replacement or inserted content" }
+                            },
+                            "required": ["start_anchor", "action"]
+                        }
+                    }
+                },
+                "required": ["path", "edits"]
             }
         }),
         json!({
@@ -252,7 +279,15 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
                         );
                     }
                     let selected = &lines[start_idx..end_idx];
-                    selected.join("\n")
+                    let formatted_lines: Vec<String> = selected
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, line)| {
+                            let line_no = start_idx + idx + 1;
+                            hashline::format_line_hashline(line_no, line)
+                        })
+                        .collect();
+                    formatted_lines.join("\n")
                 }
                 Err(e) => format!("Error reading file '{raw_path}': {e}"),
             }
@@ -313,6 +348,40 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
                         Err(e) => format!("Error writing file '{raw_path}': {e}"),
                     }
                 }
+                Err(e) => format!("Error reading file '{raw_path}': {e}"),
+            }
+        }
+        "edit_file_hashline" => {
+            let raw_path = match args.get("path").and_then(|v| v.as_str()) {
+                Some(p) => p,
+                None => return "Error: 'path' parameter is required".into(),
+            };
+            let validated_path = match validate_path_in_workspace(raw_path, workspace_root) {
+                Ok(p) => p,
+                Err(err) => return err,
+            };
+
+            let edits_value = match args.get("edits") {
+                Some(e) => e,
+                None => return "Error: 'edits' parameter is required".into(),
+            };
+
+            let edits: Vec<hashline::HashlineEdit> = match serde_json::from_value(edits_value.clone()) {
+                Ok(e) => e,
+                Err(err) => return format!("Error parsing 'edits' argument: {err}"),
+            };
+
+            match fs::read_to_string(&validated_path) {
+                Ok(content) => match hashline::apply_hashline_edits(&content, &edits) {
+                    Ok(new_content) => match fs::write(&validated_path, new_content) {
+                        Ok(_) => format!(
+                            "Successfully applied {} hashline edit(s) to '{raw_path}'",
+                            edits.len()
+                        ),
+                        Err(e) => format!("Error writing file '{raw_path}': {e}"),
+                    },
+                    Err(e) => format!("Error applying hashline edits to '{raw_path}': {e}"),
+                },
                 Err(e) => format!("Error reading file '{raw_path}': {e}"),
             }
         }

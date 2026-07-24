@@ -4464,6 +4464,20 @@ impl App {
                 let status = concise_status(&error);
                 self.set_session_status(cx, &key, UiStatus::Error, &status);
             }
+            AgentEvent::StreamRuleTriggered {
+                rule_name,
+                matched_text,
+                reminder,
+                ..
+            } => {
+                let Some(key) = target_key else { return };
+                let workspace = self.workspace_state.workspace_mut(key);
+                workspace.chat.flush_streaming();
+                workspace.chat.push_chat(
+                    MsgRole::System,
+                    format!("⚠ Injected stream rule '{rule_name}' after matching '{matched_text}': {reminder}"),
+                );
+            }
             AgentEvent::TurnStart { .. } | AgentEvent::MessageStart { .. } => {}
         }
     }

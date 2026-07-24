@@ -119,10 +119,11 @@ fn compact_from_index(messages: &[AgentMessage], mut start: usize) -> Vec<AgentM
         start += 1;
     }
 
-    let system = messages
+    let system_messages: Vec<_> = messages
         .iter()
-        .find(|message| matches!(message, AgentMessage::System { .. }))
-        .cloned();
+        .filter(|message| matches!(message, AgentMessage::System { .. }))
+        .cloned()
+        .collect();
     let dropped: Vec<_> = messages[..start]
         .iter()
         .filter(|message| !matches!(message, AgentMessage::System { .. }))
@@ -134,9 +135,7 @@ fn compact_from_index(messages: &[AgentMessage], mut start: usize) -> Vec<AgentM
     }
 
     let mut compacted = Vec::new();
-    if let Some(system) = system {
-        compacted.push(system);
-    }
+    compacted.extend(system_messages);
     compacted.push(AgentMessage::Custom {
         custom_type: "compaction_summary".to_string(),
         payload: serde_json::json!({

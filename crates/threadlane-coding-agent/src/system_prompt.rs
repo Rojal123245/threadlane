@@ -121,9 +121,12 @@ pub fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> String {
         if available_tool_names.contains("read_file") {
             add_guideline("Inspect relevant files before making changes; do not guess about code you have not read.");
         }
-        if available_tool_names.contains("write_file") || available_tool_names.contains("edit_file")
+        if available_tool_names.contains("write_file") || available_tool_names.contains("edit_file") || available_tool_names.contains("edit_file_hashline")
         {
             add_guideline("Keep edits focused, preserve existing user work, and follow the project's established style.");
+        }
+        if available_tool_names.contains("edit_file_hashline") {
+            add_guideline("Prefer `edit_file_hashline` for high-precision edits using line:hash anchors (e.g. '12:a3f') returned from `read_file` to ensure edit safety and prevent line drift.");
         }
         if available_tool_names.contains("run_command") {
             add_guideline("Run focused validation after changes when practical, and never claim a command passed unless you ran it successfully.");
