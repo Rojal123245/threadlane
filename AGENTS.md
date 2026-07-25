@@ -273,6 +273,10 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 ## WASI Extensions
 
 - Extension crates live under `extensions/` and target `wasm32-wasip1`.
+- Package install and removal must canonicalize the project root, reject
+  symlinked destination components, and keep every mutation inside the resolved
+  `.threadlane/extensions` directory. Validate the staged package record before
+  swapping it into place so installation cannot report failure after commit.
 - Use `./scripts/build_extensions.sh` to compile and deploy them.
 - The script intentionally treats missing binaries and copy failures as fatal.
 - Bundled agent definitions and prompts are part of a valid extension deployment; do not update only the `.wasm` artifact when associated metadata also changes.

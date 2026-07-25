@@ -59,4 +59,22 @@ impl CapabilityCatalog {
     pub fn packages(&self) -> &[PackageRecord] {
         &self.packages
     }
+
+    pub fn extensions(&self) -> &[ExtensionMetadata] {
+        &self.extensions
+    }
+}
+
+impl ExtensionMetadata {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
 }

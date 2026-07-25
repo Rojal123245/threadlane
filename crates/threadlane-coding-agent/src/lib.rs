@@ -24,7 +24,7 @@ pub use extension_broker::{
     CapabilityDispatcher, CapabilityHandler, CapabilityPolicy, HostBrokerRequest,
     HostCapabilityGrantPolicy,
 };
-pub use packages::{PackageManifest, PackageRecord, PackageScope};
+pub use packages::{PackageManifest, PackageRecord};
 pub use packages::PackageManager;
 pub use prompt_templates::{
     expand_prompt_template, load_prompt_templates, parse_command_args, substitute_args, PromptTemplate,

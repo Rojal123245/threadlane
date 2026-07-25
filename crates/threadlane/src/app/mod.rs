@@ -3868,13 +3868,13 @@ impl App {
         self.capability_state
             .refresh(&CapabilityCatalog::discover(Some(&work_dir)));
         let mut summary = String::new();
-        for package in self
+        for extension in self
             .capability_state
-            .packages
+            .extensions
             .iter()
-            .filter(|package| package.is_available())
+            .filter(|extension| extension.enabled)
         {
-            summary.push_str(&format!("{} · project · WASI\n", package.name));
+            summary.push_str(&format!("{} · project · WASI\n", extension.name));
         }
         if summary.is_empty() {
             summary.push_str("No packages discovered.");

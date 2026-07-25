@@ -181,6 +181,9 @@ fn package_install_rejects_invalid_modules_without_creating_extensions() {
         let source_root = tempdir().unwrap();
         let source = source_root.path().join("source");
         write_wasi_package_fixture(&source, extension, b"test wasm");
+        if extension == "../outside.wasm" {
+            fs::write(source_root.path().join("outside.wasm"), b"outside wasm").unwrap();
+        }
 
         assert!(
             PackageManager::new()
@@ -190,6 +193,48 @@ fn package_install_rejects_invalid_modules_without_creating_extensions() {
         );
         assert!(!project.path().join(".threadlane/extensions").exists());
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn package_install_rejects_symlinked_extensions_destination() {
+    let project = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    let source = tempdir().unwrap();
+    write_wasi_package_fixture(source.path(), "extension.wasm", b"test wasm");
+    fs::create_dir(project.path().join(".threadlane")).unwrap();
+    std::os::unix::fs::symlink(
+        outside.path(),
+        project.path().join(".threadlane/extensions"),
+    )
+    .unwrap();
+
+    assert!(PackageManager::new()
+        .install_from_local(source.path(), project.path())
+        .is_err());
+    assert!(!outside.path().join("test-extension").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn package_removal_rejects_symlinked_extensions_destination() {
+    let project = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    let outside_package = outside.path().join("test-extension");
+    let outside_module = outside_package.join("extension.wasm");
+    fs::create_dir_all(&outside_package).unwrap();
+    fs::write(&outside_module, b"outside wasm").unwrap();
+    fs::create_dir(project.path().join(".threadlane")).unwrap();
+    std::os::unix::fs::symlink(
+        outside.path(),
+        project.path().join(".threadlane/extensions"),
+    )
+    .unwrap();
+
+    let result = PackageManager::new().remove_package("test-extension", project.path());
+
+    assert!(outside_module.is_file(), "outside package was removed");
+    assert!(result.is_err());
 }
 
 #[test]

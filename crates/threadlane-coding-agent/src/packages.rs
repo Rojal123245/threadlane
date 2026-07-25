@@ -1,13 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PackageScope {
-    Global,
-    Project,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -22,8 +17,6 @@ pub struct PackageManifest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageRecord {
     manifest: PackageManifest,
-    scope: PackageScope,
-    root_dir: PathBuf,
     module_path: PathBuf,
     enabled: bool,
 }
@@ -37,7 +30,9 @@ impl PackageManager {
     }
 
     pub fn list_packages(&self, project_root: &Path) -> Vec<PackageRecord> {
-        let extensions_dir = extensions_dir(project_root);
+        let Ok(Some(extensions_dir)) = resolve_extensions_dir(project_root, false) else {
+            return Vec::new();
+        };
         let Ok(entries) = fs::read_dir(extensions_dir) else {
             return Vec::new();
         };
@@ -45,7 +40,15 @@ impl PackageManager {
         entries
             .flatten()
             .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
-            .filter_map(|entry| self.package_record(&entry.path()).ok())
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .filter_map(|entry| {
+                let mut record = self.package_record(&entry.path()).ok()?;
+                record.module_path = project_root
+                    .join(".threadlane/extensions")
+                    .join(entry.file_name())
+                    .join("extension.wasm");
+                Some(record)
+            })
             .collect()
     }
 
@@ -85,10 +88,26 @@ impl PackageManager {
             return Err("Package extension must be a file".into());
         }
 
-        let extensions_dir = extensions_dir(project_root);
-        fs::create_dir_all(&extensions_dir)
-            .map_err(|e| format!("Failed to create extensions directory: {e}"))?;
+        let extensions_dir = resolve_extensions_dir(project_root, true)?
+            .ok_or_else(|| "Failed to create extensions directory".to_string())?;
         let target = extensions_dir.join(&manifest.id);
+        let installed_module = project_root
+            .join(".threadlane/extensions")
+            .join(&manifest.id)
+            .join("extension.wasm");
+        let target_exists = match fs::symlink_metadata(&target) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err("Package destination must not be a symbolic link".into())
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err("Package destination must be a directory".into())
+            }
+            Ok(_) => true,
+            Err(error) if error.kind() == ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(format!("Failed to inspect package destination: {error}"))
+            }
+        };
         let staged = create_staging_dir(&extensions_dir, &manifest.id)?;
         let result = (|| {
             manifest.extension = PathBuf::from("extension.wasm");
@@ -101,7 +120,8 @@ impl PackageManager {
             fs::copy(&module, staged.join("extension.wasm"))
                 .map_err(|e| format!("Failed to stage package extension: {e}"))?;
 
-            if target.exists() {
+            let mut record = self.package_record(&staged)?;
+            if target_exists {
                 let backup = available_path(&extensions_dir, &manifest.id, "backup");
                 fs::rename(&target, &backup)
                     .map_err(|e| format!("Failed to back up existing package: {e}"))?;
@@ -120,7 +140,8 @@ impl PackageManager {
                     .map_err(|e| format!("Failed to install package: {e}"))?;
             }
 
-            self.package_record(&target)
+            record.module_path = installed_module;
+            Ok(record)
         })();
         if staged.exists() {
             let _ = fs::remove_dir_all(&staged);
@@ -130,28 +151,48 @@ impl PackageManager {
 
     pub fn remove_package(&self, package_id: &str, project_root: &Path) -> Result<(), String> {
         validate_package_id(package_id)?;
-        let target = extensions_dir(project_root).join(package_id);
-        if target.exists() {
-            fs::remove_dir_all(&target)
-                .map_err(|e| format!("Failed to remove package '{package_id}': {e}"))?;
+        let Some(extensions_dir) = resolve_extensions_dir(project_root, false)? else {
+            return Ok(());
+        };
+        let target = extensions_dir.join(package_id);
+        let metadata = match fs::symlink_metadata(&target) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(format!(
+                    "Failed to inspect package '{package_id}': {error}"
+                ))
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            return Err("Package destination must not be a symbolic link".into());
         }
+        if !metadata.is_dir() {
+            return Err("Package destination must be a directory".into());
+        }
+        let target = target
+            .canonicalize()
+            .map_err(|e| format!("Failed to resolve package '{package_id}': {e}"))?;
+        if target.parent() != Some(extensions_dir.as_path()) {
+            return Err("Package destination must remain below the project extension root".into());
+        }
+        fs::remove_dir_all(&target)
+            .map_err(|e| format!("Failed to remove package '{package_id}': {e}"))?;
         Ok(())
     }
 
-    fn package_record(&self, root_dir: &Path) -> Result<PackageRecord, String> {
-        let contents = fs::read_to_string(root_dir.join("threadlane-package.json"))
+    fn package_record(&self, package_dir: &Path) -> Result<PackageRecord, String> {
+        let contents = fs::read_to_string(package_dir.join("threadlane-package.json"))
             .map_err(|e| format!("Failed to read package manifest: {e}"))?;
         let manifest: PackageManifest = serde_json::from_str(&contents)
             .map_err(|e| format!("Invalid threadlane-package.json manifest: {e}"))?;
         validate_package_id(&manifest.id)?;
-        let module_path = root_dir.join("extension.wasm");
+        let module_path = package_dir.join("extension.wasm");
         if manifest.extension != Path::new("extension.wasm") || !module_path.is_file() {
             return Err("Package extension is missing or invalid".into());
         }
         Ok(PackageRecord {
             manifest,
-            scope: PackageScope::Project,
-            root_dir: root_dir.to_path_buf(),
             module_path,
             enabled: true,
         })
@@ -176,8 +217,56 @@ impl PackageRecord {
     }
 }
 
-fn extensions_dir(project_root: &Path) -> PathBuf {
-    project_root.join(".threadlane/extensions")
+fn resolve_extensions_dir(project_root: &Path, create: bool) -> Result<Option<PathBuf>, String> {
+    let project_root = project_root
+        .canonicalize()
+        .map_err(|e| format!("Failed to resolve project root: {e}"))?;
+    if !project_root.is_dir() {
+        return Err("Project root must be a directory".into());
+    }
+
+    let threadlane_dir = project_root.join(".threadlane");
+    let extensions_dir = threadlane_dir.join("extensions");
+    for directory in [&threadlane_dir, &extensions_dir] {
+        match fs::symlink_metadata(directory) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!(
+                    "Extension destination component '{}' must not be a symbolic link",
+                    directory.display()
+                ))
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(format!(
+                    "Extension destination component '{}' must be a directory",
+                    directory.display()
+                ))
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound && create => {
+                fs::create_dir(directory).map_err(|e| {
+                    format!(
+                        "Failed to create extension destination '{}': {e}",
+                        directory.display()
+                    )
+                })?;
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(format!(
+                    "Failed to inspect extension destination '{}': {error}",
+                    directory.display()
+                ))
+            }
+        }
+    }
+
+    let resolved = extensions_dir
+        .canonicalize()
+        .map_err(|e| format!("Failed to resolve project extension root: {e}"))?;
+    if !resolved.starts_with(&project_root) || resolved != extensions_dir {
+        return Err("Project extension root must remain within the project".into());
+    }
+    Ok(Some(resolved))
 }
 
 fn validate_package_id(id: &str) -> Result<(), String> {

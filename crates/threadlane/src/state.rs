@@ -64,20 +64,17 @@ impl BackgroundTaskState {
 
 pub struct CapabilityPackageRow {
     pub id: String,
-    pub name: String,
-    pub module_path: PathBuf,
-    pub enabled: bool,
 }
 
-impl CapabilityPackageRow {
-    pub fn is_available(&self) -> bool {
-        self.enabled && self.module_path.is_file()
-    }
+pub struct CapabilityExtensionRow {
+    pub name: String,
+    pub enabled: bool,
 }
 
 #[derive(Default)]
 pub struct CapabilityState {
     pub packages: Vec<CapabilityPackageRow>,
+    pub extensions: Vec<CapabilityExtensionRow>,
 }
 
 impl CapabilityState {
@@ -87,9 +84,14 @@ impl CapabilityState {
             .iter()
             .map(|package| CapabilityPackageRow {
                 id: package.id().to_owned(),
-                name: package.name().to_owned(),
-                module_path: package.module_path().to_path_buf(),
-                enabled: package.is_enabled(),
+            })
+            .collect();
+        self.extensions = catalog
+            .extensions()
+            .iter()
+            .map(|extension| CapabilityExtensionRow {
+                name: extension.name().to_owned(),
+                enabled: extension.is_enabled(),
             })
             .collect();
     }
@@ -162,22 +164,16 @@ mod tests {
         )
         .unwrap();
         let module_path = package.join("extension.wasm");
-        fs::write(&module_path, b"test wasm").unwrap();
+        fs::write(&module_path, b"\0asm\x01\0\0\0").unwrap();
 
         let catalog = CapabilityCatalog::discover(Some(&project));
         let mut capabilities = CapabilityState::default();
         capabilities.refresh(&catalog);
         assert_eq!(capabilities.packages.len(), 1);
         assert_eq!(capabilities.packages[0].id, "test-extension");
-        assert_eq!(capabilities.packages[0].name, "Test Extension");
-        assert_eq!(capabilities.packages[0].module_path, module_path);
-        assert!(capabilities.packages[0].enabled);
-        assert!(capabilities.packages[0].is_available());
-        capabilities.packages[0].enabled = false;
-        assert!(!capabilities.packages[0].is_available());
-        capabilities.packages[0].enabled = true;
-        fs::remove_file(&capabilities.packages[0].module_path).unwrap();
-        assert!(!capabilities.packages[0].is_available());
+        assert_eq!(capabilities.extensions.len(), 1);
+        assert_eq!(capabilities.extensions[0].name, "unnamed_wasi_ext");
+        assert!(capabilities.extensions[0].enabled);
         fs::remove_dir_all(project).unwrap();
     }
 

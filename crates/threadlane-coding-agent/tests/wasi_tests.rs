@@ -7,9 +7,9 @@ use tempfile::tempdir;
 use threadlane_agent::{AgentState, AgentToolCall, BeforeToolCallHook};
 use threadlane_coding_agent::{
     BrokerError, BrokerOperationResult, BrokerRequest, CapabilityDispatcher, CapabilityHandler,
-    CapabilityPolicy, ExtensionBeforeToolHook, HostBrokerRequest, HostCapabilityGrantPolicy,
-    PackageManager, ToolPolicy, WasiExtension, WasiExtensionEvent, WasiExtensionManager,
-    WasiExtensionManifest, WasiToolDefinition,
+    CapabilityCatalog, CapabilityPolicy, ExtensionBeforeToolHook, HostBrokerRequest,
+    HostCapabilityGrantPolicy, PackageManager, ToolPolicy, WasiExtension, WasiExtensionEvent,
+    WasiExtensionManager, WasiExtensionManifest, WasiToolDefinition,
 };
 
 fn build_broker_smoke_extension(agent_only: bool) -> PathBuf {
@@ -309,6 +309,12 @@ fn installed_package_is_discovered_by_wasi_loader() {
     let mut extensions = WasiExtensionManager::for_project(project.path());
     assert_eq!(extensions.discover_and_load(project.path()), 1);
     assert!(extensions.get_extensions().contains_key("test_extension"));
+
+    let catalog = CapabilityCatalog::discover(Some(project.path()));
+    assert_eq!(catalog.extensions().len(), 1);
+    assert_eq!(catalog.extensions()[0].id(), "test_extension");
+    assert_eq!(catalog.extensions()[0].name(), "test_extension");
+    assert!(catalog.extensions()[0].is_enabled());
 }
 
 fn hook_wasm(api_version: u32, response: &str) -> Vec<u8> {
