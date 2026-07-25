@@ -64,6 +64,13 @@ fn include_connected_provider_models(mut models: Vec<String>) -> Vec<String> {
     models
 }
 
+/// Whether the user can talk to at least one LLM right now, via any
+/// supported provider (not just OpenAI/ChatGPT specifically).
+fn has_connected_provider() -> bool {
+    auth::load_credentials().is_some()
+        || threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some()
+}
+
 fn ordered_model_options(
     models: Vec<String>,
     selected_model: &str,
@@ -2260,6 +2267,8 @@ impl MatchEvent for App {
             );
             key_opt = Some(creds.access_token.clone());
             account_id_opt = creds.account_id.clone();
+        }
+        if has_connected_provider() {
             self.ui.widget(cx, ids!(auth_row)).set_visible(cx, false);
             self.set_status(cx, UiStatus::Ready, "Ready");
         } else {
@@ -2947,6 +2956,12 @@ impl App {
                     .button(cx, ids!(openai_login_btn))
                     .set_enabled(cx, true);
             }
+        }
+        if has_connected_provider() {
+            self.ui.widget(cx, ids!(auth_row)).set_visible(cx, false);
+        } else {
+            self.ui.widget(cx, ids!(auth_row)).set_visible(cx, true);
+            self.set_status(cx, UiStatus::Error, "Not signed in");
         }
         cx.redraw_all();
     }
@@ -4780,6 +4795,8 @@ impl App {
                         None => "✓ Successfully authenticated with Google Antigravity.".to_string(),
                     };
                     self.push_chat(MsgRole::System, msg);
+                    self.ui.widget(cx, ids!(auth_row)).set_visible(cx, false);
+                    self.set_status(cx, UiStatus::Ready, "Ready");
                     let selected_model = self
                         .ui
                         .icon_drop_down(cx, ids!(model_drop))
