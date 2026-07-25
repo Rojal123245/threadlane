@@ -2347,6 +2347,7 @@ impl ScriptHook for ProviderSettingsModal {
             if let Some(draw_list) = &self.draw_list {
                 draw_list.redraw(cx);
             }
+            self.sync_page_visibility(cx);
         });
     }
 }
@@ -2358,6 +2359,29 @@ impl Widget for ProviderSettingsModal {
         }
 
         self.view.handle_event(cx, event, scope);
+        if let Event::Actions(actions) = event {
+            if self
+                .view
+                .button(cx, ids!(settings_nav_google_btn))
+                .clicked(actions)
+            {
+                self.set_page(cx, SettingsPage::GoogleAntigravity);
+            }
+            if self
+                .view
+                .button(cx, ids!(settings_nav_openai_btn))
+                .clicked(actions)
+            {
+                self.set_page(cx, SettingsPage::OpenAi);
+            }
+            if self
+                .view
+                .button(cx, ids!(settings_nav_about_btn))
+                .clicked(actions)
+            {
+                self.set_page(cx, SettingsPage::About);
+            }
+        }
         let modal_rect = self.view.widget(cx, ids!(modal_card)).area().rect(cx);
         let should_close = matches!(
             event,
@@ -2400,11 +2424,37 @@ impl ProviderSettingsModal {
         self.view.redraw(cx);
     }
 
-    fn sync_page_visibility(&mut self, _cx: &mut Cx) {}
+    fn sync_page_visibility(&mut self, cx: &mut Cx) {
+        let google_selected = self.page == SettingsPage::GoogleAntigravity;
+        let openai_selected = self.page == SettingsPage::OpenAi;
+        let about_selected = self.page == SettingsPage::About;
+
+        // Keep every navigation entry available; the selected page controls
+        // the presentation while the button styles show the active state.
+        self.view
+            .button(cx, ids!(settings_nav_google_btn))
+            .set_visible(cx, true);
+        self.view
+            .button(cx, ids!(settings_nav_openai_btn))
+            .set_visible(cx, true);
+        self.view
+            .button(cx, ids!(settings_nav_about_btn))
+            .set_visible(cx, true);
+        self.view
+            .widget(cx, ids!(google_antigravity_page))
+            .set_visible(cx, google_selected);
+        self.view
+            .widget(cx, ids!(openai_page))
+            .set_visible(cx, openai_selected);
+        self.view
+            .widget(cx, ids!(about_page))
+            .set_visible(cx, about_selected);
+    }
 
     fn open(&mut self, cx: &mut Cx) {
         self.page = SettingsPage::GoogleAntigravity;
         self.opened = true;
+        self.sync_page_visibility(cx);
         if let Some(draw_list) = &self.draw_list {
             draw_list.redraw(cx);
         }
