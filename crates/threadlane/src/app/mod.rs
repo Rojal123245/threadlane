@@ -2433,6 +2433,21 @@ impl ProviderSettingsModal {
         let openai_selected = self.page == SettingsPage::OpenAi;
         let about_selected = self.page == SettingsPage::About;
 
+        let normal_color = Vec4f { x: 0x20 as f32 / 255.0, y: 0x25 as f32 / 255.0, z: 0x2e as f32 / 255.0, w: 1.0 };
+        let selected_color = Vec4f { x: 0x2d as f32 / 255.0, y: 0x40 as f32 / 255.0, z: 0x5a as f32 / 255.0, w: 1.0 };
+        for (button_id, selected) in [
+            (ids!(settings_nav_google_btn), google_selected),
+            (ids!(settings_nav_openai_btn), openai_selected),
+            (ids!(settings_nav_about_btn), about_selected),
+        ] {
+            let mut button = self.view.button(cx, button_id);
+            let color = if selected { selected_color } else { normal_color };
+            script_apply_eval!(cx, button, {
+                draw_bg +: { color: #(color) }
+            });
+            button.redraw(cx);
+        }
+
         // Keep every navigation entry available; the selected page controls
         // the presentation while the button styles show the active state.
         self.view
