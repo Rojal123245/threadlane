@@ -117,6 +117,21 @@ pub fn save_credentials(tokens: &OAuthTokens) -> Result<(), String> {
     fs::write(path, json).map_err(|e| e.to_string())
 }
 
+/// Whether `source` points at a credentials file threadlane itself owns
+/// (as opposed to an external tool's, e.g. `~/.codex/auth.json`, which we
+/// must never delete on the user's behalf).
+pub fn is_own_source(source: &str) -> bool {
+    source == "~/.threadlane/credentials.json"
+}
+
+pub fn remove_credentials() -> Result<(), String> {
+    let path = get_credentials_path();
+    if path.exists() {
+        fs::remove_file(path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 pub fn load_credentials() -> Option<StoredCredentials> {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
 

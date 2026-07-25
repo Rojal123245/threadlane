@@ -56,6 +56,14 @@ pub fn save_antigravity_credentials(creds: &AntigravityCredentials) -> Result<()
     fs::write(path, json).map_err(|e| e.to_string())
 }
 
+pub fn clear_antigravity_credentials() -> Result<(), String> {
+    let path = get_antigravity_credentials_path();
+    if path.exists() {
+        fs::remove_file(path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 pub fn generate_pkce_pair() -> (String, String) {
     let mut random_bytes = [0u8; 32];
     getrandom::fill(&mut random_bytes).expect("secure randomness should be available for PKCE");
