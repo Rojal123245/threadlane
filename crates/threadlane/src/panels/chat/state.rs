@@ -1272,9 +1272,12 @@ mod tests {
         assert!(items[0].detail.contains("read_file"));
         assert!(items[0].detail.contains("src/lib.rs"));
         assert!(!items[0].detail.contains("src/stale.rs"));
+        assert!(!items[0].detail.contains("src/state.rs"));
         assert!(!items[0].detail.contains("src/ignored.rs"));
         assert!(items[1].detail.contains("read_file"));
         assert!(items[1].detail.contains("src/state.rs"));
+        assert!(!items[1].detail.contains("src/lib.rs"));
+        assert!(!items[1].detail.contains("src/ignored.rs"));
     }
 
     #[test]
