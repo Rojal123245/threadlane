@@ -909,6 +909,7 @@ impl WasiExtensionManager {
                         "api_version": BROKER_API_VERSION,
                         "capability": result.request.capability,
                         "operation": result.request.operation,
+                        "arguments": result.request.arguments,
                         "ok": true,
                         "value": result.value,
                     }),
