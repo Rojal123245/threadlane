@@ -1744,9 +1744,7 @@ impl CodingAgent {
         }
     }
 
-    fn base_system_prompt(&self) -> &str {
-        &self.base_system_prompt
-    }
+    fn base_system_prompt(&self) -> &str { &self.base_system_prompt }
 
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
         self.agent.subscribe()
@@ -1858,66 +1856,13 @@ impl CodingAgent {
     }
 
     async fn switch_session_file(&mut self, session_file: PathBuf) {
-        let session_tree = if session_file.exists() {
-            SessionTree::load_from_file(&session_file).unwrap_or_else(|_| {
-                let mut tree = SessionTree::new(
-                    session_file
-                        .file_stem()
-                        .map(|s| s.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "session".into()),
-                );
-                tree.file_path = Some(session_file.clone());
-                tree
-            })
-        } else {
-            if let Some(parent) = session_file.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let mut tree = SessionTree::new(
-                session_file
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "session".into()),
-            );
-            tree.file_path = Some(session_file);
-            tree
-        };
-
-        let branch = session_tree.get_active_branch_messages();
-        let session_model = session_tree.model.clone();
-        self.wasi_extensions
-            .set_session_scope(session_tree.session_id.clone())
-            .unwrap_or_else(|error| {
-                eprintln!("Failed to restore session extension state: {error}")
-            });
-        *self.tool_policy.lock().await = restored_tool_policy(&self.wasi_extensions);
-        self.agent
-            .set_prompt_cache_key(Some(session_tree.session_id.clone()));
-        self.session_tree = session_tree;
-
-        let mut state = self.agent.loop_engine.state.lock().await;
-        if let Some(model) = session_model {
-            state.model = model;
-        } else {
-            self.session_tree.model = Some(state.model.clone());
-        }
-        let system_prompt = state.system_prompt.clone();
-        state.messages.clear();
-        state.messages.push(AgentMessage::System {
-            content: system_prompt,
-        });
-        for msg in branch {
-            if matches!(msg, AgentMessage::System { .. }) {
-                continue;
-            }
-            state.messages.push(msg);
-        }
-        state.is_streaming = false;
-        state.pending_tool_calls.clear();
-    }
-
-    fn session_file_path(&self) -> Option<&PathBuf> {
-        self.session_tree.file_path.as_ref()
+        let mut tree = if session_file.exists() {
+            SessionTree::load_from_file(&session_file).unwrap_or_else(|_| SessionTree::new("session"))
+        } else { SessionTree::new("session") };
+        tree.file_path = Some(session_file);
+        self.wasi_extensions.set_session_scope(tree.session_id.clone()).unwrap_or_else(|error| eprintln!("Failed to restore session extension state: {error}"));
+        self.agent.set_prompt_cache_key(Some(tree.session_id.clone()));
+        self.session_tree = tree;
     }
 
     #[cfg(test)]
