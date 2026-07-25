@@ -844,9 +844,13 @@ script_mod! {
                             }
                             header: ActivityHeader {
                                 width: Fill
-                                height: 24
+                                height: 28
+                                padding: Inset{left: 3 top: 0 right: 4 bottom: 0}
                                 title_lbl +: {
                                     width: 82
+                                    height: 20
+                                    padding: 0
+                                    align: Align{y: 0.5}
                                     draw_text +: {
                                         color: #xd5dbe4
                                         text_style: theme.font_regular { font_size: 12.0 }
@@ -861,6 +865,9 @@ script_mod! {
                                     clip_x: true
                                     preview_lbl := mod.components.ClippedLabel {
                                         width: Fill
+                                        height: 20
+                                        padding: 0
+                                        align: Align{y: 0.5}
                                         draw_text +: { color: #x8794a3 }
                                     }
                                     status_lbl := Label {
@@ -873,7 +880,10 @@ script_mod! {
                                             text_style +: { font_size: 9.0 }
                                         }
                                     }
-                                    status_indicator := ActivityStatusIndicator {}
+                                    status_indicator := ActivityStatusIndicator {
+                                        height: 20
+                                        align: Align{y: 0.5}
+                                    }
                                 }
                             }
                             body: RoundedView {
