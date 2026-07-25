@@ -1233,17 +1233,143 @@ script_mod! {
         }
 
         modal_card := RoundedView {
-                width: 460
-                height: Fit
+            width: 780
+            height: 520
+            flow: Right
+            padding: 0
+            spacing: 0
+            draw_bg +: {
+                color: #x1a1d24
+                border_radius: 12.0
+                border_size: 1.0
+                border_color: #x323a48
+            }
+
+            settings_nav := View {
+                width: 180
+                height: Fill
                 flow: Down
-                padding: Inset{left: 22 top: 20 right: 22 bottom: 22}
-                spacing: 14
+                padding: Inset{left: 16 top: 24 right: 12 bottom: 20}
+                spacing: 8
                 draw_bg +: {
-                    color: #x1a1d24
-                    border_radius: 12.0
+                    color: #x171a20
+                    border_color: #x2d3440
                     border_size: 1.0
-                    border_color: #x323a48
                 }
+
+                providers_category_lbl := Label {
+                    width: Fill
+                    height: Fit
+                    margin: Inset{bottom: 4}
+                    text: "PROVIDERS"
+                    draw_text +: {
+                        color: #x697587
+                        text_style: theme.font_bold { font_size: 9.0 }
+                    }
+                }
+
+                settings_nav_google_btn := Button {
+                    width: Fill
+                    height: 34
+                    padding: Inset{left: 10 right: 8 top: 6 bottom: 6}
+                    spacing: 0
+                    align: Align{x: 0.0 y: 0.5}
+                    text: "Google Antigravity"
+                    draw_bg +: {
+                        color: #x2d405a
+                        color_hover: #x354b69
+                        color_focus: #x3a5272
+                        color_down: #x46638a
+                        border_color: #x4b719f
+                        border_color_hover: #x5a84b8
+                        border_color_focus: #x6b96c8
+                        border_color_down: #x7ba9dc
+                        border_size: 1.0
+                        border_radius: 6.0
+                    }
+                    draw_text +: {
+                        color: #xe4edf8
+                        color_hover: #xffffff
+                        color_focus: #xffffff
+                        color_down: #xffffff
+                        text_style +: { font_size: 9.5 }
+                    }
+                }
+
+                settings_nav_openai_btn := Button {
+                    width: Fill
+                    height: 34
+                    padding: Inset{left: 10 right: 8 top: 6 bottom: 6}
+                    spacing: 0
+                    align: Align{x: 0.0 y: 0.5}
+                    text: "OpenAI / ChatGPT"
+                    draw_bg +: {
+                        color: #x20252e
+                        color_hover: #x2b3442
+                        color_focus: #x303b4b
+                        color_down: #x39485b
+                        border_color: #x20252e
+                        border_color_hover: #x3b4b60
+                        border_color_focus: #x4b5e76
+                        border_color_down: #x5c718d
+                        border_size: 1.0
+                        border_radius: 6.0
+                    }
+                    draw_text +: {
+                        color: #x9ba8ba
+                        color_hover: #xd8e2ef
+                        color_focus: #xe7eef7
+                        color_down: #xffffff
+                        text_style +: { font_size: 9.5 }
+                    }
+                }
+
+                advanced_category_lbl := Label {
+                    width: Fill
+                    height: Fit
+                    margin: Inset{top: 18 bottom: 4}
+                    text: "ADVANCED"
+                    draw_text +: {
+                        color: #x697587
+                        text_style: theme.font_bold { font_size: 9.0 }
+                    }
+                }
+
+                settings_nav_about_btn := Button {
+                    width: Fill
+                    height: 34
+                    padding: Inset{left: 10 right: 8 top: 6 bottom: 6}
+                    spacing: 0
+                    align: Align{x: 0.0 y: 0.5}
+                    text: "About"
+                    draw_bg +: {
+                        color: #x20252e
+                        color_hover: #x2b3442
+                        color_focus: #x303b4b
+                        color_down: #x39485b
+                        border_color: #x20252e
+                        border_color_hover: #x3b4b60
+                        border_color_focus: #x4b5e76
+                        border_color_down: #x5c718d
+                        border_size: 1.0
+                        border_radius: 6.0
+                    }
+                    draw_text +: {
+                        color: #x9ba8ba
+                        color_hover: #xd8e2ef
+                        color_focus: #xe7eef7
+                        color_down: #xffffff
+                        text_style +: { font_size: 9.5 }
+                    }
+                }
+            }
+
+            settings_content := View {
+                width: Fill
+                height: Fill
+                flow: Down
+                padding: Inset{left: 26 top: 20 right: 24 bottom: 22}
+                spacing: 14
 
                 modal_header := View {
                     width: Fill
@@ -1291,190 +1417,282 @@ script_mod! {
                     }
                 }
 
-                modal_subtitle := Label {
+                google_antigravity_page := View {
                     width: Fill
-                    height: Fit
-                    text: "Connect your AI model providers to use them in Threadlane."
-                    draw_text +: {
-                        color: #x7f8c9d
-                        text_style +: { font_size: 10.0 }
+                    height: Fill
+                    flow: Down
+                    spacing: 14
+
+                    google_page_title := Label {
+                        width: Fill
+                        height: Fit
+                        text: "Google Antigravity"
+                        draw_text +: {
+                            color: #xe7ebf0
+                            text_style: theme.font_bold { font_size: 18.0 }
+                        }
+                    }
+
+                    google_page_desc := Label {
+                        width: Fill
+                        height: Fit
+                        text: "Connect your AI model providers to use them in Threadlane."
+                        draw_text +: {
+                            color: #x7f8c9d
+                            text_style +: { font_size: 10.0 }
+                        }
+                    }
+
+                    antigravity_card := RoundedView {
+                        width: Fill
+                        height: Fit
+                        flow: Down
+                        padding: Inset{left: 16 top: 14 right: 16 bottom: 14}
+                        spacing: 10
+                        draw_bg +: {
+                            color: #x222631
+                            border_radius: 8.0
+                            border_size: 1.0
+                            border_color: #x323a48
+                        }
+
+                        ag_header := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            align: Align{y: 0.5}
+
+                            ag_title := Label {
+                                width: Fill
+                                height: Fit
+                                text: "Google Antigravity"
+                                draw_text +: {
+                                    color: #xe7ebf0
+                                    text_style: theme.font_bold { font_size: 11.5 }
+                                }
+                            }
+
+                            antigravity_status_lbl := Label {
+                                width: Fit
+                                height: Fit
+                                text: "Not Connected"
+                                draw_text +: {
+                                    color: #xe06c75
+                                    text_style: theme.font_bold { font_size: 10.0 }
+                                }
+                            }
+                        }
+
+                        ag_desc := Label {
+                            width: Fill
+                            height: Fit
+                            text: "Cloud Code Assist, Gemini 3.6 Flash / Pro via Google OAuth PKCE"
+                            draw_text +: {
+                                color: #x7f8c9d
+                                text_style +: { font_size: 9.25 }
+                            }
+                        }
+
+                        ag_actions := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 8
+                            align: Align{y: 0.5}
+
+                            antigravity_login_btn := Button {
+                                width: Fit
+                                height: 28
+                                padding: Inset{left: 12 right: 12 top: 4 bottom: 4}
+                                text: "Sign in with Google"
+                                draw_bg +: {
+                                    color: #x3b669e
+                                    color_hover: #x4a7bc0
+                                    color_down: #x5a8de0
+                                    border_radius: 6.0
+                                }
+                                draw_text +: {
+                                    color: #xffffff
+                                    text_style: theme.font_bold { font_size: 9.5 }
+                                }
+                            }
+
+                            antigravity_doctor_btn := Button {
+                                width: Fit
+                                height: 28
+                                padding: Inset{left: 10 right: 10 top: 4 bottom: 4}
+                                text: "Run Health Check"
+                                draw_bg +: {
+                                    color: #x2b313d
+                                    color_hover: #x363e4d
+                                    color_down: #x444f62
+                                    border_color: #x3a4354
+                                    border_size: 1.0
+                                    border_radius: 6.0
+                                }
+                                draw_text +: {
+                                    color: #xa4b0c2
+                                    color_hover: #xd8e0ec
+                                    text_style +: { font_size: 9.0 }
+                                }
+                            }
+                        }
                     }
                 }
 
-                // Google Antigravity Provider Card
-                antigravity_card := RoundedView {
+                openai_page := View {
                     width: Fill
-                    height: Fit
+                    height: Fill
                     flow: Down
-                    padding: Inset{left: 14 top: 12 right: 14 bottom: 12}
-                    spacing: 8
-                    draw_bg +: {
-                        color: #x222631
-                        border_radius: 8.0
-                        border_size: 1.0
-                        border_color: #x323a48
-                    }
+                    spacing: 14
+                    visible: false
 
-                    ag_header := View {
+                    openai_page_title := Label {
                         width: Fill
                         height: Fit
-                        flow: Right
-                        align: Align{y: 0.5}
-
-                        ag_title := Label {
-                            width: Fill
-                            height: Fit
-                            text: "Google Antigravity"
-                            draw_text +: {
-                                color: #xe7ebf0
-                                text_style: theme.font_bold { font_size: 11.5 }
-                            }
-                        }
-
-                        antigravity_status_lbl := Label {
-                            width: Fit
-                            height: Fit
-                            text: "Not Connected"
-                            draw_text +: {
-                                color: #xe06c75
-                                text_style: theme.font_bold { font_size: 10.0 }
-                            }
+                        text: "OpenAI / ChatGPT"
+                        draw_text +: {
+                            color: #xe7ebf0
+                            text_style: theme.font_bold { font_size: 18.0 }
                         }
                     }
 
-                    ag_desc := Label {
+                    openai_page_desc := Label {
                         width: Fill
                         height: Fit
-                        text: "Cloud Code Assist, Gemini 3.6 Flash / Pro via Google OAuth PKCE"
+                        text: "Connect your AI model providers to use them in Threadlane."
                         draw_text +: {
                             color: #x7f8c9d
-                            text_style +: { font_size: 9.25 }
+                            text_style +: { font_size: 10.0 }
                         }
                     }
 
-                    ag_actions := View {
+                    openai_card := RoundedView {
                         width: Fill
                         height: Fit
-                        flow: Right
-                        spacing: 8
-                        align: Align{y: 0.5}
+                        flow: Down
+                        padding: Inset{left: 16 top: 14 right: 16 bottom: 14}
+                        spacing: 10
+                        draw_bg +: {
+                            color: #x222631
+                            border_radius: 8.0
+                            border_size: 1.0
+                            border_color: #x323a48
+                        }
 
-                        antigravity_login_btn := Button {
-                            width: Fit
-                            height: 28
-                            padding: Inset{left: 12 right: 12 top: 4 bottom: 4}
-                            text: "Sign in with Google"
-                            draw_bg +: {
-                                color: #x3b669e
-                                color_hover: #x4a7bc0
-                                color_down: #x5a8de0
-                                border_radius: 6.0
+                        oa_header := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            align: Align{y: 0.5}
+
+                            oa_title := Label {
+                                width: Fill
+                                height: Fit
+                                text: "OpenAI / ChatGPT"
+                                draw_text +: {
+                                    color: #xe7ebf0
+                                    text_style: theme.font_bold { font_size: 11.5 }
+                                }
                             }
-                            draw_text +: {
-                                color: #xffffff
-                                text_style: theme.font_bold { font_size: 9.5 }
+
+                            openai_status_lbl := Label {
+                                width: Fit
+                                height: Fit
+                                text: "Not Connected"
+                                draw_text +: {
+                                    color: #xe06c75
+                                    text_style: theme.font_bold { font_size: 10.0 }
+                                }
                             }
                         }
 
-                        antigravity_doctor_btn := Button {
-                            width: Fit
-                            height: 28
-                            padding: Inset{left: 10 right: 10 top: 4 bottom: 4}
-                            text: "Run Health Check"
-                            draw_bg +: {
-                                color: #x2b313d
-                                color_hover: #x363e4d
-                                color_down: #x444f62
-                                border_color: #x3a4354
-                                border_size: 1.0
-                                border_radius: 6.0
-                            }
+                        oa_desc := Label {
+                            width: Fill
+                            height: Fit
+                            text: "GPT-4o, Codex, and OpenAI models via ChatGPT OAuth or API key"
                             draw_text +: {
-                                color: #xa4b0c2
-                                color_hover: #xd8e0ec
-                                text_style +: { font_size: 9.0 }
+                                color: #x7f8c9d
+                                text_style +: { font_size: 9.25 }
+                            }
+                        }
+
+                        oa_actions := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 8
+                            align: Align{y: 0.5}
+
+                            openai_login_btn := Button {
+                                width: Fit
+                                height: 28
+                                padding: Inset{left: 12 right: 12 top: 4 bottom: 4}
+                                text: "Sign in with ChatGPT"
+                                draw_bg +: {
+                                    color: #x2c6e49
+                                    color_hover: #x358759
+                                    color_down: #x3ea36c
+                                    border_radius: 6.0
+                                }
+                                draw_text +: {
+                                    color: #xffffff
+                                    text_style: theme.font_bold { font_size: 9.5 }
+                                }
                             }
                         }
                     }
                 }
 
-                // OpenAI / ChatGPT Provider Card
-                openai_card := RoundedView {
+                about_page := View {
                     width: Fill
-                    height: Fit
+                    height: Fill
                     flow: Down
-                    padding: Inset{left: 14 top: 12 right: 14 bottom: 12}
-                    spacing: 8
-                    draw_bg +: {
-                        color: #x222631
-                        border_radius: 8.0
-                        border_size: 1.0
-                        border_color: #x323a48
-                    }
+                    spacing: 14
+                    visible: false
 
-                    oa_header := View {
+                    about_title_lbl := Label {
                         width: Fill
                         height: Fit
-                        flow: Right
-                        align: Align{y: 0.5}
-
-                        oa_title := Label {
-                            width: Fill
-                            height: Fit
-                            text: "OpenAI / ChatGPT"
-                            draw_text +: {
-                                color: #xe7ebf0
-                                text_style: theme.font_bold { font_size: 11.5 }
-                            }
-                        }
-
-                        openai_status_lbl := Label {
-                            width: Fit
-                            height: Fit
-                            text: "Not Connected"
-                            draw_text +: {
-                                color: #xe06c75
-                                text_style: theme.font_bold { font_size: 10.0 }
-                            }
+                        text: "About Threadlane"
+                        draw_text +: {
+                            color: #xe7ebf0
+                            text_style: theme.font_bold { font_size: 18.0 }
                         }
                     }
 
-                    oa_desc := Label {
+                    about_version_lbl := Label {
                         width: Fill
                         height: Fit
-                        text: "GPT-4o, Codex, and OpenAI models via ChatGPT OAuth or API key"
+                        text: "Version"
+                        draw_text +: {
+                            color: #x9ba8ba
+                            text_style: theme.font_bold { font_size: 10.0 }
+                        }
+                    }
+
+                    about_description_lbl := Label {
+                        width: Fill
+                        height: Fit
+                        text: "Threadlane is a focused workspace for building software with AI coding agents."
+                        draw_text +: {
+                            color: #xc4cedc
+                            text_style +: { font_size: 11.0 }
+                        }
+                    }
+
+                    about_detail_lbl := Label {
+                        width: Fill
+                        height: Fit
+                        text: "Keep projects, sessions, and provider connections together in one calm, native desktop app."
                         draw_text +: {
                             color: #x7f8c9d
-                            text_style +: { font_size: 9.25 }
-                        }
-                    }
-
-                    oa_actions := View {
-                        width: Fill
-                        height: Fit
-                        flow: Right
-                        spacing: 8
-                        align: Align{y: 0.5}
-
-                        openai_login_btn := Button {
-                            width: Fit
-                            height: 28
-                            padding: Inset{left: 12 right: 12 top: 4 bottom: 4}
-                            text: "Sign in with ChatGPT"
-                            draw_bg +: {
-                                color: #x2c6e49
-                                color_hover: #x358759
-                                color_down: #x3ea36c
-                                border_radius: 6.0
-                            }
-                            draw_text +: {
-                                color: #xffffff
-                                text_style: theme.font_bold { font_size: 9.5 }
-                            }
+                            text_style +: { font_size: 10.0 }
                         }
                     }
                 }
             }
+        }
     }
 
     startup() do #(App::script_component(vm)){
