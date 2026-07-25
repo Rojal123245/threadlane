@@ -6,7 +6,7 @@ use crate::components::model_dropdown::IconDropDownWidgetRefExt;
 use crate::panels::chat::{
     accepts_generation_event, concise_status, draft_for_cancellation, submitted_draft, ChatList,
     ChatListWidgetRefExt, ComposerState, ComposerStatus, GenerationEvent, StarterPromptAction,
-    ToolFoldHeader,
+    ToolFoldHeader, SubagentChatlist,
 };
 use crate::panels::command_palette::*;
 
@@ -772,6 +772,77 @@ script_mod! {
                         border_size: 0.0
                     }
                     md := mod.components.ChatMarkdown {}
+                }
+            }
+
+            SubagentMsg := #(ToolFoldHeader::register_widget(vm)) {
+                width: Fill
+                height: Fit
+                flow: Down
+                body_walk: Walk{width: Fill, height: Fit}
+                margin: Inset{top: 1 bottom: 1 left: 20 right: 24}
+                opened: 0.0
+                animator +: {
+                    active: { default: @off }
+                }
+                header: ActivityHeader {
+                    width: Fill
+                    height: 26
+                    title_lbl +: { width: 120, text: "Delegated tasks" }
+                    icon_tile = { icon_stack = { icon_generic = { visible: false }, icon_subagent = { visible: true } } }
+                    summary := View {
+                        width: Fill
+                        height: 20
+                        flow: Right
+                        spacing: 7
+                        align: Align{y: 0.5}
+                        clip_x: true
+                        preview_lbl := mod.components.ClippedLabel {
+                            width: Fit
+                            draw_text +: { color: #x8794a3 }
+                        }
+                        status_indicator := ActivityStatusIndicator {}
+                    }
+                }
+                body: RoundedView {
+                    width: Fill
+                    height: Fit
+                    padding: Inset{left: 30 top: 2 right: 18 bottom: 6}
+                    flow: Down
+                    spacing: 4
+                    draw_bg +: {
+                        color: #x00000000
+                        border_size: 0.0
+                    }
+                    
+                    chatlist := #(SubagentChatlist::register_widget(vm)) {
+                        width: Fill
+                        height: Fit
+                        flow: Down
+                        spacing: 2
+                        
+                        tool_template: View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 8
+                            align: Align{y: 0.5}
+                            
+                            title_lbl := mod.components.CodeLabel {
+                                width: Fit
+                                draw_text +: { color: #x8494a8 }
+                            }
+                            preview_lbl := mod.components.CodeLabel {
+                                width: Fit{max: FitBound.Abs(200)}
+                                max_lines: 1
+                                text_overflow: Ellipsis
+                                draw_text +: { color: #x768292 }
+                            }
+                            status_indicator := ActivityStatusIndicator {}
+                        }
+                    }
+                    
+                    output_md := mod.components.ChatMarkdown {}
                 }
             }
 

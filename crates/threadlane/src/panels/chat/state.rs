@@ -52,6 +52,23 @@ pub struct ToolPresentation {
     pub output_markdown: bool,
 }
 
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct SubagentSessionData {
+    pub task: String,
+    pub agent: String,
+    pub status: String,
+    pub thinking: String,
+    pub inner_tools: Vec<SubagentInnerToolData>,
+    pub output: String,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct SubagentInnerToolData {
+    pub name: String,
+    pub target_preview: String,
+    pub is_error: bool,
+}
+
 #[derive(Clone, Debug)]
 pub enum ChatMessage {
     Text {

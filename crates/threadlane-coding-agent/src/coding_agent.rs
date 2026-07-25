@@ -2148,60 +2148,73 @@ fn tool_target_preview(name: &str, arguments: &str) -> String {
     }
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct SubagentSessionData {
+    pub task: String,
+    pub agent: String,
+    pub status: String,
+    pub thinking: String,
+    pub inner_tools: Vec<SubagentInnerToolData>,
+    pub output: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct SubagentInnerToolData {
+    pub name: String,
+    pub target_preview: String,
+    pub is_error: bool,
+}
+
 fn format_subagent_results(
     tasks: Vec<AgentRunTask>,
     results: Vec<Result<SubagentResult, String>>,
 ) -> String {
-    tasks
+    let sessions: Vec<SubagentSessionData> = tasks
         .into_iter()
         .zip(results)
-        .enumerate()
-        .map(|(index, (task, result))| match result {
+        .map(|(task, result)| match result {
             Ok(res) => {
-                let mut session_md = format!(
-                    "### Subagent {} (`{}`)\n- **Task**: {}\n",
-                    index + 1,
-                    task.agent,
-                    task.task
-                );
-                if !res.thinking.is_empty() {
-                    session_md
-                        .push_str("\n<details><summary><b>Subagent Reasoning</b></summary>\n\n");
-                    for think_msg in &res.thinking {
-                        if let AgentMessage::Custom { payload, .. } = think_msg {
-                            if let Some(text) =
-                                payload.get("text").and_then(serde_json::Value::as_str)
-                            {
-                                session_md.push_str(text);
-                                session_md.push_str("\n\n");
-                            }
+                let mut thinking = String::new();
+                for think_msg in &res.thinking {
+                    if let AgentMessage::Custom { payload, .. } = think_msg {
+                        if let Some(text) = payload.get("text").and_then(serde_json::Value::as_str) {
+                            thinking.push_str(text);
+                            thinking.push_str("\n\n");
                         }
                     }
-                    session_md.push_str("</details>\n");
                 }
-                if !res.inner_tools.is_empty() {
-                    session_md.push_str("\n**Subagent Tools Executed:**\n");
-                    for tool in &res.inner_tools {
-                        let status_str = if tool.is_error { "Failed" } else { "Done" };
-                        let target_preview = tool_target_preview(&tool.name, &tool.arguments);
-                        session_md.push_str(&format!(
-                            "- `{}` `{}` · {}\n",
-                            tool.name, target_preview, status_str
-                        ));
-                    }
+                
+                let inner_tools = res
+                    .inner_tools
+                    .into_iter()
+                    .map(|tool| SubagentInnerToolData {
+                        name: tool.name.clone(),
+                        target_preview: tool_target_preview(&tool.name, &tool.arguments),
+                        is_error: tool.is_error,
+                    })
+                    .collect();
+
+                SubagentSessionData {
+                    task: task.task,
+                    agent: task.agent,
+                    status: "Done".to_string(),
+                    thinking: thinking.trim().to_string(),
+                    inner_tools,
+                    output: res.output,
                 }
-                session_md.push_str(&format!("\n**Subagent Report:**\n\n{}", res.output));
-                session_md
             }
-            Err(error) => format!(
-                "### Subagent {} (`{}`) (failed)\n\n{}",
-                index + 1,
-                task.agent,
-                error
-            ),
+            Err(error) => SubagentSessionData {
+                task: task.task,
+                agent: task.agent,
+                status: "Failed".to_string(),
+                thinking: String::new(),
+                inner_tools: Vec::new(),
+                output: error,
+            },
         })
-        .collect::<Vec<_>>()
-        .join("\n\n---\n\n")
+        .collect();
+
+    serde_json::to_string(&sessions).unwrap_or_else(|e| format!("Failed to serialize subagent results: {}", e))
 }
 
 #[cfg(test)]
