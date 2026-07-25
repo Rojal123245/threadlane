@@ -15,3 +15,11 @@
 ## Remaining caveat
 
 The Makepad compile check validates the script syntax, but the nested expansion was not visually exercised in a running desktop app.
+
+## Fix round 1
+
+- Completed rail items now build their expandable detail from persisted session thinking, inner tool activity, and final report instead of requiring an active child-tool run ID.
+- `cargo test -p threadlane panels::chat::state::tests::completed_subagent_rail_items_keep_their_persisted_detail` — passed: 1 test, 83 filtered out.
+- `cargo test -p threadlane panels::chat::state::tests::subagent_result_markdown_keeps_each_agent_report_and_tool_outcome` — passed: 1 test, 83 filtered out.
+- `cargo check -p threadlane` — passed: 0 errors, 2 Makepad duplicate-package warnings.
+- `git diff --check` — passed.

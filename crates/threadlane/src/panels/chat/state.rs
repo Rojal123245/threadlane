@@ -80,11 +80,18 @@ pub fn subagent_rail_items(
             return sessions
                 .into_iter()
                 .enumerate()
-                .map(|(index, session)| SubagentRailItem {
-                    agent: session.agent,
-                    task: normalize_whitespace_bounded(&session.task, 160),
-                    status: session.status,
-                    detail: subagent_task_activity_detail(messages, child_run, index),
+                .map(|(index, session)| {
+                    let detail = if child_run.is_some() {
+                        subagent_task_activity_detail(messages, child_run, index)
+                    } else {
+                        subagent_session_detail(&session)
+                    };
+                    SubagentRailItem {
+                        agent: session.agent,
+                        task: normalize_whitespace_bounded(&session.task, 160),
+                        status: session.status,
+                        detail,
+                    }
                 })
                 .collect();
         }
@@ -200,6 +207,28 @@ fn subagent_tool_status(status: ToolStatus) -> &'static str {
         ToolStatus::Error => "Failed",
         ToolStatus::Cancelled => "Stopped",
     }
+}
+
+fn subagent_session_detail(session: &SubagentSessionData) -> String {
+    let mut sections = Vec::new();
+    if !session.thinking.trim().is_empty() {
+        sections.push(format!("**Thinking**\n\n{}", session.thinking));
+    }
+    if !session.inner_tools.is_empty() {
+        let mut activity = "**Activity**".to_string();
+        for tool in &session.inner_tools {
+            let status = if tool.is_error { "✗" } else { "✓" };
+            activity.push_str(&format!(
+                "\n- {status} `{}` · {}",
+                tool.name, tool.target_preview
+            ));
+        }
+        sections.push(activity);
+    }
+    if !session.output.trim().is_empty() {
+        sections.push(format!("**Report**\n\n{}", session.output));
+    }
+    sections.join("\n\n")
 }
 
 pub fn subagent_result_markdown(output: &str, fallback: &str) -> String {
@@ -1278,6 +1307,31 @@ mod tests {
         assert!(items[1].detail.contains("src/state.rs"));
         assert!(!items[1].detail.contains("src/lib.rs"));
         assert!(!items[1].detail.contains("src/ignored.rs"));
+    }
+
+    #[test]
+    fn completed_subagent_rail_items_keep_their_persisted_detail() {
+        let output = serde_json::json!([{
+            "agent": "scout",
+            "task": "Inspect the workspace",
+            "status": "Done",
+            "thinking": "I will inspect the entry point.",
+            "inner_tools": [{
+                "name": "read_file",
+                "target_preview": "src/main.rs",
+                "is_error": false
+            }],
+            "output": "The entry point is ready."
+        }])
+        .to_string();
+
+        let items = subagent_rail_items("", &output, ToolStatus::Done, &[]);
+
+        assert_eq!(items.len(), 1);
+        assert!(items[0].detail.contains("I will inspect the entry point."));
+        assert!(items[0].detail.contains("read_file"));
+        assert!(items[0].detail.contains("src/main.rs"));
+        assert!(items[0].detail.contains("The entry point is ready."));
     }
 
     #[test]
