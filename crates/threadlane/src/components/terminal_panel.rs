@@ -60,6 +60,20 @@ script_mod! {
             }
         }
 
+        terminal_resize_handle := View {
+            width: Fill height: 6 visible: false
+            show_bg: true
+            draw_bg +: {
+                color: #x2a3440
+                pixel: fn() {
+                    let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                    sdf.clear(#x00000000)
+                    sdf.rect(0.0, self.rect_size.y * 0.5 - 0.5, self.rect_size.x, 1.0)
+                    return sdf.fill(self.color)
+                }
+            }
+        }
+
         terminal_body := RoundedView {
             width: Fill height: 250 visible: false flow: Down
             draw_bg +: { color: #x15181c border_color: #x303945 border_size: 1.0 border_radius: 9.0 }
@@ -160,6 +174,14 @@ pub struct ProjectTerminal {
     terminal_focused: bool,
     #[rust]
     output: String,
+    #[rust]
+    terminal_height: f64,
+    #[rust]
+    resizing: bool,
+    #[rust]
+    resize_start_y: f64,
+    #[rust]
+    resize_start_height: f64,
 }
 
 impl Widget for ProjectTerminal {
@@ -199,6 +221,44 @@ impl Widget for ProjectTerminal {
             }
         }
         self.view.handle_event(cx, event, scope);
+        match event {
+            Event::MouseDown(pointer)
+                if self.expanded
+                    && pointer.button.is_primary()
+                    && self
+                        .view
+                        .view(cx, ids!(terminal_resize_handle))
+                        .area()
+                        .rect(cx)
+                        .contains(pointer.abs) =>
+            {
+                self.resizing = true;
+                self.resize_start_y = pointer.abs.y;
+                self.resize_start_height = self.terminal_height.max(250.0);
+                cx.set_cursor(MouseCursor::RowResize);
+            }
+            Event::MouseMove(pointer) if self.resizing => {
+                self.set_terminal_height(
+                    cx,
+                    (self.resize_start_height + self.resize_start_y - pointer.abs.y)
+                        .clamp(160.0, 520.0),
+                );
+                cx.set_cursor(MouseCursor::RowResize);
+            }
+            Event::MouseMove(pointer)
+                if self.expanded
+                    && self
+                        .view
+                        .view(cx, ids!(terminal_resize_handle))
+                        .area()
+                        .rect(cx)
+                        .contains(pointer.abs) =>
+            {
+                cx.set_cursor(MouseCursor::RowResize);
+            }
+            Event::MouseUp(pointer) if pointer.button.is_primary() => self.resizing = false,
+            _ => {}
+        }
         if self.expanded {
             if let Event::MouseDown(pointer) = event {
                 let body = self.view.view(cx, ids!(terminal_body)).area().rect(cx);
@@ -247,10 +307,22 @@ impl Widget for ProjectTerminal {
 }
 
 impl ProjectTerminal {
+    fn set_terminal_height(&mut self, cx: &mut Cx, height: f64) {
+        self.terminal_height = height;
+        if let Some(mut body) = self.view.view(cx, ids!(terminal_body)).borrow_mut() {
+            body.walk.height = Size::Fixed(height);
+            body.redraw(cx);
+        }
+        cx.redraw_all();
+    }
+
     pub fn toggle(&mut self, cx: &mut Cx) {
         self.expanded = !self.expanded;
         self.view
             .view(cx, ids!(terminal_body))
+            .set_visible(cx, self.expanded);
+        self.view
+            .view(cx, ids!(terminal_resize_handle))
             .set_visible(cx, self.expanded);
         if self.expanded {
             self.focus_next_frame = cx.new_next_frame();

@@ -1750,13 +1750,13 @@ script_mod! {
                         splitter: Splitter {
                             size: 6.0
                             draw_bg +: {
-                                color: uniform(#x242930)
-                                color_hover: uniform(#x3a4452)
+                                color: uniform(#x303946)
+                                color_hover: uniform(#x4b5d70)
                                 color_drag: uniform(#x6a7b91)
 
                                 pixel: fn() {
                                     let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                                    sdf.clear(#x181a1f)
+                                    sdf.clear(#x00000000)
                                     let line_color = mix(
                                         self.color
                                         mix(self.color_hover, self.color_drag, self.drag)
@@ -1812,6 +1812,16 @@ script_mod! {
                             flow: Down
                             spacing: 0
                             padding: Inset{left: 8 top: 8 right: 8 bottom: 10}
+                            show_bg: true
+                            draw_bg +: {
+                                color: #x2d3744
+                                pixel: fn() {
+                                    let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                                    sdf.clear(#x00000000)
+                                    sdf.rect(self.rect_size.x - 1.0, 0.0, 1.0, self.rect_size.y)
+                                    return sdf.fill(self.color)
+                                }
+                            }
 
                             sidebar_brand := View {
                                 width: Fill
