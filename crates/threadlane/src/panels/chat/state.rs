@@ -72,6 +72,9 @@ pub fn subagent_rail_items(
     status: ToolStatus,
     messages: &[ChatMessage],
 ) -> Vec<SubagentRailItem> {
+    let child_run = (status == ToolStatus::Running)
+        .then(|| latest_subagent_run(messages))
+        .flatten();
     if let Ok(sessions) = serde_json::from_str::<Vec<SubagentSessionData>>(output) {
         if !sessions.is_empty() {
             return sessions
@@ -81,7 +84,7 @@ pub fn subagent_rail_items(
                     agent: session.agent,
                     task: normalize_whitespace_bounded(&session.task, 160),
                     status: session.status,
-                    detail: subagent_task_activity_detail(messages, index),
+                    detail: subagent_task_activity_detail(messages, child_run, index),
                 })
                 .collect();
         }
@@ -119,16 +122,23 @@ pub fn subagent_rail_items(
                 ToolStatus::Cancelled => "Stopped",
             }
             .to_string(),
-            detail: subagent_task_activity_detail(messages, index),
+            detail: subagent_task_activity_detail(messages, child_run, index),
         })
         .collect()
 }
 
 pub fn is_subagent_child_tool(message: &ChatMessage) -> bool {
-    matches!(message, ChatMessage::Tool { id, .. } if subagent_task_index(id).is_some())
+    matches!(message, ChatMessage::Tool { id, .. } if subagent_child_tool_tag(id).is_some())
 }
 
-fn subagent_task_activity_detail(messages: &[ChatMessage], task_index: usize) -> String {
+fn subagent_task_activity_detail(
+    messages: &[ChatMessage],
+    run_id: Option<u64>,
+    task_index: usize,
+) -> String {
+    let Some(run_id) = run_id else {
+        return String::new();
+    };
     messages
         .iter()
         .filter_map(|message| match message {
@@ -138,7 +148,7 @@ fn subagent_task_activity_detail(messages: &[ChatMessage], task_index: usize) ->
                 presentation,
                 status,
                 ..
-            } if subagent_task_index(id) == Some(task_index) => {
+            } if matches!(subagent_child_tool_tag(id), Some(tag) if tag.run_id == run_id && tag.task_index == task_index) => {
                 let target = if presentation.primary.is_empty() {
                     String::new()
                 } else {
@@ -152,13 +162,35 @@ fn subagent_task_activity_detail(messages: &[ChatMessage], task_index: usize) ->
         .join("\n")
 }
 
-fn subagent_task_index(tool_call_id: &str) -> Option<usize> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SubagentChildToolTag {
+    run_id: u64,
+    task_index: usize,
+}
+
+fn latest_subagent_run(messages: &[ChatMessage]) -> Option<u64> {
+    messages.iter().rev().find_map(|message| match message {
+        ChatMessage::Tool { id, .. } => subagent_child_tool_tag(id).map(|tag| tag.run_id),
+        _ => None,
+    })
+}
+
+fn subagent_child_tool_tag(tool_call_id: &str) -> Option<SubagentChildToolTag> {
     let tagged = tool_call_id.strip_prefix("subagent-")?;
-    let (run, tagged) = tagged.split_once(':')?;
+    let (run_id, tagged) = tagged.split_once(':')?;
     let (task_index, tool_call_id) = tagged.split_once(':')?;
-    (!run.is_empty() && !tool_call_id.is_empty())
-        .then(|| task_index.parse().ok())
-        .flatten()
+    if run_id.is_empty()
+        || task_index.is_empty()
+        || tool_call_id.is_empty()
+        || !run_id.bytes().all(|byte| byte.is_ascii_digit())
+        || !task_index.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(SubagentChildToolTag {
+        run_id: run_id.parse().ok()?,
+        task_index: task_index.parse().ok()?,
+    })
 }
 
 fn subagent_tool_status(status: ToolStatus) -> &'static str {
@@ -1212,26 +1244,37 @@ mod tests {
 
     #[test]
     fn subagent_rail_places_tagged_child_tool_under_its_task() {
-        let child = ChatMessage::Tool {
-            id: "subagent-1:0:call-1".into(),
-            name: "read_file".into(),
-            arguments: r#"{"path":"src/lib.rs"}"#.into(),
+        let child_tool = |id: &str, name: &str, path: &str| ChatMessage::Tool {
+            id: id.into(),
+            name: name.into(),
+            arguments: format!(r#"{{"path":"{path}"}}"#),
             output: String::new(),
             status: ToolStatus::Running,
-            presentation: tool_presentation("read_file", r#"{"path":"src/lib.rs"}"#),
+            presentation: tool_presentation(name, &format!(r#"{{"path":"{path}"}}"#)),
             result_preview: String::new(),
             result_metadata: String::new(),
             started_at: Instant::now(),
         };
+        let messages = [
+            child_tool("subagent-40:0:stale", "read_file", "src/stale.rs"),
+            child_tool("subagent-41:0:read", "read_file", "src/lib.rs"),
+            child_tool("subagent-41:1:read", "read_file", "src/state.rs"),
+            child_tool("subagent-not-a-run:0:ignored", "write_file", "src/ignored.rs"),
+        ];
 
         let items = subagent_rail_items(
-            r#"{"parallel":true,"tasks":[{"agent":"scout","task":"inspect"}]}"#,
+            r#"{"parallel":true,"tasks":[{"agent":"scout","task":"inspect"},{"agent":"reviewer","task":"review"}]}"#,
             "",
             ToolStatus::Running,
-            &[child],
+            &messages,
         );
 
         assert!(items[0].detail.contains("read_file"));
+        assert!(items[0].detail.contains("src/lib.rs"));
+        assert!(!items[0].detail.contains("src/stale.rs"));
+        assert!(!items[0].detail.contains("src/ignored.rs"));
+        assert!(items[1].detail.contains("read_file"));
+        assert!(items[1].detail.contains("src/state.rs"));
     }
 
     #[test]

@@ -37,7 +37,7 @@ const MAX_SUBAGENT_TASKS: usize = 8;
 const MAX_SUBAGENT_TASK_CHARS: usize = 32_000;
 const SUBAGENT_CONCURRENCY_LIMIT: usize = 4;
 const SUBAGENT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-static NEXT_SUBAGENT_UI_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_SUBAGENT_UI_RUN_ID: AtomicU64 = AtomicU64::new(1);
 
 type AgentRunner = Arc<
     dyn Fn(Vec<AgentRunTask>, bool) -> Pin<Box<dyn Future<Output = Result<Value, String>> + Send>>
@@ -1802,6 +1802,7 @@ async fn run_subagents_with_context(
     parallel: bool,
     context: SubagentRunContext,
 ) -> Result<(String, Vec<AgentMessage>), String> {
+    let run_id = NEXT_SUBAGENT_UI_RUN_ID.fetch_add(1, Ordering::Relaxed);
     let run_one = |task_index: usize, task: AgentRunTask| {
         let candidate = discover_agents(&context.work_dir, AgentScope::Both)
             .agents
@@ -1851,6 +1852,7 @@ async fn run_subagents_with_context(
                     config,
                     task.task,
                     context,
+                    run_id,
                     task_index,
                 ),
             )
@@ -1898,6 +1900,7 @@ async fn run_subagent_task(
     config: AgentConfig,
     task: String,
     context: SubagentRunContext,
+    run_id: u64,
     task_index: usize,
 ) -> Result<SubagentResult, String> {
     let model = config
@@ -1972,8 +1975,7 @@ async fn run_subagent_task(
     // Assistant text stays local and is returned below as one labelled result.
     let mut ui_events = agent.subscribe();
     let ui_event_prefix = format!(
-        "subagent-{}:{task_index}:",
-        NEXT_SUBAGENT_UI_ID.fetch_add(1, Ordering::Relaxed),
+        "subagent-{run_id}:{task_index}:",
     );
     let event_tx_clone = context.parent_event_tx.clone();
     tokio::spawn(async move {
@@ -2003,6 +2005,7 @@ async fn run_subagent_task(
                 fallback_config,
                 task,
                 context,
+                run_id,
                 task_index,
             ))
             .await;
