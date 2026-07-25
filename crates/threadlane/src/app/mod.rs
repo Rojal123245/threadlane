@@ -1216,10 +1216,20 @@ script_mod! {
         flow: Overlay
         align: Align{x: 0.5 y: 0.5}
 
-        modal_backdrop := View {
+        modal_backdrop := GaussRoundedView {
             width: Fill
             height: Fill
-            draw_bg +: { color: #x000000bb }
+            draw_bg +: {
+                blur_level: 5.2
+                corner_radius: 0.0
+                border_width: 0.0
+                tint_color: #x181a1f
+                tint_alpha: 0.16
+                surface_alpha: 0.62
+                fallback_color: #x181a1f
+                shadow_radius: 0.0
+                shadow_offset: vec2(0.0 0.0)
+            }
         }
 
         modal_card := RoundedView {
