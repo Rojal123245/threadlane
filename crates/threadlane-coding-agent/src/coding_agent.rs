@@ -141,13 +141,15 @@ impl AgentWorkScheduler {
 /// Extensions reference managed processes by name across invocations.
 struct ManagedProcess {
     child: Arc<tokio::sync::Mutex<tokio::process::Child>>,
-    stdin: tokio::sync::Mutex<tokio::process::ChildStdin>,
+    stdin: Arc<tokio::sync::Mutex<tokio::process::ChildStdin>>,
     stdout_buf: Arc<tokio::sync::Mutex<Vec<u8>>>,
     pid: u32,
     alive: Arc<AtomicBool>,
 }
 
-type ManagedProcessRegistry = Arc<tokio::sync::Mutex<HashMap<String, ManagedProcess>>>;
+#[derive(Hash, Eq, PartialEq)]
+struct ManagedProcessKey { extension: String, session: Option<String>, name: String }
+type ManagedProcessRegistry = Arc<tokio::sync::Mutex<HashMap<ManagedProcessKey, ManagedProcess>>>;
 
 struct HostCapabilityHandler {
     capability: &'static str,
@@ -212,7 +214,7 @@ impl CapabilityHandler for HostCapabilityHandler {
     ) -> Result<Value, BrokerError> {
         match self.capability {
             "agent" if request.operation == "run" => self.handle_agent_run_async(request).await,
-            "process" => self.handle_process_async(request).await,
+            "process" => self.handle_process_async(request, invoking_extension).await,
             "network" => self.handle_network_async(request).await,
             _ => self.handle_for_extension(request, invoking_extension),
         }
@@ -435,14 +437,18 @@ impl HostCapabilityHandler {
         }
     }
 
-    async fn handle_process_async(&self, request: &BrokerRequest) -> Result<Value, BrokerError> {
+    fn managed_process_key(&self, name: &str, invoking_extension: &str) -> Result<ManagedProcessKey, BrokerError> {
+        if invoking_extension.is_empty() { return Err(invalid_argument("process capability requires host extension identity")); }
+        Ok(ManagedProcessKey { extension: invoking_extension.into(), session: self.extensions.active_session_scope().map_err(host_error)?, name: name.into() })
+    }
+    async fn handle_process_async(&self, request: &BrokerRequest, invoking_extension: &str) -> Result<Value, BrokerError> {
         match request.operation.as_str() {
             "run" => self.handle_process_run(request).await,
-            "spawn" => self.handle_process_spawn(request).await,
-            "send" => self.handle_process_send(request).await,
-            "recv" => self.handle_process_recv(request).await,
-            "kill" => self.handle_process_kill(request).await,
-            "status" => self.handle_process_status(request).await,
+            "spawn" => self.handle_process_spawn(request, invoking_extension).await,
+            "send" => self.handle_process_send(request, invoking_extension).await,
+            "recv" => self.handle_process_recv(request, invoking_extension).await,
+            "kill" => self.handle_process_kill(request, invoking_extension).await,
+            "status" => self.handle_process_status(request, invoking_extension).await,
             _ => unknown_operation(self.capability, &request.operation),
         }
     }
@@ -512,8 +518,9 @@ impl HostCapabilityHandler {
     }
 
     /// Spawn a named persistent subprocess with piped stdin/stdout.
-    async fn handle_process_spawn(&self, request: &BrokerRequest) -> Result<Value, BrokerError> {
+    async fn handle_process_spawn(&self, request: &BrokerRequest, invoking_extension: &str) -> Result<Value, BrokerError> {
         let name = string_argument(&request.arguments, "name")?;
+        let key = self.managed_process_key(name, invoking_extension)?;
         let program = string_argument(&request.arguments, "program")?;
         let args_val = request
             .arguments
@@ -528,14 +535,14 @@ impl HostCapabilityHandler {
             .await;
 
         // Idempotent: if a process with this name is alive, return its info.
-        if let Some(existing) = registry.get(name) {
+        if let Some(existing) = registry.get(&key) {
             if existing.alive.load(Ordering::Relaxed) {
                 return Ok(serde_json::json!({"message": serde_json::json!({
                     "name": name, "pid": existing.pid
                 }).to_string()}));
             }
             // Dead process — remove and re-spawn below.
-            registry.remove(name);
+            registry.remove(&key);
         }
 
         if registry.len() >= MAX_MANAGED_PROCESSES {
@@ -607,12 +614,11 @@ impl HostCapabilityHandler {
             alive_clone.store(false, Ordering::Relaxed);
         });
 
-        let name_owned = name.to_string();
         registry.insert(
-            name_owned,
+            key,
             ManagedProcess {
                 child,
-                stdin: tokio::sync::Mutex::new(stdin),
+                stdin: Arc::new(tokio::sync::Mutex::new(stdin)),
                 stdout_buf,
                 pid,
                 alive,
@@ -625,12 +631,14 @@ impl HostCapabilityHandler {
     }
 
     /// Write data to a named process's stdin.
-    async fn handle_process_send(&self, request: &BrokerRequest) -> Result<Value, BrokerError> {
+    async fn handle_process_send(&self, request: &BrokerRequest, invoking_extension: &str) -> Result<Value, BrokerError> {
         let name = string_argument(&request.arguments, "name")?;
         let data = string_argument(&request.arguments, "data")?;
+        let key = self.managed_process_key(name, invoking_extension)?;
 
+        let stdin = {
         let registry = self.managed_processes.lock().await;
-        let process = registry.get(name).ok_or_else(|| BrokerError {
+        let process = registry.get(&key).ok_or_else(|| BrokerError {
             code: "not_found".into(),
             message: format!("No managed process named `{name}`"),
         })?;
@@ -641,16 +649,17 @@ impl HostCapabilityHandler {
             });
         }
 
-        let mut stdin = process.stdin.lock().await;
-        stdin.write_all(data.as_bytes()).await.map_err(host_error)?;
-        stdin.flush().await.map_err(host_error)?;
+        process.stdin.clone()
+        };
+        timeout(CAPABILITY_TIMEOUT, async move { let mut stdin = stdin.lock().await; stdin.write_all(data.as_bytes()).await.map_err(host_error)?; stdin.flush().await.map_err(host_error) }).await.map_err(|_| timeout_error("process.send"))??;
 
         Ok(serde_json::json!({"message": serde_json::json!({"ok": true}).to_string()}))
     }
 
     /// Read data from a named process's stdout with optional framing.
-    async fn handle_process_recv(&self, request: &BrokerRequest) -> Result<Value, BrokerError> {
+    async fn handle_process_recv(&self, request: &BrokerRequest, invoking_extension: &str) -> Result<Value, BrokerError> {
         let name = string_argument(&request.arguments, "name")?;
+        let key = self.managed_process_key(name, invoking_extension)?;
         let timeout_ms = bounded_positive_integer_argument(
             &request.arguments,
             "timeout_ms",
@@ -665,7 +674,7 @@ impl HostCapabilityHandler {
 
         let (stdout_buf, alive) = {
             let registry = self.managed_processes.lock().await;
-            let process = registry.get(name).ok_or_else(|| BrokerError {
+            let process = registry.get(&key).ok_or_else(|| BrokerError {
                 code: "not_found".into(),
                 message: format!("No managed process named `{name}`"),
             })?;
@@ -728,22 +737,23 @@ impl HostCapabilityHandler {
     }
 
     /// Terminate a named process and remove it from the registry.
-    async fn handle_process_kill(&self, request: &BrokerRequest) -> Result<Value, BrokerError> {
+    async fn handle_process_kill(&self, request: &BrokerRequest, invoking_extension: &str) -> Result<Value, BrokerError> {
         let name = string_argument(&request.arguments, "name")?;
+        let key = self.managed_process_key(name, invoking_extension)?;
         let mut registry = self.managed_processes.lock().await;
-        let removed = registry.remove(name);
+        let removed = registry.remove(&key);
         let Some(process) = removed else {
             return Err(BrokerError {
                 code: "not_found".into(),
                 message: format!("No managed process named `{name}`"),
             });
         };
-        process.child.lock().await.kill().await.map_err(host_error)?;
+        drop(registry); process.child.lock().await.kill().await.map_err(host_error)?;
         Ok(serde_json::json!({"message": serde_json::json!({"ok": true}).to_string()}))
     }
 
     /// List active managed processes or query a specific one.
-    async fn handle_process_status(&self, request: &BrokerRequest) -> Result<Value, BrokerError> {
+    async fn handle_process_status(&self, request: &BrokerRequest, invoking_extension: &str) -> Result<Value, BrokerError> {
         let name = request
             .arguments
             .get("name")
@@ -751,7 +761,8 @@ impl HostCapabilityHandler {
         let registry = self.managed_processes.lock().await;
 
         if let Some(name) = name {
-            if let Some(process) = registry.get(name) {
+            let key = self.managed_process_key(name, invoking_extension)?;
+            if let Some(process) = registry.get(&key) {
                 return Ok(serde_json::json!({"message": serde_json::json!({
                     "processes": [{
                         "name": name,
@@ -767,9 +778,10 @@ impl HostCapabilityHandler {
 
         let processes: Vec<Value> = registry
             .iter()
-            .map(|(name, p)| {
+            .filter(|(key, _)| key.extension == invoking_extension && key.session == self.extensions.active_session_scope().ok().flatten())
+            .map(|(key, p)| {
                 serde_json::json!({
-                    "name": name,
+                    "name": key.name,
                     "pid": p.pid,
                     "alive": p.alive.load(Ordering::Relaxed),
                 })
@@ -1151,7 +1163,6 @@ impl AfterToolCallHook for ExtensionAfterToolHook {
             "WASI tool broker error",
         )
         .await;
-        let mut diagnostics = Vec::new();
         for response in self
             .extensions
             .execute_hook_with_broker_requests("after_tool_call", &arguments.to_string())
@@ -1160,20 +1171,6 @@ impl AfterToolCallHook for ExtensionAfterToolHook {
                 Ok(response) => {
                     match self.broker_dispatcher.dispatch_envelopes(response.host_broker_requests).await {
                         Ok(dispatch) => {
-                            for outcome in &dispatch.operation_results {
-                                if outcome.error.is_none()
-                                    && outcome.request.capability == "process"
-                                    && outcome.request.operation == "recv"
-                                {
-                                    if let Some(message) = outcome.value.get("message").and_then(Value::as_str) {
-                                        if let Ok(value) = serde_json::from_str::<Value>(message) {
-                                            if let Some(data) = value.get("data").and_then(Value::as_str).filter(|data| !data.is_empty()) {
-                                                diagnostics.push(data.to_owned());
-                                            }
-                                        }
-                                    }
-                                }
-                            }
                             self.extensions.enqueue_broker_results(dispatch.operation_results);
                         }
                         Err(error) => eprintln!("WASI after-tool hook broker error: {}", error.message),
@@ -1182,14 +1179,7 @@ impl AfterToolCallHook for ExtensionAfterToolHook {
                 Err(error) => eprintln!("WASI after-tool hook error: {error}"),
             }
         }
-        if diagnostics.is_empty() {
-            AfterToolCallResult::default()
-        } else {
-            AfterToolCallResult {
-                override_content: Some(format!("{}\n\nLSP diagnostics:\n{}", result.content, diagnostics.join("\n"))),
-                ..Default::default()
-            }
-        }
+        AfterToolCallResult::default()
     }
 }
 
@@ -3730,6 +3720,17 @@ mod tests {
             .unwrap();
         let output: Value = serde_json::from_str(output["message"].as_str().unwrap()).unwrap();
         assert_eq!(output, serde_json::json!({"data": "ok", "eof": false}));
+    }
+
+    #[tokio::test]
+    async fn managed_processes_are_private_to_the_invoking_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let process = handler("process", dir.path().to_path_buf());
+        let request = BrokerRequest { api_version: 2, capability: "process".into(), operation: "spawn".into(), arguments: serde_json::json!({"name": "private", "program": "cat", "args": []}) };
+        process.handle_for_extension_async(&request, "owner").await.unwrap();
+        let output = process.handle_for_extension_async(&BrokerRequest { operation: "status".into(), arguments: serde_json::json!({"name": "private"}), ..request }, "other").await.unwrap();
+        let output: Value = serde_json::from_str(output["message"].as_str().unwrap()).unwrap();
+        assert_eq!(output["processes"], serde_json::json!([]));
     }
 
     #[test]

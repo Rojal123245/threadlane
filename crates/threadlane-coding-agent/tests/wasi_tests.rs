@@ -195,6 +195,7 @@ async fn broker_outputs_are_queued_as_future_invocation_events() {
                 "api_version": 2,
                 "capability": "agent",
                 "operation": "request_turn",
+                "arguments": null,
                 "ok": true,
                 "value": {"follow_up_prompt":"must be asynchronous"}
             }),
