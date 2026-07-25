@@ -1651,15 +1651,33 @@ script_mod! {
                     spacing: 14
                     visible: false
 
-                    about_title_lbl := Label {
+                    about_title_row := View {
                         width: Fill
                         height: Fit
-                        text: "About Threadlane"
-                        draw_text +: {
-                            color: #xe7ebf0
-                            text_style: theme.font_bold { font_size: 18.0 }
+                        flow: Right
+                        spacing: 8
+                        align: Align{y: 0.5}
+
+                        about_title_icon := Icon {
+                            width: 28
+                            height: 28
+                            icon_walk: Walk{width: 28 height: 28}
+                            draw_icon +: {
+                                svg: crate_resource("self:resources/icons/logo.svg")
+                                color: #xe7ebf0
+                            }
                         }
-                    }
+
+                        about_title_lbl := Label {
+                            width: Fill
+                            height: Fit
+                            text: "Threadlane"
+                            draw_text +: {
+                                color: #xe7ebf0
+                                text_style: theme.font_bold { font_size: 18.0 }
+                            }
+                        }
+                        }
 
                     about_version_lbl := Label {
                         width: Fill
