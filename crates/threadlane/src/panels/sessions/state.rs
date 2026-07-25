@@ -95,9 +95,11 @@ impl SessionsData {
             if project.sessions.len() > SESSION_PREVIEW_LIMIT {
                 rows.push(SessionListRow::Overflow {
                     project_idx,
-                    hidden_count: (!showing_all)
-                        .then_some(project.sessions.len() - SESSION_PREVIEW_LIMIT)
-                        .unwrap_or_default(),
+                    hidden_count: if showing_all {
+                        0
+                    } else {
+                        project.sessions.len() - SESSION_PREVIEW_LIMIT
+                    },
                     showing_all,
                 });
             }

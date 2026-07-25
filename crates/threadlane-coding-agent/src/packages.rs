@@ -28,12 +28,12 @@ pub struct PackageRecord {
     revision: String,
 }
 
-pub(crate) struct PackageManager {
+pub struct PackageManager {
     global_dir: PathBuf,
 }
 
 impl PackageManager {
-    pub(crate) fn new(global_dir: PathBuf) -> Self {
+    pub fn new(global_dir: PathBuf) -> Self {
         let _ = fs::create_dir_all(global_dir.join("packages"));
         Self { global_dir }
     }
@@ -89,7 +89,7 @@ impl PackageManager {
         }
     }
 
-    fn install_from_local(
+    pub fn install_from_local(
         &self,
         source_path: &Path,
         scope: PackageScope,
@@ -130,7 +130,7 @@ impl PackageManager {
         })
     }
 
-    fn remove_package(
+    pub fn remove_package(
         &self,
         package_id: &str,
         scope: PackageScope,
@@ -152,6 +152,25 @@ impl PackageManager {
         }
         Ok(())
     }
+}
+
+impl PackageRecord {
+    pub fn id(&self) -> &str {
+        &self.manifest.id
+    }
+
+    pub fn name(&self) -> &str {
+        &self.manifest.name
+    }
+
+    pub fn scope(&self) -> PackageScope {
+        self.scope
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {

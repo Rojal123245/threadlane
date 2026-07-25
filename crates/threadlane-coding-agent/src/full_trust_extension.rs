@@ -47,7 +47,7 @@ impl TrustStore {
         self.approved_revisions.insert(package_id, revision);
     }
 
-    fn revoke(&mut self, package_id: &str) {
+    pub fn revoke(&mut self, package_id: &str) {
         self.approved_revisions.remove(package_id);
     }
 }

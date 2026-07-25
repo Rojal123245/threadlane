@@ -1195,7 +1195,7 @@ impl ToolExecutor for BrokerAwareWasiToolExecutor {
     }
 
     fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
-        <WasiExtensionManager as ToolExecutor>::tool_definitions(&self.extensions)
+        self.extensions.tool_definitions()
     }
 
     async fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {
@@ -1267,7 +1267,6 @@ impl ToolExecutor for BrokerAwareWasiToolExecutor {
 pub struct CodingAgent {
     agent: Agent,
     pub session_tree: SessionTree,
-    project_context: ProjectContext,
     pub wasi_extensions: Arc<WasiExtensionManager>,
     tool_policy: Arc<tokio::sync::Mutex<ToolPolicy>>,
     work_dir: PathBuf,
@@ -1275,7 +1274,6 @@ pub struct CodingAgent {
     agent_runner: AgentRunner,
     broker_dispatcher: Arc<CapabilityDispatcher>,
     agent_work: AgentWorkScheduler,
-    base_system_prompt: String,
     prompt_templates: Option<Vec<crate::prompt_templates::PromptTemplate>>,
     #[cfg(test)]
     subagent_work_observer: SubagentObserverState,
@@ -1561,14 +1559,23 @@ impl CodingAgent {
         // this mode so merely opening the app neither creates nor selects a
         // conversation; the first send binds the draft to a new session.
         let mut session_tree = if let Some(session_path) = options.session_file.clone() {
+            let session_id = || {
+                session_path
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "session".into())
+            };
             if session_path.exists() {
-                SessionTree::load_from_file(&session_path)
-                    .unwrap_or_else(|_| SessionTree::new("session"))
+                SessionTree::load_from_file(&session_path).unwrap_or_else(|_| {
+                    let mut session = SessionTree::new(session_id());
+                    session.file_path = Some(session_path.clone());
+                    session
+                })
             } else {
                 if let Some(parent) = session_path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                let mut session = SessionTree::new("session");
+                let mut session = SessionTree::new(session_id());
                 session.file_path = Some(session_path);
                 session
             }
@@ -1723,7 +1730,6 @@ impl CodingAgent {
         Self {
             agent,
             session_tree,
-            project_context,
             wasi_extensions,
             tool_policy,
             work_dir: options.work_dir,
@@ -1731,7 +1737,6 @@ impl CodingAgent {
             agent_runner,
             broker_dispatcher,
             agent_work,
-            base_system_prompt,
             prompt_templates: None,
             #[cfg(test)]
             subagent_work_observer,
@@ -1742,10 +1747,6 @@ impl CodingAgent {
         while self.agent_work.run(&mut self.agent).await {
             self.dispatch_assistant_message_hooks().await;
         }
-    }
-
-    fn base_system_prompt(&self) -> &str {
-        &self.base_system_prompt
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
@@ -1855,69 +1856,6 @@ impl CodingAgent {
             self.dispatch_assistant_hook(&message).await;
             self.session_tree.add_message(message);
         }
-    }
-
-    async fn switch_session_file(&mut self, session_file: PathBuf) {
-        let session_tree = if session_file.exists() {
-            SessionTree::load_from_file(&session_file).unwrap_or_else(|_| {
-                let mut tree = SessionTree::new(
-                    session_file
-                        .file_stem()
-                        .map(|s| s.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "session".into()),
-                );
-                tree.file_path = Some(session_file.clone());
-                tree
-            })
-        } else {
-            if let Some(parent) = session_file.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let mut tree = SessionTree::new(
-                session_file
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "session".into()),
-            );
-            tree.file_path = Some(session_file);
-            tree
-        };
-
-        let branch = session_tree.get_active_branch_messages();
-        let session_model = session_tree.model.clone();
-        self.wasi_extensions
-            .set_session_scope(session_tree.session_id.clone())
-            .unwrap_or_else(|error| {
-                eprintln!("Failed to restore session extension state: {error}")
-            });
-        *self.tool_policy.lock().await = restored_tool_policy(&self.wasi_extensions);
-        self.agent
-            .set_prompt_cache_key(Some(session_tree.session_id.clone()));
-        self.session_tree = session_tree;
-
-        let mut state = self.agent.loop_engine.state.lock().await;
-        if let Some(model) = session_model {
-            state.model = model;
-        } else {
-            self.session_tree.model = Some(state.model.clone());
-        }
-        let system_prompt = state.system_prompt.clone();
-        state.messages.clear();
-        state.messages.push(AgentMessage::System {
-            content: system_prompt,
-        });
-        for msg in branch {
-            if matches!(msg, AgentMessage::System { .. }) {
-                continue;
-            }
-            state.messages.push(msg);
-        }
-        state.is_streaming = false;
-        state.pending_tool_calls.clear();
-    }
-
-    fn session_file_path(&self) -> Option<&PathBuf> {
-        self.session_tree.file_path.as_ref()
     }
 
     #[cfg(test)]
@@ -2736,25 +2674,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn switching_sessions_updates_prompt_cache_identity() {
+    async fn new_session_path_sets_unique_runtime_identity_and_persists() {
         let dir = tempfile::tempdir().unwrap();
-        let mut coding_agent = CodingAgent::new(coding_agent_options(dir.path().to_path_buf()));
-        let initial_key = coding_agent.agent.loop_engine.prompt_cache_key.clone();
-        assert_eq!(
-            initial_key.as_deref(),
-            Some(coding_agent.session_tree.session_id.as_str())
-        );
+        let session_file = dir.path().join("sessions/session-42.jsonl");
+        let mut options = coding_agent_options(dir.path().to_path_buf());
+        options.session_file = Some(session_file.clone());
 
+        let mut coding_agent = CodingAgent::new(options);
+
+        assert_eq!(coding_agent.session_tree.session_id, "session-42");
         coding_agent
-            .switch_session_file(dir.path().join("sessions/other.jsonl"))
-            .await;
-
-        let switched_key = coding_agent.agent.loop_engine.prompt_cache_key.clone();
+            .session_tree
+            .add_message(AgentMessage::User {
+                content: "persist me".into(),
+            });
         assert_eq!(
-            switched_key.as_deref(),
-            Some(coding_agent.session_tree.session_id.as_str())
+            serde_json::to_value(
+                SessionTree::load_from_file(&session_file)
+                    .unwrap()
+                    .get_active_branch_messages()
+            )
+            .unwrap(),
+            serde_json::json!([{
+                "role": "user",
+                "content": "persist me",
+            }])
         );
-        assert_ne!(switched_key, initial_key);
     }
 
     #[test]
@@ -3140,7 +3085,6 @@ mod tests {
         assert!(state.system_prompt.contains("<project_context>"));
         assert!(state.system_prompt.contains("Always add focused tests."));
         assert!(state.system_prompt.contains("Current working directory:"));
-        assert_eq!(coding_agent.base_system_prompt(), state.system_prompt);
     }
 
     #[tokio::test]

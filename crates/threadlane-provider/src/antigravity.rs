@@ -251,28 +251,6 @@ impl AntigravityClient {
         consume_openai_stream(response, event_tx).await
     }
 
-    /// Legacy API retained for compatibility. New integrations should use
-    /// [`Self::stream_chat_completion`] so tool calls reach the central agent loop.
-    async fn stream_generate(
-        &self,
-        model_id: &str,
-        request: GeminiRequest,
-    ) -> Result<mpsc::Receiver<AntigravityStreamEvent>, String> {
-        let token = get_valid_antigravity_token().await?;
-        let project = self.resolve_project(&token).await;
-        let runtime_model = resolve_runtime_model(model_id, "off");
-        let request = serde_json::to_value(request).map_err(|error| error.to_string())?;
-        let envelope = request_envelope(&project, &runtime_model, request);
-        let response = self
-            .send_stream_request(&token, &runtime_model, &envelope)
-            .await?;
-        let (tx, rx) = mpsc::channel(100);
-        tokio::spawn(async move {
-            consume_legacy_stream(response, &tx).await;
-        });
-        Ok(rx)
-    }
-
     async fn resolve_project(&self, token: &str) -> String {
         let credential_key = credential_cache_key(token);
         let project = {
@@ -1142,82 +1120,6 @@ async fn consume_openai_stream(
         .send(StreamEvent::Finished { tool_calls, usage })
         .await;
     Ok(())
-}
-
-async fn consume_legacy_stream(
-    response: reqwest::Response,
-    tx: &mpsc::Sender<AntigravityStreamEvent>,
-) {
-    let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = match chunk {
-            Ok(chunk) => chunk,
-            Err(error) => {
-                let _ = tx
-                    .send(AntigravityStreamEvent::Error(format!(
-                        "Antigravity stream error: {error}"
-                    )))
-                    .await;
-                return;
-            }
-        };
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-        let mut start = 0;
-        while let Some(rel_newline) = buffer[start..].find('\n') {
-            let newline = start + rel_newline;
-            let line = buffer[start..newline].trim_end_matches('\r');
-            start = newline + 1;
-            let Some(data) = line.strip_prefix("data:").map(str::trim) else {
-                continue;
-            };
-            if data == "[DONE]" {
-                let _ = tx
-                    .send(AntigravityStreamEvent::FinishReason("STOP".to_string()))
-                    .await;
-                return;
-            }
-            let Ok(value) = serde_json::from_str::<Value>(data) else {
-                continue;
-            };
-            let parsed = parse_stream_value(&value);
-            if let Some(error) = parsed.error {
-                let _ = tx.send(AntigravityStreamEvent::Error(error)).await;
-                return;
-            }
-            for text in parsed.content {
-                let _ = tx.send(AntigravityStreamEvent::ContentDelta(text)).await;
-            }
-            for thought in parsed.reasoning {
-                let _ = tx
-                    .send(AntigravityStreamEvent::ThinkingDelta(thought))
-                    .await;
-            }
-            for call in parsed.tool_calls {
-                let _ = tx
-                    .send(AntigravityStreamEvent::ToolCall {
-                        id: call.id,
-                        name: call.function.name,
-                        arguments: call.function.arguments,
-                    })
-                    .await;
-            }
-            if let Some(usage) = parsed.usage {
-                let _ = tx
-                    .send(AntigravityStreamEvent::Usage {
-                        prompt_tokens: usage.input_tokens.saturating_add(usage.cache_read_tokens),
-                        completion_tokens: usage.output_tokens,
-                    })
-                    .await;
-            }
-            if let Some(reason) = parsed.finish_reason {
-                let _ = tx.send(AntigravityStreamEvent::FinishReason(reason)).await;
-            }
-        }
-        if start > 0 {
-            buffer.drain(..start);
-        }
-    }
 }
 
 fn extract_project_id(value: &Value) -> Option<String> {

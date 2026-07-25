@@ -133,7 +133,7 @@ struct WasiStoreData {
 
 pub struct WasiExtension {
     pub manifest: WasiExtensionManifest,
-    pub(crate) file_path: Option<PathBuf>,
+    file_path: Option<PathBuf>,
     wasm_bytes: Vec<u8>,
     engine: Engine,
 }
@@ -267,35 +267,6 @@ impl WasiExtension {
         let mut ext = Self::load_from_bytes(bytes)?;
         ext.file_path = Some(path.to_path_buf());
         Ok(ext)
-    }
-
-    fn call_tool(
-        &self,
-        invocation: &WasiExtensionInvocation,
-    ) -> Result<WasiExtensionInvocationResult, String> {
-        self.call("execute_tool", invocation)
-    }
-
-    fn call_command(
-        &self,
-        invocation: &WasiExtensionInvocation,
-    ) -> Result<WasiExtensionInvocationResult, String> {
-        self.call("execute_command", invocation)
-    }
-
-    fn call_hook(
-        &self,
-        invocation: &WasiExtensionInvocation,
-    ) -> Result<WasiExtensionInvocationResult, String> {
-        self.call("handle_hook", invocation)
-    }
-
-    fn call(
-        &self,
-        export: &str,
-        invocation: &WasiExtensionInvocation,
-    ) -> Result<WasiExtensionInvocationResult, String> {
-        self.call_with_policy(export, invocation, self.capability_policy())
     }
 
     fn call_with_policy(
@@ -508,17 +479,6 @@ impl WasiExtensionManager {
         }
     }
 
-    fn set_capability_grant_policy(
-        &self,
-        policy: HostCapabilityGrantPolicy,
-    ) -> Result<(), String> {
-        *self
-            .capability_grant_policy
-            .lock()
-            .map_err(|_| "Extension capability policy lock poisoned".to_string())? = policy;
-        Ok(())
-    }
-
     fn capability_grant_policy(&self) -> Result<HostCapabilityGrantPolicy, String> {
         self.capability_grant_policy
             .lock()
@@ -653,20 +613,6 @@ impl WasiExtensionManager {
         Ok(())
     }
 
-    fn drain_events(&self) -> Result<Vec<(String, Value)>, String> {
-        let mut pending = self
-            .pending_events
-            .lock()
-            .map_err(|_| "Extension event lock poisoned".to_string())?;
-        Ok(pending
-            .remove(&self.session_scope()?)
-            .unwrap_or_default()
-            .into_values()
-            .flatten()
-            .map(|event| (event.topic, event.payload))
-            .collect())
-    }
-
     /// Removes events queued for one extension, matching the next-invocation delivery path.
     pub fn drain_events_for(
         &self,
@@ -794,6 +740,7 @@ impl WasiExtensionManager {
         persist_json_state(&path, value)
     }
 
+    #[cfg(test)]
     pub(crate) fn has_command(&self, name: &str) -> bool {
         self.extensions.values().any(|extension| {
             extension
@@ -804,37 +751,12 @@ impl WasiExtensionManager {
         })
     }
 
-    fn get_tools(&self) -> Vec<Value> {
-        self.extensions.values().flat_map(|extension| extension.manifest.tools.iter()).map(|tool| {
-            serde_json::json!({ "type": "function", "function": {
-                "name": tool.name, "description": tool.description, "parameters": tool.parameters
-            }})
-        }).collect()
-    }
-
-    fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {
-        self.execute("tool", name, args)
-    }
-
     pub(crate) fn execute_tool_with_broker_requests(
         &self,
         name: &str,
         args: &str,
     ) -> Option<Result<WasiExtensionInvocationResult, String>> {
         self.execute_response("tool", name, args)
-    }
-
-    fn execute_tool_with_effects(
-        &self,
-        name: &str,
-        args: &str,
-    ) -> Option<Result<WasiExtensionInvocationResult, String>> {
-        self.execute_tool_with_broker_requests(name, args)
-    }
-
-    fn execute_command(&self, name: &str, args: &str) -> Option<Result<String, String>> {
-        self.execute_command_with_effects(name, args)
-            .map(|result| result.map(|result| result.message))
     }
 
     pub fn execute_command_with_effects(
@@ -863,15 +785,6 @@ impl WasiExtensionManager {
                     host_broker_requests,
                     events: result.events,
                 }
-            })
-        })
-    }
-
-    fn execute(&self, kind: &str, name: &str, args: &str) -> Option<Result<String, String>> {
-        self.execute_response(kind, name, args).map(|result| {
-            result.map(|mut result| {
-                self.enqueue_broker_requests(std::mem::take(&mut result.host_broker_requests));
-                result.response.message.unwrap_or_default()
             })
         })
     }
@@ -926,16 +839,6 @@ impl WasiExtensionManager {
         }
     }
 
-    fn enqueue_broker_requests(&self, requests: Vec<HostBrokerRequest>) {
-        let requests = self.filter_granted_requests(requests);
-        let Ok(scope) = self.session_scope() else {
-            return;
-        };
-        if let Ok(mut pending) = self.pending_broker_requests.lock() {
-            pending.entry(scope).or_default().extend(requests);
-        }
-    }
-
     fn session_scope(&self) -> Result<Option<String>, String> {
         self.session_id
             .lock()
@@ -964,17 +867,6 @@ impl WasiExtensionManager {
                             )
                     })
             })
-            .collect()
-    }
-
-    fn execute_hook(
-        &self,
-        name: &str,
-        args: &str,
-    ) -> Vec<Result<WasiExtensionResponse, String>> {
-        self.execute_hook_with_effects(name, args)
-            .into_iter()
-            .map(|result| result.map(|result| result.response))
             .collect()
     }
 
@@ -1113,13 +1005,8 @@ fn persist_json_state(path: &Path, state: &Value) -> Result<(), String> {
     fs::write(path, bytes).map_err(|error| error.to_string())
 }
 
-#[async_trait::async_trait]
-impl threadlane_agent::ToolExecutor for WasiExtensionManager {
-    fn executor_id(&self) -> &str {
-        "threadlane.wasi_extensions"
-    }
-
-    fn tool_definitions(&self) -> Vec<threadlane_agent::AgentToolDefinition> {
+impl WasiExtensionManager {
+    pub(crate) fn tool_definitions(&self) -> Vec<threadlane_agent::AgentToolDefinition> {
         let mut tools: Vec<_> = self
             .extensions
             .values()
@@ -1134,9 +1021,5 @@ impl threadlane_agent::ToolExecutor for WasiExtensionManager {
             .collect();
         tools.sort_by(|left, right| left.name.cmp(&right.name));
         tools
-    }
-
-    async fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {
-        WasiExtensionManager::execute_tool(self, name, args)
     }
 }

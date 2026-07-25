@@ -182,12 +182,6 @@ impl SkillRegistry {
         sorted_metadata(self.records.values().map(|record| record.metadata.clone()))
     }
 
-    fn metadata(&self, skill_id: &str) -> Option<SkillMetadata> {
-        self.records
-            .get(skill_id)
-            .map(|record| record.metadata.clone())
-    }
-
     pub(crate) fn get_skill_instructions(&self, skill_id: &str) -> Result<String, String> {
         self.load_skill(skill_id).map(|skill| skill.instructions)
     }
@@ -320,10 +314,6 @@ impl SkillManager {
         Arc::clone(&self.registry)
     }
 
-    fn warnings(&self) -> &[SkillDiscoveryWarning] {
-        &self.warnings
-    }
-
     pub fn list_skills(&self) -> Vec<SkillMetadata> {
         self.registry.list_skills()
     }
@@ -337,7 +327,7 @@ impl SkillManager {
     }
 }
 
-pub(crate) fn discover_skill_registry<O>(options: O) -> (Arc<SkillRegistry>, SkillDiscoveryReport)
+fn discover_skill_registry<O>(options: O) -> (Arc<SkillRegistry>, SkillDiscoveryReport)
 where
     O: Into<SkillDiscoveryOptions>,
 {
@@ -355,10 +345,6 @@ pub struct LoadSkillToolExecutor {
 impl LoadSkillToolExecutor {
     pub fn new(registry: Arc<SkillRegistry>) -> Self {
         Self { registry }
-    }
-
-    fn registry(&self) -> Arc<SkillRegistry> {
-        Arc::clone(&self.registry)
     }
 }
 

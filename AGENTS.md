@@ -250,6 +250,12 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 - Credential checks follow the selected model. Antigravity models require stored Antigravity OAuth credentials but must not require an OpenAI key; OpenAI models retain the existing OpenAI credential requirement.
 - Automatic session titles currently use the OpenAI title endpoint. Skip that side path for Antigravity sessions rather than consuming an OpenAI credential or permanently marking a failed Antigravity title attempt.
 
+## Background Tasks and Capabilities
+
+- `HarnessSupervisor` owns only explicit background tasks (currently `/task <prompt>`). Ordinary chat sessions continue to use the existing `SessionRuntime` path and must not be mirrored into supervisor tasks.
+- Forward supervisor events through `GuiAgentEvent`; update `BackgroundTaskState` and widgets only on the Makepad event thread.
+- Package install/remove operations use `PackageManager`. Full-trust executable approval and revocation use `TrustStore` and require a second explicit confirmation before persistence.
+
 ## Updater Behavior
 
 - `THREADLANE_UPDATER_PUBLIC_KEY` and `THREADLANE_UPDATER_ENDPOINT` are compile-time environment values through `option_env!`.

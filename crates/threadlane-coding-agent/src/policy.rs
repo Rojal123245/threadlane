@@ -5,9 +5,3 @@ pub enum ToolPolicy {
     FullAccess,
     ReadOnly,
 }
-
-impl ToolPolicy {
-    fn allows_writes(self) -> bool {
-        matches!(self, ToolPolicy::FullAccess)
-    }
-}

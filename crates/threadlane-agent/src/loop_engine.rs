@@ -288,7 +288,7 @@ pub struct AgentLoop {
     pub api_key: String,
     pub account_id: Option<String>,
     provider_client: ProviderClient,
-    pub prompt_cache_key: Option<String>,
+    prompt_cache_key: Option<String>,
     pub tool_execution_mode: ToolExecutionMode,
     allowed_tool_names: Option<HashSet<String>>,
     steering_queue: PendingMessageQueue,
@@ -342,14 +342,6 @@ impl AgentLoop {
         }
     }
 
-    fn add_stream_rule(&mut self, rule: crate::rules::StreamRule) {
-        self.stream_rules.push(rule);
-    }
-
-    fn set_stream_rules(&mut self, rules: Vec<crate::rules::StreamRule>) {
-        self.stream_rules = rules;
-    }
-
     pub fn set_prompt_cache_key(&mut self, key: Option<String>) {
         self.prompt_cache_key = key
             .map(|key| clamp_prompt_cache_key(&key))
@@ -360,10 +352,6 @@ impl AgentLoop {
     /// default behavior where all registered, state, and core tools are available.
     pub fn set_allowed_tool_names(&mut self, allowed_tool_names: Option<HashSet<String>>) {
         self.allowed_tool_names = allowed_tool_names;
-    }
-
-    fn allowed_tool_names(&self) -> Option<&HashSet<String>> {
-        self.allowed_tool_names.as_ref()
     }
 
     /// Returns the core and registered executor schemas in provider order,
@@ -581,18 +569,6 @@ impl AgentLoop {
             self.compatibility_executor().as_ref(),
             self.prompt_cache_key.as_deref(),
             PayloadFormat::Codex,
-        )
-        .await
-    }
-
-    async fn build_payload_for_format(&self, format: PayloadFormat) -> Value {
-        Self::build_payload_helper(
-            &self.state,
-            &self.tool_executors,
-            self.allowed_tool_names.as_ref(),
-            self.compatibility_executor().as_ref(),
-            self.prompt_cache_key.as_deref(),
-            format,
         )
         .await
     }

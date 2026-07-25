@@ -1,9 +1,10 @@
 use threadlane_coding_agent::{
     CapabilityCatalog, CodingAgentOptions, FullTrustRunner, HarnessSupervisor, SkillManager,
-    SkillScope, TrustStore,
+    PackageManager, PackageScope, SkillScope, TaskStatus, TrustStore,
 };
 use std::fs::{self, File};
 use std::io::Write;
+use std::time::Duration;
 use tempfile::tempdir;
 
 #[tokio::test]
@@ -53,6 +54,44 @@ async fn test_supervisor_multi_task_isolation() {
     assert_eq!(t2_tasks[0].id, task2_id);
 
     assert_ne!(t1_tasks[0].session_file, t2_tasks[0].session_file);
+}
+
+#[tokio::test]
+async fn test_supervisor_submit_updates_status_and_forwards_events() {
+    let global_dir = tempdir().unwrap();
+    let project_dir = tempdir().unwrap();
+    let supervisor = HarnessSupervisor::new(global_dir.path().to_path_buf());
+    let project = supervisor.register_project(project_dir.path()).unwrap();
+    let task_id = supervisor
+        .create_task(
+            &project.id,
+            None,
+            CodingAgentOptions {
+                api_key: "test_key".into(),
+                account_id: None,
+                model: "gpt-4o".into(),
+                work_dir: project_dir.path().to_path_buf(),
+                session_file: None,
+                system_prompt: Default::default(),
+            },
+        )
+        .unwrap();
+    let mut events = supervisor.subscribe();
+
+    supervisor
+        .submit_input(&task_id, "hello".to_string())
+        .unwrap();
+    assert_eq!(
+        supervisor.get_task_status(&task_id),
+        Some(TaskStatus::Running)
+    );
+
+    let forwarded = tokio::time::timeout(Duration::from_secs(2), events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(forwarded.task_id(), task_id);
+    assert_eq!(forwarded.project_id(), project.id);
 }
 
 #[test]
@@ -114,13 +153,51 @@ fn test_full_trust_revision_approval() {
 
     let res = runner.execute_request("{}", &trust_file);
     assert!(res.is_ok());
+
+    store.revoke("pkg-1");
+    store.save_to_file(&trust_file).unwrap();
+    assert!(runner.execute_request("{}", &trust_file).is_err());
 }
 
 #[test]
-fn test_capability_catalog_discovery() {
+fn test_package_install_discovery_and_removal() {
     let proj_dir = tempdir().unwrap();
     let global_dir = tempdir().unwrap();
+    let source_dir = tempdir().unwrap();
+    fs::write(
+        source_dir.path().join("threadlane-package.json"),
+        r#"{
+            "id": "test-package",
+            "name": "Test Package",
+            "version": "1.0.0",
+            "description": null,
+            "skills": null,
+            "extensions": null,
+            "full_trust_executable": null
+        }"#,
+    )
+    .unwrap();
 
+    let manager = PackageManager::new(global_dir.path().to_path_buf());
+    manager
+        .install_from_local(source_dir.path(), PackageScope::Global, None)
+        .unwrap();
     let catalog = CapabilityCatalog::discover(Some(proj_dir.path()), global_dir.path());
-    assert!(catalog.skills.is_empty() || !catalog.skills.is_empty());
+    let package = catalog
+        .packages()
+        .iter()
+        .find(|package| package.id() == "test-package")
+        .unwrap();
+    assert_eq!(package.name(), "Test Package");
+    assert_eq!(package.scope(), PackageScope::Global);
+    assert!(package.is_enabled());
+
+    manager
+        .remove_package("test-package", PackageScope::Global, None)
+        .unwrap();
+    let catalog = CapabilityCatalog::discover(Some(proj_dir.path()), global_dir.path());
+    assert!(catalog
+        .packages()
+        .iter()
+        .all(|package| package.id() != "test-package"));
 }

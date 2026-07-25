@@ -4,24 +4,22 @@ use crate::packages::{PackageManager, PackageRecord};
 use crate::skills::{SkillManager, SkillMetadata};
 use crate::wasi_extension::WasiExtensionManager;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtensionMetadata {
     id: String,
+    package_id: Option<String>,
     name: String,
-    path: PathBuf,
     is_full_trust: bool,
     enabled: bool,
-    is_valid: bool,
-    validation_error: Option<String>,
     revision: Option<String>,
     is_trusted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityCatalog {
-    pub skills: Vec<SkillMetadata>,
+    skills: Vec<SkillMetadata>,
     extensions: Vec<ExtensionMetadata>,
     packages: Vec<PackageRecord>,
     agents: Vec<AgentConfig>,
@@ -47,12 +45,10 @@ impl CapabilityCatalog {
             for (id, ext) in wasi_mgr.get_extensions() {
                 extensions.push(ExtensionMetadata {
                     id: id.clone(),
+                    package_id: None,
                     name: ext.manifest.name.clone(),
-                    path: ext.file_path.clone().unwrap_or_default(),
                     is_full_trust: false,
                     enabled: true,
-                    is_valid: true,
-                    validation_error: None,
                     revision: None,
                     is_trusted: true,
                 });
@@ -65,10 +61,8 @@ impl CapabilityCatalog {
         for pkg in &packages {
             if let Some(ref exe_rel) = pkg.manifest.full_trust_executable {
                 let exe_path = pkg.root_dir.join(exe_rel);
-                let (is_valid, err, rev) = match compute_executable_revision(&exe_path) {
-                    Ok(r) => (true, None, Some(r)),
-                    Err(e) => (false, Some(e), None),
-                };
+                let rev = compute_executable_revision(&exe_path).ok();
+                let is_valid = rev.is_some();
 
                 let trusted = if let Some(ref r) = rev {
                     trust_store.is_trusted(&pkg.manifest.id, r)
@@ -78,12 +72,10 @@ impl CapabilityCatalog {
 
                 extensions.push(ExtensionMetadata {
                     id: format!("{}-exe", pkg.manifest.id),
+                    package_id: Some(pkg.manifest.id.clone()),
                     name: format!("{} (Executable)", pkg.manifest.name),
-                    path: exe_path,
                     is_full_trust: true,
                     enabled: trusted && is_valid,
-                    is_valid,
-                    validation_error: err,
                     revision: rev,
                     is_trusted: trusted,
                 });
@@ -96,5 +88,35 @@ impl CapabilityCatalog {
             packages,
             agents,
         }
+    }
+
+    pub fn extensions(&self) -> &[ExtensionMetadata] {
+        &self.extensions
+    }
+
+    pub fn packages(&self) -> &[PackageRecord] {
+        &self.packages
+    }
+}
+
+impl ExtensionMetadata {
+    pub fn package_id(&self) -> Option<&str> {
+        self.package_id.as_deref()
+    }
+
+    pub fn is_full_trust(&self) -> bool {
+        self.is_full_trust
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn revision(&self) -> Option<&str> {
+        self.revision.as_deref()
+    }
+
+    pub fn is_trusted(&self) -> bool {
+        self.is_trusted
     }
 }

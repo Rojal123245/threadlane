@@ -63,6 +63,7 @@ impl StreamRuleMonitor {
         None
     }
 
+    #[cfg(test)]
     fn reset(&mut self) {
         self.accumulated_text.clear();
     }
@@ -134,7 +135,7 @@ mod tests {
         // Push multi-byte UTF-8 characters (crab emoji is 4 bytes)
         // 4095 'a' bytes + 1 crab emoji (4 bytes) = 4099 bytes total
         let mut text = "a".repeat(4095);
-        text.push_str("🦀"); // starts at byte 4095, ends at byte 4099
+        text.push('🦀'); // starts at byte 4095, ends at byte 4099
         monitor.push_chunk(&text);
 
         // Window size before clamp was 4099.

@@ -18,20 +18,6 @@ pub enum TaskStatus {
     Interrupted,
 }
 
-impl TaskStatus {
-    fn as_str(&self) -> &'static str {
-        match self {
-            TaskStatus::Idle => "Idle",
-            TaskStatus::Running => "Running",
-            TaskStatus::Waiting => "Waiting",
-            TaskStatus::Completed => "Completed",
-            TaskStatus::Failed => "Failed",
-            TaskStatus::Cancelled => "Cancelled",
-            TaskStatus::Interrupted => "Interrupted",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectRecord {
     pub id: String,
@@ -55,19 +41,25 @@ pub struct TaskAgentEvent {
     event: AgentEvent,
 }
 
+impl TaskAgentEvent {
+    pub fn task_id(&self) -> &str {
+        &self.task_id
+    }
+
+    pub fn project_id(&self) -> &str {
+        &self.project_id
+    }
+
+    pub fn into_parts(self) -> (String, String, AgentEvent) {
+        (self.task_id, self.project_id, self.event)
+    }
+}
+
 struct TaskRuntime {
-    #[allow(dead_code)]
-    id: String,
-    project_id: String,
-    #[allow(dead_code)]
-    work_dir: PathBuf,
-    #[allow(dead_code)]
-    session_file: PathBuf,
     agent: Arc<tokio::sync::Mutex<CodingAgent>>,
     status: TaskStatus,
-    #[allow(dead_code)]
-    capability_generation: u64,
     prompt_lock: Arc<tokio::sync::Mutex<()>>,
+    run_handle: Option<tokio::task::AbortHandle>,
 }
 
 pub struct HarnessSupervisor {
@@ -93,7 +85,7 @@ impl HarnessSupervisor {
         supervisor
     }
 
-    fn subscribe(&self) -> broadcast::Receiver<TaskAgentEvent> {
+    pub fn subscribe(&self) -> broadcast::Receiver<TaskAgentEvent> {
         self.event_tx.subscribe()
     }
 
@@ -155,13 +147,6 @@ impl HarnessSupervisor {
         Ok(record)
     }
 
-    fn list_projects(&self) -> Vec<ProjectRecord> {
-        let lock = self.projects.lock().unwrap();
-        let mut list: Vec<ProjectRecord> = lock.values().cloned().collect();
-        list.sort_by(|a, b| a.name.cmp(&b.name));
-        list
-    }
-
     pub fn create_task(
         &self,
         project_id: &str,
@@ -208,14 +193,10 @@ impl HarnessSupervisor {
         };
 
         let runtime = TaskRuntime {
-            id: task_id.clone(),
-            project_id: project_id.to_string(),
-            work_dir: project.path.clone(),
-            session_file: final_session_file,
             agent: agent_arc,
             status: TaskStatus::Idle,
-            capability_generation: 0,
             prompt_lock: Arc::new(tokio::sync::Mutex::new(())),
+            run_handle: None,
         };
 
         {
@@ -233,11 +214,27 @@ impl HarnessSupervisor {
         self.save_registry();
 
         let event_tx = self.event_tx.clone();
+        let tasks = self.tasks.clone();
+        let runtimes = self.runtimes.clone();
         let tid = task_id.clone();
         let pid = project_id.to_string();
         tokio::spawn(async move {
             let mut sub_rx = rx;
             while let Ok(evt) = sub_rx.recv().await {
+                let status = match &evt {
+                    AgentEvent::AgentStart => Some(TaskStatus::Running),
+                    AgentEvent::AgentEnd { .. } => Some(TaskStatus::Completed),
+                    AgentEvent::AgentError { .. } => Some(TaskStatus::Failed),
+                    _ => None,
+                };
+                if let Some(status) = status {
+                    if let Some(task) = tasks.lock().unwrap().get_mut(&tid) {
+                        task.status = status;
+                    }
+                    if let Some(runtime) = runtimes.lock().unwrap().get_mut(&tid) {
+                        runtime.status = status;
+                    }
+                }
                 let _ = event_tx.send(TaskAgentEvent {
                     task_id: tid.clone(),
                     project_id: pid.clone(),
@@ -249,17 +246,13 @@ impl HarnessSupervisor {
         Ok(task_id)
     }
 
-    fn submit_input(&self, task_id: &str, prompt: String) -> Result<(), String> {
-        let (agent_arc, prompt_lock, _pid) = {
+    pub fn submit_input(&self, task_id: &str, prompt: String) -> Result<(), String> {
+        let (agent_arc, prompt_lock) = {
             let runtimes = self.runtimes.lock().unwrap();
             let rt = runtimes
                 .get(task_id)
                 .ok_or_else(|| format!("Task ID '{task_id}' not found"))?;
-            (
-                rt.agent.clone(),
-                rt.prompt_lock.clone(),
-                rt.project_id.clone(),
-            )
+            (rt.agent.clone(), rt.prompt_lock.clone())
         };
 
         self.update_task_status(task_id, TaskStatus::Running);
@@ -268,7 +261,7 @@ impl HarnessSupervisor {
         let tasks_map = self.tasks.clone();
         let runtimes_map = self.runtimes.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let _guard = prompt_lock.lock().await;
             let mut agent = agent_arc.lock().await;
             let _ = agent.handle_input(&prompt).await;
@@ -282,15 +275,31 @@ impl HarnessSupervisor {
             let mut r_lock = runtimes_map.lock().unwrap();
             if let Some(rt) = r_lock.get_mut(&tid) {
                 if rt.status == TaskStatus::Running {
-                    rt.status = TaskStatus::Idle;
+                    rt.status = TaskStatus::Completed;
                 }
+                rt.run_handle = None;
             }
         });
+        if let Some(runtime) = self.runtimes.lock().unwrap().get_mut(task_id) {
+            runtime.run_handle = Some(handle.abort_handle());
+        }
 
         Ok(())
     }
 
-    fn cancel_task(&self, task_id: &str) -> Result<(), String> {
+    pub fn cancel_task(&self, task_id: &str) -> Result<(), String> {
+        if !self.tasks.lock().unwrap().contains_key(task_id) {
+            return Err(format!("Task ID '{task_id}' not found"));
+        }
+        if let Some(handle) = self
+            .runtimes
+            .lock()
+            .unwrap()
+            .get_mut(task_id)
+            .and_then(|runtime| runtime.run_handle.take())
+        {
+            handle.abort();
+        }
         self.update_task_status(task_id, TaskStatus::Cancelled);
         Ok(())
     }
@@ -306,7 +315,7 @@ impl HarnessSupervisor {
         }
     }
 
-    fn get_task_status(&self, task_id: &str) -> Option<TaskStatus> {
+    pub fn get_task_status(&self, task_id: &str) -> Option<TaskStatus> {
         let lock = self.tasks.lock().unwrap();
         lock.get(task_id).map(|t| t.status)
     }

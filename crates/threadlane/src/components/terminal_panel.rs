@@ -247,7 +247,7 @@ impl Widget for ProjectTerminal {
                 }
                 Event::TextInput(input)
                     if input.was_paste
-                        || input.input.chars().any(|character| !character.is_ascii()) =>
+                        || !input.input.is_ascii() =>
                 {
                     cx.widget_action(
                         self.widget_uid(),

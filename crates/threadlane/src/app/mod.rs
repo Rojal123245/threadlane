@@ -22,7 +22,8 @@ use crate::state::{
     session_entry_at_row, session_overflow_at_row, session_title_eligible, set_active_project,
     set_active_session, set_session_context_target, set_session_working,
     title_prompt_for_submission, toggle_project_collapsed, toggle_project_show_all, truncate_chars,
-    CommandInfo, GuiAgentEvent, MsgRole, SessionEntry, ToolStatus,
+    BackgroundTaskState, CapabilityState, CommandInfo, GuiAgentEvent, MsgRole, SessionEntry,
+    ToolStatus,
 };
 use crate::updater::UpdateStatus;
 use crate::workspace::{AppState, SessionKey, WorkspaceUiState};
@@ -32,8 +33,8 @@ use makepad_widgets::*;
 use robius_file_picker::FileDialog;
 use threadlane_agent::{get_runtime, AgentEvent, ImageAttachment, ReasoningEffort};
 use threadlane_coding_agent::{
-    discover_agents, AgentConfig, AgentScope, CodingAgent, CodingAgentOptions, ProjectContext,
-    SkillMetadata,
+    discover_agents, AgentConfig, AgentScope, CapabilityCatalog, CodingAgent, CodingAgentOptions,
+    HarnessSupervisor, PackageManager, PackageScope, ProjectContext, SkillMetadata, TrustStore,
 };
 use threadlane_provider::auth;
 use threadlane_provider::openai::{fetch_available_models, OpenAIClient};
@@ -1260,6 +1261,31 @@ script_mod! {
         }
     }
 
+    let SettingsActionButton = Button {
+        width: Fit
+        height: 28
+        padding: Inset{left: 10 right: 10 top: 4 bottom: 4}
+        draw_bg +: {
+            color: #x2b313d
+            color_hover: #x363e4d
+            color_focus: #x3b4658
+            color_down: #x444f62
+            border_color: #x3a4354
+            border_color_hover: #x536176
+            border_color_focus: #x60718a
+            border_color_down: #x71839e
+            border_size: 1.0
+            border_radius: 6.0
+        }
+        draw_text +: {
+            color: #xa4b0c2
+            color_hover: #xd8e0ec
+            color_focus: #xe7eef7
+            color_down: #xffffff
+            text_style +: { font_size: 9.0 }
+        }
+    }
+
     let ProvidersModal = #(ProviderSettingsModal::register_widget(vm)) {
         width: Fill
         height: Fill
@@ -1382,6 +1408,34 @@ script_mod! {
                     draw_text +: {
                         color: #x697587
                         text_style: theme.font_bold { font_size: 9.0 }
+                    }
+                }
+
+                settings_nav_capabilities_btn := Button {
+                    width: Fill
+                    height: 34
+                    padding: Inset{left: 10 right: 8 top: 6 bottom: 6}
+                    spacing: 0
+                    align: Align{x: 0.0 y: 0.5}
+                    text: "Capabilities"
+                    draw_bg +: {
+                        color: #x20252e
+                        color_hover: #x2b3442
+                        color_focus: #x303b4b
+                        color_down: #x39485b
+                        border_color: #x20252e
+                        border_color_hover: #x3b4b60
+                        border_color_focus: #x4b5e76
+                        border_color_down: #x5c718d
+                        border_size: 1.0
+                        border_radius: 6.0
+                    }
+                    draw_text +: {
+                        color: #x9ba8ba
+                        color_hover: #xd8e2ef
+                        color_focus: #xe7eef7
+                        color_down: #xffffff
+                        text_style +: { font_size: 9.5 }
                     }
                 }
 
@@ -1690,6 +1744,83 @@ script_mod! {
                                     text_style: theme.font_bold { font_size: 9.5 }
                                 }
                             }
+                        }
+                    }
+                }
+
+                capabilities_page := View {
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    spacing: 12
+                    visible: false
+
+                    capability_page_title := Label {
+                        width: Fill
+                        height: Fit
+                        text: "Capabilities"
+                        draw_text +: {
+                            color: #xe7ebf0
+                            text_style: theme.font_bold { font_size: 18.0 }
+                        }
+                    }
+
+                    capability_page_desc := Label {
+                        width: Fill
+                        height: Fit
+                        text: "Install packages and manage explicit approval for full-trust executables."
+                        draw_text +: {
+                            color: #x7f8c9d
+                            text_style +: { font_size: 10.0 }
+                        }
+                    }
+
+                    capability_summary_lbl := Label {
+                        width: Fill
+                        height: 210
+                        text: "No packages discovered."
+                        draw_text +: {
+                            color: #xc4cedc
+                            text_style +: { font_size: 10.0 }
+                        }
+                    }
+
+                    capability_package_input := TextInput {
+                        width: Fill
+                        height: 36
+                        empty_text: "Package ID"
+                    }
+
+                    capability_actions := View {
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+
+                        capability_install_btn := SettingsActionButton {
+                            text: "Install folder…"
+                        }
+                        capability_remove_btn := SettingsActionButton {
+                            text: "Remove"
+                        }
+                        capability_approve_btn := SettingsActionButton {
+                            text: "Approve"
+                        }
+                        capability_revoke_btn := SettingsActionButton {
+                            text: "Revoke"
+                        }
+                        capability_refresh_btn := SettingsActionButton {
+                            text: "Refresh"
+                        }
+                    }
+
+                    capability_status_lbl := Label {
+                        width: Fill
+                        height: Fit
+                        text: ""
+                        draw_text +: {
+                            color: #x9ba8ba
+                            text_style +: { font_size: 9.5 }
                         }
                     }
                 }
@@ -2052,6 +2183,33 @@ script_mod! {
                                 }
                             }
 
+                            tasks_btn := Button {
+                                width: Fit
+                                height: 28
+                                padding: Inset{left: 9 right: 9 top: 4 bottom: 4}
+                                spacing: 0
+                                text: "0 tasks"
+                                draw_bg +: {
+                                    color: #x232830
+                                    color_hover: #x2d3642
+                                    color_focus: #x2d3642
+                                    color_down: #x36475c
+                                    border_color: #x3f4a59
+                                    border_color_hover: #x6184ac
+                                    border_color_focus: #x6184ac
+                                    border_color_down: #x7eb4f2
+                                    border_radius: 7.0
+                                    border_size: 1.0
+                                }
+                                draw_text +: {
+                                    color: #xcbd3dd
+                                    color_hover: #xe8edf4
+                                    color_focus: #xe8edf4
+                                    color_down: #xffffff
+                                    text_style: theme.font_bold { font_size: 9.5 }
+                                }
+                            }
+
                             status_pill := StatusPill {}
                         }
 
@@ -2391,17 +2549,13 @@ script_mod! {
 }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum SettingsPage {
+    #[default]
     GoogleAntigravity,
     OpenAi,
+    Capabilities,
     About,
-}
-
-impl Default for SettingsPage {
-    fn default() -> Self {
-        Self::GoogleAntigravity
-    }
 }
 
 #[derive(Script, Widget)]
@@ -2467,6 +2621,13 @@ impl Widget for ProviderSettingsModal {
             }
             if self
                 .view
+                .button(cx, ids!(settings_nav_capabilities_btn))
+                .clicked(actions)
+            {
+                self.set_page(cx, SettingsPage::Capabilities);
+            }
+            if self
+                .view
                 .button(cx, ids!(settings_nav_about_btn))
                 .clicked(actions)
             {
@@ -2518,6 +2679,7 @@ impl ProviderSettingsModal {
     fn sync_page_visibility(&mut self, cx: &mut Cx) {
         let google_selected = self.page == SettingsPage::GoogleAntigravity;
         let openai_selected = self.page == SettingsPage::OpenAi;
+        let capabilities_selected = self.page == SettingsPage::Capabilities;
         let about_selected = self.page == SettingsPage::About;
 
         let normal_color = Vec4f { x: 0x20 as f32 / 255.0, y: 0x25 as f32 / 255.0, z: 0x2e as f32 / 255.0, w: 1.0 };
@@ -2525,6 +2687,10 @@ impl ProviderSettingsModal {
         for (button_id, selected) in [
             (ids!(settings_nav_google_btn), google_selected),
             (ids!(settings_nav_openai_btn), openai_selected),
+            (
+                ids!(settings_nav_capabilities_btn),
+                capabilities_selected,
+            ),
             (ids!(settings_nav_about_btn), about_selected),
         ] {
             let mut button = self.view.button(cx, button_id);
@@ -2544,6 +2710,9 @@ impl ProviderSettingsModal {
             .button(cx, ids!(settings_nav_openai_btn))
             .set_visible(cx, true);
         self.view
+            .button(cx, ids!(settings_nav_capabilities_btn))
+            .set_visible(cx, true);
+        self.view
             .button(cx, ids!(settings_nav_about_btn))
             .set_visible(cx, true);
         self.view
@@ -2553,12 +2722,19 @@ impl ProviderSettingsModal {
             .widget(cx, ids!(openai_page))
             .set_visible(cx, openai_selected);
         self.view
+            .widget(cx, ids!(capabilities_page))
+            .set_visible(cx, capabilities_selected);
+        self.view
             .widget(cx, ids!(about_page))
             .set_visible(cx, about_selected);
     }
 
     fn open(&mut self, cx: &mut Cx) {
-        self.page = SettingsPage::GoogleAntigravity;
+        self.open_page(cx, SettingsPage::GoogleAntigravity);
+    }
+
+    fn open_page(&mut self, cx: &mut Cx, page: SettingsPage) {
+        self.page = page;
         self.opened = true;
         self.sync_page_visibility(cx);
         if let Some(draw_list) = &self.draw_list {
@@ -2814,6 +2990,16 @@ pub struct App {
     #[rust]
     capability_cache: HashMap<PathBuf, ProjectCapabilities>,
     #[rust]
+    capability_state: CapabilityState,
+    #[rust]
+    supervisor: Option<Arc<HarnessSupervisor>>,
+    #[rust]
+    supervisor_projects: HashMap<PathBuf, String>,
+    #[rust]
+    background_tasks: BackgroundTaskState,
+    #[rust]
+    pending_trust_action: Option<(bool, String)>,
+    #[rust]
     update_status: UpdateStatus,
     #[rust]
     update_rx: Option<Arc<Mutex<Receiver<UpdateStatus>>>>,
@@ -2863,6 +3049,33 @@ impl MatchEvent for App {
             }
             Err(error) => registry_error = Some(error.to_string()),
         }
+        let supervisor = Arc::new(HarnessSupervisor::new(
+            global_threadlane_dir().join("supervisor"),
+        ));
+        if let Some(registry) = &self.project_registry {
+            for project in registry.projects() {
+                if let Ok(record) = supervisor.register_project(&project.path) {
+                    self.supervisor_projects
+                        .insert(project.path.clone(), record.id);
+                }
+            }
+        }
+        if let Some(tx) = self.tx.clone() {
+            let mut events = supervisor.subscribe();
+            get_runtime().spawn(async move {
+                loop {
+                    match events.recv().await {
+                        Ok(event) => {
+                            let _ = tx.send(GuiAgentEvent::BackgroundTask(event));
+                            SignalToUI::set_ui_signal();
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+        }
+        self.supervisor = Some(supervisor);
         let project_dirs = self.registered_project_dirs_or(&launch_dir);
         refresh_sessions(&project_dirs);
         let selected_project = self
@@ -3238,8 +3451,48 @@ impl MatchEvent for App {
         }
 
         if self.ui.button(cx, ids!(caps_btn)).clicked(actions) {
-            let summary = self.capabilities_summary.clone();
-            self.push_chat(MsgRole::System, summary);
+            self.open_capabilities_modal(cx);
+        }
+
+        if self
+            .ui
+            .button(cx, ids!(capability_install_btn))
+            .clicked(actions)
+        {
+            self.open_package_picker();
+        }
+        if self
+            .ui
+            .button(cx, ids!(capability_remove_btn))
+            .clicked(actions)
+        {
+            self.remove_selected_package(cx);
+        }
+        if self
+            .ui
+            .button(cx, ids!(capability_approve_btn))
+            .clicked(actions)
+        {
+            self.confirm_trust_change(cx, true);
+        }
+        if self
+            .ui
+            .button(cx, ids!(capability_revoke_btn))
+            .clicked(actions)
+        {
+            self.confirm_trust_change(cx, false);
+        }
+        if self
+            .ui
+            .button(cx, ids!(capability_refresh_btn))
+            .clicked(actions)
+        {
+            self.pending_trust_action = None;
+            self.refresh_capability_state(cx);
+        }
+
+        if self.ui.button(cx, ids!(tasks_btn)).clicked(actions) {
+            self.push_chat(MsgRole::System, self.background_tasks.summary());
             self.ui.widget(cx, ids!(chat_list)).redraw(cx);
         }
 
@@ -3610,13 +3863,196 @@ impl App {
         }
     }
 
+    fn open_capabilities_modal(&mut self, cx: &mut Cx) {
+        self.refresh_capability_state(cx);
+        if let Some(mut modal) = self
+            .ui
+            .widget(cx, ids!(providers_modal))
+            .borrow_mut::<ProviderSettingsModal>()
+        {
+            modal.open_page(cx, SettingsPage::Capabilities);
+        }
+    }
+
     fn dismiss_providers_modal(&mut self, cx: &mut Cx) {
+        self.pending_trust_action = None;
         if let Some(mut modal) = self
             .ui
             .widget(cx, ids!(providers_modal))
             .borrow_mut::<ProviderSettingsModal>()
         {
             modal.close(cx);
+        }
+    }
+
+    fn refresh_capability_state(&mut self, cx: &mut Cx) {
+        let Some(work_dir) = self.active_work_dir().map(Path::to_path_buf) else {
+            return;
+        };
+        self.capability_state.refresh(&CapabilityCatalog::discover(
+            Some(&work_dir),
+            &global_threadlane_dir(),
+        ));
+        let mut summary = String::new();
+        for package in &self.capability_state.packages {
+            let scope = match package.scope {
+                PackageScope::Global => "global",
+                PackageScope::Project => "project",
+            };
+            let trust = self
+                .capability_state
+                .extensions
+                .iter()
+                .find(|extension| extension.package_id.as_deref() == Some(&package.id))
+                .map(|extension| {
+                    if extension.trusted {
+                        "trusted"
+                    } else {
+                        "approval required"
+                    }
+                })
+                .unwrap_or("sandboxed");
+            summary.push_str(&format!(
+                "{} · {} · {}\n",
+                package.name, scope, trust
+            ));
+        }
+        if summary.is_empty() {
+            summary.push_str("No packages discovered.");
+        }
+        self.ui
+            .label(cx, ids!(capability_summary_lbl))
+            .set_text(cx, &summary);
+        self.ui
+            .label(cx, ids!(capability_status_lbl))
+            .set_text(cx, "");
+        self.capability_cache.remove(&work_dir);
+    }
+
+    fn selected_capability_package_id(&self, cx: &Cx) -> String {
+        self.ui
+            .text_input(cx, ids!(capability_package_input))
+            .text()
+            .trim()
+            .to_string()
+    }
+
+    fn open_package_picker(&self) {
+        let picked = rfd::FileDialog::new()
+            .set_title("Install a Threadlane package folder")
+            .pick_folder();
+        if let Some(tx) = self.tx.as_ref() {
+            let _ = tx.send(GuiAgentEvent::PackageFolderPicked(picked));
+            SignalToUI::set_ui_signal();
+        }
+    }
+
+    fn install_package(&mut self, cx: &mut Cx, source: PathBuf) {
+        let Some(work_dir) = self.active_work_dir().map(Path::to_path_buf) else {
+            return;
+        };
+        let manager = PackageManager::new(global_threadlane_dir());
+        match manager.install_from_local(&source, PackageScope::Project, Some(&work_dir)) {
+            Ok(package) => {
+                self.ui
+                    .text_input(cx, ids!(capability_package_input))
+                    .set_text(cx, package.id());
+                self.refresh_capability_state(cx);
+                self.ui
+                    .label(cx, ids!(capability_status_lbl))
+                    .set_text(cx, "Package installed for this project.");
+            }
+            Err(error) => self
+                .ui
+                .label(cx, ids!(capability_status_lbl))
+                .set_text(cx, &error),
+        }
+    }
+
+    fn remove_selected_package(&mut self, cx: &mut Cx) {
+        let package_id = self.selected_capability_package_id(cx);
+        let Some(package) = self
+            .capability_state
+            .packages
+            .iter()
+            .find(|package| package.id == package_id)
+        else {
+            self.ui
+                .label(cx, ids!(capability_status_lbl))
+                .set_text(cx, "Enter an installed package ID.");
+            return;
+        };
+        let scope = package.scope;
+        let work_dir = self.active_work_dir().map(Path::to_path_buf);
+        match PackageManager::new(global_threadlane_dir()).remove_package(
+            &package_id,
+            scope,
+            work_dir.as_deref(),
+        ) {
+            Ok(()) => {
+                self.refresh_capability_state(cx);
+                self.ui
+                    .label(cx, ids!(capability_status_lbl))
+                    .set_text(cx, "Package removed.");
+            }
+            Err(error) => self
+                .ui
+                .label(cx, ids!(capability_status_lbl))
+                .set_text(cx, &error),
+        }
+    }
+
+    fn confirm_trust_change(&mut self, cx: &mut Cx, approve: bool) {
+        let package_id = self.selected_capability_package_id(cx);
+        let action = if approve { "approve" } else { "revoke" };
+        if package_id.is_empty() {
+            self.ui
+                .label(cx, ids!(capability_status_lbl))
+                .set_text(cx, "Enter a package ID.");
+            return;
+        }
+        if self.pending_trust_action.as_ref() != Some(&(approve, package_id.clone())) {
+            self.pending_trust_action = Some((approve, package_id));
+            self.ui
+                .label(cx, ids!(capability_status_lbl))
+                .set_text(cx, &format!("Click {action} again to confirm."));
+            return;
+        }
+        self.pending_trust_action = None;
+        let trust_file = global_threadlane_dir().join("state/trust.json");
+        let mut trust = TrustStore::load_from_file(&trust_file);
+        if approve {
+            let Some(revision) = self
+                .capability_state
+                .extensions
+                .iter()
+                .find(|extension| {
+                    extension.full_trust
+                        && extension.package_id.as_deref() == Some(&package_id)
+                })
+                .and_then(|extension| extension.revision.clone())
+            else {
+                self.ui
+                    .label(cx, ids!(capability_status_lbl))
+                    .set_text(cx, "No valid full-trust executable found for that package.");
+                return;
+            };
+            trust.approve(package_id.clone(), revision);
+        } else {
+            trust.revoke(&package_id);
+            self.capability_state.mark_revoked(&package_id);
+        }
+        match trust.save_to_file(&trust_file) {
+            Ok(()) => {
+                self.refresh_capability_state(cx);
+                self.ui
+                    .label(cx, ids!(capability_status_lbl))
+                    .set_text(cx, &format!("Trust {action}d."));
+            }
+            Err(error) => self
+                .ui
+                .label(cx, ids!(capability_status_lbl))
+                .set_text(cx, &error),
         }
     }
 
@@ -4265,6 +4701,12 @@ impl App {
         };
         match registry.attach(&raw_path) {
             Ok(project) => {
+                if let Some(supervisor) = &self.supervisor {
+                    if let Ok(record) = supervisor.register_project(&project.path) {
+                        self.supervisor_projects
+                            .insert(project.path.clone(), record.id);
+                    }
+                }
                 self.refresh_registered_sessions();
                 self.select_project_draft(cx, project.path);
                 self.ui
@@ -4597,7 +5039,7 @@ impl App {
             if row_index == cursor_row {
                 let width = line.chars().count();
                 if width < cursor_col {
-                    line.extend(std::iter::repeat(' ').take(cursor_col - width));
+                    line.extend(std::iter::repeat_n(' ', cursor_col - width));
                 }
                 let byte_index = line
                     .char_indices()
@@ -4685,6 +5127,80 @@ impl App {
         }
         self.refresh_project_capabilities(cx, &work_dir);
         self.restore_active_status(cx);
+        cx.redraw_all();
+    }
+
+    fn start_background_task(
+        &mut self,
+        cx: &mut Cx,
+        work_dir: PathBuf,
+        prompt: String,
+        api_key: String,
+        account_id: Option<String>,
+        model: String,
+    ) {
+        if prompt.is_empty() {
+            self.push_chat(MsgRole::System, "Usage: /task <prompt>");
+            return;
+        }
+        let Some(supervisor) = self.supervisor.clone() else {
+            self.push_chat(MsgRole::System, "Background task service is unavailable.");
+            return;
+        };
+        let canonical =
+            std::fs::canonicalize(&work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+        let project_id = match self.supervisor_projects.get(&canonical) {
+            Some(project_id) => project_id.clone(),
+            None => match supervisor.register_project(&canonical) {
+                Ok(project) => {
+                    self.supervisor_projects
+                        .insert(canonical.clone(), project.id.clone());
+                    project.id
+                }
+                Err(error) => {
+                    self.push_chat(
+                        MsgRole::System,
+                        format!("Could not register background task project: {error}"),
+                    );
+                    return;
+                }
+            },
+        };
+        let task_id = match supervisor.create_task(
+            &project_id,
+            None,
+            CodingAgentOptions {
+                api_key,
+                account_id,
+                model,
+                work_dir: canonical.clone(),
+                session_file: None,
+                system_prompt: Default::default(),
+            },
+        ) {
+            Ok(task_id) => task_id,
+            Err(error) => {
+                self.push_chat(
+                    MsgRole::System,
+                    format!("Could not create background task: {error}"),
+                );
+                return;
+            }
+        };
+        self.background_tasks
+            .started(task_id.clone(), canonical);
+        if let Err(error) = supervisor.submit_input(&task_id, prompt) {
+            let _ = supervisor.cancel_task(&task_id);
+            self.push_chat(
+                MsgRole::System,
+                format!("Could not start background task: {error}"),
+            );
+        } else {
+            self.push_chat(MsgRole::System, format!("Started background task {task_id}."));
+        }
+        self.ui
+            .button(cx, ids!(tasks_btn))
+            .set_text(cx, &self.background_tasks.summary());
         cx.redraw_all();
     }
 
@@ -5052,6 +5568,11 @@ impl App {
                 self.start_antigravity_doctor(cx);
                 return;
             }
+            "/task" => {
+                self.push_chat(MsgRole::System, "Usage: /task <prompt>");
+                cx.redraw_all();
+                return;
+            }
             _ => {}
         }
 
@@ -5095,6 +5616,27 @@ impl App {
             return;
         };
         let work_dir = active_key.work_dir.clone();
+
+        if let Some(prompt) = input_text.trim().strip_prefix("/task ") {
+            self.start_background_task(
+                cx,
+                work_dir,
+                prompt.trim().to_string(),
+                api_key,
+                account_id,
+                model_name,
+            );
+            if consumes_composer {
+                if let Some(workspace) = self.workspace_state.active_workspace_mut() {
+                    clear_composer_for_dispatch(origin, &mut workspace.ui);
+                }
+                self.refresh_attachment_ui(cx);
+                self.ui
+                    .threadlane_command_text_input(cx, ids!(prompt_input))
+                    .reset(cx);
+            }
+            return;
+        }
 
         if consumes_composer
             && active_session_entry().is_none()
@@ -5691,6 +6233,10 @@ impl App {
                 GuiAgentEvent::ProjectFolderPicked(result) => {
                     self.apply_project_folder_result(cx, result);
                 }
+                GuiAgentEvent::PackageFolderPicked(Some(path)) => {
+                    self.install_package(cx, path);
+                }
+                GuiAgentEvent::PackageFolderPicked(None) => {}
                 GuiAgentEvent::DeviceCodePrompt { user_code, url } => {
                     if let Some(key) = self.auth_workspace.clone() {
                         self.push_chat_to(
@@ -5778,6 +6324,14 @@ impl App {
                 GuiAgentEvent::AntigravityDoctorReport(report) => {
                     self.push_chat(MsgRole::System, report);
                     cx.redraw_all();
+                }
+                GuiAgentEvent::BackgroundTask(event) => {
+                    let (task_id, _, agent_event) = event.into_parts();
+                    self.background_tasks
+                        .apply_agent_event(&task_id, &agent_event);
+                    self.ui
+                        .button(cx, ids!(tasks_btn))
+                        .set_text(cx, &self.background_tasks.summary());
                 }
                 GuiAgentEvent::GenerationAgent {
                     generation_id,

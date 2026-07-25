@@ -168,7 +168,7 @@ pub fn parse_frontmatter(content: &str) -> (Option<String>, Option<String>, Stri
 }
 
 /// Load prompt templates from a directory (non-recursive).
-pub(crate) fn load_prompt_templates_from_dir(dir: &Path, scope: &str) -> Vec<PromptTemplate> {
+fn load_prompt_templates_from_dir(dir: &Path, scope: &str) -> Vec<PromptTemplate> {
     let mut templates = Vec::new();
 
     if !dir.exists() || !dir.is_dir() {
