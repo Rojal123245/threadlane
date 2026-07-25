@@ -449,8 +449,17 @@ pub struct ChatList {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct SubagentRail {
-    #[deref]
-    view: View,
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[redraw]
+    #[rust]
+    area: Area,
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
     #[live]
     row_template: ScriptValue,
     #[rust]
@@ -464,11 +473,10 @@ impl Widget for SubagentRail {
         for row in self.rows.values_mut() {
             row.handle_event(cx, event, scope);
         }
-        self.view.handle_event(cx, event, scope);
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        self.view.draw_bg.begin(cx, walk, self.view.layout);
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        cx.begin_turtle(walk, self.layout);
         for (index, item) in self.items.iter().enumerate() {
             let row_id = LiveId::from_num(1, index as u64);
             let template = self.row_template;
@@ -490,10 +498,9 @@ impl Widget for SubagentRail {
                 item.status == "Failed",
                 item.status == "Stopped",
             );
-            let row_walk = row.walk(cx);
-            row.draw_walk(cx, scope, row_walk)?;
+            row.draw_all_unscoped(cx);
         }
-        self.view.draw_bg.end(cx);
+        cx.end_turtle_with_area(&mut self.area);
         DrawStep::done()
     }
 }

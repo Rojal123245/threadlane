@@ -183,6 +183,8 @@ Drawing in an overlay does not automatically stop widgets underneath from receiv
 - Keep summary categories concise and action-oriented (`Explored`, `Edited`, `Ran`, `Loaded`, `Delegated`) and bound expanded tool output rather than restoring every raw tool payload to the top-level transcript.
 - Expanded activity groups must render complete persisted thinking segments and current streaming reasoning in event order alongside concise tool summaries; never replace finalized reasoning with only a completion/status placeholder.
 - Opening or closing `ToolFoldHeader` changes its `PortalList` item height. Preserve its `LayoutChanged` action and redraw the parent chat list so following messages are reflowed instead of overlapping the expanded body.
+- `SubagentRail` manually draws dynamic `ToolFoldHeader` rows but does not keep per-row draw state. Consume each row with `draw_all_unscoped`; propagating a row's intermediate `DrawStep` restarts the rail loop at the first header and prevents expanded bodies from drawing.
+- Custom containers that manually draw dynamic children must end their turtle into their own `Area`. A dereferenced `View` whose background is begun/ended directly can retain a zero-sized widget area even while its child rows draw visibly, which removes the container from pointer-event traversal.
 - The chat `PortalList` range is based on display rows, not raw message count. If changing grouping, preserve stable ordering, auto-tail behavior, and non-reused fold widget state.
 
 ### Composer Drop-Ups

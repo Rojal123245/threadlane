@@ -260,50 +260,6 @@ fn subagent_session_detail(session: &SubagentSessionData) -> String {
     sections.join("\n\n")
 }
 
-pub fn subagent_result_markdown(output: &str, fallback: &str) -> String {
-    let Ok(sessions) = serde_json::from_str::<Vec<SubagentSessionData>>(output) else {
-        return fallback.to_string();
-    };
-    if sessions.is_empty() {
-        return fallback.to_string();
-    }
-
-    let session_count = sessions.len();
-    sessions
-        .into_iter()
-        .enumerate()
-        .map(|(index, session)| {
-            let mut section = format!(
-                "### {} · {}\n\n**Task:** {}",
-                session.agent,
-                session.status,
-                normalize_whitespace_bounded(&session.task, 240),
-            );
-            if !session.inner_tools.is_empty() {
-                section.push_str("\n\n**Activity**");
-                for tool in session.inner_tools {
-                    let status = if tool.is_error { "✗" } else { "✓" };
-                    section.push_str(&format!(
-                        "\n- {status} `{}` · {}",
-                        tool.name, tool.target_preview
-                    ));
-                }
-            }
-            if !session.thinking.trim().is_empty() {
-                section.push_str(&format!("\n\n<details><summary>Reasoning</summary>\n\n{}\n</details>", session.thinking));
-            }
-            if !session.output.trim().is_empty() {
-                section.push_str(&format!("\n\n**Report**\n\n{}", session.output));
-            }
-            if index + 1 < session_count {
-                section.push_str("\n\n---");
-            }
-            section
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum ChatMessage {
@@ -1233,41 +1189,6 @@ mod tests {
             .arguments_detail
             .contains("Subagent Session 1 (`scout`)"));
         assert!(presentation.output_markdown);
-    }
-
-    #[test]
-    fn subagent_result_markdown_keeps_each_agent_report_and_tool_outcome() {
-        let output = serde_json::json!([
-            {
-                "agent": "scout",
-                "task": "Inspect the workspace",
-                "status": "Done",
-                "thinking": "",
-                "inner_tools": [{
-                    "name": "read_file",
-                    "target_preview": "src/main.rs",
-                    "is_error": false
-                }],
-                "output": "Found the entry point."
-            },
-            {
-                "agent": "reviewer",
-                "task": "Review the change",
-                "status": "Failed",
-                "thinking": "",
-                "inner_tools": [],
-                "output": "Model unavailable"
-            }
-        ])
-        .to_string();
-
-        let markdown = subagent_result_markdown(&output, "fallback");
-
-        assert!(markdown.contains("### scout · Done"));
-        assert!(markdown.contains("Inspect the workspace"));
-        assert!(markdown.contains("- ✓ `read_file` · src/main.rs"));
-        assert!(markdown.contains("### reviewer · Failed"));
-        assert!(markdown.contains("Model unavailable"));
     }
 
     #[test]
