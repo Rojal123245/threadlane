@@ -2347,6 +2347,10 @@ impl ScriptHook for ProviderSettingsModal {
             if let Some(draw_list) = &self.draw_list {
                 draw_list.redraw(cx);
             }
+            let version = format!("Version {}", env!("CARGO_PKG_VERSION"));
+            self.view
+                .label(cx, ids!(about_version_lbl))
+                .set_text(cx, &version);
             self.sync_page_visibility(cx);
         });
     }
