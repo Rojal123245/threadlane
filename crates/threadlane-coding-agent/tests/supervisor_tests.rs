@@ -257,3 +257,30 @@ fn package_install_preserves_existing_extension_when_replacement_is_invalid() {
         b"original wasm"
     );
 }
+
+#[test]
+fn package_list_ignores_hidden_replacement_backups() {
+    let project = tempdir().unwrap();
+    let source = tempdir().unwrap();
+    write_wasi_package_fixture(source.path(), "extension.wasm", b"test wasm");
+
+    let manager = PackageManager::new();
+    manager
+        .install_from_local(source.path(), project.path())
+        .unwrap();
+    let extensions = project.path().join(".threadlane/extensions");
+    let backup = extensions.join(".test-extension.backup-test");
+    fs::create_dir(&backup).unwrap();
+    fs::copy(
+        extensions.join("test-extension/threadlane-package.json"),
+        backup.join("threadlane-package.json"),
+    )
+    .unwrap();
+    fs::copy(
+        extensions.join("test-extension/extension.wasm"),
+        backup.join("extension.wasm"),
+    )
+    .unwrap();
+
+    assert_eq!(manager.list_packages(project.path()).len(), 1);
+}

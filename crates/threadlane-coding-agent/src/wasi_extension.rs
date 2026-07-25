@@ -653,6 +653,9 @@ impl WasiExtensionManager {
                 continue;
             };
             for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().starts_with('.') {
+                    continue;
+                }
                 let path = entry.path();
                 let wasm_path = if path.is_dir() {
                     path.join("extension.wasm")

@@ -292,6 +292,19 @@ fn installed_package_is_discovered_by_wasi_loader() {
     PackageManager::new()
         .install_from_local(source.path(), project.path())
         .unwrap();
+    let extensions_dir = project.path().join(".threadlane/extensions");
+    let backup_dir = extensions_dir.join(".test-extension.backup-test");
+    std::fs::create_dir(&backup_dir).unwrap();
+    std::fs::copy(
+        extensions_dir.join("test-extension/threadlane-package.json"),
+        backup_dir.join("threadlane-package.json"),
+    )
+    .unwrap();
+    std::fs::copy(
+        extensions_dir.join("test-extension/extension.wasm"),
+        backup_dir.join("extension.wasm"),
+    )
+    .unwrap();
 
     let mut extensions = WasiExtensionManager::for_project(project.path());
     assert_eq!(extensions.discover_and_load(project.path()), 1);
