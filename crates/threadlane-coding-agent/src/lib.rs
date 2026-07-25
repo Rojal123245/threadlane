@@ -5,7 +5,6 @@ pub mod coding_agent;
 pub mod commands;
 pub mod context;
 pub mod extension_broker;
-pub mod full_trust_extension;
 pub mod packages;
 pub mod prompt_templates;
 pub mod skills;
@@ -25,7 +24,6 @@ pub use extension_broker::{
     CapabilityDispatcher, CapabilityHandler, CapabilityPolicy, HostBrokerRequest,
     HostCapabilityGrantPolicy,
 };
-pub use full_trust_extension::{FullTrustRunner, TrustStore};
 pub use packages::{PackageManifest, PackageRecord, PackageScope};
 pub use packages::PackageManager;
 pub use prompt_templates::{

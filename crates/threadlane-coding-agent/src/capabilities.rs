@@ -8,12 +8,8 @@ use std::path::Path;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtensionMetadata {
     id: String,
-    package_id: Option<String>,
     name: String,
-    is_full_trust: bool,
     enabled: bool,
-    revision: Option<String>,
-    is_trusted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,7 +21,7 @@ pub struct CapabilityCatalog {
 }
 
 impl CapabilityCatalog {
-    pub fn discover(project_root: Option<&Path>, global_dir: &Path) -> Self {
+    pub fn discover(project_root: Option<&Path>) -> Self {
         let mut skill_mgr = SkillManager::new();
         skill_mgr.discover_skills(project_root);
         let skills = skill_mgr.list_skills();
@@ -34,8 +30,9 @@ impl CapabilityCatalog {
             .map(|project_root| PackageManager::new().list_packages(project_root))
             .unwrap_or_default();
 
-        let cwd = project_root.unwrap_or(global_dir);
-        let agents = discover_agents(cwd, AgentScope::Both).agents;
+        let agents = project_root
+            .map(|project_root| discover_agents(project_root, AgentScope::Both).agents)
+            .unwrap_or_default();
 
         let mut extensions = Vec::new();
 
@@ -45,12 +42,8 @@ impl CapabilityCatalog {
             for (id, ext) in wasi_mgr.get_extensions() {
                 extensions.push(ExtensionMetadata {
                     id: id.clone(),
-                    package_id: None,
                     name: ext.manifest.name.clone(),
-                    is_full_trust: false,
                     enabled: true,
-                    revision: None,
-                    is_trusted: true,
                 });
             }
         }
@@ -73,23 +66,7 @@ impl CapabilityCatalog {
 }
 
 impl ExtensionMetadata {
-    pub fn package_id(&self) -> Option<&str> {
-        self.package_id.as_deref()
-    }
-
-    pub fn is_full_trust(&self) -> bool {
-        self.is_full_trust
-    }
-
     pub fn is_enabled(&self) -> bool {
         self.enabled
-    }
-
-    pub fn revision(&self) -> Option<&str> {
-        self.revision.as_deref()
-    }
-
-    pub fn is_trusted(&self) -> bool {
-        self.is_trusted
     }
 }

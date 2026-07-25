@@ -3,8 +3,7 @@ use std::io::Write;
 use std::time::Duration;
 use tempfile::tempdir;
 use threadlane_coding_agent::{
-    CodingAgentOptions, FullTrustRunner, HarnessSupervisor, PackageManager, SkillManager,
-    SkillScope, TaskStatus, TrustStore,
+    CodingAgentOptions, HarnessSupervisor, PackageManager, SkillManager, SkillScope, TaskStatus,
 };
 
 #[tokio::test]
@@ -119,44 +118,6 @@ fn test_skill_discovery_and_precedence() {
 
     let instructions = mgr.get_skill_instructions("test-skill").unwrap();
     assert_eq!(instructions, "Instruction step 1");
-}
-
-#[test]
-fn test_full_trust_revision_approval() {
-    let global_dir = tempdir().unwrap();
-    let trust_file = global_dir.path().join("state/trust.json");
-
-    let exe_dir = tempdir().unwrap();
-    let exe_path = exe_dir.path().join("dummy_extension.sh");
-    {
-        let mut f = File::create(&exe_path).unwrap();
-        writeln!(f, "#!/bin/sh\necho '{{\"status\": \"ok\"}}'").unwrap();
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&exe_path).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&exe_path, perms).unwrap();
-    }
-
-    let runner = FullTrustRunner::new("pkg-1".into(), exe_path.clone()).unwrap();
-    let rev = runner.revision.clone();
-
-    let err = runner.execute_request("{}", &trust_file);
-    assert!(err.is_err());
-    assert!(err.unwrap_err().contains("Security Denial"));
-
-    let mut store = TrustStore::load_from_file(&trust_file);
-    store.approve("pkg-1".into(), rev.clone());
-    store.save_to_file(&trust_file).unwrap();
-
-    let res = runner.execute_request("{}", &trust_file);
-    assert!(res.is_ok());
-
-    store.revoke("pkg-1");
-    store.save_to_file(&trust_file).unwrap();
-    assert!(runner.execute_request("{}", &trust_file).is_err());
 }
 
 fn write_wasi_package_fixture(source: &std::path::Path, extension: &str, wasm: &[u8]) {
