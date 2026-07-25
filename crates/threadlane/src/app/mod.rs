@@ -2086,6 +2086,19 @@ script_mod! {
 }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsPage {
+    GoogleAntigravity,
+    OpenAi,
+    About,
+}
+
+impl Default for SettingsPage {
+    fn default() -> Self {
+        Self::GoogleAntigravity
+    }
+}
+
 #[derive(Script, Widget)]
 struct ProviderSettingsModal {
     #[source]
@@ -2096,6 +2109,8 @@ struct ProviderSettingsModal {
     draw_list: Option<DrawList2d>,
     #[rust]
     opened: bool,
+    #[rust]
+    page: SettingsPage,
 }
 
 impl ScriptHook for ProviderSettingsModal {
@@ -2159,9 +2174,18 @@ impl Widget for ProviderSettingsModal {
         DrawStep::done()
     }
 }
-
 impl ProviderSettingsModal {
+
+    fn set_page(&mut self, cx: &mut Cx, page: SettingsPage) {
+        self.page = page;
+        self.sync_page_visibility(cx);
+        self.view.redraw(cx);
+    }
+
+    fn sync_page_visibility(&mut self, _cx: &mut Cx) {}
+
     fn open(&mut self, cx: &mut Cx) {
+        self.page = SettingsPage::GoogleAntigravity;
         self.opened = true;
         if let Some(draw_list) = &self.draw_list {
             draw_list.redraw(cx);
