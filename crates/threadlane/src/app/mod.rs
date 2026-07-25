@@ -80,6 +80,7 @@ const ANTIGRAVITY_MODELS: &[&str] = &[
     "antigravity/claude-opus-4-6",
     "antigravity/gpt-oss-120b",
 ];
+const MAX_TERMINAL_OUTPUT: usize = 256 * 1024;
 
 fn append_antigravity_models(models: &mut Vec<String>) {
     for model in ANTIGRAVITY_MODELS {
@@ -190,6 +191,21 @@ fn project_name(path: &Path) -> String {
 
 fn canonical_terminal_work_dir(work_dir: &Path) -> PathBuf {
     std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf())
+}
+
+fn truncate_terminal_output(output: &mut String) {
+    if output.len() <= MAX_TERMINAL_OUTPUT {
+        return;
+    }
+    let mut cutoff = output.len() - MAX_TERMINAL_OUTPUT;
+    while cutoff < output.len() && !output.is_char_boundary(cutoff) {
+        cutoff += 1;
+    }
+    let cutoff = output[cutoff..]
+        .char_indices()
+        .find_map(|(offset, ch)| (ch == '\n').then_some(cutoff + offset + 1))
+        .unwrap_or(cutoff);
+    output.drain(..cutoff);
 }
 
 use crate::path_utils::compact_workspace_path;
@@ -4601,18 +4617,7 @@ impl App {
         for row in 0..screen.rows() {
             push_row(screen.scrollback().len() + row, screen.grid.row_slice(row));
         }
-        const MAX_TERMINAL_OUTPUT: usize = 256 * 1024;
-        if output.len() > MAX_TERMINAL_OUTPUT {
-            let mut cutoff = output.len() - MAX_TERMINAL_OUTPUT;
-            while cutoff < output.len() && !output.is_char_boundary(cutoff) {
-                cutoff += 1;
-            }
-            let cutoff = output[cutoff..]
-                .char_indices()
-                .find_map(|(offset, ch)| (ch == '\n').then_some(cutoff + offset + 1))
-                .unwrap_or(cutoff);
-            output.drain(..cutoff);
-        }
+        truncate_terminal_output(&mut output);
         output.pop();
         output
     }
@@ -5803,7 +5808,7 @@ mod workspace_header_tests {
     use super::{
         append_antigravity_models, clear_composer_for_dispatch, compact_workspace_path,
         model_credential_error, ordered_model_options, project_name, InputOrigin,
-        ANTIGRAVITY_MODELS,
+        truncate_terminal_output, ANTIGRAVITY_MODELS, MAX_TERMINAL_OUTPUT,
     };
     use crate::workspace::WorkspaceUiState;
     use std::path::Path;
@@ -5937,6 +5942,18 @@ mod workspace_header_tests {
             project_name(Path::new("/Users/alex/code/threadlane")),
             "threadlane"
         );
+    }
+
+    #[test]
+    fn terminal_output_truncation_handles_a_multibyte_cutoff() {
+        let mut output = "a".repeat(MAX_TERMINAL_OUTPUT - 1);
+        output.push('é');
+        output.push_str(&"b".repeat(MAX_TERMINAL_OUTPUT - 1));
+
+        truncate_terminal_output(&mut output);
+
+        assert!(output.is_char_boundary(0));
+        assert!(output.len() <= MAX_TERMINAL_OUTPUT);
     }
 
     #[test]
