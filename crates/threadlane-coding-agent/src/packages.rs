@@ -113,9 +113,7 @@ impl PackageManager {
                         ),
                     });
                 }
-                if let Err(error) = fs::remove_dir_all(&backup) {
-                    return Err(restore_package_backup(&target, &backup, &staged, error));
-                }
+                let _ = fs::remove_dir_all(&backup);
             } else {
                 fs::rename(&staged, &target)
                     .map_err(|e| format!("Failed to install package: {e}"))?;
@@ -222,29 +220,4 @@ fn available_path(parent: &Path, id: &str, kind: &str) -> PathBuf {
         }
     }
     parent.join(format!(".{id}.{kind}-{}", std::process::id()))
-}
-
-fn restore_package_backup(
-    target: &Path,
-    backup: &Path,
-    staged: &Path,
-    cleanup_error: std::io::Error,
-) -> String {
-    if let Err(rollback_error) = fs::rename(target, staged) {
-        return format!(
-            "Failed to remove package backup: {cleanup_error}; failed to move replacement aside for rollback: {rollback_error}"
-        );
-    }
-    if let Err(restore_error) = fs::rename(backup, target) {
-        let restore_replacement = fs::rename(staged, target);
-        return match restore_replacement {
-            Ok(()) => format!(
-                "Failed to remove package backup: {cleanup_error}; failed to restore previous package: {restore_error}; replacement was restored"
-            ),
-            Err(replacement_error) => format!(
-                "Failed to remove package backup: {cleanup_error}; failed to restore previous package: {restore_error}; failed to restore replacement: {replacement_error}"
-            ),
-        };
-    }
-    format!("Failed to remove package backup: {cleanup_error}; restored the previous package")
 }
