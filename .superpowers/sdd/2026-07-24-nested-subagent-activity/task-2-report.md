@@ -23,3 +23,11 @@ The Makepad compile check validates the script syntax, but the nested expansion 
 - `cargo test -p threadlane panels::chat::state::tests::subagent_result_markdown_keeps_each_agent_report_and_tool_outcome` — passed: 1 test, 83 filtered out.
 - `cargo check -p threadlane` — passed: 0 errors, 2 Makepad duplicate-package warnings.
 - `git diff --check` — passed.
+
+## Final review fix
+
+- Child tool tags are now suppressed only when the transcript also renders an outer subagent tool; an orphaned or stale tagged tool remains ordinary top-level activity.
+- `cargo test -p threadlane panels::chat::view::tests::child_tool_rows_are_hidden_only_when_a_subagent_parent_is_rendered` — passed: 1 test, 84 filtered out.
+- `cargo test -p threadlane panels::chat::state::tests::subagent_rail_places_tagged_child_tool_under_its_task` — passed: 1 test, 84 filtered out.
+- `cargo check -p threadlane` — passed: 0 errors, 2 Makepad duplicate-package warnings.
+- `git diff --check` — passed.
