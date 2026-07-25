@@ -1,6 +1,6 @@
 //! Chat panel main view & transcript list widget.
 
-use super::state::{ChatMessage, MsgRole, StreamingKind, ToolIcon, ToolStatus};
+use super::state::{ChatMessage, MsgRole, StreamingKind, SubagentRailItem, ToolIcon, ToolStatus};
 use crate::components::tool_fold_header::ToolFoldHeaderAction;
 use crate::path_utils::{compact_workspace_path, truncate_chars};
 use crate::workspace::AppState;
@@ -111,6 +111,9 @@ fn display_rows(
     let mut rows = Vec::new();
 
     for (message_index, message) in messages.iter().enumerate() {
+        if super::state::is_subagent_child_tool(message) {
+            continue;
+        }
         if is_activity(message) {
             if let Some(DisplayRow::ActivityGroup { end, .. }) = rows.last_mut() {
                 if *end == message_index {
@@ -436,60 +439,53 @@ pub struct ChatList {
     #[rust]
     cached_streaming_text_len: usize,
     #[rust]
+    cached_revision: u64,
+    #[rust]
     hovered_starter: Option<StarterPromptAction>,
     #[rust]
     pressed_starter: Option<StarterPromptAction>,
 }
 
 #[derive(Script, ScriptHook, Widget)]
-pub struct SubagentChatlist {
+pub struct SubagentRail {
     #[deref]
     view: View,
     #[live]
-    tool_template: ScriptValue,
+    row_template: ScriptValue,
     #[rust]
-    tools: ComponentMap<LiveId, WidgetRef>,
+    rows: ComponentMap<LiveId, WidgetRef>,
     #[rust]
-    pub sessions: Vec<crate::panels::chat::state::SubagentSessionData>,
+    pub items: Vec<SubagentRailItem>,
 }
 
-impl Widget for SubagentChatlist {
+impl Widget for SubagentRail {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        for (_, item) in self.tools.iter_mut() {
-            item.handle_event(cx, event, scope);
+        for row in self.rows.values_mut() {
+            row.handle_event(cx, event, scope);
         }
         self.view.handle_event(cx, event, scope);
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.view.draw_bg.begin(cx, walk, self.view.layout);
-        let mut idx = 0;
-        for session in &self.sessions {
-            for tool in &session.inner_tools {
-                let item_id = LiveId::from_num(1, idx as u64);
-                let template = self.tool_template.clone();
-                let item = self.tools.get_or_insert(cx, item_id, |cx| {
-                    cx.with_vm(|vm| WidgetRef::script_from_value(vm, template))
-                });
-                
-                item.label(cx, ids!(title_lbl)).set_text(cx, &tool.name);
-                item.label(cx, ids!(preview_lbl)).set_text(cx, &tool.target_preview);
-                
-                let (running, error, cancelled) = if tool.is_error {
-                    (false, true, false)
-                } else {
-                    (false, false, false)
-                };
-                
-                let indicator = item.widget(cx, ids!(status_indicator));
-                indicator.widget(cx, ids!(status_running_indicator)).set_visible(cx, running);
-                indicator.widget(cx, ids!(status_done_indicator)).set_visible(cx, !running && !error && !cancelled);
-                indicator.widget(cx, ids!(status_cancelled_indicator)).set_visible(cx, !running && !error && cancelled);
-                indicator.widget(cx, ids!(status_error_lbl)).set_visible(cx, !running && error);
-
-                item.draw_all_unscoped(cx);
-                idx += 1;
-            }
+        for (index, item) in self.items.iter().enumerate() {
+            let row_id = LiveId::from_num(1, index as u64);
+            let template = self.row_template;
+            let row = self.rows.get_or_insert(cx, row_id, |cx| {
+                cx.with_vm(|vm| WidgetRef::script_from_value(vm, template))
+            });
+            row.label(cx, ids!(title_lbl)).set_text(cx, &item.agent);
+            row.label(cx, ids!(preview_lbl)).set_text(cx, &item.task);
+            row.label(cx, ids!(status_lbl)).set_text(cx, &item.status);
+            row.markdown(cx, ids!(detail_md)).set_text(cx, &item.detail);
+            update_activity_status(
+                cx,
+                &row,
+                item.status == "Working",
+                item.status == "Failed",
+                item.status == "Stopped",
+            );
+            row.draw_all_unscoped(cx);
         }
         self.view.draw_bg.end(cx);
         DrawStep::done()
@@ -513,12 +509,14 @@ impl Widget for ChatList {
         if msg_count != self.cached_msg_count
             || data.streaming_kind != self.cached_streaming_kind
             || streaming_text_len != self.cached_streaming_text_len
+            || data.revision != self.cached_revision
         {
             self.cached_rows =
                 display_rows(&data.messages, data.streaming_kind, &data.streaming_text);
             self.cached_msg_count = msg_count;
             self.cached_streaming_kind = data.streaming_kind;
             self.cached_streaming_text_len = streaming_text_len;
+            self.cached_revision = data.revision;
         }
         let rows = &self.cached_rows;
 
@@ -683,6 +681,7 @@ impl Widget for ChatList {
                                 }
                                 ChatMessage::Tool {
                                     name,
+                                    arguments,
                                     output,
                                     status,
                                     presentation,
@@ -692,15 +691,40 @@ impl Widget for ChatList {
                                 } => {
                                     if name == "subagent" || presentation.icon == ToolIcon::Subagent {
                                         let item_widget = list.item(cx, item_id, id!(SubagentMsg));
-                                        
-                                        // Title and status
-                                        let sessions: Vec<crate::panels::chat::state::SubagentSessionData> = serde_json::from_str(output).unwrap_or_default();
-                                        
-                                        let tasks_preview = sessions.iter().map(|s| s.task.as_str()).collect::<Vec<_>>().join(", ");
-                                        let tasks_preview = truncate_chars(&tasks_preview, 60);
-                                        
-                                        item_widget.label(cx, ids!(preview_lbl)).set_text(cx, &tasks_preview);
-                                        
+                                        let rail_items = super::state::subagent_rail_items(
+                                            arguments,
+                                            output,
+                                            *status,
+                                            &data.messages,
+                                        );
+                                        let working = rail_items
+                                            .iter()
+                                            .filter(|item| item.status == "Working")
+                                            .count();
+                                        let queued = rail_items
+                                            .iter()
+                                            .filter(|item| item.status == "Queued")
+                                            .count();
+                                        let preview = if *status == ToolStatus::Running {
+                                            let suffix = if queued > 0 {
+                                                format!(" · {queued} queued")
+                                            } else {
+                                                String::new()
+                                            };
+                                            format!(
+                                                "{} agent{} · {working} working{suffix}",
+                                                rail_items.len(),
+                                                if rail_items.len() == 1 { "" } else { "s" },
+                                            )
+                                        } else {
+                                            format!(
+                                                "{} agent{} · {}",
+                                                rail_items.len(),
+                                                if rail_items.len() == 1 { "" } else { "s" },
+                                                result_metadata,
+                                            )
+                                        };
+                                        item_widget.label(cx, ids!(preview_lbl)).set_text(cx, &preview);
                                         update_activity_status(
                                             cx,
                                             &item_widget,
@@ -708,25 +732,22 @@ impl Widget for ChatList {
                                             *status == ToolStatus::Error,
                                             *status == ToolStatus::Cancelled,
                                         );
-                                        
-                                        // Provide inner tools to the nested chatlist
-                                        let subagent_chatlist = item_widget.widget(cx, ids!(chatlist));
-                                        if let Some(mut chatlist_inner) = subagent_chatlist.as_subagent_chatlist().borrow_mut() {
-                                            chatlist_inner.sessions = sessions.clone();
+                                        let rail = item_widget.widget(cx, ids!(rail));
+                                        if let Some(mut rail) = rail.as_subagent_rail().borrow_mut() {
+                                            rail.items = rail_items;
                                         }
-                                        
-                                        // Collect reasoning from all sessions and combine
-                                        let mut combined_output = String::new();
-                                        for (i, session) in sessions.iter().enumerate() {
-                                            if !session.thinking.is_empty() {
-                                                combined_output.push_str(&format!("<details><summary><b>Subagent {} Reasoning</b></summary>\n\n{}\n</details>\n\n", i + 1, session.thinking));
-                                            }
-                                            if !session.output.is_empty() {
-                                                combined_output.push_str(&format!("**Subagent {} Report:**\n{}\n\n", i + 1, session.output));
-                                            }
-                                        }
-                                        item_widget.markdown(cx, ids!(output_md)).set_text(cx, combined_output.trim());
-                                        
+                                        let detail = if *status == ToolStatus::Running {
+                                            String::new()
+                                        } else {
+                                            super::state::subagent_result_markdown(
+                                                output,
+                                                &presentation.arguments_detail,
+                                            )
+                                        };
+                                        item_widget.markdown(cx, ids!(output_md)).set_text(cx, &detail);
+                                        item_widget
+                                            .widget(cx, ids!(detail_wrap))
+                                            .set_visible(cx, *status != ToolStatus::Running);
                                         item_widget.draw_all_unscoped(cx);
                                     } else {
                                         let item_widget = list.item(cx, item_id, id!(ToolMsg));
@@ -841,19 +862,16 @@ impl Widget for ChatList {
 
         if let Event::Actions(actions) = event {
             let list = self.view.portal_list(cx, ids!(list));
-            let layout_changed = list
-                .items_with_actions(actions)
-                .into_iter()
-                .any(|(_, item)| {
-                    actions
-                        .find_widget_action(item.widget_uid())
-                        .is_some_and(|action| {
-                            matches!(
-                                action.cast::<ToolFoldHeaderAction>(),
-                                ToolFoldHeaderAction::LayoutChanged
-                            )
-                        })
-                });
+            let layout_changed = actions.iter().any(|action| {
+                action
+                    .downcast_ref::<WidgetAction>()
+                    .is_some_and(|action| {
+                        matches!(
+                            action.cast::<ToolFoldHeaderAction>(),
+                            ToolFoldHeaderAction::LayoutChanged
+                        )
+                    })
+            });
             if layout_changed {
                 list.redraw(cx);
             }

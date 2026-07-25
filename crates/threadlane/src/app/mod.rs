@@ -6,7 +6,7 @@ use crate::components::model_dropdown::IconDropDownWidgetRefExt;
 use crate::panels::chat::{
     accepts_generation_event, concise_status, draft_for_cancellation, submitted_draft, ChatList,
     ChatListWidgetRefExt, ComposerState, ComposerStatus, GenerationEvent, StarterPromptAction,
-    ToolFoldHeader, SubagentChatlist,
+    SubagentRail, ToolFoldHeader,
 };
 use crate::panels::command_palette::*;
 
@@ -788,8 +788,13 @@ script_mod! {
                 header: ActivityHeader {
                     width: Fill
                     height: 26
-                    title_lbl +: { width: 120, text: "Delegated tasks" }
-                    icon_tile = { icon_stack = { icon_generic = { visible: false }, icon_subagent = { visible: true } } }
+                    title_lbl +: { width: 92, text: "Agent tasks" }
+                    icon_tile +: {
+                        icon_stack +: {
+                            icon_generic +: { visible: false }
+                            icon_subagent +: { visible: true }
+                        }
+                    }
                     summary := View {
                         width: Fill
                         height: 20
@@ -807,42 +812,79 @@ script_mod! {
                 body: RoundedView {
                     width: Fill
                     height: Fit
-                    padding: Inset{left: 30 top: 2 right: 18 bottom: 6}
+                    padding: Inset{left: 30 top: 4 right: 18 bottom: 8}
                     flow: Down
-                    spacing: 4
+                    spacing: 6
                     draw_bg +: {
                         color: #x00000000
                         border_size: 0.0
                     }
-                    
-                    chatlist := #(SubagentChatlist::register_widget(vm)) {
+                    rail := #(SubagentRail::register_widget(vm)) {
                         width: Fill
                         height: Fit
                         flow: Down
-                        spacing: 2
-                        
-                        tool_template: View {
+                        spacing: 7
+                        row_template: #(ToolFoldHeader::register_widget(vm)) {
                             width: Fill
                             height: Fit
-                            flow: Right
-                            spacing: 8
-                            align: Align{y: 0.5}
-                            
-                            title_lbl := mod.components.CodeLabel {
-                                width: Fit
-                                draw_text +: { color: #x8494a8 }
+                            flow: Down
+                            body_walk: Walk{width: Fill, height: Fit}
+                            opened: 0.0
+                            animator +: {
+                                active: { default: @off }
                             }
-                            preview_lbl := mod.components.CodeLabel {
-                                width: Fit{max: FitBound.Abs(200)}
-                                max_lines: 1
-                                text_overflow: Ellipsis
-                                draw_text +: { color: #x768292 }
+                            header: ActivityHeader {
+                                width: Fill
+                                height: 24
+                                title_lbl +: {
+                                    width: 82
+                                    draw_text +: {
+                                        color: #xd5dbe4
+                                        text_style: theme.font_regular { font_size: 12.0 }
+                                    }
+                                }
+                                summary := View {
+                                    width: Fill
+                                    height: 20
+                                    flow: Right
+                                    spacing: 7
+                                    align: Align{y: 0.5}
+                                    clip_x: true
+                                    preview_lbl := mod.components.ClippedLabel {
+                                        width: Fill
+                                        draw_text +: { color: #x8794a3 }
+                                    }
+                                    status_lbl := Label {
+                                        width: Fit
+                                        height: 20
+                                        align: Align{y: 0.5}
+                                        padding: 0
+                                        draw_text +: {
+                                            color: #x8794a3
+                                            text_style +: { font_size: 9.0 }
+                                        }
+                                    }
+                                    status_indicator := ActivityStatusIndicator {}
+                                }
                             }
-                            status_indicator := ActivityStatusIndicator {}
+                            body: RoundedView {
+                                width: Fill
+                                height: Fit
+                                padding: Inset{left: 30 top: 2 right: 18 bottom: 6}
+                                draw_bg +: {
+                                    color: #x00000000
+                                    border_size: 0.0
+                                }
+                                detail_md := mod.components.ChatMarkdown {}
+                            }
                         }
                     }
-                    
-                    output_md := mod.components.ChatMarkdown {}
+                    detail_wrap := View {
+                        width: Fill
+                        height: Fit
+                        visible: false
+                        output_md := mod.components.ChatMarkdown {}
+                    }
                 }
             }
 
