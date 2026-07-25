@@ -542,6 +542,10 @@ fn workspace_relative_path(state: &serde_json::Value, uri: &str) -> Result<Strin
         .ok_or_else(|| "LSP edit escapes workspace".into())
 }
 
+fn path_matches_uri(path: &str, uri: &str, workspace_path: &str) -> bool {
+    path == workspace_path || uri.strip_prefix("file://") == Some(path)
+}
+
 fn workspace_edit_changes(edit: &serde_json::Value) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     if let Some(changes) = edit.get("changes").and_then(serde_json::Value::as_object) {
         return Ok(changes.clone());
@@ -1119,9 +1123,11 @@ pub extern "C" fn handle_hook(ptr: i32, len: i32) -> u64 {
     let path = invocation.arguments.get("tool_arguments")
         .and_then(|arguments| arguments.get("path"))
         .and_then(serde_json::Value::as_str);
+    let state_path = invocation.state.get("path").and_then(serde_json::Value::as_str).unwrap_or("");
+    let state_uri = invocation.state.get("uri").and_then(serde_json::Value::as_str).unwrap_or("");
     if !matches!(tool, Some("write_file" | "edit_file" | "edit_file_hashline"))
         || invocation.arguments.get("is_error").and_then(serde_json::Value::as_bool) == Some(true)
-        || path != invocation.state.get("path").and_then(serde_json::Value::as_str)
+        || !path.is_some_and(|path| path_matches_uri(path, state_uri, state_path))
     {
         return write_output(&Response::ok(String::new()));
     }
@@ -1318,6 +1324,15 @@ mod tests {
         }))
         .unwrap();
         assert!(changes.contains_key("file:///workspace/src/lib.rs"));
+    }
+
+    #[test]
+    fn hook_matches_absolute_path_against_lsp_uri() {
+        assert!(path_matches_uri(
+            "/workspace/src/lib.rs",
+            "file:///workspace/src/lib.rs",
+            "src/lib.rs",
+        ));
     }
 
     #[test]
