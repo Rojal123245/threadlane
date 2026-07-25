@@ -46,13 +46,21 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 struct ProjectTerminalSession {
-    _child: Child,
+    id: u64,
+    child: Child,
     stdin: ChildStdin,
     output: String,
 }
 
+#[derive(Default)]
+struct ProjectTerminalGroup {
+    sessions: Vec<ProjectTerminalSession>,
+    active: usize,
+}
+
 struct ProjectTerminalOutput {
     work_dir: PathBuf,
+    terminal_id: u64,
     bytes: Vec<u8>,
 }
 
@@ -2428,7 +2436,9 @@ pub struct App {
     #[rust]
     starter_prompt_focus_pending: bool,
     #[rust]
-    project_terminals: HashMap<PathBuf, ProjectTerminalSession>,
+    project_terminals: HashMap<PathBuf, ProjectTerminalGroup>,
+    #[rust]
+    next_terminal_id: u64,
     #[rust]
     terminal_tx: Option<Sender<ProjectTerminalOutput>>,
     #[rust]
@@ -2439,6 +2449,7 @@ impl ScriptHook for App {}
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
+        self.next_terminal_id = 1;
         let (terminal_tx, terminal_rx) = channel();
         self.terminal_tx = Some(terminal_tx);
         self.terminal_rx = Some(terminal_rx);
@@ -2669,17 +2680,32 @@ impl MatchEvent for App {
 
         self.spawn_model_fetch(api_key, account_id_opt);
         self.trigger_update_check(cx);
+        self.sync_terminal_project(cx);
 
         cx.redraw_all();
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        if let Some(command) = self
+        let terminal_actions = self
             .ui
             .project_terminal(cx, ids!(project_terminal))
-            .command(actions)
-        {
-            self.run_terminal_command(cx, command);
+            .actions(actions);
+        for action in terminal_actions {
+            match action {
+                crate::components::terminal_panel::ProjectTerminalAction::Run(command) => {
+                    self.run_terminal_command(cx, command);
+                }
+                crate::components::terminal_panel::ProjectTerminalAction::New => {
+                    self.create_project_terminal(cx);
+                }
+                crate::components::terminal_panel::ProjectTerminalAction::Select(index) => {
+                    self.select_project_terminal(cx, index);
+                }
+                crate::components::terminal_panel::ProjectTerminalAction::Close(index) => {
+                    self.close_project_terminal(cx, index);
+                }
+                crate::components::terminal_panel::ProjectTerminalAction::None => {}
+            }
         }
         for action in actions {
             if let Some(ImagePickerAction::Loaded { key, attachment }) =
@@ -3905,25 +3931,52 @@ impl App {
         (api_key, account_id)
     }
 
-    fn sync_terminal_project(&mut self, cx: &mut Cx) {
-        let Some(key) = self.workspace_state.active_key() else {
-            return;
-        };
-        let project = project_name(&key.work_dir);
-        let output = self
-            .project_terminals
-            .get(&key.work_dir)
-            .map(|terminal| terminal.output.as_str())
-            .unwrap_or("Terminal ready. Run a command to start the project shell.\n");
-        let terminal = self.ui.project_terminal(cx, ids!(project_terminal));
-        terminal.set_project(cx, &project);
-        terminal.set_output(cx, output);
+    fn active_terminal_project(&self) -> Option<PathBuf> {
+        self.workspace_state
+            .active_key()
+            .map(|key| key.work_dir.clone())
     }
 
-    fn start_project_terminal(&mut self, work_dir: &Path) -> Result<(), String> {
-        if self.project_terminals.contains_key(work_dir) {
-            return Ok(());
+    fn sync_terminal_project(&mut self, cx: &mut Cx) {
+        let Some(work_dir) = self.active_terminal_project() else {
+            return;
+        };
+        let project = project_name(&work_dir);
+        let terminal = self.ui.project_terminal(cx, ids!(project_terminal));
+        terminal.set_project(cx, &project);
+        if let Some(group) = self.project_terminals.get(&work_dir) {
+            let names = group
+                .sessions
+                .iter()
+                .enumerate()
+                .map(|(index, _)| {
+                    if index == 0 {
+                        project.clone()
+                    } else {
+                        format!("{project} {}", index + 1)
+                    }
+                })
+                .collect::<Vec<_>>();
+            let output = group
+                .sessions
+                .get(group.active)
+                .map(|session| session.output.as_str())
+                .unwrap_or_default();
+            terminal.set_terminals(cx, &names, Some(group.active), output);
+        } else {
+            terminal.set_terminals(
+                cx,
+                &[],
+                None,
+                "Use + to open a terminal for this project.\n",
+            );
         }
+    }
+
+    fn spawn_project_terminal(
+        &mut self,
+        work_dir: &Path,
+    ) -> Result<ProjectTerminalSession, String> {
         let mut command = if cfg!(windows) {
             Command::new("cmd.exe")
         } else {
@@ -3950,6 +4003,8 @@ impl App {
             .terminal_tx
             .clone()
             .ok_or("Terminal channel was unavailable")?;
+        let terminal_id = self.next_terminal_id;
+        self.next_terminal_id += 1;
         for reader in [Box::new(stdout) as Box<dyn Read + Send>, Box::new(stderr)] {
             let tx = tx.clone();
             let work_dir = work_dir.to_path_buf();
@@ -3962,6 +4017,7 @@ impl App {
                         Ok(count) => {
                             let _ = tx.send(ProjectTerminalOutput {
                                 work_dir: work_dir.clone(),
+                                terminal_id,
                                 bytes: buffer[..count].to_vec(),
                             });
                             SignalToUI::set_ui_signal();
@@ -3970,32 +4026,97 @@ impl App {
                 }
             });
         }
-        self.project_terminals.insert(
-            work_dir.to_path_buf(),
-            ProjectTerminalSession {
-                _child: child,
-                stdin,
-                output: String::new(),
-            },
-        );
-        Ok(())
+        Ok(ProjectTerminalSession {
+            id: terminal_id,
+            child,
+            stdin,
+            output: String::new(),
+        })
+    }
+
+    fn create_project_terminal(&mut self, cx: &mut Cx) {
+        const MAX_PROJECT_TERMINALS: usize = 6;
+        let Some(work_dir) = self.active_terminal_project() else {
+            return;
+        };
+        if self
+            .project_terminals
+            .get(&work_dir)
+            .is_some_and(|group| group.sessions.len() >= MAX_PROJECT_TERMINALS)
+        {
+            return;
+        }
+        match self.spawn_project_terminal(&work_dir) {
+            Ok(session) => {
+                let group = self.project_terminals.entry(work_dir).or_default();
+                group.sessions.push(session);
+                group.active = group.sessions.len() - 1;
+            }
+            Err(error) => {
+                self.ui
+                    .project_terminal(cx, ids!(project_terminal))
+                    .set_terminals(cx, &[], None, &format!("{error}\n"));
+                return;
+            }
+        }
+        self.sync_terminal_project(cx);
+    }
+
+    fn select_project_terminal(&mut self, cx: &mut Cx, index: usize) {
+        let Some(work_dir) = self.active_terminal_project() else {
+            return;
+        };
+        if let Some(group) = self.project_terminals.get_mut(&work_dir) {
+            if index < group.sessions.len() {
+                group.active = index;
+            }
+        }
+        self.sync_terminal_project(cx);
+    }
+
+    fn close_project_terminal(&mut self, cx: &mut Cx, index: usize) {
+        let Some(work_dir) = self.active_terminal_project() else {
+            return;
+        };
+        let remove_group = if let Some(group) = self.project_terminals.get_mut(&work_dir) {
+            if index >= group.sessions.len() {
+                return;
+            }
+            let mut session = group.sessions.remove(index);
+            let _ = session.child.kill();
+            let _ = session.child.wait();
+            if group.sessions.is_empty() {
+                true
+            } else {
+                if group.active >= group.sessions.len() {
+                    group.active = group.sessions.len() - 1;
+                } else if index < group.active {
+                    group.active -= 1;
+                }
+                false
+            }
+        } else {
+            return;
+        };
+        if remove_group {
+            self.project_terminals.remove(&work_dir);
+        }
+        self.sync_terminal_project(cx);
     }
 
     fn run_terminal_command(&mut self, cx: &mut Cx, command: String) {
-        let Some(work_dir) = self
-            .workspace_state
-            .active_key()
-            .map(|key| key.work_dir.clone())
-        else {
+        let Some(work_dir) = self.active_terminal_project() else {
             return;
         };
-        if let Err(error) = self.start_project_terminal(&work_dir) {
-            self.ui
-                .project_terminal(cx, ids!(project_terminal))
-                .set_output(cx, &format!("{error}\n"));
-            return;
+        if !self.project_terminals.contains_key(&work_dir) {
+            self.create_project_terminal(cx);
         }
-        let terminal = self.project_terminals.get_mut(&work_dir).unwrap();
+        let Some(group) = self.project_terminals.get_mut(&work_dir) else {
+            return;
+        };
+        let Some(terminal) = group.sessions.get_mut(group.active) else {
+            return;
+        };
         terminal.output.push_str(&format!("$ {command}\n"));
         let mut bytes = command.into_bytes();
         bytes.push(b'\n');
@@ -4020,19 +4141,29 @@ impl App {
             return;
         }
         for event in events {
-            if let Some(terminal) = self.project_terminals.get_mut(&event.work_dir) {
-                terminal
-                    .output
-                    .push_str(&String::from_utf8_lossy(&event.bytes));
-                const MAX_TERMINAL_OUTPUT: usize = 256 * 1024;
-                if terminal.output.len() > MAX_TERMINAL_OUTPUT {
-                    let cutoff = terminal.output.len() - MAX_TERMINAL_OUTPUT;
-                    let cutoff = terminal.output[cutoff..]
-                        .char_indices()
-                        .find_map(|(offset, ch)| (ch == '\n').then_some(cutoff + offset + 1))
-                        .unwrap_or(cutoff);
-                    terminal.output.drain(..cutoff);
-                }
+            let Some(terminal) =
+                self.project_terminals
+                    .get_mut(&event.work_dir)
+                    .and_then(|group| {
+                        group
+                            .sessions
+                            .iter_mut()
+                            .find(|session| session.id == event.terminal_id)
+                    })
+            else {
+                continue;
+            };
+            terminal
+                .output
+                .push_str(&String::from_utf8_lossy(&event.bytes));
+            const MAX_TERMINAL_OUTPUT: usize = 256 * 1024;
+            if terminal.output.len() > MAX_TERMINAL_OUTPUT {
+                let cutoff = terminal.output.len() - MAX_TERMINAL_OUTPUT;
+                let cutoff = terminal.output[cutoff..]
+                    .char_indices()
+                    .find_map(|(offset, ch)| (ch == '\n').then_some(cutoff + offset + 1))
+                    .unwrap_or(cutoff);
+                terminal.output.drain(..cutoff);
             }
         }
         self.sync_terminal_project(cx);
