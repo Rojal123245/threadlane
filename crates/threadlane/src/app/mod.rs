@@ -38,30 +38,21 @@ use threadlane_coding_agent::{
 use threadlane_provider::auth;
 use threadlane_provider::openai::{fetch_available_models, OpenAIClient};
 
+use makepad_terminal_core::{Pty, Terminal};
 use std::collections::HashMap;
-use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 struct ProjectTerminalSession {
-    id: u64,
-    child: Child,
-    stdin: ChildStdin,
-    output: String,
+    pty: Pty,
+    emulator: Terminal,
 }
 
 #[derive(Default)]
 struct ProjectTerminalGroup {
     sessions: Vec<ProjectTerminalSession>,
     active: usize,
-}
-
-struct ProjectTerminalOutput {
-    work_dir: PathBuf,
-    terminal_id: u64,
-    bytes: Vec<u8>,
 }
 
 const ANTIGRAVITY_MODELS: &[&str] = &[
@@ -1974,6 +1965,13 @@ script_mod! {
                                 }
                             }
 
+                            terminal_header_btn := mod.components.TerminalIconButton {
+                                width: 24
+                                height: 24
+                                icon_walk: Walk{width: 11 height: 11}
+                                draw_icon +: { svg: crate_resource("self:resources/icons/terminal.svg") }
+                            }
+
                             caps_btn := Button {
                                 width: Fit
                                 height: 28
@@ -2779,9 +2777,7 @@ pub struct App {
     #[rust]
     next_terminal_id: u64,
     #[rust]
-    terminal_tx: Option<Sender<ProjectTerminalOutput>>,
-    #[rust]
-    terminal_rx: Option<Receiver<ProjectTerminalOutput>>,
+    terminal_poll_next_frame: NextFrame,
 }
 
 impl ScriptHook for App {}
@@ -2789,9 +2785,7 @@ impl ScriptHook for App {}
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         self.next_terminal_id = 1;
-        let (terminal_tx, terminal_rx) = channel();
-        self.terminal_tx = Some(terminal_tx);
-        self.terminal_rx = Some(terminal_rx);
+        self.terminal_poll_next_frame = cx.new_next_frame();
         let (tx, rx) = channel::<GuiAgentEvent>();
         self.tx = Some(tx);
         self.rx = Some(Arc::new(Mutex::new(rx)));
@@ -3031,8 +3025,11 @@ impl MatchEvent for App {
             .actions(actions);
         for action in terminal_actions {
             match action {
-                crate::components::terminal_panel::ProjectTerminalAction::Run(command) => {
-                    self.run_terminal_command(cx, command);
+                crate::components::terminal_panel::ProjectTerminalAction::Input(bytes) => {
+                    self.write_terminal_bytes(cx, bytes);
+                }
+                crate::components::terminal_panel::ProjectTerminalAction::LayoutChanged => {
+                    cx.redraw_all();
                 }
                 crate::components::terminal_panel::ProjectTerminalAction::New => {
                     self.create_project_terminal(cx);
@@ -3052,6 +3049,12 @@ impl MatchEvent for App {
             {
                 self.apply_image_picker_result(cx, key.clone(), attachment.clone());
             }
+        }
+
+        if self.ui.button(cx, ids!(terminal_header_btn)).clicked(actions) {
+            self.ui
+                .project_terminal(cx, ids!(project_terminal))
+                .toggle(cx);
         }
 
         if self.ui.button(cx, ids!(settings_btn)).clicked(actions) {
@@ -3450,7 +3453,10 @@ impl AppMain for App {
         self.match_event(cx, event);
         self.poll_agent_events(cx);
         self.poll_update_status(cx);
-        self.poll_terminal_output(cx);
+        if self.terminal_poll_next_frame.is_event(event).is_some() {
+            self.poll_terminal_output(cx);
+            self.terminal_poll_next_frame = cx.new_next_frame();
+        }
         {
             let mut scope = Scope::with_data(&mut self.workspace_state);
             self.ui.handle_event(cx, event, &mut scope);
@@ -4283,6 +4289,10 @@ impl App {
         let project = project_name(&work_dir);
         let terminal = self.ui.project_terminal(cx, ids!(project_terminal));
         terminal.set_project(cx, &project);
+        if !self.project_terminals.contains_key(&work_dir) {
+            self.create_project_terminal(cx);
+            return;
+        }
         if let Some(group) = self.project_terminals.get(&work_dir) {
             let names = group
                 .sessions
@@ -4299,16 +4309,10 @@ impl App {
             let output = group
                 .sessions
                 .get(group.active)
-                .map(|session| session.output.as_str())
+                .map(Self::terminal_text)
                 .unwrap_or_default();
+            let output = output.as_str();
             terminal.set_terminals(cx, &names, Some(group.active), output);
-        } else {
-            terminal.set_terminals(
-                cx,
-                &[],
-                None,
-                "Use + to open a terminal for this project.\n",
-            );
         }
     }
 
@@ -4316,60 +4320,18 @@ impl App {
         &mut self,
         work_dir: &Path,
     ) -> Result<ProjectTerminalSession, String> {
-        let mut command = if cfg!(windows) {
-            Command::new("cmd.exe")
-        } else {
-            let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into());
-            Command::new(shell)
-        };
-        let mut child = command
-            .current_dir(work_dir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("Could not start terminal: {error}"))?;
-        let stdin = child.stdin.take().ok_or("Terminal stdin was unavailable")?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or("Terminal stdout was unavailable")?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or("Terminal stderr was unavailable")?;
-        let tx = self
-            .terminal_tx
-            .clone()
-            .ok_or("Terminal channel was unavailable")?;
-        let terminal_id = self.next_terminal_id;
         self.next_terminal_id += 1;
-        for reader in [Box::new(stdout) as Box<dyn Read + Send>, Box::new(stderr)] {
-            let tx = tx.clone();
-            let work_dir = work_dir.to_path_buf();
-            std::thread::spawn(move || {
-                let mut reader = BufReader::new(reader);
-                let mut buffer = [0_u8; 4096];
-                loop {
-                    match reader.read(&mut buffer) {
-                        Ok(0) | Err(_) => break,
-                        Ok(count) => {
-                            let _ = tx.send(ProjectTerminalOutput {
-                                work_dir: work_dir.clone(),
-                                terminal_id,
-                                bytes: buffer[..count].to_vec(),
-                            });
-                            SignalToUI::set_ui_signal();
-                        }
-                    }
-                }
-            });
-        }
+        let pty = Pty::spawn(
+            80,
+            24,
+            None,
+            &[("TERM", "xterm-256color")],
+            Some(work_dir),
+        )
+        .map_err(|error| format!("Could not start terminal: {error}"))?;
         Ok(ProjectTerminalSession {
-            id: terminal_id,
-            child,
-            stdin,
-            output: String::new(),
+            pty,
+            emulator: Terminal::new(80, 24),
         })
     }
 
@@ -4421,9 +4383,7 @@ impl App {
             if index >= group.sessions.len() {
                 return;
             }
-            let mut session = group.sessions.remove(index);
-            let _ = session.child.kill();
-            let _ = session.child.wait();
+            group.sessions.remove(index);
             if group.sessions.is_empty() {
                 true
             } else {
@@ -4443,7 +4403,7 @@ impl App {
         self.sync_terminal_project(cx);
     }
 
-    fn run_terminal_command(&mut self, cx: &mut Cx, command: String) {
+    fn write_terminal_bytes(&mut self, cx: &mut Cx, bytes: Vec<u8>) {
         let Some(work_dir) = self.active_terminal_project() else {
             return;
         };
@@ -4456,56 +4416,69 @@ impl App {
         let Some(terminal) = group.sessions.get_mut(group.active) else {
             return;
         };
-        terminal.output.push_str(&format!("$ {command}\n"));
-        let mut bytes = command.into_bytes();
-        bytes.push(b'\n');
-        if let Err(error) = terminal
-            .stdin
-            .write_all(&bytes)
-            .and_then(|_| terminal.stdin.flush())
-        {
-            terminal
-                .output
-                .push_str(&format!("Terminal write failed: {error}\n"));
+        if let Err(error) = terminal.pty.write(&bytes) {
+            eprintln!("Terminal write failed: {error}");
         }
         self.sync_terminal_project(cx);
     }
 
     fn poll_terminal_output(&mut self, cx: &mut Cx) {
-        let Some(rx) = self.terminal_rx.as_ref() else {
-            return;
-        };
-        let events: Vec<_> = rx.try_iter().collect();
-        if events.is_empty() {
-            return;
-        }
-        for event in events {
-            let Some(terminal) =
-                self.project_terminals
-                    .get_mut(&event.work_dir)
-                    .and_then(|group| {
-                        group
-                            .sessions
-                            .iter_mut()
-                            .find(|session| session.id == event.terminal_id)
-                    })
-            else {
-                continue;
-            };
-            terminal
-                .output
-                .push_str(&String::from_utf8_lossy(&event.bytes));
-            const MAX_TERMINAL_OUTPUT: usize = 256 * 1024;
-            if terminal.output.len() > MAX_TERMINAL_OUTPUT {
-                let cutoff = terminal.output.len() - MAX_TERMINAL_OUTPUT;
-                let cutoff = terminal.output[cutoff..]
-                    .char_indices()
-                    .find_map(|(offset, ch)| (ch == '\n').then_some(cutoff + offset + 1))
-                    .unwrap_or(cutoff);
-                terminal.output.drain(..cutoff);
+        for group in self.project_terminals.values_mut() {
+            for session in &mut group.sessions {
+                while let Some(bytes) = session.pty.try_read() {
+                    session.emulator.process_bytes(&bytes);
+                    let outbound = session.emulator.take_outbound();
+                    if !outbound.is_empty() {
+                        let _ = session.pty.write(&outbound);
+                    }
+                }
             }
         }
         self.sync_terminal_project(cx);
+    }
+
+    fn terminal_text(session: &ProjectTerminalSession) -> String {
+        let screen = session.emulator.screen();
+        const CURSOR_MARKER: char = '\u{e000}';
+        let cursor_row = screen.scrollback().len() + screen.cursor.y;
+        let cursor_col = screen.cursor.x;
+        let mut output = String::new();
+        let mut push_row = |row_index: usize, cells: &[makepad_terminal_core::Cell]| {
+            let mut line: String = cells.iter().map(|cell| cell.codepoint).collect();
+            if row_index == cursor_row {
+                let width = line.chars().count();
+                if width < cursor_col {
+                    line.extend(std::iter::repeat(' ').take(cursor_col - width));
+                }
+                let byte_index = line
+                    .char_indices()
+                    .nth(cursor_col)
+                    .map(|(index, _)| index)
+                    .unwrap_or(line.len());
+                line.insert(byte_index, CURSOR_MARKER);
+            } else {
+                line = line.trim_end().to_owned();
+            }
+            output.push_str(&line);
+            output.push('\n');
+        };
+        for (row, cells) in screen.scrollback().iter().enumerate() {
+            push_row(row, cells);
+        }
+        for row in 0..screen.rows() {
+            push_row(cursor_row - screen.cursor.y + row, screen.grid.row_slice(row));
+        }
+        const MAX_TERMINAL_OUTPUT: usize = 256 * 1024;
+        if output.len() > MAX_TERMINAL_OUTPUT {
+            let cutoff = output.len() - MAX_TERMINAL_OUTPUT;
+            let cutoff = output[cutoff..]
+                .char_indices()
+                .find_map(|(offset, ch)| (ch == '\n').then_some(cutoff + offset + 1))
+                .unwrap_or(cutoff);
+            output.drain(..cutoff);
+        }
+        output.pop();
+        output
     }
 
     fn select_workspace(&mut self, work_dir: PathBuf, session_id: impl Into<String>) {
