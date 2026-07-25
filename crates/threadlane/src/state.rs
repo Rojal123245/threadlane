@@ -65,10 +65,14 @@ impl BackgroundTaskState {
 pub struct CapabilityPackageRow {
     pub id: String,
     pub name: String,
-    #[allow(dead_code)]
     pub module_path: PathBuf,
-    #[allow(dead_code)]
     pub enabled: bool,
+}
+
+impl CapabilityPackageRow {
+    pub fn is_available(&self) -> bool {
+        self.enabled && self.module_path.is_file()
+    }
 }
 
 #[derive(Default)]
@@ -168,6 +172,12 @@ mod tests {
         assert_eq!(capabilities.packages[0].name, "Test Extension");
         assert_eq!(capabilities.packages[0].module_path, module_path);
         assert!(capabilities.packages[0].enabled);
+        assert!(capabilities.packages[0].is_available());
+        capabilities.packages[0].enabled = false;
+        assert!(!capabilities.packages[0].is_available());
+        capabilities.packages[0].enabled = true;
+        fs::remove_file(&capabilities.packages[0].module_path).unwrap();
+        assert!(!capabilities.packages[0].is_available());
         fs::remove_dir_all(project).unwrap();
     }
 

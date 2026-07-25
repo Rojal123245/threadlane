@@ -3868,7 +3868,12 @@ impl App {
         self.capability_state
             .refresh(&CapabilityCatalog::discover(Some(&work_dir)));
         let mut summary = String::new();
-        for package in &self.capability_state.packages {
+        for package in self
+            .capability_state
+            .packages
+            .iter()
+            .filter(|package| package.is_available())
+        {
             summary.push_str(&format!("{} · project · WASI\n", package.name));
         }
         if summary.is_empty() {
