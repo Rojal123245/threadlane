@@ -5,9 +5,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use threadlane_agent::AgentEvent;
-use threadlane_coding_agent::{
-    CapabilityCatalog, PackageScope, TaskAgentEvent,
-};
+use threadlane_coding_agent::{CapabilityCatalog, TaskAgentEvent};
 
 pub use crate::panels::chat::*;
 pub use crate::panels::command_palette::*;
@@ -67,21 +65,15 @@ impl BackgroundTaskState {
 pub struct CapabilityPackageRow {
     pub id: String,
     pub name: String,
-    pub scope: PackageScope,
-}
-
-pub struct CapabilityExtensionRow {
-    pub package_id: Option<String>,
-    pub full_trust: bool,
+    #[allow(dead_code)]
+    pub module_path: PathBuf,
+    #[allow(dead_code)]
     pub enabled: bool,
-    pub revision: Option<String>,
-    pub trusted: bool,
 }
 
 #[derive(Default)]
 pub struct CapabilityState {
     pub packages: Vec<CapabilityPackageRow>,
-    pub extensions: Vec<CapabilityExtensionRow>,
 }
 
 impl CapabilityState {
@@ -92,29 +84,10 @@ impl CapabilityState {
             .map(|package| CapabilityPackageRow {
                 id: package.id().to_owned(),
                 name: package.name().to_owned(),
-                scope: package.scope(),
+                module_path: package.module_path().to_path_buf(),
+                enabled: package.is_enabled(),
             })
             .collect();
-        self.extensions = catalog
-            .extensions()
-            .iter()
-            .map(|extension| CapabilityExtensionRow {
-                package_id: extension.package_id().map(str::to_owned),
-                full_trust: extension.is_full_trust(),
-                enabled: extension.is_enabled(),
-                revision: extension.revision().map(str::to_owned),
-                trusted: extension.is_trusted(),
-            })
-            .collect();
-    }
-
-    pub fn mark_revoked(&mut self, package_id: &str) {
-        for extension in &mut self.extensions {
-            if extension.full_trust && extension.package_id.as_deref() == Some(package_id) {
-                extension.enabled = false;
-                extension.trusted = false;
-            }
-        }
     }
 }
 
@@ -158,23 +131,48 @@ pub enum GuiAgentEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn capability_revoke_and_background_completion_update_state() {
-        let mut capabilities = CapabilityState {
-            extensions: vec![CapabilityExtensionRow {
-                package_id: Some("example".into()),
-                full_trust: true,
-                enabled: true,
-                revision: Some("revision".into()),
-                trusted: true,
-            }],
-            ..Default::default()
-        };
-        capabilities.mark_revoked("example");
-        assert!(!capabilities.extensions[0].enabled);
-        assert!(!capabilities.extensions[0].trusted);
+    fn capability_refresh_copies_project_wasi_package_state() {
+        let project = std::env::temp_dir().join(format!(
+            "threadlane-capability-state-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let package = project.join(".threadlane/extensions/test-extension");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(
+            package.join("threadlane-package.json"),
+            r#"{
+                "id": "test-extension",
+                "name": "Test Extension",
+                "version": "1.0.0",
+                "description": "test fixture",
+                "extension": "extension.wasm"
+            }"#,
+        )
+        .unwrap();
+        let module_path = package.join("extension.wasm");
+        fs::write(&module_path, b"test wasm").unwrap();
 
+        let catalog = CapabilityCatalog::discover(Some(&project));
+        let mut capabilities = CapabilityState::default();
+        capabilities.refresh(&catalog);
+        assert_eq!(capabilities.packages.len(), 1);
+        assert_eq!(capabilities.packages[0].id, "test-extension");
+        assert_eq!(capabilities.packages[0].name, "Test Extension");
+        assert_eq!(capabilities.packages[0].module_path, module_path);
+        assert!(capabilities.packages[0].enabled);
+        fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn background_completion_updates_state() {
         let mut tasks = BackgroundTaskState::default();
         tasks.started("task-1".into(), PathBuf::from("/project"));
         assert_eq!(tasks.summary(), "1 tasks · 1 running");

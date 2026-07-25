@@ -34,7 +34,7 @@ use robius_file_picker::FileDialog;
 use threadlane_agent::{get_runtime, AgentEvent, ImageAttachment, ReasoningEffort};
 use threadlane_coding_agent::{
     discover_agents, AgentConfig, AgentScope, CapabilityCatalog, CodingAgent, CodingAgentOptions,
-    HarnessSupervisor, PackageManager, PackageScope, ProjectContext, SkillMetadata, TrustStore,
+    HarnessSupervisor, PackageManager, ProjectContext, SkillMetadata,
 };
 use threadlane_provider::auth;
 use threadlane_provider::openai::{fetch_available_models, OpenAIClient};
@@ -1417,7 +1417,7 @@ script_mod! {
                     padding: Inset{left: 10 right: 8 top: 6 bottom: 6}
                     spacing: 0
                     align: Align{x: 0.0 y: 0.5}
-                    text: "Capabilities"
+                    text: "WASI Extensions"
                     draw_bg +: {
                         color: #x20252e
                         color_hover: #x2b3442
@@ -1758,7 +1758,7 @@ script_mod! {
                     capability_page_title := Label {
                         width: Fill
                         height: Fit
-                        text: "Capabilities"
+                        text: "WASI Extensions"
                         draw_text +: {
                             color: #xe7ebf0
                             text_style: theme.font_bold { font_size: 18.0 }
@@ -1768,7 +1768,7 @@ script_mod! {
                     capability_page_desc := Label {
                         width: Fill
                         height: Fit
-                        text: "Install packages and manage explicit approval for full-trust executables."
+                        text: "Install and manage sandboxed WASI extension packages for this project."
                         draw_text +: {
                             color: #x7f8c9d
                             text_style +: { font_size: 10.0 }
@@ -1802,12 +1802,6 @@ script_mod! {
                         }
                         capability_remove_btn := SettingsActionButton {
                             text: "Remove"
-                        }
-                        capability_approve_btn := SettingsActionButton {
-                            text: "Approve"
-                        }
-                        capability_revoke_btn := SettingsActionButton {
-                            text: "Revoke"
                         }
                         capability_refresh_btn := SettingsActionButton {
                             text: "Refresh"
@@ -2998,8 +2992,6 @@ pub struct App {
     #[rust]
     background_tasks: BackgroundTaskState,
     #[rust]
-    pending_trust_action: Option<(bool, String)>,
-    #[rust]
     update_status: UpdateStatus,
     #[rust]
     update_rx: Option<Arc<Mutex<Receiver<UpdateStatus>>>>,
@@ -3470,24 +3462,9 @@ impl MatchEvent for App {
         }
         if self
             .ui
-            .button(cx, ids!(capability_approve_btn))
-            .clicked(actions)
-        {
-            self.confirm_trust_change(cx, true);
-        }
-        if self
-            .ui
-            .button(cx, ids!(capability_revoke_btn))
-            .clicked(actions)
-        {
-            self.confirm_trust_change(cx, false);
-        }
-        if self
-            .ui
             .button(cx, ids!(capability_refresh_btn))
             .clicked(actions)
         {
-            self.pending_trust_action = None;
             self.refresh_capability_state(cx);
         }
 
@@ -3875,7 +3852,6 @@ impl App {
     }
 
     fn dismiss_providers_modal(&mut self, cx: &mut Cx) {
-        self.pending_trust_action = None;
         if let Some(mut modal) = self
             .ui
             .widget(cx, ids!(providers_modal))
@@ -3889,33 +3865,11 @@ impl App {
         let Some(work_dir) = self.active_work_dir().map(Path::to_path_buf) else {
             return;
         };
-        self.capability_state.refresh(&CapabilityCatalog::discover(
-            Some(&work_dir),
-            &global_threadlane_dir(),
-        ));
+        self.capability_state
+            .refresh(&CapabilityCatalog::discover(Some(&work_dir)));
         let mut summary = String::new();
         for package in &self.capability_state.packages {
-            let scope = match package.scope {
-                PackageScope::Global => "global",
-                PackageScope::Project => "project",
-            };
-            let trust = self
-                .capability_state
-                .extensions
-                .iter()
-                .find(|extension| extension.package_id.as_deref() == Some(&package.id))
-                .map(|extension| {
-                    if extension.trusted {
-                        "trusted"
-                    } else {
-                        "approval required"
-                    }
-                })
-                .unwrap_or("sandboxed");
-            summary.push_str(&format!(
-                "{} · {} · {}\n",
-                package.name, scope, trust
-            ));
+            summary.push_str(&format!("{} · project · WASI\n", package.name));
         }
         if summary.is_empty() {
             summary.push_str("No packages discovered.");
@@ -3951,8 +3905,8 @@ impl App {
         let Some(work_dir) = self.active_work_dir().map(Path::to_path_buf) else {
             return;
         };
-        let manager = PackageManager::new(global_threadlane_dir());
-        match manager.install_from_local(&source, PackageScope::Project, Some(&work_dir)) {
+        let manager = PackageManager::new();
+        match manager.install_from_local(&source, &work_dir) {
             Ok(package) => {
                 self.ui
                     .text_input(cx, ids!(capability_package_input))
@@ -3971,83 +3925,26 @@ impl App {
 
     fn remove_selected_package(&mut self, cx: &mut Cx) {
         let package_id = self.selected_capability_package_id(cx);
-        let Some(package) = self
+        if !self
             .capability_state
             .packages
             .iter()
-            .find(|package| package.id == package_id)
-        else {
+            .any(|package| package.id == package_id)
+        {
             self.ui
                 .label(cx, ids!(capability_status_lbl))
                 .set_text(cx, "Enter an installed package ID.");
             return;
+        }
+        let Some(work_dir) = self.active_work_dir().map(Path::to_path_buf) else {
+            return;
         };
-        let scope = package.scope;
-        let work_dir = self.active_work_dir().map(Path::to_path_buf);
-        match PackageManager::new(global_threadlane_dir()).remove_package(
-            &package_id,
-            scope,
-            work_dir.as_deref(),
-        ) {
+        match PackageManager::new().remove_package(&package_id, &work_dir) {
             Ok(()) => {
                 self.refresh_capability_state(cx);
                 self.ui
                     .label(cx, ids!(capability_status_lbl))
                     .set_text(cx, "Package removed.");
-            }
-            Err(error) => self
-                .ui
-                .label(cx, ids!(capability_status_lbl))
-                .set_text(cx, &error),
-        }
-    }
-
-    fn confirm_trust_change(&mut self, cx: &mut Cx, approve: bool) {
-        let package_id = self.selected_capability_package_id(cx);
-        let action = if approve { "approve" } else { "revoke" };
-        if package_id.is_empty() {
-            self.ui
-                .label(cx, ids!(capability_status_lbl))
-                .set_text(cx, "Enter a package ID.");
-            return;
-        }
-        if self.pending_trust_action.as_ref() != Some(&(approve, package_id.clone())) {
-            self.pending_trust_action = Some((approve, package_id));
-            self.ui
-                .label(cx, ids!(capability_status_lbl))
-                .set_text(cx, &format!("Click {action} again to confirm."));
-            return;
-        }
-        self.pending_trust_action = None;
-        let trust_file = global_threadlane_dir().join("state/trust.json");
-        let mut trust = TrustStore::load_from_file(&trust_file);
-        if approve {
-            let Some(revision) = self
-                .capability_state
-                .extensions
-                .iter()
-                .find(|extension| {
-                    extension.full_trust
-                        && extension.package_id.as_deref() == Some(&package_id)
-                })
-                .and_then(|extension| extension.revision.clone())
-            else {
-                self.ui
-                    .label(cx, ids!(capability_status_lbl))
-                    .set_text(cx, "No valid full-trust executable found for that package.");
-                return;
-            };
-            trust.approve(package_id.clone(), revision);
-        } else {
-            trust.revoke(&package_id);
-            self.capability_state.mark_revoked(&package_id);
-        }
-        match trust.save_to_file(&trust_file) {
-            Ok(()) => {
-                self.refresh_capability_state(cx);
-                self.ui
-                    .label(cx, ids!(capability_status_lbl))
-                    .set_text(cx, &format!("Trust {action}d."));
             }
             Err(error) => self
                 .ui
