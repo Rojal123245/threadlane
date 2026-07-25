@@ -109,12 +109,10 @@ fn display_rows(
     streaming_text: &str,
 ) -> Vec<DisplayRow> {
     let mut rows = Vec::new();
-    let has_subagent_parent = messages.iter().any(|message| {
-        matches!(message, ChatMessage::Tool { name, presentation, .. } if name == "subagent" || presentation.icon == ToolIcon::Subagent)
-    });
+    let owned_subagent_runs = super::state::owned_subagent_child_runs(messages);
 
     for (message_index, message) in messages.iter().enumerate() {
-        if has_subagent_parent && super::state::is_subagent_child_tool(message) {
+        if super::state::is_owned_subagent_child_tool(message, &owned_subagent_runs) {
             continue;
         }
         if is_activity(message) {
@@ -1074,8 +1072,27 @@ mod tests {
             }]
         ));
 
-        let owned_rows = display_rows(&[tool("delegate", "subagent", "{}"), child], None, "");
-        assert!(matches!(owned_rows.as_slice(), [DisplayRow::Message(0)]));
+        let unrelated_child = tool(
+            "subagent-405:0:read",
+            "read_file",
+            r#"{"path":"src/unrelated.rs"}"#,
+        );
+        let owned_rows = display_rows(
+            &[tool("delegate", "subagent", "{}"), child, unrelated_child],
+            None,
+            "",
+        );
+        assert!(matches!(
+            owned_rows.as_slice(),
+            [
+                DisplayRow::Message(0),
+                DisplayRow::ActivityGroup {
+                    start: 2,
+                    end: 3,
+                    streaming_thinking: false
+                }
+            ]
+        ));
     }
 
     #[test]

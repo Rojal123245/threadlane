@@ -138,6 +138,35 @@ pub fn is_subagent_child_tool(message: &ChatMessage) -> bool {
     matches!(message, ChatMessage::Tool { id, .. } if subagent_child_tool_tag(id).is_some())
 }
 
+pub fn owned_subagent_child_runs(messages: &[ChatMessage]) -> Vec<u64> {
+    let mut runs = Vec::new();
+    for (index, message) in messages.iter().enumerate() {
+        if !is_subagent_parent_tool(message) {
+            continue;
+        }
+        let run_id = messages[index + 1..]
+            .iter()
+            .take_while(|message| !is_subagent_parent_tool(message))
+            .find_map(|message| match message {
+                ChatMessage::Tool { id, .. } => subagent_child_tool_tag(id).map(|tag| tag.run_id),
+                _ => None,
+            });
+        if let Some(run_id) = run_id.filter(|run_id| !runs.contains(run_id)) {
+            runs.push(run_id);
+        }
+    }
+    runs
+}
+
+pub fn is_owned_subagent_child_tool(message: &ChatMessage, owned_runs: &[u64]) -> bool {
+    is_subagent_child_tool(message)
+        && matches!(message, ChatMessage::Tool { id, .. } if matches!(subagent_child_tool_tag(id), Some(tag) if owned_runs.contains(&tag.run_id)))
+}
+
+fn is_subagent_parent_tool(message: &ChatMessage) -> bool {
+    matches!(message, ChatMessage::Tool { name, presentation, .. } if name == "subagent" || presentation.icon == ToolIcon::Subagent)
+}
+
 fn subagent_task_activity_detail(
     messages: &[ChatMessage],
     run_id: Option<u64>,
