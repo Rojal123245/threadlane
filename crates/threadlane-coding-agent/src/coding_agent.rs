@@ -927,6 +927,7 @@ pub struct CodingAgent {
     broker_dispatcher: Arc<CapabilityDispatcher>,
     agent_work: AgentWorkScheduler,
     base_system_prompt: String,
+    prompt_templates: Option<Vec<crate::prompt_templates::PromptTemplate>>,
     #[cfg(test)]
     subagent_work_observer: SubagentObserverState,
 }
@@ -1361,6 +1362,7 @@ impl CodingAgent {
             broker_dispatcher,
             agent_work,
             base_system_prompt,
+            prompt_templates: None,
             #[cfg(test)]
             subagent_work_observer,
         }
@@ -1595,12 +1597,15 @@ impl CodingAgent {
         let trimmed = input.trim();
 
         // 1. Expand prompt templates (e.g. /review, /component Button) if match
-        let global_dir = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .map(|h| h.join(".threadlane"))
-            .unwrap_or_else(|| self.work_dir.join(".threadlane"));
-        let templates = crate::prompt_templates::load_prompt_templates(&self.work_dir, &global_dir);
-        let expanded_input = crate::prompt_templates::expand_prompt_template(trimmed, &templates);
+        if self.prompt_templates.is_none() {
+            let global_dir = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|h| h.join(".threadlane"))
+                .unwrap_or_else(|| self.work_dir.join(".threadlane"));
+            self.prompt_templates = Some(crate::prompt_templates::load_prompt_templates(&self.work_dir, &global_dir));
+        }
+        let templates = self.prompt_templates.as_ref().unwrap();
+        let expanded_input = crate::prompt_templates::expand_prompt_template(trimmed, templates);
         let effective_input = expanded_input.trim();
 
         if let Some(command_input) = effective_input.strip_prefix('/') {

@@ -700,7 +700,7 @@ script_mod! {
                 height: Fit
                 flow: Down
                 body_walk: Walk{width: Fill, height: Fit}
-                margin: Inset{top: 1 bottom: 1 left: 20 right: 24}
+                margin: Inset{top: 4 bottom: 2 left: 20 right: 24}
                 opened: 0.0
                 animator +: {
                     active: { default: @off }
@@ -742,7 +742,7 @@ script_mod! {
                 height: Fit
                 flow: Down
                 body_walk: Walk{width: Fill, height: Fit}
-                margin: Inset{top: 1 bottom: 1 left: 20 right: 24}
+                margin: Inset{top: 4 bottom: 2 left: 20 right: 24}
                 opened: 0.0
                 animator +: {
                     active: { default: @off }
@@ -789,7 +789,7 @@ script_mod! {
                 height: Fit
                 flow: Down
                 body_walk: Walk{width: Fill, height: Fit}
-                margin: Inset{top: 1 bottom: 1 left: 20 right: 24}
+                margin: Inset{top: 4 bottom: 2 left: 20 right: 24}
                 opened: 0.0
                 animator +: {
                     active: { default: @off }
@@ -929,7 +929,7 @@ script_mod! {
                 height: Fit
                 flow: Down
                 body_walk: Walk{width: Fill, height: Fit}
-                margin: Inset{top: 1 bottom: 1 left: 20 right: 24}
+                margin: Inset{top: 4 bottom: 2 left: 20 right: 24}
                 opened: 0.0
                 animator +: {
                     active: { default: @off }
@@ -1815,7 +1815,8 @@ script_mod! {
                                 }
                                 chat_working_indicator := View {
                                     width: Fill
-                                    height: 18
+                                    height: 26
+                                    margin: Inset{top: 8 bottom: 4}
                                     padding: Inset{left: 20}
                                     visible: false
                                     align: Align{x: 0.0 y: 0.5}
@@ -2200,16 +2201,37 @@ fn image_attachment_from_rgba(
         return Err("Clipboard image has invalid pixel data".to_string());
     }
 
+    let max_dim = 1600;
+    let (target_w, target_h, src_rgba) = if width > max_dim || height > max_dim {
+        let scale = (max_dim as f64) / (width.max(height) as f64);
+        let tw = ((width as f64 * scale) as usize).max(1);
+        let th = ((height as f64 * scale) as usize).max(1);
+        let mut resized = vec![0u8; tw * th * 4];
+        for y in 0..th {
+            let src_y = ((y as f64 / scale) as usize).min(height - 1);
+            for x in 0..tw {
+                let src_x = ((x as f64 / scale) as usize).min(width - 1);
+                let src_idx = (src_y * width + src_x) * 4;
+                let dst_idx = (y * tw + x) * 4;
+                resized[dst_idx..dst_idx + 4].copy_from_slice(&rgba[src_idx..src_idx + 4]);
+            }
+        }
+        (tw, th, std::borrow::Cow::Owned(resized))
+    } else {
+        (width, height, std::borrow::Cow::Borrowed(rgba))
+    };
+
     let mut encoded = Vec::new();
     {
-        let mut encoder = png::Encoder::new(&mut encoded, width as u32, height as u32);
+        let mut encoder = png::Encoder::new(&mut encoded, target_w as u32, target_h as u32);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(png::Compression::Fast);
         let mut writer = encoder
             .write_header()
             .map_err(|error| format!("Could not encode clipboard image: {error}"))?;
         writer
-            .write_image_data(rgba)
+            .write_image_data(&src_rgba)
             .map_err(|error| format!("Could not encode clipboard image: {error}"))?;
     }
     if encoded.len() as u64 > MAX_IMAGE_BYTES {
@@ -5030,7 +5052,7 @@ impl App {
             }
         }
 
-        cx.redraw_all();
+        self.ui.view(cx, ids!(chat_panel)).redraw(cx);
     }
 }
 

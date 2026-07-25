@@ -1,6 +1,7 @@
 //! Chat panel state: chat messages, tool call presentations, and streaming status.
 
 use std::path::Path;
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use threadlane_agent::AgentMessage;
 
@@ -140,21 +141,24 @@ pub fn is_subagent_child_tool(message: &ChatMessage) -> bool {
 
 pub fn owned_subagent_child_runs(messages: &[ChatMessage]) -> Vec<u64> {
     let mut runs = Vec::new();
-    for (index, message) in messages.iter().enumerate() {
-        if !is_subagent_parent_tool(message) {
-            continue;
-        }
-        let run_id = messages[index + 1..]
-            .iter()
-            .take_while(|message| !is_subagent_parent_tool(message))
-            .find_map(|message| match message {
-                ChatMessage::Tool { id, .. } => subagent_child_tool_tag(id).map(|tag| tag.run_id),
-                _ => None,
-            });
-        if let Some(run_id) = run_id.filter(|run_id| !runs.contains(run_id)) {
-            runs.push(run_id);
+    let mut seen = HashSet::new();
+    let mut in_parent_block = false;
+
+    for message in messages {
+        if is_subagent_parent_tool(message) {
+            in_parent_block = true;
+        } else if in_parent_block {
+            if let ChatMessage::Tool { id, .. } = message {
+                if let Some(tag) = subagent_child_tool_tag(id) {
+                    if seen.insert(tag.run_id) {
+                        runs.push(tag.run_id);
+                    }
+                    in_parent_block = false;
+                }
+            }
         }
     }
+
     runs
 }
 

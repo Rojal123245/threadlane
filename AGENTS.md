@@ -186,6 +186,8 @@ Drawing in an overlay does not automatically stop widgets underneath from receiv
 - `SubagentRail` manually draws dynamic `ToolFoldHeader` rows but does not keep per-row draw state. Consume each row with `draw_all_unscoped`; propagating a row's intermediate `DrawStep` restarts the rail loop at the first header and prevents expanded bodies from drawing.
 - Custom containers that manually draw dynamic children must end their turtle into their own `Area`. A dereferenced `View` whose background is begun/ended directly can retain a zero-sized widget area even while its child rows draw visibly, which removes the container from pointer-event traversal.
 - The chat `PortalList` range is based on display rows, not raw message count. If changing grouping, preserve stable ordering, auto-tail behavior, and non-reused fold widget state.
+- Avoid calling `markdown.set_text(cx, text)` unconditionally inside `draw_walk` when text is unchanged; `set_text` forces Makepad to discard its AST and re-parse Markdown/syntax highlighting on every frame draw. Check `widget.text() != text` before updating.
+- Precalculate tool details, activity summaries, and JSON presentations in `DisplayRow` state when building display items rather than invoking `serde_json::from_str` or string line-splitting during `draw_walk`.
 
 ### Composer Drop-Ups
 

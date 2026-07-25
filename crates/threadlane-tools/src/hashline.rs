@@ -36,19 +36,23 @@ pub fn format_line_hashline(line_no: usize, line: &str) -> String {
 
 /// Parse a line anchor string like `"12:a3f"` into line index (1-based) and lowercased hash.
 pub fn parse_anchor(anchor: &str) -> Result<(usize, String), String> {
-    let parts: Vec<&str> = anchor.split(':').collect();
-    if parts.len() != 2 {
+    let (first, second) = anchor.split_once(':').ok_or_else(|| {
+        format!(
+            "Invalid anchor format '{anchor}'. Expected format 'line_number:hash' (e.g. '12:a3f')."
+        )
+    })?;
+    if second.contains(':') {
         return Err(format!(
             "Invalid anchor format '{anchor}'. Expected format 'line_number:hash' (e.g. '12:a3f')."
         ));
     }
-    let line_no: usize = parts[0].trim().parse().map_err(|_| {
+    let line_no: usize = first.trim().parse().map_err(|_| {
         format!("Invalid line number in anchor '{anchor}'. Must be a positive integer.")
     })?;
     if line_no == 0 {
         return Err(format!("Invalid line number 0 in anchor '{anchor}'. Line numbers are 1-indexed."));
     }
-    let hash = parts[1].trim().to_lowercase();
+    let hash = second.trim().to_lowercase();
     if hash.is_empty() {
         return Err(format!("Hash missing in anchor '{anchor}'."));
     }
@@ -157,16 +161,11 @@ pub fn apply_hashline_edits(content: &str, edits: &[HashlineEdit]) -> Result<Str
     for edit in validated_edits {
         match edit.action {
             HashlineAction::Replace => {
-                lines.drain(edit.start_idx..=edit.end_idx);
-                for (offset, new_line) in edit.new_lines.into_iter().enumerate() {
-                    lines.insert(edit.start_idx + offset, new_line);
-                }
+                lines.splice(edit.start_idx..=edit.end_idx, edit.new_lines);
             }
             HashlineAction::InsertAfter => {
                 let insert_at = edit.end_idx + 1;
-                for (offset, new_line) in edit.new_lines.into_iter().enumerate() {
-                    lines.insert(insert_at + offset, new_line);
-                }
+                lines.splice(insert_at..insert_at, edit.new_lines);
             }
             HashlineAction::Delete => {
                 lines.drain(edit.start_idx..=edit.end_idx);
