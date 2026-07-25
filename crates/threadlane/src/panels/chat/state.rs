@@ -19,17 +19,6 @@ pub enum ToolStatus {
     Cancelled,
 }
 
-impl ToolStatus {
-    pub fn glyph(self) -> &'static str {
-        match self {
-            ToolStatus::Running => "◌",
-            ToolStatus::Done => "✓",
-            ToolStatus::Error => "✗",
-            ToolStatus::Cancelled => "-",
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolIcon {
     ReadFile,
@@ -69,6 +58,163 @@ pub struct SubagentInnerToolData {
     pub is_error: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubagentRailItem {
+    pub agent: String,
+    pub task: String,
+    pub status: String,
+    pub detail: String,
+}
+
+pub fn subagent_rail_items(
+    arguments: &str,
+    output: &str,
+    status: ToolStatus,
+    messages: &[ChatMessage],
+) -> Vec<SubagentRailItem> {
+    if let Ok(sessions) = serde_json::from_str::<Vec<SubagentSessionData>>(output) {
+        if !sessions.is_empty() {
+            return sessions
+                .into_iter()
+                .enumerate()
+                .map(|(index, session)| SubagentRailItem {
+                    agent: session.agent,
+                    task: normalize_whitespace_bounded(&session.task, 160),
+                    status: session.status,
+                    detail: subagent_task_activity_detail(messages, index),
+                })
+                .collect();
+        }
+    }
+
+    let parsed = serde_json::from_str::<serde_json::Value>(arguments).ok();
+    let parallel = parsed
+        .as_ref()
+        .and_then(|value| value.get("parallel"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    parsed
+        .as_ref()
+        .and_then(|value| value.get("tasks"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .map(|(index, task)| SubagentRailItem {
+            agent: task
+                .get("agent")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("subagent")
+                .to_string(),
+            task: task
+                .get("task")
+                .and_then(serde_json::Value::as_str)
+                .map(|task| normalize_whitespace_bounded(task, 160))
+                .unwrap_or_default(),
+            status: match status {
+                ToolStatus::Running if parallel || index == 0 => "Working",
+                ToolStatus::Running => "Queued",
+                ToolStatus::Done => "Done",
+                ToolStatus::Error => "Failed",
+                ToolStatus::Cancelled => "Stopped",
+            }
+            .to_string(),
+            detail: subagent_task_activity_detail(messages, index),
+        })
+        .collect()
+}
+
+pub fn is_subagent_child_tool(message: &ChatMessage) -> bool {
+    matches!(message, ChatMessage::Tool { id, .. } if subagent_task_index(id).is_some())
+}
+
+fn subagent_task_activity_detail(messages: &[ChatMessage], task_index: usize) -> String {
+    messages
+        .iter()
+        .filter_map(|message| match message {
+            ChatMessage::Tool {
+                id,
+                name,
+                presentation,
+                status,
+                ..
+            } if subagent_task_index(id) == Some(task_index) => {
+                let target = if presentation.primary.is_empty() {
+                    String::new()
+                } else {
+                    format!(" `{}`", presentation.primary)
+                };
+                Some(format!("- **{}**{} · {}", name, target, subagent_tool_status(*status)))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn subagent_task_index(tool_call_id: &str) -> Option<usize> {
+    let tagged = tool_call_id.strip_prefix("subagent-")?;
+    let (run, tagged) = tagged.split_once(':')?;
+    let (task_index, tool_call_id) = tagged.split_once(':')?;
+    (!run.is_empty() && !tool_call_id.is_empty())
+        .then(|| task_index.parse().ok())
+        .flatten()
+}
+
+fn subagent_tool_status(status: ToolStatus) -> &'static str {
+    match status {
+        ToolStatus::Running => "Working",
+        ToolStatus::Done => "Done",
+        ToolStatus::Error => "Failed",
+        ToolStatus::Cancelled => "Stopped",
+    }
+}
+
+pub fn subagent_result_markdown(output: &str, fallback: &str) -> String {
+    let Ok(sessions) = serde_json::from_str::<Vec<SubagentSessionData>>(output) else {
+        return fallback.to_string();
+    };
+    if sessions.is_empty() {
+        return fallback.to_string();
+    }
+
+    let session_count = sessions.len();
+    sessions
+        .into_iter()
+        .enumerate()
+        .map(|(index, session)| {
+            let mut section = format!(
+                "### {} · {}\n\n**Task:** {}",
+                session.agent,
+                session.status,
+                normalize_whitespace_bounded(&session.task, 240),
+            );
+            if !session.inner_tools.is_empty() {
+                section.push_str("\n\n**Activity**");
+                for tool in session.inner_tools {
+                    let status = if tool.is_error { "✗" } else { "✓" };
+                    section.push_str(&format!(
+                        "\n- {status} `{}` · {}",
+                        tool.name, tool.target_preview
+                    ));
+                }
+            }
+            if !session.thinking.trim().is_empty() {
+                section.push_str(&format!("\n\n<details><summary>Reasoning</summary>\n\n{}\n</details>", session.thinking));
+            }
+            if !session.output.trim().is_empty() {
+                section.push_str(&format!("\n\n**Report**\n\n{}", session.output));
+            }
+            if index + 1 < session_count {
+                section.push_str("\n\n---");
+            }
+            section
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum ChatMessage {
     Text {
@@ -102,6 +248,7 @@ pub struct ChatData {
     pub messages: Vec<ChatMessage>,
     pub streaming_text: String,
     pub streaming_kind: Option<StreamingKind>,
+    pub revision: u64,
 }
 
 impl ChatData {
@@ -110,10 +257,12 @@ impl ChatData {
             role,
             text: text.into(),
         });
+        self.revision = self.revision.wrapping_add(1);
     }
 
     pub fn push_thinking(&mut self, text: String) {
         push_thinking_locked(self, text);
+        self.revision = self.revision.wrapping_add(1);
     }
 
     pub fn push_stream_delta(&mut self, kind: StreamingKind, delta: &str) {
@@ -163,6 +312,7 @@ impl ChatData {
             *result_metadata =
                 result_metadata_for_tool(name, output, ToolStatus::Cancelled, started_at.elapsed());
         }
+        self.revision = self.revision.wrapping_add(1);
     }
 
     pub fn push_tool(&mut self, id: String, name: String, arguments: String) {
@@ -189,6 +339,7 @@ impl ChatData {
             result_metadata.clear();
             *status = ToolStatus::Running;
             *started_at = Instant::now();
+            self.revision = self.revision.wrapping_add(1);
             return;
         }
         self.messages.push(ChatMessage::Tool {
@@ -202,6 +353,7 @@ impl ChatData {
             result_metadata: String::new(),
             started_at: Instant::now(),
         });
+        self.revision = self.revision.wrapping_add(1);
     }
 
     pub fn update_tool(&mut self, id: &str, output: String, status: Option<ToolStatus>) {
@@ -227,6 +379,7 @@ impl ChatData {
             if let Some(status) = status {
                 *existing_status = status;
             }
+            self.revision = self.revision.wrapping_add(1);
         }
     }
 
@@ -234,6 +387,7 @@ impl ChatData {
         self.messages.clear();
         self.streaming_text.clear();
         self.streaming_kind = None;
+        self.revision = self.revision.wrapping_add(1);
         for msg in messages {
             match msg {
                 AgentMessage::User { content } => self.push_chat(MsgRole::User, content.clone()),
@@ -710,17 +864,6 @@ fn ordered_list_marker_end(line: &str) -> Option<usize> {
         .then_some(marker_end)
 }
 
-pub fn tool_preview(name: &str, arguments: &str) -> String {
-    let presentation = tool_presentation(name, arguments);
-    if presentation.metadata.is_empty() {
-        presentation.primary
-    } else if name == "read_file" {
-        format!("{}  ({})", presentation.primary, presentation.metadata)
-    } else {
-        presentation.primary
-    }
-}
-
 fn compact_command(command: &str) -> String {
     let normalized = command.split_whitespace().collect::<Vec<_>>().join(" ");
     truncate_chars(&normalized, 48)
@@ -815,7 +958,8 @@ pub fn tool_result_detail(output: &str, max_chars: usize) -> String {
     format!("{body}\n{notice}")
 }
 
-pub fn result_metadata_for(output: &str, status: ToolStatus, duration: Duration) -> String {
+#[cfg(test)]
+fn result_metadata_for(output: &str, status: ToolStatus, duration: Duration) -> String {
     result_metadata_for_tool("", output, status, duration)
 }
 
@@ -827,7 +971,7 @@ fn result_metadata_for_tool(
 ) -> String {
     let secs = duration.as_secs_f32();
     let time_label = if secs < 0.1 {
-        format!("<0.1s")
+        "<0.1s".to_string()
     } else {
         format!("{secs:.1}s")
     };
@@ -999,6 +1143,95 @@ mod tests {
             .arguments_detail
             .contains("Subagent Session 1 (`scout`)"));
         assert!(presentation.output_markdown);
+    }
+
+    #[test]
+    fn subagent_result_markdown_keeps_each_agent_report_and_tool_outcome() {
+        let output = serde_json::json!([
+            {
+                "agent": "scout",
+                "task": "Inspect the workspace",
+                "status": "Done",
+                "thinking": "",
+                "inner_tools": [{
+                    "name": "read_file",
+                    "target_preview": "src/main.rs",
+                    "is_error": false
+                }],
+                "output": "Found the entry point."
+            },
+            {
+                "agent": "reviewer",
+                "task": "Review the change",
+                "status": "Failed",
+                "thinking": "",
+                "inner_tools": [],
+                "output": "Model unavailable"
+            }
+        ])
+        .to_string();
+
+        let markdown = subagent_result_markdown(&output, "fallback");
+
+        assert!(markdown.contains("### scout · Done"));
+        assert!(markdown.contains("Inspect the workspace"));
+        assert!(markdown.contains("- ✓ `read_file` · src/main.rs"));
+        assert!(markdown.contains("### reviewer · Failed"));
+        assert!(markdown.contains("Model unavailable"));
+    }
+
+    #[test]
+    fn updating_a_tool_advances_the_chat_revision() {
+        let mut data = ChatData::default();
+        data.push_tool("delegation".into(), "subagent".into(), "{\"tasks\":[]}".into());
+        let revision = data.revision;
+
+        data.update_tool("delegation", "[]".into(), Some(ToolStatus::Done));
+
+        assert!(data.revision > revision);
+    }
+
+    #[test]
+    fn subagent_rail_marks_only_the_first_sequential_task_as_running() {
+        let arguments = serde_json::json!({
+            "parallel": false,
+            "tasks": [
+                {"agent": "scout", "task": "Inspect the repository"},
+                {"agent": "reviewer", "task": "Review the change"}
+            ]
+        })
+        .to_string();
+
+        let items = subagent_rail_items(&arguments, "", ToolStatus::Running, &[]);
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].agent, "scout");
+        assert_eq!(items[0].status, "Working");
+        assert_eq!(items[1].status, "Queued");
+    }
+
+    #[test]
+    fn subagent_rail_places_tagged_child_tool_under_its_task() {
+        let child = ChatMessage::Tool {
+            id: "subagent-1:0:call-1".into(),
+            name: "read_file".into(),
+            arguments: r#"{"path":"src/lib.rs"}"#.into(),
+            output: String::new(),
+            status: ToolStatus::Running,
+            presentation: tool_presentation("read_file", r#"{"path":"src/lib.rs"}"#),
+            result_preview: String::new(),
+            result_metadata: String::new(),
+            started_at: Instant::now(),
+        };
+
+        let items = subagent_rail_items(
+            r#"{"parallel":true,"tasks":[{"agent":"scout","task":"inspect"}]}"#,
+            "",
+            ToolStatus::Running,
+            &[child],
+        );
+
+        assert!(items[0].detail.contains("read_file"));
     }
 
     #[test]
