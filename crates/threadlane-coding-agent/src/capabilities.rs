@@ -1,5 +1,4 @@
 use crate::agents::{discover_agents, AgentConfig, AgentScope};
-use crate::full_trust_extension::{compute_executable_revision, TrustStore};
 use crate::packages::{PackageManager, PackageRecord};
 use crate::skills::{SkillManager, SkillMetadata};
 use crate::wasi_extension::WasiExtensionManager;
@@ -31,8 +30,9 @@ impl CapabilityCatalog {
         skill_mgr.discover_skills(project_root);
         let skills = skill_mgr.list_skills();
 
-        let pkg_mgr = PackageManager::new(global_dir.to_path_buf());
-        let packages = pkg_mgr.list_packages(project_root);
+        let packages = project_root
+            .map(|project_root| PackageManager::new().list_packages(project_root))
+            .unwrap_or_default();
 
         let cwd = project_root.unwrap_or(global_dir);
         let agents = discover_agents(cwd, AgentScope::Both).agents;
@@ -51,33 +51,6 @@ impl CapabilityCatalog {
                     enabled: true,
                     revision: None,
                     is_trusted: true,
-                });
-            }
-        }
-
-        let trust_file = global_dir.join("state/trust.json");
-        let trust_store = TrustStore::load_from_file(&trust_file);
-
-        for pkg in &packages {
-            if let Some(ref exe_rel) = pkg.manifest.full_trust_executable {
-                let exe_path = pkg.root_dir.join(exe_rel);
-                let rev = compute_executable_revision(&exe_path).ok();
-                let is_valid = rev.is_some();
-
-                let trusted = if let Some(ref r) = rev {
-                    trust_store.is_trusted(&pkg.manifest.id, r)
-                } else {
-                    false
-                };
-
-                extensions.push(ExtensionMetadata {
-                    id: format!("{}-exe", pkg.manifest.id),
-                    package_id: Some(pkg.manifest.id.clone()),
-                    name: format!("{} (Executable)", pkg.manifest.name),
-                    is_full_trust: true,
-                    enabled: trusted && is_valid,
-                    revision: rev,
-                    is_trusted: trusted,
                 });
             }
         }

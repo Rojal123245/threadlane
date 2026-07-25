@@ -1,16 +1,16 @@
-use threadlane_agent::{AgentState, AgentToolCall, BeforeToolCallHook};
-use threadlane_coding_agent::{
-    BrokerError, BrokerOperationResult, BrokerRequest, CapabilityDispatcher, CapabilityHandler,
-    CapabilityPolicy, ExtensionBeforeToolHook, HostBrokerRequest, HostCapabilityGrantPolicy,
-    ToolPolicy, WasiExtension, WasiExtensionEvent, WasiExtensionManager, WasiExtensionManifest,
-    WasiToolDefinition,
-};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
+use threadlane_agent::{AgentState, AgentToolCall, BeforeToolCallHook};
+use threadlane_coding_agent::{
+    BrokerError, BrokerOperationResult, BrokerRequest, CapabilityDispatcher, CapabilityHandler,
+    CapabilityPolicy, ExtensionBeforeToolHook, HostBrokerRequest, HostCapabilityGrantPolicy,
+    PackageManager, ToolPolicy, WasiExtension, WasiExtensionEvent, WasiExtensionManager,
+    WasiExtensionManifest, WasiToolDefinition,
+};
 
 fn build_broker_smoke_extension(agent_only: bool) -> PathBuf {
     static BUILD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -264,6 +264,38 @@ fn manifest_wasm(json: &str) -> Vec<u8> {
     data.extend_from_slice(json.as_bytes());
     push_section(&mut wasm, 11, &data);
     wasm
+}
+
+#[test]
+fn installed_package_is_discovered_by_wasi_loader() {
+    let project = tempdir().unwrap();
+    let source = tempdir().unwrap();
+    std::fs::write(
+        source.path().join("threadlane-package.json"),
+        r#"{
+            "id": "test-extension",
+            "name": "Test Extension",
+            "version": "1.0.0",
+            "description": "test fixture",
+            "extension": "extension.wasm"
+        }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        source.path().join("extension.wasm"),
+        manifest_wasm(
+            r#"{"api_version":1,"name":"test_extension","version":"1.0.0","description":"test fixture"}"#,
+        ),
+    )
+    .unwrap();
+
+    PackageManager::new()
+        .install_from_local(source.path(), project.path())
+        .unwrap();
+
+    let mut extensions = WasiExtensionManager::for_project(project.path());
+    assert_eq!(extensions.discover_and_load(project.path()), 1);
+    assert!(extensions.get_extensions().contains_key("test_extension"));
 }
 
 fn hook_wasm(api_version: u32, response: &str) -> Vec<u8> {

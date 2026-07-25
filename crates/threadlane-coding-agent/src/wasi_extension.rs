@@ -461,11 +461,11 @@ impl WasiExtensionManager {
         Self::default()
     }
 
-    pub(crate) fn get_extensions(&self) -> &HashMap<String, WasiExtension> {
+    pub fn get_extensions(&self) -> &HashMap<String, WasiExtension> {
         &self.extensions
     }
 
-    pub(crate) fn for_project(project_dir: &Path) -> Self {
+    pub fn for_project(project_dir: &Path) -> Self {
         Self {
             state_dir: Some(project_dir.join(".threadlane/state/extensions")),
             ..Self::default()

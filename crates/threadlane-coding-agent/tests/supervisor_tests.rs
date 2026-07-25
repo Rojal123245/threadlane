@@ -1,11 +1,11 @@
-use threadlane_coding_agent::{
-    CapabilityCatalog, CodingAgentOptions, FullTrustRunner, HarnessSupervisor, SkillManager,
-    PackageManager, PackageScope, SkillScope, TaskStatus, TrustStore,
-};
 use std::fs::{self, File};
 use std::io::Write;
 use std::time::Duration;
 use tempfile::tempdir;
+use threadlane_coding_agent::{
+    CodingAgentOptions, FullTrustRunner, HarnessSupervisor, PackageManager, SkillManager,
+    SkillScope, TaskStatus, TrustStore,
+};
 
 #[tokio::test]
 async fn test_supervisor_multi_task_isolation() {
@@ -159,45 +159,101 @@ fn test_full_trust_revision_approval() {
     assert!(runner.execute_request("{}", &trust_file).is_err());
 }
 
-#[test]
-fn test_package_install_discovery_and_removal() {
-    let proj_dir = tempdir().unwrap();
-    let global_dir = tempdir().unwrap();
-    let source_dir = tempdir().unwrap();
+fn write_wasi_package_fixture(source: &std::path::Path, extension: &str, wasm: &[u8]) {
+    fs::create_dir_all(source).unwrap();
     fs::write(
-        source_dir.path().join("threadlane-package.json"),
-        r#"{
-            "id": "test-package",
-            "name": "Test Package",
-            "version": "1.0.0",
-            "description": null,
-            "skills": null,
-            "extensions": null,
-            "full_trust_executable": null
-        }"#,
+        source.join("threadlane-package.json"),
+        format!(
+            r#"{{
+                "id": "test-extension",
+                "name": "Test Extension",
+                "version": "1.0.0",
+                "description": "test fixture",
+                "extension": "{extension}"
+            }}"#
+        ),
     )
     .unwrap();
+    fs::write(source.join("extension.wasm"), wasm).unwrap();
+}
 
-    let manager = PackageManager::new(global_dir.path().to_path_buf());
-    manager
-        .install_from_local(source_dir.path(), PackageScope::Global, None)
+#[test]
+fn package_install_lists_and_removes_project_wasi_extension() {
+    let project = tempdir().unwrap();
+    let source = tempdir().unwrap();
+    write_wasi_package_fixture(source.path(), "extension.wasm", b"test wasm");
+
+    let manager = PackageManager::new();
+    let package = manager
+        .install_from_local(source.path(), project.path())
         .unwrap();
-    let catalog = CapabilityCatalog::discover(Some(proj_dir.path()), global_dir.path());
-    let package = catalog
-        .packages()
-        .iter()
-        .find(|package| package.id() == "test-package")
-        .unwrap();
-    assert_eq!(package.name(), "Test Package");
-    assert_eq!(package.scope(), PackageScope::Global);
+    let module = project
+        .path()
+        .join(".threadlane/extensions/test-extension/extension.wasm");
+
+    assert!(project
+        .path()
+        .join(".threadlane/extensions/test-extension/threadlane-package.json")
+        .is_file());
+    assert!(module.is_file());
+    assert_eq!(package.id(), "test-extension");
+    assert_eq!(package.name(), "Test Extension");
+    assert_eq!(package.module_path(), module);
     assert!(package.is_enabled());
+    assert_eq!(manager.list_packages(project.path()).len(), 1);
 
     manager
-        .remove_package("test-package", PackageScope::Global, None)
+        .remove_package("test-extension", project.path())
         .unwrap();
-    let catalog = CapabilityCatalog::discover(Some(proj_dir.path()), global_dir.path());
-    assert!(catalog
-        .packages()
-        .iter()
-        .all(|package| package.id() != "test-package"));
+    assert!(!module.exists());
+}
+
+#[test]
+fn package_install_rejects_invalid_modules_without_creating_extensions() {
+    for extension in [
+        "../outside.wasm",
+        "/tmp/outside.wasm",
+        "extension.bin",
+        "missing.wasm",
+    ] {
+        let project = tempdir().unwrap();
+        let source_root = tempdir().unwrap();
+        let source = source_root.path().join("source");
+        write_wasi_package_fixture(&source, extension, b"test wasm");
+
+        assert!(
+            PackageManager::new()
+                .install_from_local(&source, project.path())
+                .is_err(),
+            "{extension} was accepted"
+        );
+        assert!(!project.path().join(".threadlane/extensions").exists());
+    }
+}
+
+#[test]
+fn package_install_preserves_existing_extension_when_replacement_is_invalid() {
+    let project = tempdir().unwrap();
+    let valid_source = tempdir().unwrap();
+    let invalid_source_root = tempdir().unwrap();
+    let invalid_source = invalid_source_root.path().join("source");
+    write_wasi_package_fixture(valid_source.path(), "extension.wasm", b"original wasm");
+    write_wasi_package_fixture(&invalid_source, "missing.wasm", b"replacement wasm");
+
+    let manager = PackageManager::new();
+    manager
+        .install_from_local(valid_source.path(), project.path())
+        .unwrap();
+    assert!(manager
+        .install_from_local(&invalid_source, project.path())
+        .is_err());
+    assert_eq!(
+        fs::read(
+            project
+                .path()
+                .join(".threadlane/extensions/test-extension/extension.wasm")
+        )
+        .unwrap(),
+        b"original wasm"
+    );
 }
