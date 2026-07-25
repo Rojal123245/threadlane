@@ -13,25 +13,25 @@ pub enum Role {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
-    pub role: Role,
+    role: Role,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<ToolCall>>,
+    tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
+    tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
+    name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Session {
-    pub messages: Vec<Message>,
-    pub model: String,
+    messages: Vec<Message>,
+    model: String,
 }
 
 impl Session {
-    pub fn new(model: &str) -> Self {
+    pub(crate) fn new(model: &str) -> Self {
         let system_message = Message {
             role: Role::System,
             content: Some(
@@ -52,7 +52,7 @@ impl Session {
         }
     }
 
-    pub fn add_user_message(&mut self, content: &str) {
+    pub(crate) fn add_user_message(&mut self, content: &str) {
         self.messages.push(Message {
             role: Role::User,
             content: Some(content.to_string()),
@@ -62,7 +62,7 @@ impl Session {
         });
     }
 
-    pub fn add_assistant_message(
+    pub(crate) fn add_assistant_message(
         &mut self,
         content: Option<String>,
         tool_calls: Option<Vec<ToolCall>>,
@@ -76,7 +76,7 @@ impl Session {
         });
     }
 
-    pub fn add_tool_result(&mut self, tool_call_id: &str, tool_name: &str, result: &str) {
+    pub(crate) fn add_tool_result(&mut self, tool_call_id: &str, tool_name: &str, result: &str) {
         self.messages.push(Message {
             role: Role::Tool,
             content: Some(result.to_string()),
@@ -86,7 +86,7 @@ impl Session {
         });
     }
 
-    pub fn to_api_payload(&self, tools: Vec<Value>) -> Value {
+    pub(crate) fn to_api_payload(&self, tools: Vec<Value>) -> Value {
         serde_json::json!({
             "model": self.model,
             "messages": self.messages,
@@ -96,7 +96,7 @@ impl Session {
         })
     }
 
-    pub fn to_codex_payload(&self, tools: Vec<Value>) -> Value {
+    pub(crate) fn to_codex_payload(&self, tools: Vec<Value>) -> Value {
         serde_json::json!({
             "model": self.model,
             "input": self.messages,

@@ -2,29 +2,29 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamRule {
-    pub id: String,
-    pub name: String,
-    pub pattern: String,
-    pub reminder: String,
+    id: String,
+    name: String,
+    pattern: String,
+    reminder: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct RuleMatch {
-    pub rule_id: String,
-    pub rule_name: String,
-    pub matched_text: String,
-    pub reminder: String,
+    pub(crate) rule_id: String,
+    pub(crate) rule_name: String,
+    pub(crate) matched_text: String,
+    pub(crate) reminder: String,
 }
 
 const MAX_WINDOW_BYTES: usize = 4096;
 
-pub struct StreamRuleMonitor {
+pub(crate) struct StreamRuleMonitor {
     rules: Vec<(StreamRule, regex::Regex)>,
     accumulated_text: String,
 }
 
 impl StreamRuleMonitor {
-    pub fn new(rules: Vec<StreamRule>) -> Self {
+    pub(crate) fn new(rules: Vec<StreamRule>) -> Self {
         let mut compiled = Vec::new();
         for rule in rules {
             if let Ok(re) = regex::Regex::new(&rule.pattern) {
@@ -47,7 +47,7 @@ impl StreamRuleMonitor {
         }
     }
 
-    pub fn push_chunk(&mut self, chunk: &str) -> Option<RuleMatch> {
+    pub(crate) fn push_chunk(&mut self, chunk: &str) -> Option<RuleMatch> {
         self.accumulated_text.push_str(chunk);
         self.clamp_window();
         for (rule, re) in &self.rules {
@@ -63,7 +63,7 @@ impl StreamRuleMonitor {
         None
     }
 
-    pub fn reset(&mut self) {
+    fn reset(&mut self) {
         self.accumulated_text.clear();
     }
 }

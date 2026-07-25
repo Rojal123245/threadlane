@@ -3,11 +3,11 @@
 use serde_json::Value;
 use std::time::Duration;
 
-pub const TITLE_SYSTEM_PROMPT: &str =
+const TITLE_SYSTEM_PROMPT: &str =
     "Return only a concise session title, maximum 42 Unicode characters, with no Markdown or explanation.";
-pub const TITLE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const TITLE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub fn title_payload(model: &str, prompt: &str, is_codex: bool) -> Value {
+pub(crate) fn title_payload(model: &str, prompt: &str, is_codex: bool) -> Value {
     if is_codex {
         serde_json::json!({
             "model": model,
@@ -32,7 +32,7 @@ pub fn title_payload(model: &str, prompt: &str, is_codex: bool) -> Value {
     }
 }
 
-pub fn title_response_text(value: &Value) -> Result<String, String> {
+pub(crate) fn title_response_text(value: &Value) -> Result<String, String> {
     let text = value
         .get("choices")
         .and_then(Value::as_array)
@@ -96,7 +96,7 @@ fn api_error_details(value: &Value) -> (String, String) {
     (code, message)
 }
 
-pub fn title_stream_text(body: &str) -> Result<String, String> {
+pub(crate) fn title_stream_text(body: &str) -> Result<String, String> {
     let mut streamed_text = String::new();
     let mut terminal_text = None;
 

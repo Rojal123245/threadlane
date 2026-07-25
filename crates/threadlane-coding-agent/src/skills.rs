@@ -9,11 +9,11 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 pub const LOAD_SKILL_TOOL_NAME: &str = "load_skill";
-pub const DEFAULT_MAX_SKILL_BYTES: usize = 512 * 1024;
-pub const DEFAULT_MAX_FRONTMATTER_BYTES: usize = 64 * 1024;
-pub const DEFAULT_MAX_MANIFEST_BYTES: usize = 256 * 1024;
-pub const DEFAULT_MAX_DIRECTORY_ENTRIES: usize = 1_024;
-pub const DEFAULT_MAX_SKILLS: usize = 512;
+const DEFAULT_MAX_SKILL_BYTES: usize = 512 * 1024;
+const DEFAULT_MAX_FRONTMATTER_BYTES: usize = 64 * 1024;
+const DEFAULT_MAX_MANIFEST_BYTES: usize = 256 * 1024;
+const DEFAULT_MAX_DIRECTORY_ENTRIES: usize = 1_024;
+const DEFAULT_MAX_SKILLS: usize = 512;
 const MAX_SKILL_NAME_CHARS: usize = 128;
 const MAX_CATALOG_DESCRIPTION_CHARS: usize = 320;
 
@@ -33,7 +33,7 @@ pub enum SkillScope {
 impl SkillScope {
     /// A later native scope keeps the precedence used by the original manager.
     /// Pi compatibility sources deliberately rank below equivalent native sources.
-    pub fn precedence(self) -> u8 {
+    fn precedence(self) -> u8 {
         match self {
             SkillScope::GlobalPiPackage => 0,
             SkillScope::GlobalPi => 0,
@@ -65,26 +65,26 @@ impl SkillScope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillMetadata {
     pub id: String,
-    pub name: String,
+    name: String,
     pub description: String,
-    pub tags: Vec<String>,
-    pub file_path: PathBuf,
+    tags: Vec<String>,
+    file_path: PathBuf,
     pub scope: SkillScope,
     pub enabled: bool,
     pub is_valid: bool,
-    pub validation_error: Option<String>,
+    validation_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct SkillDiscoveryOptions {
-    pub project_root: Option<PathBuf>,
-    pub home_dir: Option<PathBuf>,
-    pub include_pi_compatibility: bool,
+    project_root: Option<PathBuf>,
+    home_dir: Option<PathBuf>,
+    include_pi_compatibility: bool,
     pub max_skill_bytes: usize,
-    pub max_frontmatter_bytes: usize,
-    pub max_manifest_bytes: usize,
-    pub max_directory_entries: usize,
-    pub max_skills: usize,
+    max_frontmatter_bytes: usize,
+    max_manifest_bytes: usize,
+    max_directory_entries: usize,
+    max_skills: usize,
 }
 
 impl SkillDiscoveryOptions {
@@ -132,8 +132,8 @@ pub enum SkillDiscoveryWarningKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillDiscoveryWarning {
     pub kind: SkillDiscoveryWarningKind,
-    pub message: String,
-    pub path: Option<PathBuf>,
+    message: String,
+    path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -172,9 +172,9 @@ pub struct SkillRegistry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedSkill {
-    pub id: String,
-    pub instructions: String,
-    pub scope: SkillScope,
+    id: String,
+    instructions: String,
+    scope: SkillScope,
 }
 
 impl SkillRegistry {
@@ -182,17 +182,17 @@ impl SkillRegistry {
         sorted_metadata(self.records.values().map(|record| record.metadata.clone()))
     }
 
-    pub fn metadata(&self, skill_id: &str) -> Option<SkillMetadata> {
+    fn metadata(&self, skill_id: &str) -> Option<SkillMetadata> {
         self.records
             .get(skill_id)
             .map(|record| record.metadata.clone())
     }
 
-    pub fn get_skill_instructions(&self, skill_id: &str) -> Result<String, String> {
+    pub(crate) fn get_skill_instructions(&self, skill_id: &str) -> Result<String, String> {
         self.load_skill(skill_id).map(|skill| skill.instructions)
     }
 
-    pub fn load_skill(&self, skill_id: &str) -> Result<LoadedSkill, String> {
+    fn load_skill(&self, skill_id: &str) -> Result<LoadedSkill, String> {
         let record = self
             .records
             .get(skill_id)
@@ -239,7 +239,7 @@ impl SkillRegistry {
     }
 
     /// Render only bounded catalog metadata. Full skill bodies and paths are never included.
-    pub fn render_model_catalog(&self) -> String {
+    pub(crate) fn render_model_catalog(&self) -> String {
         let entries: Vec<_> = self
             .list_skills()
             .into_iter()
@@ -290,7 +290,7 @@ impl SkillManager {
         }
     }
 
-    pub fn discover_skills(&mut self, project_root: Option<&Path>) {
+    pub(crate) fn discover_skills(&mut self, project_root: Option<&Path>) {
         self.discover_skills_with_home(project_root, dirs_home().as_deref());
     }
 
@@ -320,7 +320,7 @@ impl SkillManager {
         Arc::clone(&self.registry)
     }
 
-    pub fn warnings(&self) -> &[SkillDiscoveryWarning] {
+    fn warnings(&self) -> &[SkillDiscoveryWarning] {
         &self.warnings
     }
 
@@ -337,7 +337,7 @@ impl SkillManager {
     }
 }
 
-pub fn discover_skill_registry<O>(options: O) -> (Arc<SkillRegistry>, SkillDiscoveryReport)
+pub(crate) fn discover_skill_registry<O>(options: O) -> (Arc<SkillRegistry>, SkillDiscoveryReport)
 where
     O: Into<SkillDiscoveryOptions>,
 {
@@ -357,7 +357,7 @@ impl LoadSkillToolExecutor {
         Self { registry }
     }
 
-    pub fn registry(&self) -> Arc<SkillRegistry> {
+    fn registry(&self) -> Arc<SkillRegistry> {
         Arc::clone(&self.registry)
     }
 }

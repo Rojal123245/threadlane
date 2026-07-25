@@ -25,7 +25,7 @@ pub struct AntigravityCredentials {
     pub project_id: Option<String>,
 }
 
-pub fn get_antigravity_credentials_path() -> PathBuf {
+fn get_antigravity_credentials_path() -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());
@@ -50,7 +50,7 @@ pub fn load_antigravity_credentials() -> Option<AntigravityCredentials> {
     None
 }
 
-pub fn save_antigravity_credentials(creds: &AntigravityCredentials) -> Result<(), String> {
+fn save_antigravity_credentials(creds: &AntigravityCredentials) -> Result<(), String> {
     let path = get_antigravity_credentials_path();
     let json = serde_json::to_string_pretty(creds).map_err(|e| e.to_string())?;
     fs::write(path, json).map_err(|e| e.to_string())
@@ -203,7 +203,7 @@ async fn fetch_user_email(client: &reqwest::Client, access_token: &str) -> Resul
     Err("Email not found".to_string())
 }
 
-pub async fn refresh_antigravity_token(
+async fn refresh_antigravity_token(
     creds: &AntigravityCredentials,
 ) -> Result<AntigravityCredentials, String> {
     let refresh_token = creds
@@ -277,7 +277,7 @@ pub async fn refresh_antigravity_token(
     Ok(updated_creds)
 }
 
-pub async fn get_valid_antigravity_token() -> Result<String, String> {
+pub(crate) async fn get_valid_antigravity_token() -> Result<String, String> {
     let creds = load_antigravity_credentials().ok_or_else(|| {
         "No stored Google Antigravity credentials found. Please run /login antigravity".to_string()
     })?;

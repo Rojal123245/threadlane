@@ -19,7 +19,7 @@ pub enum TaskStatus {
 }
 
 impl TaskStatus {
-    pub fn as_str(&self) -> &'static str {
+    fn as_str(&self) -> &'static str {
         match self {
             TaskStatus::Idle => "Idle",
             TaskStatus::Running => "Running",
@@ -35,24 +35,24 @@ impl TaskStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectRecord {
     pub id: String,
-    pub path: PathBuf,
-    pub name: String,
-    pub last_selected_task_id: Option<String>,
+    path: PathBuf,
+    name: String,
+    last_selected_task_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRecord {
     pub id: String,
-    pub project_id: String,
+    project_id: String,
     pub session_file: PathBuf,
-    pub status: TaskStatus,
+    status: TaskStatus,
 }
 
 #[derive(Debug, Clone)]
 pub struct TaskAgentEvent {
-    pub task_id: String,
-    pub project_id: String,
-    pub event: AgentEvent,
+    task_id: String,
+    project_id: String,
+    event: AgentEvent,
 }
 
 struct TaskRuntime {
@@ -93,7 +93,7 @@ impl HarnessSupervisor {
         supervisor
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<TaskAgentEvent> {
+    fn subscribe(&self) -> broadcast::Receiver<TaskAgentEvent> {
         self.event_tx.subscribe()
     }
 
@@ -115,7 +115,7 @@ impl HarnessSupervisor {
         }
     }
 
-    pub fn save_registry(&self) {
+    fn save_registry(&self) {
         let records: Vec<ProjectRecord> = self.projects.lock().unwrap().values().cloned().collect();
         let file = self.registry_file();
         if let Ok(json) = serde_json::to_string_pretty(&records) {
@@ -155,7 +155,7 @@ impl HarnessSupervisor {
         Ok(record)
     }
 
-    pub fn list_projects(&self) -> Vec<ProjectRecord> {
+    fn list_projects(&self) -> Vec<ProjectRecord> {
         let lock = self.projects.lock().unwrap();
         let mut list: Vec<ProjectRecord> = lock.values().cloned().collect();
         list.sort_by(|a, b| a.name.cmp(&b.name));
@@ -249,7 +249,7 @@ impl HarnessSupervisor {
         Ok(task_id)
     }
 
-    pub fn submit_input(&self, task_id: &str, prompt: String) -> Result<(), String> {
+    fn submit_input(&self, task_id: &str, prompt: String) -> Result<(), String> {
         let (agent_arc, prompt_lock, _pid) = {
             let runtimes = self.runtimes.lock().unwrap();
             let rt = runtimes
@@ -290,7 +290,7 @@ impl HarnessSupervisor {
         Ok(())
     }
 
-    pub fn cancel_task(&self, task_id: &str) -> Result<(), String> {
+    fn cancel_task(&self, task_id: &str) -> Result<(), String> {
         self.update_task_status(task_id, TaskStatus::Cancelled);
         Ok(())
     }
@@ -306,7 +306,7 @@ impl HarnessSupervisor {
         }
     }
 
-    pub fn get_task_status(&self, task_id: &str) -> Option<TaskStatus> {
+    fn get_task_status(&self, task_id: &str) -> Option<TaskStatus> {
         let lock = self.tasks.lock().unwrap();
         lock.get(task_id).map(|t| t.status)
     }

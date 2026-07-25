@@ -7,7 +7,7 @@ pub enum ToolPolicy {
 }
 
 impl ToolPolicy {
-    pub fn allows_writes(self) -> bool {
+    fn allows_writes(self) -> bool {
         matches!(self, ToolPolicy::FullAccess)
     }
 }

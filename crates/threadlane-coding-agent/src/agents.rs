@@ -36,17 +36,17 @@ impl AgentSource {
 pub struct AgentConfig {
     pub name: String,
     pub description: String,
-    pub tools: Option<Vec<String>>,
+    pub(crate) tools: Option<Vec<String>>,
     pub model: Option<String>,
-    pub system_prompt: String,
+    pub(crate) system_prompt: String,
     pub source: AgentSource,
-    pub file_path: PathBuf,
+    pub(crate) file_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDiscoveryResult {
     pub agents: Vec<AgentConfig>,
-    pub project_agents_dir: Option<PathBuf>,
+    project_agents_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Clone)]

@@ -4,11 +4,11 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptTemplate {
     pub name: String,
-    pub description: String,
-    pub argument_hint: Option<String>,
-    pub content: String,
-    pub file_path: PathBuf,
-    pub scope: String,
+    description: String,
+    argument_hint: Option<String>,
+    content: String,
+    file_path: PathBuf,
+    scope: String,
 }
 
 /// Parse command arguments respecting bash-style quotes (single and double quotes).
@@ -168,7 +168,7 @@ pub fn parse_frontmatter(content: &str) -> (Option<String>, Option<String>, Stri
 }
 
 /// Load prompt templates from a directory (non-recursive).
-pub fn load_prompt_templates_from_dir(dir: &Path, scope: &str) -> Vec<PromptTemplate> {
+pub(crate) fn load_prompt_templates_from_dir(dir: &Path, scope: &str) -> Vec<PromptTemplate> {
     let mut templates = Vec::new();
 
     if !dir.exists() || !dir.is_dir() {

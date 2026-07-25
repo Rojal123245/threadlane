@@ -8,23 +8,23 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtensionMetadata {
-    pub id: String,
-    pub name: String,
-    pub path: PathBuf,
-    pub is_full_trust: bool,
-    pub enabled: bool,
-    pub is_valid: bool,
-    pub validation_error: Option<String>,
-    pub revision: Option<String>,
-    pub is_trusted: bool,
+    id: String,
+    name: String,
+    path: PathBuf,
+    is_full_trust: bool,
+    enabled: bool,
+    is_valid: bool,
+    validation_error: Option<String>,
+    revision: Option<String>,
+    is_trusted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityCatalog {
     pub skills: Vec<SkillMetadata>,
-    pub extensions: Vec<ExtensionMetadata>,
-    pub packages: Vec<PackageRecord>,
-    pub agents: Vec<AgentConfig>,
+    extensions: Vec<ExtensionMetadata>,
+    packages: Vec<PackageRecord>,
+    agents: Vec<AgentConfig>,
 }
 
 impl CapabilityCatalog {

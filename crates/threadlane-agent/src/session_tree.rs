@@ -84,13 +84,13 @@ enum SessionRecord {
 pub struct SessionTree {
     pub session_id: String,
     pub name: Option<String>,
-    pub title_attempted: bool,
+    title_attempted: bool,
     pub model: Option<String>,
     pub nodes: HashMap<String, SessionNode>,
     /// Node IDs in persisted/insertion order. This is intentionally separate
     /// from `nodes`: the map is only an index and does not define ordering.
-    pub node_order: Vec<String>,
-    pub active_node_id: Option<String>,
+    node_order: Vec<String>,
+    active_node_id: Option<String>,
     pub file_path: Option<PathBuf>,
     /// Whether a session metadata record was present on disk. Legacy files
     /// have no metadata and retain their historical all-branches lookup rules.

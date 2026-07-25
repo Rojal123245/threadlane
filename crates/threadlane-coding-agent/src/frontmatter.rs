@@ -3,19 +3,19 @@ use std::collections::HashMap;
 /// Parsed markdown document containing frontmatter key-value metadata and body content.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ParsedFrontmatter {
-    pub metadata: HashMap<String, String>,
-    pub body: String,
-    pub parse_error: Option<String>,
+    pub(crate) metadata: HashMap<String, String>,
+    pub(crate) body: String,
+    pub(crate) parse_error: Option<String>,
 }
 
 impl ParsedFrontmatter {
-    pub fn get(&self, key: &str) -> Option<&str> {
+    pub(crate) fn get(&self, key: &str) -> Option<&str> {
         self.metadata.get(key).map(|s| s.as_str())
     }
 }
 
 /// Parse frontmatter (delimited by `---`) and body from markdown content.
-pub fn parse_frontmatter(content: &str) -> ParsedFrontmatter {
+pub(crate) fn parse_frontmatter(content: &str) -> ParsedFrontmatter {
     let trimmed = content.trim_start();
     if !trimmed.starts_with("---") {
         return ParsedFrontmatter {

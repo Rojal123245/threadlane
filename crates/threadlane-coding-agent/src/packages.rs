@@ -10,35 +10,35 @@ pub enum PackageScope {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageManifest {
-    pub id: String,
-    pub name: String,
-    pub version: String,
-    pub description: Option<String>,
-    pub skills: Option<Vec<String>>,
-    pub extensions: Option<Vec<String>>,
-    pub full_trust_executable: Option<String>,
+    pub(crate) id: String,
+    pub(crate) name: String,
+    version: String,
+    description: Option<String>,
+    skills: Option<Vec<String>>,
+    extensions: Option<Vec<String>>,
+    pub(crate) full_trust_executable: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageRecord {
-    pub manifest: PackageManifest,
-    pub scope: PackageScope,
-    pub root_dir: PathBuf,
-    pub enabled: bool,
-    pub revision: String,
+    pub(crate) manifest: PackageManifest,
+    scope: PackageScope,
+    pub(crate) root_dir: PathBuf,
+    enabled: bool,
+    revision: String,
 }
 
-pub struct PackageManager {
+pub(crate) struct PackageManager {
     global_dir: PathBuf,
 }
 
 impl PackageManager {
-    pub fn new(global_dir: PathBuf) -> Self {
+    pub(crate) fn new(global_dir: PathBuf) -> Self {
         let _ = fs::create_dir_all(global_dir.join("packages"));
         Self { global_dir }
     }
 
-    pub fn list_packages(&self, project_root: Option<&Path>) -> Vec<PackageRecord> {
+    pub(crate) fn list_packages(&self, project_root: Option<&Path>) -> Vec<PackageRecord> {
         let mut packages = Vec::new();
 
         self.scan_packages_dir(
@@ -89,7 +89,7 @@ impl PackageManager {
         }
     }
 
-    pub fn install_from_local(
+    fn install_from_local(
         &self,
         source_path: &Path,
         scope: PackageScope,
@@ -130,7 +130,7 @@ impl PackageManager {
         })
     }
 
-    pub fn remove_package(
+    fn remove_package(
         &self,
         package_id: &str,
         scope: PackageScope,

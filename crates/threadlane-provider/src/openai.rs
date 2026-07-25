@@ -55,7 +55,7 @@ pub struct ToolCall {
     pub thought_signature: Option<String>,
 }
 
-pub const OPENAI_PROMPT_CACHE_KEY_MAX_CHARS: usize = 64;
+pub(crate) const OPENAI_PROMPT_CACHE_KEY_MAX_CHARS: usize = 64;
 
 pub fn clamp_prompt_cache_key(key: &str) -> String {
     key.chars()
@@ -714,11 +714,11 @@ impl OpenAIClient {
             title_response_text(&value)
         }
     }
-    pub fn is_codex(&self) -> bool {
+    pub(crate) fn is_codex(&self) -> bool {
         self.account_id.is_some() || self.api_key.starts_with("ey")
     }
 
-    pub async fn stream_chat_completion(
+    pub(crate) async fn stream_chat_completion(
         &self,
         payload: Value,
         prompt_cache_key: Option<String>,

@@ -29,20 +29,20 @@ pub enum AgentUIEvent {
     AvailableModelsLoaded(Vec<String>),
 }
 
-pub struct AgentEngine {
-    pub session: Arc<Mutex<Session>>,
+struct AgentEngine {
+    session: Arc<Mutex<Session>>,
     client: ProviderClient,
 }
 
 impl AgentEngine {
-    pub fn new(api_key: String, account_id: Option<String>, model: &str) -> Self {
+    fn new(api_key: String, account_id: Option<String>, model: &str) -> Self {
         Self {
             session: Arc::new(Mutex::new(Session::new(model))),
             client: ProviderClient::new(api_key, account_id),
         }
     }
 
-    pub async fn run_turn(&self, prompt: &str, ui_tx: mpsc::Sender<AgentUIEvent>) {
+    async fn run_turn(&self, prompt: &str, ui_tx: mpsc::Sender<AgentUIEvent>) {
         {
             let mut sess = self.session.lock().await;
             sess.add_user_message(prompt);

@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrustStore {
-    pub approved_revisions: HashMap<String, String>,
+    approved_revisions: HashMap<String, String>,
 }
 
 impl TrustStore {
@@ -36,7 +36,7 @@ impl TrustStore {
         Ok(())
     }
 
-    pub fn is_trusted(&self, package_id: &str, revision: &str) -> bool {
+    pub(crate) fn is_trusted(&self, package_id: &str, revision: &str) -> bool {
         self.approved_revisions
             .get(package_id)
             .map(|r| r == revision)
@@ -47,20 +47,20 @@ impl TrustStore {
         self.approved_revisions.insert(package_id, revision);
     }
 
-    pub fn revoke(&mut self, package_id: &str) {
+    fn revoke(&mut self, package_id: &str) {
         self.approved_revisions.remove(package_id);
     }
 }
 
-pub fn compute_executable_revision(exe_path: &Path) -> Result<String, String> {
+pub(crate) fn compute_executable_revision(exe_path: &Path) -> Result<String, String> {
     let bytes = fs::read(exe_path)
         .map_err(|e| format!("Failed to read executable '{}': {e}", exe_path.display()))?;
     Ok(format!("{:x}", md5::compute(&bytes)))
 }
 
 pub struct FullTrustRunner {
-    pub package_id: String,
-    pub exe_path: PathBuf,
+    package_id: String,
+    exe_path: PathBuf,
     pub revision: String,
 }
 

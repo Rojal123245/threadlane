@@ -40,12 +40,12 @@ pub trait ShouldStopAfterTurnHook: Send + Sync {
 }
 
 // Function closure adapters for convenience
-pub type DynBeforeToolCallFn =
+type DynBeforeToolCallFn =
     Arc<dyn Fn(&AgentToolCall, &AgentState) -> BeforeToolCallResult + Send + Sync>;
-pub type DynAfterToolCallFn =
+type DynAfterToolCallFn =
     Arc<dyn Fn(&AgentToolCall, &AgentToolResult, &AgentState) -> AfterToolCallResult + Send + Sync>;
-pub type DynTransformContextFn = Arc<dyn Fn(Vec<AgentMessage>) -> Vec<AgentMessage> + Send + Sync>;
-pub type DynShouldStopFn =
+type DynTransformContextFn = Arc<dyn Fn(Vec<AgentMessage>) -> Vec<AgentMessage> + Send + Sync>;
+type DynShouldStopFn =
     Arc<dyn Fn(usize, &[AgentToolResult], &AgentState) -> bool + Send + Sync>;
 
 #[async_trait]

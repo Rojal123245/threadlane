@@ -60,9 +60,9 @@ pub struct DeviceCodeResponse {
     #[serde(default = "default_verification_uri")]
     pub verification_uri: String,
     #[serde(default)]
-    pub expires_at: Option<String>,
+    expires_at: Option<String>,
     #[serde(default)]
-    pub expires_in: Option<u64>,
+    expires_in: Option<u64>,
     #[serde(
         deserialize_with = "deserialize_string_or_number",
         default = "default_interval"
@@ -77,26 +77,26 @@ fn default_interval() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OAuthTokens {
     #[serde(default)]
-    pub access_token: String,
+    access_token: String,
     #[serde(default)]
-    pub refresh_token: Option<String>,
+    refresh_token: Option<String>,
     #[serde(default)]
-    pub expires_in: Option<u64>,
+    expires_in: Option<u64>,
     #[serde(default)]
-    pub id_token: Option<String>,
+    id_token: Option<String>,
     #[serde(default)]
-    pub account_id: Option<String>,
+    account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredCredentials {
     pub access_token: String,
-    pub refresh_token: Option<String>,
+    refresh_token: Option<String>,
     pub account_id: Option<String>,
     pub source: String,
 }
 
-pub fn get_credentials_path() -> PathBuf {
+fn get_credentials_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     let mut path = PathBuf::from(home);
     path.push(".threadlane");
@@ -105,7 +105,7 @@ pub fn get_credentials_path() -> PathBuf {
     path
 }
 
-pub fn save_credentials(tokens: &OAuthTokens) -> Result<(), String> {
+fn save_credentials(tokens: &OAuthTokens) -> Result<(), String> {
     let path = get_credentials_path();
     let creds = StoredCredentials {
         access_token: tokens.access_token.clone(),
@@ -271,7 +271,7 @@ pub async fn poll_device_token(
     Err(format!("Unexpected OAuth token response: {body}"))
 }
 
-pub async fn exchange_authorization_code(code: &str) -> Result<OAuthTokens, String> {
+async fn exchange_authorization_code(code: &str) -> Result<OAuthTokens, String> {
     let client = reqwest::Client::new();
     let res = client
         .post("https://auth.openai.com/oauth/token")

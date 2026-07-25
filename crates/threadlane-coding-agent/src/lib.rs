@@ -23,24 +23,31 @@ pub use context::{ProjectContext, ProjectInstruction};
 pub use extension_broker::{
     BrokerDispatchResult, BrokerError, BrokerOperationResult, BrokerRequest, BrokerResponse,
     CapabilityDispatcher, CapabilityHandler, CapabilityPolicy, HostBrokerRequest,
-    HostCapabilityGrantPolicy, BROKER_API_VERSION,
+    HostCapabilityGrantPolicy,
 };
-pub use full_trust_extension::{compute_executable_revision, FullTrustRunner, TrustStore};
-pub use packages::{PackageManager, PackageManifest, PackageRecord, PackageScope};
+pub(crate) use extension_broker::BROKER_API_VERSION;
+pub use full_trust_extension::{FullTrustRunner, TrustStore};
+pub(crate) use full_trust_extension::compute_executable_revision;
+pub use packages::{PackageManifest, PackageRecord, PackageScope};
+pub(crate) use packages::PackageManager;
 pub use prompt_templates::{
-    expand_prompt_template, load_prompt_templates, load_prompt_templates_from_dir,
-    parse_command_args, substitute_args, PromptTemplate,
+    expand_prompt_template, load_prompt_templates, parse_command_args, substitute_args, PromptTemplate,
 };
+pub(crate) use prompt_templates::load_prompt_templates_from_dir;
 pub use skills::{
-    discover_skill_registry, load_skill_tool_definition, LoadSkillToolExecutor, LoadedSkill,
-    SkillDiscoveryOptions, SkillDiscoveryReport, SkillDiscoveryWarning, SkillDiscoveryWarningKind,
-    SkillManager, SkillMetadata, SkillRegistry, SkillScope, LOAD_SKILL_TOOL_NAME,
+    load_skill_tool_definition, LoadSkillToolExecutor, SkillDiscoveryOptions, SkillDiscoveryReport,
+    SkillDiscoveryWarning, SkillDiscoveryWarningKind, SkillManager, SkillMetadata, SkillRegistry,
+    SkillScope, LOAD_SKILL_TOOL_NAME,
 };
+pub(crate) use skills::{discover_skill_registry, LoadedSkill};
 pub use supervisor::{HarnessSupervisor, ProjectRecord, TaskAgentEvent, TaskRecord, TaskStatus};
-pub use system_prompt::{build_system_prompt, SystemPromptBuildOptions, SystemPromptConfig};
+pub use system_prompt::SystemPromptConfig;
+pub(crate) use system_prompt::{build_system_prompt, SystemPromptBuildOptions};
 pub use wasi_extension::{
     WasiCommandDefinition, WasiExtension, WasiExtensionCommandResult, WasiExtensionEvent,
-    WasiExtensionInvocation, WasiExtensionInvocationResult, WasiExtensionManager,
-    WasiExtensionManifest, WasiExtensionResponse, WasiHookMiddleware, WasiLegacyEffect,
-    WasiToolDefinition,
+    WasiExtensionManager, WasiExtensionManifest, WasiLegacyEffect, WasiToolDefinition,
+};
+pub(crate) use wasi_extension::{
+    WasiExtensionInvocation, WasiExtensionInvocationResult, WasiExtensionResponse,
+    WasiHookMiddleware,
 };

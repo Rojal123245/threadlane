@@ -77,11 +77,11 @@ enum AgentWork {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentRunTask {
-    pub agent: String,
-    pub task: String,
-    pub instructions: Option<String>,
-    pub tools: Option<Vec<String>>,
-    pub model: Option<String>,
+    agent: String,
+    task: String,
+    instructions: Option<String>,
+    tools: Option<Vec<String>>,
+    model: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -1136,8 +1136,8 @@ impl BeforeToolCallHook for ExtensionBeforeToolHook {
 }
 
 pub struct ExtensionAfterToolHook {
-    pub extensions: Arc<WasiExtensionManager>,
-    pub broker_dispatcher: Arc<CapabilityDispatcher>,
+    extensions: Arc<WasiExtensionManager>,
+    broker_dispatcher: Arc<CapabilityDispatcher>,
 }
 
 #[async_trait]
@@ -1265,12 +1265,12 @@ impl ToolExecutor for BrokerAwareWasiToolExecutor {
 }
 
 pub struct CodingAgent {
-    pub agent: Agent,
+    agent: Agent,
     pub session_tree: SessionTree,
-    pub project_context: ProjectContext,
+    project_context: ProjectContext,
     pub wasi_extensions: Arc<WasiExtensionManager>,
-    pub tool_policy: Arc<tokio::sync::Mutex<ToolPolicy>>,
-    pub work_dir: PathBuf,
+    tool_policy: Arc<tokio::sync::Mutex<ToolPolicy>>,
+    work_dir: PathBuf,
     pub skills: Arc<SkillRegistry>,
     agent_runner: AgentRunner,
     broker_dispatcher: Arc<CapabilityDispatcher>,
@@ -1281,7 +1281,7 @@ pub struct CodingAgent {
     subagent_work_observer: SubagentObserverState,
 }
 
-pub const SUBAGENT_TOOL_NAME: &str = "subagent";
+const SUBAGENT_TOOL_NAME: &str = "subagent";
 
 #[derive(Clone)]
 pub struct SubagentToolExecutor {
@@ -1289,12 +1289,12 @@ pub struct SubagentToolExecutor {
 }
 
 impl SubagentToolExecutor {
-    pub fn new(runner: AgentRunner) -> Self {
+    fn new(runner: AgentRunner) -> Self {
         Self { runner }
     }
 }
 
-pub fn subagent_tool_definition() -> AgentToolDefinition {
+fn subagent_tool_definition() -> AgentToolDefinition {
     AgentToolDefinition {
         name: SUBAGENT_TOOL_NAME.to_string(),
         description: Some(
@@ -1744,7 +1744,7 @@ impl CodingAgent {
         }
     }
 
-    pub fn base_system_prompt(&self) -> &str {
+    fn base_system_prompt(&self) -> &str {
         &self.base_system_prompt
     }
 
@@ -1857,7 +1857,7 @@ impl CodingAgent {
         }
     }
 
-    pub async fn switch_session_file(&mut self, session_file: PathBuf) {
+    async fn switch_session_file(&mut self, session_file: PathBuf) {
         let session_tree = if session_file.exists() {
             SessionTree::load_from_file(&session_file).unwrap_or_else(|_| {
                 let mut tree = SessionTree::new(
@@ -1916,7 +1916,7 @@ impl CodingAgent {
         state.pending_tool_calls.clear();
     }
 
-    pub fn session_file_path(&self) -> Option<&PathBuf> {
+    fn session_file_path(&self) -> Option<&PathBuf> {
         self.session_tree.file_path.as_ref()
     }
 
@@ -1954,7 +1954,7 @@ impl CodingAgent {
         self.agent.set_reasoning_effort(effort).await;
     }
 
-    pub async fn handle_input(&mut self, input: &str) -> Option<String> {
+    pub(crate) async fn handle_input(&mut self, input: &str) -> Option<String> {
         self.handle_input_with_images(input, Vec::new()).await
     }
 
@@ -2522,19 +2522,19 @@ fn tool_target_preview(name: &str, arguments: &str) -> String {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SubagentSessionData {
-    pub task: String,
-    pub agent: String,
-    pub status: String,
-    pub thinking: String,
-    pub inner_tools: Vec<SubagentInnerToolData>,
-    pub output: String,
+    task: String,
+    agent: String,
+    status: String,
+    thinking: String,
+    inner_tools: Vec<SubagentInnerToolData>,
+    output: String,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SubagentInnerToolData {
-    pub name: String,
-    pub target_preview: String,
-    pub is_error: bool,
+    name: String,
+    target_preview: String,
+    is_error: bool,
 }
 
 fn format_subagent_results(

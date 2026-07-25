@@ -53,15 +53,15 @@ pub struct WasiExtensionEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WasiExtensionInvocation {
-    pub api_version: u32,
-    pub kind: String,
-    pub name: String,
-    pub arguments: Value,
+    pub(crate) api_version: u32,
+    pub(crate) kind: String,
+    pub(crate) name: String,
+    pub(crate) arguments: Value,
     #[serde(default)]
-    pub state: Value,
+    pub(crate) state: Value,
     /// Events are queued by the host and delivered on this extension's next invocation.
     #[serde(default)]
-    pub events: Vec<WasiExtensionEvent>,
+    pub(crate) events: Vec<WasiExtensionEvent>,
 }
 
 /// Effects retained for API v1 compatibility. Bundled v2 extensions use
@@ -76,50 +76,50 @@ pub enum WasiLegacyEffect {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WasiHookMiddleware {
     #[serde(default)]
-    pub block: Option<bool>,
+    pub(crate) block: Option<bool>,
     #[serde(default)]
-    pub reason: Option<String>,
+    pub(crate) reason: Option<String>,
     #[serde(default)]
-    pub arguments: Option<Value>,
+    arguments: Option<Value>,
     #[serde(default)]
-    pub result: Option<Value>,
+    result: Option<Value>,
     #[serde(default)]
-    pub context: Option<Value>,
+    context: Option<Value>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WasiExtensionResponse {
     #[serde(default)]
-    pub message: Option<String>,
+    pub(crate) message: Option<String>,
     #[serde(default)]
-    pub error: Option<String>,
+    pub(crate) error: Option<String>,
     /// Reinvoke the same tool after queued broker outcomes are available.
     #[serde(default)]
-    pub continue_after_broker: bool,
+    pub(crate) continue_after_broker: bool,
     #[serde(default)]
-    pub state: Option<Value>,
+    state: Option<Value>,
     #[serde(default)]
-    pub effects: Vec<WasiLegacyEffect>,
+    effects: Vec<WasiLegacyEffect>,
     #[serde(default)]
-    pub middleware: Option<WasiHookMiddleware>,
+    pub(crate) middleware: Option<WasiHookMiddleware>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct WasiExtensionInvocationResult {
-    pub api_version: u32,
-    pub response: WasiExtensionResponse,
-    pub broker_requests: Vec<BrokerRequest>,
-    pub host_broker_requests: Vec<HostBrokerRequest>,
+    pub(crate) api_version: u32,
+    pub(crate) response: WasiExtensionResponse,
+    broker_requests: Vec<BrokerRequest>,
+    pub(crate) host_broker_requests: Vec<HostBrokerRequest>,
     /// Events supplied to this concrete WASM invocation.
-    pub events: Vec<WasiExtensionEvent>,
+    events: Vec<WasiExtensionEvent>,
     invoking_extension: String,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct WasiExtensionCommandResult {
-    pub api_version: u32,
+    pub(crate) api_version: u32,
     pub message: String,
-    pub effects: Vec<WasiLegacyEffect>,
+    pub(crate) effects: Vec<WasiLegacyEffect>,
     pub broker_requests: Vec<BrokerRequest>,
     pub host_broker_requests: Vec<HostBrokerRequest>,
     pub events: Vec<WasiExtensionEvent>,
@@ -133,7 +133,7 @@ struct WasiStoreData {
 
 pub struct WasiExtension {
     pub manifest: WasiExtensionManifest,
-    pub file_path: Option<PathBuf>,
+    pub(crate) file_path: Option<PathBuf>,
     wasm_bytes: Vec<u8>,
     engine: Engine,
 }
@@ -269,21 +269,21 @@ impl WasiExtension {
         Ok(ext)
     }
 
-    pub fn call_tool(
+    fn call_tool(
         &self,
         invocation: &WasiExtensionInvocation,
     ) -> Result<WasiExtensionInvocationResult, String> {
         self.call("execute_tool", invocation)
     }
 
-    pub fn call_command(
+    fn call_command(
         &self,
         invocation: &WasiExtensionInvocation,
     ) -> Result<WasiExtensionInvocationResult, String> {
         self.call("execute_command", invocation)
     }
 
-    pub fn call_hook(
+    fn call_hook(
         &self,
         invocation: &WasiExtensionInvocation,
     ) -> Result<WasiExtensionInvocationResult, String> {
@@ -490,11 +490,11 @@ impl WasiExtensionManager {
         Self::default()
     }
 
-    pub fn get_extensions(&self) -> &HashMap<String, WasiExtension> {
+    pub(crate) fn get_extensions(&self) -> &HashMap<String, WasiExtension> {
         &self.extensions
     }
 
-    pub fn for_project(project_dir: &Path) -> Self {
+    pub(crate) fn for_project(project_dir: &Path) -> Self {
         Self {
             state_dir: Some(project_dir.join(".threadlane/state/extensions")),
             ..Self::default()
@@ -508,7 +508,7 @@ impl WasiExtensionManager {
         }
     }
 
-    pub fn set_capability_grant_policy(
+    fn set_capability_grant_policy(
         &self,
         policy: HostCapabilityGrantPolicy,
     ) -> Result<(), String> {
@@ -519,7 +519,7 @@ impl WasiExtensionManager {
         Ok(())
     }
 
-    pub fn capability_grant_policy(&self) -> Result<HostCapabilityGrantPolicy, String> {
+    fn capability_grant_policy(&self) -> Result<HostCapabilityGrantPolicy, String> {
         self.capability_grant_policy
             .lock()
             .map(|policy| policy.clone())
@@ -527,7 +527,7 @@ impl WasiExtensionManager {
     }
 
     /// Creates a manager whose extension state belongs to one conversation.
-    pub fn for_project_session(project_dir: &Path, session_id: impl Into<String>) -> Self {
+    pub(crate) fn for_project_session(project_dir: &Path, session_id: impl Into<String>) -> Self {
         Self {
             state_dir: Some(project_dir.join(".threadlane/state/extensions")),
             session_id: Mutex::new(Some(session_id.into())),
@@ -590,7 +590,7 @@ impl WasiExtensionManager {
 
     /// Returns host-owned state in the active session scope without relying on
     /// any extension identity or schema.
-    pub fn host_state(&self, key: &str) -> Option<Value> {
+    pub(crate) fn host_state(&self, key: &str) -> Option<Value> {
         if let Ok(state) = self.host_state.lock() {
             if let Some(value) = state.get(key) {
                 return Some(value.clone());
@@ -605,7 +605,7 @@ impl WasiExtensionManager {
     }
 
     /// Persists host-owned state in the active session scope.
-    pub fn set_host_state(&self, key: &str, value: Value) -> Result<(), String> {
+    pub(crate) fn set_host_state(&self, key: &str, value: Value) -> Result<(), String> {
         self.host_state
             .lock()
             .map_err(|_| "Host state lock poisoned".to_string())?
@@ -653,7 +653,7 @@ impl WasiExtensionManager {
         Ok(())
     }
 
-    pub fn drain_events(&self) -> Result<Vec<(String, Value)>, String> {
+    fn drain_events(&self) -> Result<Vec<(String, Value)>, String> {
         let mut pending = self
             .pending_events
             .lock()
@@ -794,7 +794,7 @@ impl WasiExtensionManager {
         persist_json_state(&path, value)
     }
 
-    pub fn has_command(&self, name: &str) -> bool {
+    pub(crate) fn has_command(&self, name: &str) -> bool {
         self.extensions.values().any(|extension| {
             extension
                 .manifest
@@ -804,7 +804,7 @@ impl WasiExtensionManager {
         })
     }
 
-    pub fn get_tools(&self) -> Vec<Value> {
+    fn get_tools(&self) -> Vec<Value> {
         self.extensions.values().flat_map(|extension| extension.manifest.tools.iter()).map(|tool| {
             serde_json::json!({ "type": "function", "function": {
                 "name": tool.name, "description": tool.description, "parameters": tool.parameters
@@ -812,11 +812,11 @@ impl WasiExtensionManager {
         }).collect()
     }
 
-    pub fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {
+    fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {
         self.execute("tool", name, args)
     }
 
-    pub fn execute_tool_with_broker_requests(
+    pub(crate) fn execute_tool_with_broker_requests(
         &self,
         name: &str,
         args: &str,
@@ -824,7 +824,7 @@ impl WasiExtensionManager {
         self.execute_response("tool", name, args)
     }
 
-    pub fn execute_tool_with_effects(
+    fn execute_tool_with_effects(
         &self,
         name: &str,
         args: &str,
@@ -832,7 +832,7 @@ impl WasiExtensionManager {
         self.execute_tool_with_broker_requests(name, args)
     }
 
-    pub fn execute_command(&self, name: &str, args: &str) -> Option<Result<String, String>> {
+    fn execute_command(&self, name: &str, args: &str) -> Option<Result<String, String>> {
         self.execute_command_with_effects(name, args)
             .map(|result| result.map(|result| result.message))
     }
@@ -943,7 +943,7 @@ impl WasiExtensionManager {
             .map_err(|_| "Extension session lock poisoned".to_string())
     }
 
-    pub fn active_session_scope(&self) -> Result<Option<String>, String> {
+    pub(crate) fn active_session_scope(&self) -> Result<Option<String>, String> {
         self.session_scope()
     }
 
@@ -967,7 +967,7 @@ impl WasiExtensionManager {
             .collect()
     }
 
-    pub fn execute_hook(
+    fn execute_hook(
         &self,
         name: &str,
         args: &str,
@@ -978,7 +978,7 @@ impl WasiExtensionManager {
             .collect()
     }
 
-    pub fn execute_hook_with_broker_requests(
+    pub(crate) fn execute_hook_with_broker_requests(
         &self,
         name: &str,
         args: &str,
@@ -995,7 +995,7 @@ impl WasiExtensionManager {
             .collect()
     }
 
-    pub fn execute_hook_with_effects(
+    pub(crate) fn execute_hook_with_effects(
         &self,
         name: &str,
         args: &str,

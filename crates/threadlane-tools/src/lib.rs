@@ -125,7 +125,7 @@ pub fn get_codex_tools() -> Vec<Value> {
         .collect()
 }
 
-pub fn validate_path_in_workspace(
+fn validate_path_in_workspace(
     path_input: &str,
     workspace_root: &Path,
 ) -> Result<PathBuf, String> {
@@ -199,7 +199,7 @@ pub fn validate_path_in_workspace(
     }
 }
 
-pub fn validate_cwd_in_workspace(
+fn validate_cwd_in_workspace(
     cwd_input: Option<&str>,
     workspace_root: &Path,
 ) -> Result<PathBuf, String> {
@@ -452,7 +452,7 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
     }
 }
 
-pub fn run_post_edit_diagnostics(workspace_root: &Path, raw_path: &str) -> String {
+fn run_post_edit_diagnostics(workspace_root: &Path, raw_path: &str) -> String {
     if !raw_path.ends_with(".rs") {
         return String::new();
     }

@@ -8,21 +8,21 @@ const MAX_TOOL_DESCRIPTION_CHARS: usize = 240;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SystemPromptConfig {
     /// Replaces threadlane's default identity, tool list, and default guidelines.
-    pub custom_prompt: Option<String>,
+    pub(crate) custom_prompt: Option<String>,
     /// Text appended after the base prompt and before project resources.
-    pub append_prompt: Option<String>,
+    pub(crate) append_prompt: Option<String>,
     /// Additional guideline bullets for the default prompt.
-    pub guidelines: Vec<String>,
+    pub(crate) guidelines: Vec<String>,
 }
 
-pub struct SystemPromptBuildOptions<'a> {
-    pub config: &'a SystemPromptConfig,
-    pub work_dir: &'a Path,
-    pub tools: &'a [AgentToolDefinition],
-    pub project_context: &'a ProjectContext,
-    pub skill_catalog: Option<&'a str>,
-    pub agent_catalog: Option<&'a str>,
-    pub loaded_extension_count: usize,
+pub(crate) struct SystemPromptBuildOptions<'a> {
+    pub(crate) config: &'a SystemPromptConfig,
+    pub(crate) work_dir: &'a Path,
+    pub(crate) tools: &'a [AgentToolDefinition],
+    pub(crate) project_context: &'a ProjectContext,
+    pub(crate) skill_catalog: Option<&'a str>,
+    pub(crate) agent_catalog: Option<&'a str>,
+    pub(crate) loaded_extension_count: usize,
 }
 
 fn normalize_line(value: &str) -> String {
@@ -86,7 +86,7 @@ fn append_catalog(prompt: &mut String, catalog: Option<&str>) {
     }
 }
 
-pub fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> String {
+pub(crate) fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> String {
     let visible_tools = visible_tools(options.tools);
     let available_tool_names: HashSet<_> = visible_tools.iter().map(|(name, _)| *name).collect();
 

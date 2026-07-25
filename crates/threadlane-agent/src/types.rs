@@ -109,7 +109,7 @@ pub enum ReasoningEffort {
 }
 
 impl ReasoningEffort {
-    pub fn as_api_str(self) -> Option<&'static str> {
+    pub(crate) fn as_api_str(self) -> Option<&'static str> {
         match self {
             Self::Off => None,
             Self::Minimal => Some("minimal"),
@@ -281,7 +281,7 @@ pub struct AgentToolResult {
     pub name: String,
     pub content: String,
     pub is_error: bool,
-    pub terminate: bool,
+    pub(crate) terminate: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -310,7 +310,7 @@ pub struct AgentState {
 }
 
 impl AgentState {
-    pub fn new(model: impl Into<String>, system_prompt: impl Into<String>) -> Self {
+    pub(crate) fn new(model: impl Into<String>, system_prompt: impl Into<String>) -> Self {
         Self {
             system_prompt: system_prompt.into(),
             model: model.into(),

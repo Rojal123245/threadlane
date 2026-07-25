@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-pub const ANTIGRAVITY_MODEL_PREFIX: &str = "antigravity/";
+const ANTIGRAVITY_MODEL_PREFIX: &str = "antigravity/";
 
 pub fn is_antigravity_model(model: &str) -> bool {
     model.starts_with(ANTIGRAVITY_MODEL_PREFIX)
@@ -44,7 +44,7 @@ impl PayloadSource {
         }
     }
 
-    pub fn model(&self) -> &str {
+    fn model(&self) -> &str {
         match self {
             PayloadSource::Eager { chat_payload, .. } => chat_payload
                 .get("model")
@@ -58,7 +58,7 @@ impl PayloadSource {
         }
     }
 
-    pub async fn resolve(self, format: PayloadFormat) -> Value {
+    async fn resolve(self, format: PayloadFormat) -> Value {
         match self {
             PayloadSource::Eager {
                 chat_payload,
@@ -96,7 +96,7 @@ impl ProviderClient {
         }
     }
 
-    pub fn determine_format(&self, model: &str) -> PayloadFormat {
+    fn determine_format(&self, model: &str) -> PayloadFormat {
         if is_antigravity_model(model) {
             PayloadFormat::ChatCompletions
         } else if self.openai.is_codex() {

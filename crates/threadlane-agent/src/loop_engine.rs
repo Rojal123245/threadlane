@@ -291,19 +291,19 @@ pub struct AgentLoop {
     pub prompt_cache_key: Option<String>,
     pub tool_execution_mode: ToolExecutionMode,
     allowed_tool_names: Option<HashSet<String>>,
-    pub steering_queue: PendingMessageQueue,
-    pub follow_up_queue: PendingMessageQueue,
+    steering_queue: PendingMessageQueue,
+    follow_up_queue: PendingMessageQueue,
     pub before_tool_call_hook: Option<Arc<dyn BeforeToolCallHook>>,
     pub after_tool_call_hook: Option<Arc<dyn AfterToolCallHook>>,
-    pub transform_context_hook: Option<Arc<dyn TransformContextHook>>,
-    pub should_stop_hook: Option<Arc<dyn ShouldStopAfterTurnHook>>,
+    transform_context_hook: Option<Arc<dyn TransformContextHook>>,
+    should_stop_hook: Option<Arc<dyn ShouldStopAfterTurnHook>>,
     pub event_tx: broadcast::Sender<AgentEvent>,
     tool_executors: Vec<Arc<dyn ToolExecutor>>,
     /// Compatibility slot for existing callers. New code should use
     /// `register_tool_executor` so ordering and schema conflicts are validated.
-    pub extension_manager: Option<Arc<dyn ToolExecutor>>,
+    extension_manager: Option<Arc<dyn ToolExecutor>>,
     pub work_dir: Option<PathBuf>,
-    pub stream_rules: Vec<crate::rules::StreamRule>,
+    stream_rules: Vec<crate::rules::StreamRule>,
 }
 
 impl AgentLoop {
@@ -342,11 +342,11 @@ impl AgentLoop {
         }
     }
 
-    pub fn add_stream_rule(&mut self, rule: crate::rules::StreamRule) {
+    fn add_stream_rule(&mut self, rule: crate::rules::StreamRule) {
         self.stream_rules.push(rule);
     }
 
-    pub fn set_stream_rules(&mut self, rules: Vec<crate::rules::StreamRule>) {
+    fn set_stream_rules(&mut self, rules: Vec<crate::rules::StreamRule>) {
         self.stream_rules = rules;
     }
 
@@ -362,7 +362,7 @@ impl AgentLoop {
         self.allowed_tool_names = allowed_tool_names;
     }
 
-    pub fn allowed_tool_names(&self) -> Option<&HashSet<String>> {
+    fn allowed_tool_names(&self) -> Option<&HashSet<String>> {
         self.allowed_tool_names.as_ref()
     }
 
@@ -561,7 +561,7 @@ impl AgentLoop {
         }
     }
 
-    pub async fn build_chat_payload(&self) -> Value {
+    async fn build_chat_payload(&self) -> Value {
         Self::build_payload_helper(
             &self.state,
             &self.tool_executors,
@@ -573,7 +573,7 @@ impl AgentLoop {
         .await
     }
 
-    pub async fn build_codex_payload(&self) -> Value {
+    async fn build_codex_payload(&self) -> Value {
         Self::build_payload_helper(
             &self.state,
             &self.tool_executors,
@@ -585,7 +585,7 @@ impl AgentLoop {
         .await
     }
 
-    pub async fn build_payload_for_format(&self, format: PayloadFormat) -> Value {
+    async fn build_payload_for_format(&self, format: PayloadFormat) -> Value {
         Self::build_payload_helper(
             &self.state,
             &self.tool_executors,
@@ -605,19 +605,19 @@ impl AgentLoop {
         )
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
+    pub(crate) fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
         self.event_tx.subscribe()
     }
 
-    pub fn steer(&mut self, message: AgentMessage) {
+    pub(crate) fn steer(&mut self, message: AgentMessage) {
         self.steering_queue.enqueue(message);
     }
 
-    pub fn follow_up(&mut self, message: AgentMessage) {
+    pub(crate) fn follow_up(&mut self, message: AgentMessage) {
         self.follow_up_queue.enqueue(message);
     }
 
-    pub async fn run_prompt(&mut self, prompt: &str) {
+    pub(crate) async fn run_prompt(&mut self, prompt: &str) {
         self.run_prompt_message(AgentMessage::User {
             content: prompt.to_string(),
         })
@@ -627,7 +627,7 @@ impl AgentLoop {
     /// Runs a complete user message, preserving multimodal attachments exactly.
     ///
     /// Panics if `message` is not a user message.
-    pub async fn run_prompt_message(&mut self, message: AgentMessage) {
+    pub(crate) async fn run_prompt_message(&mut self, message: AgentMessage) {
         assert!(message.is_user(), "prompt message must have a user role");
         {
             let mut state = self.state.lock().await;
@@ -640,7 +640,7 @@ impl AgentLoop {
     /// Runs messages already placed in the follow-up queue without adding an
     /// artificial prompt. This lets host schedulers start queued work while
     /// the agent is idle.
-    pub async fn run_follow_up(&mut self) {
+    pub(crate) async fn run_follow_up(&mut self) {
         if !self.follow_up_queue.has_items() {
             return;
         }

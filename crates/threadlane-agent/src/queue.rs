@@ -3,34 +3,34 @@ use crate::types::{AgentMessage, QueueMode};
 #[derive(Debug, Clone)]
 pub struct PendingMessageQueue {
     messages: Vec<AgentMessage>,
-    pub mode: QueueMode,
+    mode: QueueMode,
 }
 
 impl PendingMessageQueue {
-    pub fn new(mode: QueueMode) -> Self {
+    pub(crate) fn new(mode: QueueMode) -> Self {
         Self {
             messages: Vec::new(),
             mode,
         }
     }
 
-    pub fn enqueue(&mut self, message: AgentMessage) {
+    pub(crate) fn enqueue(&mut self, message: AgentMessage) {
         self.messages.push(message);
     }
 
-    pub fn has_items(&self) -> bool {
+    pub(crate) fn has_items(&self) -> bool {
         !self.messages.is_empty()
     }
 
-    pub fn len(&self) -> usize {
+    fn len(&self) -> usize {
         self.messages.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.messages.is_empty()
     }
 
-    pub fn drain(&mut self) -> Vec<AgentMessage> {
+    pub(crate) fn drain(&mut self) -> Vec<AgentMessage> {
         match self.mode {
             QueueMode::All => std::mem::take(&mut self.messages),
             QueueMode::OneAtATime => {
@@ -43,7 +43,7 @@ impl PendingMessageQueue {
         }
     }
 
-    pub fn clear(&mut self) {
+    fn clear(&mut self) {
         self.messages.clear();
     }
 }

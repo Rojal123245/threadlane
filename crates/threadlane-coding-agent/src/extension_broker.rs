@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
-pub const BROKER_API_VERSION: u32 = 2;
+pub(crate) const BROKER_API_VERSION: u32 = 2;
 
 /// A host-side envelope. Extensions can create `BrokerRequest`, but only the
 /// host attaches the identity used by identity-sensitive capabilities.
@@ -54,13 +54,13 @@ pub struct BrokerError {
 pub struct BrokerResponse {
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub value: Option<Value>,
+    value: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<BrokerError>,
 }
 
 impl BrokerResponse {
-    pub fn ok(value: Value) -> Self {
+    pub(crate) fn ok(value: Value) -> Self {
         Self {
             ok: true,
             value: Some(value),
@@ -68,7 +68,7 @@ impl BrokerResponse {
         }
     }
 
-    pub fn error(code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub(crate) fn error(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             ok: false,
             value: None,
@@ -197,7 +197,7 @@ pub struct HostCapabilityGrantPolicy {
 }
 
 impl HostCapabilityGrantPolicy {
-    pub fn allow_declared() -> Self {
+    fn allow_declared() -> Self {
         Self::default()
     }
 
@@ -207,7 +207,7 @@ impl HostCapabilityGrantPolicy {
         }
     }
 
-    pub fn allows_declared(&self, declared: &[String], capability: &str) -> bool {
+    pub(crate) fn allows_declared(&self, declared: &[String], capability: &str) -> bool {
         declared.iter().any(|item| item == capability)
             && self
                 .allowed

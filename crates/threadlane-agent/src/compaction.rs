@@ -1,7 +1,7 @@
 use crate::types::AgentMessage;
 
-pub const AUTO_COMPACTION_THRESHOLD_TOKENS: usize = 96_000;
-pub const AUTO_COMPACTION_KEEP_RECENT_TOKENS: usize = 20_000;
+const AUTO_COMPACTION_THRESHOLD_TOKENS: usize = 96_000;
+pub(crate) const AUTO_COMPACTION_KEEP_RECENT_TOKENS: usize = 20_000;
 const MAX_CHECKPOINT_CHARS: usize = 12_000;
 const ESTIMATED_IMAGE_TOKENS: usize = 1_200;
 
@@ -20,7 +20,7 @@ impl Default for CompactionOptions {
     }
 }
 
-pub fn estimate_message_tokens(message: &AgentMessage) -> usize {
+fn estimate_message_tokens(message: &AgentMessage) -> usize {
     let chars = match message {
         AgentMessage::System { content } | AgentMessage::User { content } => content.len(),
         AgentMessage::UserWithImages { content, images } => {
@@ -50,15 +50,15 @@ pub fn estimate_message_tokens(message: &AgentMessage) -> usize {
     chars.div_ceil(4)
 }
 
-pub fn estimate_context_tokens(messages: &[AgentMessage]) -> usize {
+fn estimate_context_tokens(messages: &[AgentMessage]) -> usize {
     messages.iter().map(estimate_message_tokens).sum()
 }
 
-pub fn should_auto_compact(messages: &[AgentMessage]) -> bool {
+pub(crate) fn should_auto_compact(messages: &[AgentMessage]) -> bool {
     estimate_context_tokens(messages) > AUTO_COMPACTION_THRESHOLD_TOKENS
 }
 
-pub fn is_context_overflow_error(error: &str) -> bool {
+pub(crate) fn is_context_overflow_error(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     error.contains("context_length_exceeded")
         || error.contains("context length exceeded")
@@ -93,7 +93,7 @@ pub fn compact_messages(
     compact_from_index(messages, messages.len().saturating_sub(keep_count))
 }
 
-pub fn compact_messages_to_token_budget(
+pub(crate) fn compact_messages_to_token_budget(
     messages: &[AgentMessage],
     keep_recent_tokens: usize,
 ) -> Vec<AgentMessage> {

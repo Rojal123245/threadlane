@@ -37,36 +37,36 @@ pub enum AntigravityStreamEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeminiPart {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
+    text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "functionCall")]
-    pub function_call: Option<GeminiFunctionCall>,
+    function_call: Option<GeminiFunctionCall>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "functionResponse")]
-    pub function_response: Option<GeminiFunctionResponse>,
+    function_response: Option<GeminiFunctionResponse>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeminiFunctionCall {
-    pub name: String,
-    pub args: Value,
+    name: String,
+    args: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeminiFunctionResponse {
-    pub name: String,
-    pub response: Value,
+    name: String,
+    response: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeminiContent {
     pub role: String,
-    pub parts: Vec<GeminiPart>,
+    parts: Vec<GeminiPart>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeminiFunctionDecl {
     pub name: String,
-    pub description: String,
-    pub parameters: Value,
+    description: String,
+    parameters: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,7 +83,7 @@ pub struct GeminiRequest {
     #[serde(skip_serializing_if = "Option::is_none", rename = "systemInstruction")]
     pub system_instruction: Option<GeminiContent>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "generationConfig")]
-    pub generation_config: Option<Value>,
+    generation_config: Option<Value>,
 }
 
 /// Compatibility builder retained for callers that already construct Gemini requests.
@@ -223,7 +223,7 @@ impl AntigravityClient {
 
     /// Converts an OpenAI chat-completions payload and streams events understood by the
     /// shared agent loop.
-    pub async fn stream_chat_completion(
+    pub(crate) async fn stream_chat_completion(
         &self,
         api_payload: Value,
         event_tx: mpsc::Sender<StreamEvent>,
@@ -253,7 +253,7 @@ impl AntigravityClient {
 
     /// Legacy API retained for compatibility. New integrations should use
     /// [`Self::stream_chat_completion`] so tool calls reach the central agent loop.
-    pub async fn stream_generate(
+    async fn stream_generate(
         &self,
         model_id: &str,
         request: GeminiRequest,

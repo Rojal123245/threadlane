@@ -1,0 +1,68 @@
+[[production]]
+package = "threadlane"
+bin = "threadlane"
+reason = "shipped desktop application"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "broker_smoke_ext"
+item = "alloc"
+kind = "function"
+level = "expect"
+reason = "exported WASI extension ABI"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "broker_smoke_ext"
+item = "extension_info"
+kind = "function"
+level = "expect"
+reason = "exported WASI extension ABI"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "broker_smoke_ext"
+item = "execute_command"
+kind = "function"
+level = "expect"
+reason = "exported WASI extension ABI"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "lsp_ext"
+item = "alloc"
+kind = "function"
+level = "expect"
+reason = "exported WASI extension ABI"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "lsp_ext"
+item = "extension_info"
+kind = "function"
+level = "expect"
+reason = "exported WASI extension ABI"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "lsp_ext"
+item = "execute_tool"
+kind = "function"
+level = "expect"
+reason = "exported WASI extension ABI"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "lsp_ext"
+item = "execute_command"
+kind = "function"
+level = "expect"
+reason = "exported WASI extension ABI"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "lsp_ext"
+item = "handle_hook"
+kind = "function"
+level = "expect"
+reason = "exported WASI extension ABI"
