@@ -1,6 +1,6 @@
 //! Compact, expandable project terminal surface with project-scoped tabs.
 
-use makepad_terminal_core::{TermKeyCode as TerminalKeyCode, Terminal};
+use makepad_terminal_core::TermKeyCode as TerminalKeyCode;
 use makepad_widgets::*;
 
 script_mod! {
@@ -108,7 +108,9 @@ script_mod! {
     }
 }
 
-const MAX_VISIBLE_TERMINALS: usize = 6;
+pub const MAX_VISIBLE_TERMINALS: usize = 6;
+const TERMINAL_CELL_WIDTH: f64 = 5.7;
+const TERMINAL_CELL_HEIGHT: f64 = 12.35;
 
 fn tab_id(index: usize) -> &'static [LiveId] {
     match index {
@@ -146,7 +148,13 @@ fn slot_id(index: usize) -> &'static [LiveId] {
 #[derive(Clone, Debug, Default)]
 pub enum ProjectTerminalAction {
     Input(Vec<u8>),
-    LayoutChanged,
+    Key {
+        key: TerminalKeyCode,
+        shift: bool,
+        control: bool,
+        alt: bool,
+    },
+    LayoutChanged { cols: usize, rows: usize },
     New,
     Select(usize),
     Close(usize),
@@ -167,6 +175,8 @@ pub struct ProjectTerminal {
     #[rust]
     cursor_next_frame: NextFrame,
     #[rust]
+    layout_next_frame: NextFrame,
+    #[rust]
     cursor_last_blink: f64,
     #[rust]
     cursor_blink_on: bool,
@@ -174,6 +184,10 @@ pub struct ProjectTerminal {
     terminal_focused: bool,
     #[rust]
     output: String,
+    #[rust]
+    output_without_cursor: String,
+    #[rust]
+    output_with_cursor: String,
     #[rust]
     terminal_height: f64,
     #[rust]
@@ -190,6 +204,13 @@ impl Widget for ProjectTerminal {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if self.layout_next_frame.is_event(event).is_some() && self.expanded {
+            let (cols, rows) = self.terminal_dimensions(cx);
+            cx.widget_action(
+                self.widget_uid(),
+                ProjectTerminalAction::LayoutChanged { cols, rows },
+            );
+        }
         if self.focus_next_frame.is_event(event).is_some() && self.expanded {
             self.view.button(cx, ids!(terminal_toggle)).set_key_focus(cx);
         }
@@ -197,9 +218,25 @@ impl Widget for ProjectTerminal {
         if self.expanded && terminal_has_focus {
             match event {
                 Event::KeyDown(key) => {
-                    if let Some(bytes) = encode_key(key) {
-                        cx.widget_action(self.widget_uid(), ProjectTerminalAction::Input(bytes));
-                    } else if !key.modifiers.control && !key.modifiers.alt {
+                    if let Some(byte) = control_letter(key) {
+                        cx.widget_action(
+                            self.widget_uid(),
+                            ProjectTerminalAction::Input(vec![byte]),
+                        );
+                    } else if let Some(key_code) = terminal_key_code(key) {
+                        cx.widget_action(
+                            self.widget_uid(),
+                            ProjectTerminalAction::Key {
+                                key: key_code,
+                                shift: key.modifiers.shift,
+                                control: key.modifiers.control,
+                                alt: key.modifiers.alt,
+                            },
+                        );
+                    } else if !key.modifiers.control
+                        && !key.modifiers.alt
+                        && !key.modifiers.logo
+                    {
                         if let Some(ch) = key.key_code.to_char(key.modifiers.shift) {
                             cx.widget_action(
                                 self.widget_uid(),
@@ -313,7 +350,8 @@ impl ProjectTerminal {
             body.walk.height = Size::Fixed(height);
             body.redraw(cx);
         }
-        cx.redraw_all();
+        self.layout_next_frame = cx.new_next_frame();
+        self.view.redraw(cx);
     }
 
     pub fn toggle(&mut self, cx: &mut Cx) {
@@ -326,33 +364,45 @@ impl ProjectTerminal {
             .set_visible(cx, self.expanded);
         if self.expanded {
             self.focus_next_frame = cx.new_next_frame();
+            self.layout_next_frame = cx.new_next_frame();
             self.view.button(cx, ids!(terminal_toggle)).set_key_focus(cx);
         }
-        cx.widget_action(self.widget_uid(), ProjectTerminalAction::LayoutChanged);
         self.view.redraw(cx);
     }
 
+    fn terminal_dimensions(&self, cx: &Cx) -> (usize, usize) {
+        let rect = self.view.view(cx, ids!(terminal_scroll)).area().rect(cx);
+        terminal_grid_size(rect.size.x, rect.size.y)
+    }
+
+    fn set_output(&mut self, cx: &mut Cx, output: &str) {
+        if self.output != output {
+            self.output.clear();
+            self.output.push_str(output);
+            self.output_without_cursor = self.output.replace('\u{e000}', "");
+            self.output_with_cursor = self.output.replace('\u{e000}', "▌");
+        }
+        self.render_output(cx);
+    }
+
     fn render_output(&mut self, cx: &mut Cx) {
-        let cursor = if self.terminal_focused && self.cursor_blink_on {
-            "▌"
+        let display = if self.terminal_focused && self.cursor_blink_on {
+            &self.output_with_cursor
         } else {
-            ""
+            &self.output_without_cursor
         };
-        let display = self.output.replace('\u{e000}', cursor);
-        self.view.label(cx, ids!(terminal_output)).set_text(cx, &display);
+        self.view.label(cx, ids!(terminal_output)).set_text(cx, display);
         self.view.redraw(cx);
     }
 }
 
-fn encode_key(event: &KeyEvent) -> Option<Vec<u8>> {
-    if event.modifiers.control {
-        if let Some(ch) = event.key_code.to_char(false) {
-            let byte = ch.to_ascii_lowercase() as u8;
-            if byte.is_ascii_lowercase() {
-                return Some(vec![byte - b'a' + 1]);
-            }
-        }
-    }
+fn terminal_grid_size(width: f64, height: f64) -> (usize, usize) {
+    let cols = (width / TERMINAL_CELL_WIDTH).floor().max(1.0) as usize;
+    let rows = (height / TERMINAL_CELL_HEIGHT).floor().max(1.0) as usize;
+    (cols, rows)
+}
+
+fn terminal_key_code(event: &KeyEvent) -> Option<TerminalKeyCode> {
     let key = match event.key_code {
         KeyCode::ReturnKey | KeyCode::NumpadEnter => TerminalKeyCode::Return,
         KeyCode::Tab => TerminalKeyCode::Tab,
@@ -385,13 +435,17 @@ fn encode_key(event: &KeyEvent) -> Option<Vec<u8>> {
     if key == TerminalKeyCode::None {
         return None;
     }
-    Terminal::new(1, 1).encode_key(
-        key,
-        "",
-        event.modifiers.shift,
-        event.modifiers.control,
-        event.modifiers.alt,
-    )
+    Some(key)
+}
+
+fn control_letter(event: &KeyEvent) -> Option<u8> {
+    if event.modifiers.control && !event.modifiers.alt && !event.modifiers.logo {
+        let byte = event.key_code.to_char(false)?.to_ascii_lowercase() as u8;
+        if byte.is_ascii_lowercase() {
+            return Some(byte - b'a' + 1);
+        }
+    }
+    None
 }
 
 impl ProjectTerminalRef {
@@ -401,12 +455,16 @@ impl ProjectTerminalRef {
             .collect()
     }
 
-    pub fn set_project(&self, _cx: &mut Cx, _name: &str) {}
-
     pub fn toggle(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.toggle(cx);
         }
+    }
+
+    pub fn dimensions(&self, cx: &Cx) -> Option<(usize, usize)> {
+        self.borrow()
+            .filter(|inner| inner.expanded)
+            .map(|inner| inner.terminal_dimensions(cx))
     }
 
     pub fn set_terminals(
@@ -428,9 +486,7 @@ impl ProjectTerminalRef {
         self.button(cx, ids!(terminal_new))
             .set_visible(cx, names.len() < MAX_VISIBLE_TERMINALS);
         if let Some(mut inner) = self.borrow_mut() {
-            inner.output.clear();
-            inner.output.push_str(output);
-            inner.render_output(cx);
+            inner.set_output(cx, output);
         }
     }
 }
@@ -438,6 +494,7 @@ impl ProjectTerminalRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use makepad_terminal_core::Terminal;
 
     #[test]
     fn terminal_core_parses_ansi_into_screen_cells() {
@@ -448,5 +505,11 @@ mod tests {
         let text: String = screen.grid.row_slice(0).iter().map(|cell| cell.codepoint).collect();
         assert_eq!(text.trim_end(), "hellored");
         assert_ne!(screen.grid.cell(5, 0).style.fg, Default::default());
+    }
+
+    #[test]
+    fn terminal_grid_size_uses_the_visible_grid_area() {
+        assert_eq!(terminal_grid_size(570.0, 247.0), (100, 20));
+        assert_eq!(terminal_grid_size(0.0, 0.0), (1, 1));
     }
 }

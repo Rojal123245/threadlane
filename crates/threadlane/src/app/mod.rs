@@ -38,7 +38,7 @@ use threadlane_coding_agent::{
 use threadlane_provider::auth;
 use threadlane_provider::openai::{fetch_available_models, OpenAIClient};
 
-use makepad_terminal_core::{Pty, Terminal};
+use makepad_terminal_core::{Pty, TermKeyCode as TerminalKeyCode, Terminal};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -49,10 +49,27 @@ struct ProjectTerminalSession {
     emulator: Terminal,
 }
 
+impl ProjectTerminalSession {
+    fn terminate(self) {
+        let Self { pty, emulator } = self;
+        drop(pty);
+        drop(emulator);
+    }
+}
+
 #[derive(Default)]
 struct ProjectTerminalGroup {
     sessions: Vec<ProjectTerminalSession>,
     active: usize,
+    error: Option<String>,
+}
+
+impl ProjectTerminalGroup {
+    fn terminate(self) {
+        for session in self.sessions {
+            session.terminate();
+        }
+    }
 }
 
 const ANTIGRAVITY_MODELS: &[&str] = &[
@@ -169,6 +186,10 @@ fn project_name(path: &Path) -> String {
         .map(|name| name.to_string_lossy().into_owned())
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| path.display().to_string())
+}
+
+fn canonical_terminal_work_dir(work_dir: &Path) -> PathBuf {
+    std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf())
 }
 
 use crate::path_utils::compact_workspace_path;
@@ -2785,8 +2806,6 @@ pub struct App {
     #[rust]
     project_terminals: HashMap<PathBuf, ProjectTerminalGroup>,
     #[rust]
-    next_terminal_id: u64,
-    #[rust]
     terminal_poll_next_frame: NextFrame,
 }
 
@@ -2794,8 +2813,7 @@ impl ScriptHook for App {}
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
-        self.next_terminal_id = 1;
-        self.terminal_poll_next_frame = cx.new_next_frame();
+        self.terminal_poll_next_frame = NextFrame::default();
         let (tx, rx) = channel::<GuiAgentEvent>();
         self.tx = Some(tx);
         self.rx = Some(Arc::new(Mutex::new(rx)));
@@ -3038,8 +3056,24 @@ impl MatchEvent for App {
                 crate::components::terminal_panel::ProjectTerminalAction::Input(bytes) => {
                     self.write_terminal_bytes(cx, bytes);
                 }
-                crate::components::terminal_panel::ProjectTerminalAction::LayoutChanged => {
-                    cx.redraw_all();
+                crate::components::terminal_panel::ProjectTerminalAction::Key {
+                    key,
+                    shift,
+                    control,
+                    alt,
+                } => self.write_terminal_key(cx, key, shift, control, alt),
+                crate::components::terminal_panel::ProjectTerminalAction::LayoutChanged {
+                    cols,
+                    rows,
+                } => {
+                    if self
+                        .active_terminal_project()
+                        .and_then(|work_dir| self.project_terminals.get(&work_dir))
+                        .is_none_or(|group| group.sessions.is_empty())
+                    {
+                        self.create_project_terminal(cx);
+                    }
+                    self.resize_project_terminals(cx, cols, rows);
                 }
                 crate::components::terminal_panel::ProjectTerminalAction::New => {
                     self.create_project_terminal(cx);
@@ -3465,7 +3499,9 @@ impl AppMain for App {
         self.poll_update_status(cx);
         if self.terminal_poll_next_frame.is_event(event).is_some() {
             self.poll_terminal_output(cx);
-            self.terminal_poll_next_frame = cx.new_next_frame();
+            if self.has_live_terminal_sessions() {
+                self.terminal_poll_next_frame = cx.new_next_frame();
+            }
         }
         {
             let mut scope = Scope::with_data(&mut self.workspace_state);
@@ -4246,6 +4282,12 @@ impl App {
                 let was_active = self.active_work_dir() == Some(work_dir.as_path());
                 self.session_runtimes
                     .retain(|key, _| key.work_dir != work_dir);
+                if let Some(group) = self
+                    .project_terminals
+                    .remove(&canonical_terminal_work_dir(&work_dir))
+                {
+                    group.terminate();
+                }
                 let keys = self
                     .workspace_state
                     .keys_for_project(&work_dir)
@@ -4289,7 +4331,7 @@ impl App {
     fn active_terminal_project(&self) -> Option<PathBuf> {
         self.workspace_state
             .active_key()
-            .map(|key| key.work_dir.clone())
+            .map(|key| canonical_terminal_work_dir(&key.work_dir))
     }
 
     fn sync_terminal_project(&mut self, cx: &mut Cx) {
@@ -4298,11 +4340,6 @@ impl App {
         };
         let project = project_name(&work_dir);
         let terminal = self.ui.project_terminal(cx, ids!(project_terminal));
-        terminal.set_project(cx, &project);
-        if !self.project_terminals.contains_key(&work_dir) {
-            self.create_project_terminal(cx);
-            return;
-        }
         if let Some(group) = self.project_terminals.get(&work_dir) {
             let names = group
                 .sessions
@@ -4316,24 +4353,26 @@ impl App {
                     }
                 })
                 .collect::<Vec<_>>();
-            let output = group
-                .sessions
-                .get(group.active)
-                .map(Self::terminal_text)
+            let output = group.sessions.get(group.active).map(Self::terminal_text);
+            let output = output
+                .as_deref()
+                .or(group.error.as_deref())
                 .unwrap_or_default();
-            let output = output.as_str();
             terminal.set_terminals(cx, &names, Some(group.active), output);
+        } else {
+            terminal.set_terminals(cx, &[], None, "");
         }
     }
 
     fn spawn_project_terminal(
         &mut self,
         work_dir: &Path,
+        cols: u16,
+        rows: u16,
     ) -> Result<ProjectTerminalSession, String> {
-        self.next_terminal_id += 1;
         let pty = Pty::spawn(
-            80,
-            24,
+            cols,
+            rows,
             None,
             &[("TERM", "xterm-256color")],
             Some(work_dir),
@@ -4341,32 +4380,40 @@ impl App {
         .map_err(|error| format!("Could not start terminal: {error}"))?;
         Ok(ProjectTerminalSession {
             pty,
-            emulator: Terminal::new(80, 24),
+            emulator: Terminal::new(cols as usize, rows as usize),
         })
     }
 
     fn create_project_terminal(&mut self, cx: &mut Cx) {
-        const MAX_PROJECT_TERMINALS: usize = 6;
         let Some(work_dir) = self.active_terminal_project() else {
             return;
         };
         if self
             .project_terminals
             .get(&work_dir)
-            .is_some_and(|group| group.sessions.len() >= MAX_PROJECT_TERMINALS)
+            .is_some_and(|group| {
+                group.sessions.len()
+                    >= crate::components::terminal_panel::MAX_VISIBLE_TERMINALS
+            })
         {
             return;
         }
-        match self.spawn_project_terminal(&work_dir) {
+        let (cols, rows) = self
+            .ui
+            .project_terminal(cx, ids!(project_terminal))
+            .dimensions(cx)
+            .unwrap_or((80, 24));
+        match self.spawn_project_terminal(&work_dir, cols as u16, rows as u16) {
             Ok(session) => {
                 let group = self.project_terminals.entry(work_dir).or_default();
                 group.sessions.push(session);
                 group.active = group.sessions.len() - 1;
+                group.error = None;
+                self.terminal_poll_next_frame = cx.new_next_frame();
             }
             Err(error) => {
-                self.ui
-                    .project_terminal(cx, ids!(project_terminal))
-                    .set_terminals(cx, &[], None, &format!("{error}\n"));
+                self.project_terminals.entry(work_dir).or_default().error = Some(error);
+                self.sync_terminal_project(cx);
                 return;
             }
         }
@@ -4385,6 +4432,29 @@ impl App {
         self.sync_terminal_project(cx);
     }
 
+    fn resize_project_terminals(&mut self, cx: &mut Cx, cols: usize, rows: usize) {
+        let Some(work_dir) = self.active_terminal_project() else {
+            return;
+        };
+        let cols = cols.clamp(1, u16::MAX as usize);
+        let rows = rows.clamp(1, u16::MAX as usize);
+        if let Some(group) = self.project_terminals.get_mut(&work_dir) {
+            for session in &mut group.sessions {
+                if session.emulator.screen().cols() == cols
+                    && session.emulator.screen().rows() == rows
+                {
+                    continue;
+                }
+                if let Err(error) = session.pty.resize(cols as u16, rows as u16) {
+                    eprintln!("Terminal resize failed: {error}");
+                    continue;
+                }
+                session.emulator.resize(cols, rows);
+            }
+        }
+        self.sync_terminal_project(cx);
+    }
+
     fn close_project_terminal(&mut self, cx: &mut Cx, index: usize) {
         let Some(work_dir) = self.active_terminal_project() else {
             return;
@@ -4393,7 +4463,7 @@ impl App {
             if index >= group.sessions.len() {
                 return;
             }
-            group.sessions.remove(index);
+            group.sessions.remove(index).terminate();
             if group.sessions.is_empty() {
                 true
             } else {
@@ -4408,7 +4478,9 @@ impl App {
             return;
         };
         if remove_group {
-            self.project_terminals.remove(&work_dir);
+            if let Some(group) = self.project_terminals.remove(&work_dir) {
+                group.terminate();
+            }
         }
         self.sync_terminal_project(cx);
     }
@@ -4417,7 +4489,11 @@ impl App {
         let Some(work_dir) = self.active_terminal_project() else {
             return;
         };
-        if !self.project_terminals.contains_key(&work_dir) {
+        if self
+            .project_terminals
+            .get(&work_dir)
+            .is_none_or(|group| group.sessions.is_empty())
+        {
             self.create_project_terminal(cx);
         }
         let Some(group) = self.project_terminals.get_mut(&work_dir) else {
@@ -4432,10 +4508,49 @@ impl App {
         self.sync_terminal_project(cx);
     }
 
+    fn write_terminal_key(
+        &mut self,
+        cx: &mut Cx,
+        key: TerminalKeyCode,
+        shift: bool,
+        control: bool,
+        alt: bool,
+    ) {
+        let Some(work_dir) = self.active_terminal_project() else {
+            return;
+        };
+        if self
+            .project_terminals
+            .get(&work_dir)
+            .is_none_or(|group| group.sessions.is_empty())
+        {
+            self.create_project_terminal(cx);
+        }
+        let Some(terminal) = self
+            .project_terminals
+            .get_mut(&work_dir)
+            .and_then(|group| group.sessions.get_mut(group.active))
+        else {
+            return;
+        };
+        if let Some(bytes) = terminal.emulator.encode_key(key, "", shift, control, alt) {
+            if let Err(error) = terminal.pty.write(&bytes) {
+                eprintln!("Terminal write failed: {error}");
+            }
+        }
+        self.sync_terminal_project(cx);
+    }
+
     fn poll_terminal_output(&mut self, cx: &mut Cx) {
+        const MAX_PTY_READS_PER_FRAME: usize = 8;
+        let mut processed_output = false;
         for group in self.project_terminals.values_mut() {
             for session in &mut group.sessions {
-                while let Some(bytes) = session.pty.try_read() {
+                for _ in 0..MAX_PTY_READS_PER_FRAME {
+                    let Some(bytes) = session.pty.try_read() else {
+                        break;
+                    };
+                    processed_output = true;
                     session.emulator.process_bytes(&bytes);
                     let outbound = session.emulator.take_outbound();
                     if !outbound.is_empty() {
@@ -4444,7 +4559,15 @@ impl App {
                 }
             }
         }
-        self.sync_terminal_project(cx);
+        if processed_output {
+            self.sync_terminal_project(cx);
+        }
+    }
+
+    fn has_live_terminal_sessions(&self) -> bool {
+        self.project_terminals
+            .values()
+            .any(|group| !group.sessions.is_empty())
     }
 
     fn terminal_text(session: &ProjectTerminalSession) -> String {
@@ -4476,11 +4599,14 @@ impl App {
             push_row(row, cells);
         }
         for row in 0..screen.rows() {
-            push_row(cursor_row - screen.cursor.y + row, screen.grid.row_slice(row));
+            push_row(screen.scrollback().len() + row, screen.grid.row_slice(row));
         }
         const MAX_TERMINAL_OUTPUT: usize = 256 * 1024;
         if output.len() > MAX_TERMINAL_OUTPUT {
-            let cutoff = output.len() - MAX_TERMINAL_OUTPUT;
+            let mut cutoff = output.len() - MAX_TERMINAL_OUTPUT;
+            while cutoff < output.len() && !output.is_char_boundary(cutoff) {
+                cutoff += 1;
+            }
             let cutoff = output[cutoff..]
                 .char_indices()
                 .find_map(|(offset, ch)| (ch == '\n').then_some(cutoff + offset + 1))
