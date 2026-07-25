@@ -3,7 +3,7 @@
 use crate::path_utils::{canonicalize_path, truncate_chars};
 use threadlane_agent::{AgentMessage, SessionTree};
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -45,7 +45,7 @@ pub enum SessionListRow {
 pub struct SessionsData {
     pub projects: Vec<ProjectGroup>,
     /// O(1) lookup for spinner visibility per row in draw_walk.
-    pub working_sessions: HashSet<(PathBuf, String)>,
+    pub working_sessions: HashMap<PathBuf, HashSet<String>>,
     pub active_session_id: Option<String>,
     pub active_work_dir: PathBuf,
     pub context_session_id: Option<String>,
@@ -95,7 +95,9 @@ impl SessionsData {
             if project.sessions.len() > SESSION_PREVIEW_LIMIT {
                 rows.push(SessionListRow::Overflow {
                     project_idx,
-                    hidden_count: project.sessions.len() - SESSION_PREVIEW_LIMIT,
+                    hidden_count: (!showing_all)
+                        .then_some(project.sessions.len() - SESSION_PREVIEW_LIMIT)
+                        .unwrap_or_default(),
                     showing_all,
                 });
             }
@@ -207,7 +209,7 @@ pub fn end_title_generation(_work_dir: &Path, _session_id: &str) {
 pub static SESSIONS_DATA: LazyLock<RwLock<SessionsData>> = LazyLock::new(|| {
     RwLock::new(SessionsData {
         projects: Vec::new(),
-        working_sessions: HashSet::new(),
+        working_sessions: HashMap::new(),
         active_session_id: None,
         active_work_dir: PathBuf::new(),
         context_session_id: None,
@@ -380,11 +382,22 @@ pub fn refresh_sessions(project_dirs: &[PathBuf]) -> Vec<SessionListRow> {
 pub fn set_session_working(work_dir: &Path, session_id: &str, is_working: bool) {
     let mut data = SESSIONS_DATA.write().unwrap();
     let normalized_dir = canonicalize_path(work_dir);
-    let key = (normalized_dir, session_id.to_string());
     if is_working {
-        data.working_sessions.insert(key);
+        data.working_sessions
+            .entry(normalized_dir)
+            .or_default()
+            .insert(session_id.to_string());
     } else {
-        data.working_sessions.remove(&key);
+        let remove_project =
+            data.working_sessions
+                .get_mut(&normalized_dir)
+                .is_some_and(|sessions| {
+                    sessions.remove(session_id);
+                    sessions.is_empty()
+                });
+        if remove_project {
+            data.working_sessions.remove(&normalized_dir);
+        }
     }
 }
 
@@ -394,7 +407,8 @@ pub fn is_session_working(work_dir: &Path, session_id: &str) -> bool {
         .read()
         .unwrap()
         .working_sessions
-        .contains(&(normalized_dir, session_id.to_string()))
+        .get(&normalized_dir)
+        .is_some_and(|sessions| sessions.contains(session_id))
 }
 
 pub fn set_session_context_target(entry: Option<&SessionEntry>) {
@@ -447,8 +461,7 @@ pub fn is_project_working(work_dir: &Path) -> bool {
         .read()
         .unwrap()
         .working_sessions
-        .iter()
-        .any(|(dir, _)| dir == &normalized_dir)
+        .contains_key(&normalized_dir)
 }
 
 pub fn active_session_entry() -> Option<SessionEntry> {
@@ -611,7 +624,7 @@ mod tests {
     fn test_sessions_data(session_count: usize) -> SessionsData {
         SessionsData {
             projects: vec![test_project(session_count)],
-            working_sessions: HashSet::new(),
+            working_sessions: HashMap::new(),
             active_session_id: None,
             active_work_dir: PathBuf::from("/project"),
             context_session_id: None,
@@ -658,6 +671,7 @@ mod tests {
         assert!(matches!(
             rows.last(),
             Some(SessionListRow::Overflow {
+                hidden_count: 0,
                 showing_all: true,
                 ..
             })

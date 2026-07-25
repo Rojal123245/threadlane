@@ -310,20 +310,6 @@ fn io_error(operation: &'static str, path: &Path, source: io::Error) -> ProjectR
 }
 
 #[cfg(test)]
-impl ProjectRegistry {
-    fn touch(&mut self, canonical_path: &Path) -> Result<(), ProjectRegistryError> {
-        let index = self.project_index(canonical_path)?;
-        let previous = self.projects[index].last_opened_at;
-        self.projects[index].last_opened_at = unix_timestamp().max(previous.saturating_add(1));
-        if let Err(error) = self.persist() {
-            self.projects[index].last_opened_at = previous;
-            return Err(error);
-        }
-        Ok(())
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
@@ -441,10 +427,6 @@ mod tests {
         let loaded = ProjectRegistry::load(&global).unwrap();
         assert_eq!(loaded.projects(), registry.projects());
         assert_eq!(loaded.projects().len(), 1);
-        assert!(matches!(
-            registry.touch(&second.path),
-            Err(ProjectRegistryError::ProjectNotAttached(_))
-        ));
     }
 
     #[test]

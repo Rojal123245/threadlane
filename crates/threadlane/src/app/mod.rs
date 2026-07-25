@@ -916,12 +916,6 @@ script_mod! {
                             }
                         }
                     }
-                    detail_wrap := View {
-                        width: Fill
-                        height: Fit
-                        visible: false
-                        output_md := mod.components.ChatMarkdown {}
-                    }
                 }
             }
 
@@ -1477,7 +1471,7 @@ script_mod! {
         ui: Root {
             main_window := Window {
                 window.inner_size: vec2(1280, 768)
-                window.title: "threadlane"
+                window.title: "Threadlane"
                 pass.clear_color: #x181a1f
                 body +: {
                     window_body := View {
@@ -2194,6 +2188,9 @@ fn image_attachment_from_rgba(
     height: usize,
     rgba: &[u8],
 ) -> Result<ImageAttachment, String> {
+    if width == 0 || height == 0 {
+        return Err("Clipboard image has invalid dimensions".to_string());
+    }
     let expected_len = width
         .checked_mul(height)
         .and_then(|pixels| pixels.checked_mul(4))
@@ -2246,6 +2243,16 @@ fn image_attachment_from_rgba(
             base64::engine::general_purpose::STANDARD.encode(encoded)
         ),
     })
+}
+
+#[cfg(test)]
+mod image_attachment_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_zero_dimensions_before_resizing() {
+        assert!(image_attachment_from_rgba("clipboard.png".into(), 0, 1601, &[]).is_err());
+    }
 }
 
 fn clipboard_image_attachment() -> Result<Option<ImageAttachment>, String> {
@@ -2565,9 +2572,8 @@ impl MatchEvent for App {
             .filter(|skill| skill.enabled && skill.is_valid)
             .collect();
         let discovered_agents = discover_agents(&work_dir, AgentScope::Both).agents;
-        let subagent_enabled = true;
         self.capabilities_summary =
-            format_capabilities_summary(&discovered_skills, &discovered_agents, subagent_enabled);
+            format_capabilities_summary(&discovered_skills, &discovered_agents);
         self.ui.button(cx, ids!(caps_btn)).set_text(
             cx,
             &format!(
@@ -3072,11 +3078,7 @@ fn normalize_catalog_text(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn format_capabilities_summary(
-    skills: &[SkillMetadata],
-    agents: &[AgentConfig],
-    subagent_enabled: bool,
-) -> String {
+fn format_capabilities_summary(skills: &[SkillMetadata], agents: &[AgentConfig]) -> String {
     let mut summary = format!(
         "Capabilities\n\nSkills ({}) — use /skill <id> or let the model load one automatically.",
         skills.len()
@@ -3101,13 +3103,8 @@ fn format_capabilities_summary(
     }
 
     summary.push_str(&format!(
-        "\n\nSubagents ({}) — {}",
+        "\n\nSubagents ({}) — use /subagent <task>, or let the model delegate automatically.",
         agents.len(),
-        if subagent_enabled {
-            "use /subagent <task>, or let the model delegate automatically."
-        } else {
-            "the subagent extension is not loaded."
-        }
     ));
     if agents.is_empty() {
         summary.push_str("\n  No agent presets discovered.");
@@ -3158,8 +3155,7 @@ impl App {
     }
 
     fn refresh_provider_connection_ui(&mut self, cx: &mut Cx) {
-        if let Some(creds) = threadlane_provider::antigravity_auth::load_antigravity_credentials()
-        {
+        if let Some(creds) = threadlane_provider::antigravity_auth::load_antigravity_credentials() {
             let status_text = match creds.account_email {
                 Some(ref email) => format!("✓ Connected ({email})"),
                 None => "✓ Connected".to_string(),
@@ -3310,7 +3306,6 @@ impl App {
             add_project_btn.set_visible(cx, add_project_visible);
             projects_header.redraw(cx);
         }
-
     }
 
     fn set_model_dropup_options(&mut self, cx: &mut Cx, models: Vec<String>, selected_model: &str) {
@@ -3965,7 +3960,6 @@ impl App {
                     .filter(|skill| skill.enabled && skill.is_valid)
                     .collect::<Vec<_>>();
                 let agents = discover_agents(&canonical, AgentScope::Both).agents;
-                let subagent_enabled = true;
                 let mut commands = builtin_commands();
                 commands.extend(skills.iter().map(|skill| CommandInfo {
                     name: format!("skill {}", skill.id),
@@ -3984,7 +3978,7 @@ impl App {
                     }));
                 }
                 let capabilities = ProjectCapabilities {
-                    summary: format_capabilities_summary(&skills, &agents, subagent_enabled),
+                    summary: format_capabilities_summary(&skills, &agents),
                     button_text: format!("{} skills · {} agents", skills.len(), agents.len()),
                     commands,
                 };
@@ -4930,6 +4924,7 @@ impl App {
 
                 GuiAgentEvent::SessionTitleGenerated => {
                     self.refresh_registered_sessions();
+                    self.ui.widget(cx, ids!(session_list)).redraw(cx);
                 }
                 GuiAgentEvent::AvailableModelsLoaded(models) => {
                     let selected_model = self

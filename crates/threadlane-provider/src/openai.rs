@@ -665,7 +665,7 @@ impl OpenAIClient {
     }
 
     pub async fn generate_title(&self, model: &str, prompt: &str) -> Result<String, String> {
-        let is_codex = self.account_id.is_some() || self.api_key.starts_with("ey");
+        let is_codex = self.is_codex();
         let (url, payload) = if is_codex {
             (CODEX_SSE_URL, title_payload(model, prompt, true))
         } else {
@@ -767,14 +767,8 @@ impl OpenAIClient {
                 fallback_allowed: true,
                 ..
             } => {
-                self.stream_sse(
-                    CODEX_SSE_URL,
-                    payload,
-                    Some(&session_key),
-                    true,
-                    &event_tx,
-                )
-                .await;
+                self.stream_sse(CODEX_SSE_URL, payload, Some(&session_key), true, &event_tx)
+                    .await;
             }
         }
     }

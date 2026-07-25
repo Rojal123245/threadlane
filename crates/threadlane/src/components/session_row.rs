@@ -178,6 +178,7 @@ script_mod! {
                 draw_text +: {
                     color: #x00000000
                     color_hover: #x00000000
+                    color_focus: #x00000000
                     color_down: #x00000000
                     text_style +: { font_size: 11.0 }
                 }
@@ -192,6 +193,7 @@ script_mod! {
                 draw_icon +: {
                     color: #x00000000
                     color_hover: #x00000000
+                    color_focus: #x00000000
                     color_down: #x00000000
                 }
                 draw_bg +: {
@@ -235,6 +237,7 @@ impl ProjectHeader {
                 draw_text +: {
                     color: #x626d7d
                     color_hover: #xd08a92
+                    color_focus: #xd08a92
                     color_down: #xf2a0aa
                 }
                 draw_bg +: {
@@ -247,6 +250,7 @@ impl ProjectHeader {
                 draw_icon +: {
                     color: #x758294
                     color_hover: #xb8d5f5
+                    color_focus: #xb8d5f5
                     color_down: #xffffff
                 }
                 draw_bg +: {
@@ -260,6 +264,7 @@ impl ProjectHeader {
                 draw_text +: {
                     color: #x00000000
                     color_hover: #x00000000
+                    color_focus: #x00000000
                     color_down: #x00000000
                 }
                 draw_bg +: {
@@ -272,6 +277,7 @@ impl ProjectHeader {
                 draw_icon +: {
                     color: #x00000000
                     color_hover: #x00000000
+                    color_focus: #x00000000
                     color_down: #x00000000
                 }
                 draw_bg +: {
@@ -296,10 +302,7 @@ impl Widget for ProjectHeader {
 
         match event {
             Event::MouseMove(event) => {
-                self.set_actions_painted(
-                    cx,
-                    self.view.area().clipped_rect(cx).contains(event.abs),
-                );
+                self.set_actions_painted(cx, self.view.area().clipped_rect(cx).contains(event.abs));
             }
             Event::MouseLeave(_) => self.set_actions_painted(cx, false),
             _ => {}

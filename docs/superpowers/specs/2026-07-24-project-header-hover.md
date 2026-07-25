@@ -14,9 +14,9 @@ The widget will:
 - delegate events to its child controls;
 - handle hover-in and hover-out against its own area;
 - update and redraw its action buttons locally;
-- emit typed detach, new-session, and select-project actions.
+- emit typed detach, new-session, and toggle actions.
 
-Both fixed and portal-list project headers will use the same widget. The app and session-list shell will consume its typed actions and will no longer calculate project hover from retained global pointer coordinates.
+Both fixed and portal-list project headers will use the same widget. The app and session-list shell will route `ProjectHeaderAction::Toggle` to `toggle_project_collapsed` for collapse/expand behavior and will no longer calculate project hover from retained global pointer coordinates.
 
 ## Verification
 

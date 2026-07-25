@@ -316,7 +316,10 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
             match fs::write(&validated_path, content) {
                 Ok(_) => {
                     let diag = run_post_edit_diagnostics(workspace_root, raw_path);
-                    format!("Successfully wrote {} bytes to '{raw_path}'{diag}", content.len())
+                    format!(
+                        "Successfully wrote {} bytes to '{raw_path}'{diag}",
+                        content.len()
+                    )
                 }
                 Err(e) => format!("Error writing to file '{raw_path}': {e}"),
             }
@@ -372,10 +375,11 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
                 None => return "Error: 'edits' parameter is required".into(),
             };
 
-            let edits: Vec<hashline::HashlineEdit> = match serde_json::from_value(edits_value.clone()) {
-                Ok(e) => e,
-                Err(err) => return format!("Error parsing 'edits' argument: {err}"),
-            };
+            let edits: Vec<hashline::HashlineEdit> =
+                match serde_json::from_value(edits_value.clone()) {
+                    Ok(e) => e,
+                    Err(err) => return format!("Error parsing 'edits' argument: {err}"),
+                };
 
             match fs::read_to_string(&validated_path) {
                 Ok(content) => match hashline::apply_hashline_edits(&content, &edits) {
@@ -499,7 +503,10 @@ pub fn run_post_edit_diagnostics(workspace_root: &Path, raw_path: &str) -> Strin
                     if file_clean.ends_with(&target_clean) || target_clean.ends_with(&file_clean) {
                         matched = true;
                         line_no = span.get("line_start").and_then(|v| v.as_u64()).unwrap_or(0);
-                        col_no = span.get("column_start").and_then(|v| v.as_u64()).unwrap_or(0);
+                        col_no = span
+                            .get("column_start")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
                         break;
                     }
                 }
@@ -508,9 +515,13 @@ pub fn run_post_edit_diagnostics(workspace_root: &Path, raw_path: &str) -> Strin
 
         if matched {
             if level == "error" {
-                errors.push(format!("- [ERROR] Line {line_no}, Col {col_no}: {text_msg}"));
+                errors.push(format!(
+                    "- [ERROR] Line {line_no}, Col {col_no}: {text_msg}"
+                ));
             } else if level == "warning" {
-                warnings.push(format!("- [WARNING] Line {line_no}, Col {col_no}: {text_msg}"));
+                warnings.push(format!(
+                    "- [WARNING] Line {line_no}, Col {col_no}: {text_msg}"
+                ));
             }
         }
     }
@@ -559,24 +570,35 @@ mod tests {
             .iter()
             .find(|t| t["function"]["name"] == "edit_file_hashline")
             .expect("edit_file_hashline tool should exist");
-        
+
         let desc = hashline_tool["function"]["description"].as_str().unwrap();
-        assert!(desc.contains("Supports line and range replace, insert_after, and delete operations"));
+        assert!(
+            desc.contains("Supports line and range replace, insert_after, and delete operations")
+        );
         assert!(desc.contains("Always batch multiple edits for the same file in one tool call"));
 
         let params = &hashline_tool["function"]["parameters"]["properties"];
-        let start_anchor_desc = params["edits"]["items"]["properties"]["start_anchor"]["description"].as_str().unwrap();
+        let start_anchor_desc = params["edits"]["items"]["properties"]["start_anchor"]
+            ["description"]
+            .as_str()
+            .unwrap();
         assert!(start_anchor_desc.contains("formatted as 'line_number:hash'"));
 
-        let end_anchor_desc = params["edits"]["items"]["properties"]["end_anchor"]["description"].as_str().unwrap();
+        let end_anchor_desc = params["edits"]["items"]["properties"]["end_anchor"]["description"]
+            .as_str()
+            .unwrap();
         assert!(end_anchor_desc.contains("multi-line range edits"));
 
-        let action_desc = params["edits"]["items"]["properties"]["action"]["description"].as_str().unwrap();
+        let action_desc = params["edits"]["items"]["properties"]["action"]["description"]
+            .as_str()
+            .unwrap();
         assert!(action_desc.contains("'replace'"));
         assert!(action_desc.contains("'insert_after'"));
         assert!(action_desc.contains("'delete'"));
 
-        let new_content_desc = params["edits"]["items"]["properties"]["new_content"]["description"].as_str().unwrap();
+        let new_content_desc = params["edits"]["items"]["properties"]["new_content"]["description"]
+            .as_str()
+            .unwrap();
         assert!(new_content_desc.contains("Omit or leave empty for 'delete' actions"));
     }
 

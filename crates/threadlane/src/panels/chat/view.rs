@@ -131,7 +131,9 @@ impl ActivityCounts {
 fn is_activity(message: &ChatMessage) -> bool {
     match message {
         ChatMessage::Thinking { .. } => true,
-        ChatMessage::Tool { name, .. } => name != "subagent",
+        ChatMessage::Tool {
+            name, presentation, ..
+        } => name != "subagent" && presentation.icon != ToolIcon::Subagent,
         _ => false,
     }
 }
@@ -143,9 +145,10 @@ fn display_rows(
 ) -> Vec<DisplayRow> {
     let mut interim = Vec::new();
     let owned_subagent_runs = super::state::owned_subagent_child_runs(messages);
+    let owned_runs = owned_subagent_runs.values().copied().collect::<Vec<_>>();
 
     for (message_index, message) in messages.iter().enumerate() {
-        if super::state::is_owned_subagent_child_tool(message, &owned_subagent_runs) {
+        if super::state::is_owned_subagent_child_tool(message, &owned_runs) {
             continue;
         }
         if is_activity(message) {
@@ -294,6 +297,7 @@ fn display_rows(
                                 output,
                                 *status,
                                 messages,
+                                owned_subagent_runs.get(&message_index).copied(),
                             );
                             let working = rail_items
                                 .iter()
@@ -661,6 +665,10 @@ impl Widget for SubagentRail {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
+        let item_count = self.items.len();
+        self.rows.retain(|row_id, _| {
+            (0..item_count).any(|index| *row_id == LiveId::from_num(1, index as u64))
+        });
         for (index, item) in self.items.iter().enumerate() {
             let row_id = LiveId::from_num(1, index as u64);
             let template = self.row_template;
@@ -792,8 +800,12 @@ impl Widget for ChatList {
                         DisplayRow::ActivityGroup(group) => {
                             let item_widget = list.item(cx, item_id, id!(ActivityGroupMsg));
                             show_tool_icon(cx, &item_widget, group.tool_icon);
-                            item_widget.label(cx, ids!(title_lbl)).set_text(cx, group.title);
-                            item_widget.label(cx, ids!(preview_lbl)).set_text(cx, &group.preview);
+                            item_widget
+                                .label(cx, ids!(title_lbl))
+                                .set_text(cx, group.title);
+                            item_widget
+                                .label(cx, ids!(preview_lbl))
+                                .set_text(cx, &group.preview);
                             update_activity_status(
                                 cx,
                                 &item_widget,
@@ -815,7 +827,9 @@ impl Widget for ChatList {
                                 continue;
                             };
                             let item_widget = list.item(cx, item_id, id!(SubagentMsg));
-                            item_widget.label(cx, ids!(preview_lbl)).set_text(cx, &tool.preview);
+                            item_widget
+                                .label(cx, ids!(preview_lbl))
+                                .set_text(cx, &tool.preview);
                             update_activity_status(
                                 cx,
                                 &item_widget,
@@ -829,9 +843,6 @@ impl Widget for ChatList {
                                     rail.items = tool.rail_items.clone();
                                 }
                             }
-                            item_widget
-                                .widget(cx, ids!(detail_wrap))
-                                .set_visible(cx, false);
                             item_widget.draw_all_unscoped(cx);
                         }
                         DisplayRow::Tool(tool) => {
@@ -845,32 +856,45 @@ impl Widget for ChatList {
                                 result_metadata,
                                 output,
                                 ..
-                            } = message else {
+                            } = message
+                            else {
                                 continue;
                             };
 
                             let item_widget = list.item(cx, item_id, id!(ToolMsg));
                             show_tool_icon(cx, &item_widget, presentation.icon);
-                            item_widget.label(cx, ids!(title_lbl)).set_text(cx, &presentation.title);
-                            item_widget.label(cx, ids!(meta_lbl)).set_text(cx, &presentation.metadata);
+                            item_widget
+                                .label(cx, ids!(title_lbl))
+                                .set_text(cx, &presentation.title);
+                            item_widget
+                                .label(cx, ids!(meta_lbl))
+                                .set_text(cx, &presentation.metadata);
                             item_widget
                                 .widget(cx, ids!(meta_lbl))
                                 .set_visible(cx, !presentation.metadata.is_empty());
-                            item_widget.label(cx, ids!(preview_lbl)).set_text(cx, &presentation.primary);
-                            item_widget.label(cx, ids!(result_meta_lbl)).set_text(cx, result_metadata);
+                            item_widget
+                                .label(cx, ids!(preview_lbl))
+                                .set_text(cx, &presentation.primary);
+                            item_widget
+                                .label(cx, ids!(result_meta_lbl))
+                                .set_text(cx, result_metadata);
                             item_widget
                                 .widget(cx, ids!(result_meta_lbl))
                                 .set_visible(cx, !result_metadata.is_empty());
 
                             let has_completed_result = *status != ToolStatus::Running;
-                            item_widget.label(cx, ids!(result_preview_lbl)).set_text(cx, result_preview);
+                            item_widget
+                                .label(cx, ids!(result_preview_lbl))
+                                .set_text(cx, result_preview);
                             item_widget
                                 .widget(cx, ids!(result_preview_lbl))
                                 .set_visible(
                                     cx,
                                     has_completed_result && !result_preview.is_empty(),
                                 );
-                            item_widget.label(cx, ids!(result_meta_header_lbl)).set_text(cx, result_metadata);
+                            item_widget
+                                .label(cx, ids!(result_meta_header_lbl))
+                                .set_text(cx, result_metadata);
                             item_widget
                                 .widget(cx, ids!(result_meta_header_lbl))
                                 .set_visible(
@@ -893,9 +917,7 @@ impl Widget for ChatList {
                             }
                             let arguments_are_fully_summarized = matches!(
                                 presentation.icon,
-                                ToolIcon::ReadFile
-                                    | ToolIcon::ListDirectory
-                                    | ToolIcon::Skill
+                                ToolIcon::ReadFile | ToolIcon::ListDirectory | ToolIcon::Skill
                             );
                             args_section.set_visible(
                                 cx,
@@ -999,14 +1021,12 @@ impl Widget for ChatList {
         if let Event::Actions(actions) = event {
             let list = self.view.portal_list(cx, ids!(list));
             let layout_changed = actions.iter().any(|action| {
-                action
-                    .downcast_ref::<WidgetAction>()
-                    .is_some_and(|action| {
-                        matches!(
-                            action.cast::<ToolFoldHeaderAction>(),
-                            ToolFoldHeaderAction::LayoutChanged
-                        )
-                    })
+                action.downcast_ref::<WidgetAction>().is_some_and(|action| {
+                    matches!(
+                        action.cast::<ToolFoldHeaderAction>(),
+                        ToolFoldHeaderAction::LayoutChanged
+                    )
+                })
             });
             if layout_changed {
                 list.redraw(cx);

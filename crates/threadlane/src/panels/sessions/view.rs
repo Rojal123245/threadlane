@@ -130,7 +130,7 @@ impl SessionList {
     }
 
     fn restart_scrollbar_hide_timer(&mut self, cx: &mut Cx) {
-        if self.scrollbar_hide_timer.0 != 0 {
+        if !self.scrollbar_hide_timer.is_empty() {
             cx.stop_timer(self.scrollbar_hide_timer);
         }
         self.scrollbar_hide_timer = cx.start_timeout(SCROLLBAR_HIDE_DELAY);
@@ -300,8 +300,8 @@ impl Widget for SessionList {
                                 .set_text(cx, &relative_time_label(session.updated_at));
                             let working = data
                                 .working_sessions
-                                .iter()
-                                .any(|(dir, id)| dir == &session.work_dir && id == &session.id);
+                                .get(&session.work_dir)
+                                .is_some_and(|sessions| sessions.contains(&session.id));
                             item_widget
                                 .widget(cx, ids!(session_row_spinner))
                                 .set_visible(cx, working);
@@ -317,7 +317,7 @@ impl Widget for SessionList {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if self.scrollbar_hide_timer.is_event(event).is_some() {
-            self.scrollbar_hide_timer = Timer::default();
+            self.scrollbar_hide_timer = Timer::empty();
             self.scrolling_recently = false;
             if !self.list_hovered {
                 self.set_scrollbar_revealed(cx, false);

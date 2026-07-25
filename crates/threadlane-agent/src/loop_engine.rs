@@ -494,72 +494,72 @@ impl AgentLoop {
         routes
     }
 
-async fn build_payload_helper(
-    state_mutex: &Arc<Mutex<AgentState>>,
-    tool_executors: &[Arc<dyn ToolExecutor>],
-    allowed_tool_names: Option<&HashSet<String>>,
-    compatibility_executor: Option<&Arc<dyn ToolExecutor>>,
-    prompt_cache_key: Option<&str>,
-    format: PayloadFormat,
-) -> Value {
-    let mut state = state_mutex.lock().await.clone();
-    repair_interrupted_tool_turn(&mut state.messages);
+    async fn build_payload_helper(
+        state_mutex: &Arc<Mutex<AgentState>>,
+        tool_executors: &[Arc<dyn ToolExecutor>],
+        allowed_tool_names: Option<&HashSet<String>>,
+        compatibility_executor: Option<&Arc<dyn ToolExecutor>>,
+        prompt_cache_key: Option<&str>,
+        format: PayloadFormat,
+    ) -> Value {
+        let mut state = state_mutex.lock().await.clone();
+        repair_interrupted_tool_turn(&mut state.messages);
 
-    let mut definitions =
-        collect_tool_definitions(&state.tools, tool_executors, compatibility_executor);
-    if let Some(allowed_tool_names) = allowed_tool_names {
-        definitions.retain(|definition| allowed_tool_names.contains(&definition.name));
-    }
-
-    match format {
-        PayloadFormat::ChatCompletions => {
-            let api_msgs = convert_to_llm(&state.messages);
-            let tools: Vec<_> = definitions
-                .iter()
-                .map(AgentToolDefinition::to_chat_completions_tool)
-                .collect();
-            let mut chat_payload = serde_json::json!({
-                "model": state.model,
-                "messages": api_msgs,
-                "tools": tools,
-                "stream": true,
-                "stream_options": { "include_usage": true }
-            });
-            if let Some(key) = prompt_cache_key {
-                chat_payload["prompt_cache_key"] = key.into();
-            }
-            if let Some(effort) = state.reasoning_effort.as_api_str() {
-                chat_payload["reasoning_effort"] = effort.into();
-            }
-            chat_payload
+        let mut definitions =
+            collect_tool_definitions(&state.tools, tool_executors, compatibility_executor);
+        if let Some(allowed_tool_names) = allowed_tool_names {
+            definitions.retain(|definition| allowed_tool_names.contains(&definition.name));
         }
-        PayloadFormat::Codex => {
-            let (instructions, codex_msgs) = convert_to_codex_llm(&state.messages);
-            let codex_tools: Vec<_> = definitions
-                .iter()
-                .map(AgentToolDefinition::to_codex_responses_tool)
-                .collect();
-            let mut codex_payload = serde_json::json!({
-                "model": state.model,
-                "instructions": instructions,
-                "input": codex_msgs,
-                "store": false,
-                "stream": true,
-                "tools": codex_tools
-            });
-            if let Some(key) = prompt_cache_key {
-                codex_payload["prompt_cache_key"] = key.into();
-            }
-            if let Some(effort) = state.reasoning_effort.as_api_str() {
-                codex_payload["reasoning"] = serde_json::json!({
-                    "effort": effort,
-                    "summary": "auto"
+
+        match format {
+            PayloadFormat::ChatCompletions => {
+                let api_msgs = convert_to_llm(&state.messages);
+                let tools: Vec<_> = definitions
+                    .iter()
+                    .map(AgentToolDefinition::to_chat_completions_tool)
+                    .collect();
+                let mut chat_payload = serde_json::json!({
+                    "model": state.model,
+                    "messages": api_msgs,
+                    "tools": tools,
+                    "stream": true,
+                    "stream_options": { "include_usage": true }
                 });
+                if let Some(key) = prompt_cache_key {
+                    chat_payload["prompt_cache_key"] = key.into();
+                }
+                if let Some(effort) = state.reasoning_effort.as_api_str() {
+                    chat_payload["reasoning_effort"] = effort.into();
+                }
+                chat_payload
             }
-            codex_payload
+            PayloadFormat::Codex => {
+                let (instructions, codex_msgs) = convert_to_codex_llm(&state.messages);
+                let codex_tools: Vec<_> = definitions
+                    .iter()
+                    .map(AgentToolDefinition::to_codex_responses_tool)
+                    .collect();
+                let mut codex_payload = serde_json::json!({
+                    "model": state.model,
+                    "instructions": instructions,
+                    "input": codex_msgs,
+                    "store": false,
+                    "stream": true,
+                    "tools": codex_tools
+                });
+                if let Some(key) = prompt_cache_key {
+                    codex_payload["prompt_cache_key"] = key.into();
+                }
+                if let Some(effort) = state.reasoning_effort.as_api_str() {
+                    codex_payload["reasoning"] = serde_json::json!({
+                        "effort": effort,
+                        "summary": "auto"
+                    });
+                }
+                codex_payload
+            }
         }
     }
-}
 
     pub async fn build_chat_payload(&self) -> Value {
         Self::build_payload_helper(
@@ -739,7 +739,8 @@ async fn build_payload_helper(
             let mut current_turn_reasoning = String::new();
             let mut captured_tool_calls: Vec<ToolCall> = Vec::new();
 
-            let mut stream_monitor = crate::rules::StreamRuleMonitor::new(self.stream_rules.clone());
+            let mut stream_monitor =
+                crate::rules::StreamRuleMonitor::new(self.stream_rules.clone());
             let mut rule_triggered = None;
 
             while let Some(evt) = stream_rx.recv().await {
@@ -933,9 +934,8 @@ async fn build_payload_helper(
                 };
 
                 let handle_tool_call = tc.clone();
-                let handle = tokio::spawn(async move {
-                    Self::run_tool_with_hooks(tc_clone, context).await
-                });
+                let handle =
+                    tokio::spawn(async move { Self::run_tool_with_hooks(tc_clone, context).await });
                 handles.push((handle_tool_call, handle));
             }
 
@@ -985,10 +985,7 @@ async fn build_payload_helper(
         .await
     }
 
-    async fn run_tool_with_hooks(
-        tc: ToolCall,
-        context: ToolRunContext,
-    ) -> AgentToolResult {
+    async fn run_tool_with_hooks(tc: ToolCall, context: ToolRunContext) -> AgentToolResult {
         let arguments = normalize_tool_arguments(
             &tc.function.name,
             &tc.function.arguments,
@@ -1000,7 +997,8 @@ async fn build_payload_helper(
             arguments: arguments.clone(),
         };
 
-        if context.allowed_tool_names
+        if context
+            .allowed_tool_names
             .as_ref()
             .is_some_and(|allowed| !allowed.contains(&tc.function.name))
         {
@@ -1171,7 +1169,7 @@ fn normalize_tool_arguments(
             if object
                 .get("path")
                 .and_then(Value::as_str)
-                .is_some_and(str::is_empty) =>
+                .is_none_or(str::is_empty) =>
         {
             object.insert("path".into(), Value::String(workspace));
         }
@@ -1187,4 +1185,17 @@ fn normalize_tool_arguments(
     }
 
     serde_json::to_string(&value).unwrap_or_else(|_| arguments.to_string())
+}
+
+#[cfg(test)]
+mod normalize_tool_arguments_tests {
+    use super::*;
+
+    #[test]
+    fn fills_missing_file_paths_from_the_workspace() {
+        let arguments =
+            normalize_tool_arguments("read_file", "{}", Some(std::path::Path::new("/workspace")));
+
+        assert_eq!(arguments, r#"{"path":"/workspace"}"#);
+    }
 }
