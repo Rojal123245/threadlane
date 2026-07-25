@@ -275,6 +275,7 @@ fn discover_sessions_in_project(work_dir: &Path) -> Vec<SessionEntry> {
     let Ok(entries) = std::fs::read_dir(&sessions_dir) else {
         return Vec::new();
     };
+    let canonical_work_dir = canonicalize_path(work_dir);
 
     let mut sessions = Vec::new();
     for entry in entries.flatten() {
@@ -295,7 +296,7 @@ fn discover_sessions_in_project(work_dir: &Path) -> Vec<SessionEntry> {
             id: id.clone(),
             title: session_title_from_tree(&tree, &id),
             // Store the canonical path once so draw_walk never needs a syscall.
-            work_dir: canonicalize_path(work_dir),
+            work_dir: canonical_work_dir.clone(),
             session_file: path.clone(),
             updated_at: session_updated_at(&tree, &path),
         });

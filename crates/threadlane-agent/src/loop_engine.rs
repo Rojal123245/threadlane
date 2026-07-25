@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use threadlane_provider::openai::{clamp_prompt_cache_key, ProviderUsage, StreamEvent, ToolCall};
-use threadlane_provider::router::ProviderClient;
+use threadlane_provider::router::{PayloadFormat, PayloadSource, ProviderClient};
 use threadlane_tools::{
     execute_tool, execute_tool_in_workspace, get_available_tools, get_codex_tools,
 };
@@ -494,59 +494,115 @@ impl AgentLoop {
         routes
     }
 
+async fn build_payload_helper(
+    state_mutex: &Arc<Mutex<AgentState>>,
+    tool_executors: &[Arc<dyn ToolExecutor>],
+    allowed_tool_names: Option<&HashSet<String>>,
+    compatibility_executor: Option<&Arc<dyn ToolExecutor>>,
+    prompt_cache_key: Option<&str>,
+    format: PayloadFormat,
+) -> Value {
+    let mut state = state_mutex.lock().await.clone();
+    repair_interrupted_tool_turn(&mut state.messages);
+
+    let mut definitions =
+        collect_tool_definitions(&state.tools, tool_executors, compatibility_executor);
+    if let Some(allowed_tool_names) = allowed_tool_names {
+        definitions.retain(|definition| allowed_tool_names.contains(&definition.name));
+    }
+
+    match format {
+        PayloadFormat::ChatCompletions => {
+            let api_msgs = convert_to_llm(&state.messages);
+            let tools: Vec<_> = definitions
+                .iter()
+                .map(AgentToolDefinition::to_chat_completions_tool)
+                .collect();
+            let mut chat_payload = serde_json::json!({
+                "model": state.model,
+                "messages": api_msgs,
+                "tools": tools,
+                "stream": true,
+                "stream_options": { "include_usage": true }
+            });
+            if let Some(key) = prompt_cache_key {
+                chat_payload["prompt_cache_key"] = key.into();
+            }
+            if let Some(effort) = state.reasoning_effort.as_api_str() {
+                chat_payload["reasoning_effort"] = effort.into();
+            }
+            chat_payload
+        }
+        PayloadFormat::Codex => {
+            let (instructions, codex_msgs) = convert_to_codex_llm(&state.messages);
+            let codex_tools: Vec<_> = definitions
+                .iter()
+                .map(AgentToolDefinition::to_codex_responses_tool)
+                .collect();
+            let mut codex_payload = serde_json::json!({
+                "model": state.model,
+                "instructions": instructions,
+                "input": codex_msgs,
+                "store": false,
+                "stream": true,
+                "tools": codex_tools
+            });
+            if let Some(key) = prompt_cache_key {
+                codex_payload["prompt_cache_key"] = key.into();
+            }
+            if let Some(effort) = state.reasoning_effort.as_api_str() {
+                codex_payload["reasoning"] = serde_json::json!({
+                    "effort": effort,
+                    "summary": "auto"
+                });
+            }
+            codex_payload
+        }
+    }
+}
+
+    pub async fn build_chat_payload(&self) -> Value {
+        Self::build_payload_helper(
+            &self.state,
+            &self.tool_executors,
+            self.allowed_tool_names.as_ref(),
+            self.compatibility_executor().as_ref(),
+            self.prompt_cache_key.as_deref(),
+            PayloadFormat::ChatCompletions,
+        )
+        .await
+    }
+
+    pub async fn build_codex_payload(&self) -> Value {
+        Self::build_payload_helper(
+            &self.state,
+            &self.tool_executors,
+            self.allowed_tool_names.as_ref(),
+            self.compatibility_executor().as_ref(),
+            self.prompt_cache_key.as_deref(),
+            PayloadFormat::Codex,
+        )
+        .await
+    }
+
+    pub async fn build_payload_for_format(&self, format: PayloadFormat) -> Value {
+        Self::build_payload_helper(
+            &self.state,
+            &self.tool_executors,
+            self.allowed_tool_names.as_ref(),
+            self.compatibility_executor().as_ref(),
+            self.prompt_cache_key.as_deref(),
+            format,
+        )
+        .await
+    }
+
     /// Builds both provider payloads without making a network request.
     pub async fn build_api_payloads(&self) -> (Value, Value) {
-        let mut state = self.state.lock().await.clone();
-        repair_interrupted_tool_turn(&mut state.messages);
-        let api_msgs = convert_to_llm(&state.messages);
-        let (instructions, codex_msgs) = convert_to_codex_llm(&state.messages);
-        let mut definitions = collect_tool_definitions(
-            &state.tools,
-            &self.tool_executors,
-            self.compatibility_executor().as_ref(),
-        );
-        if let Some(allowed_tool_names) = &self.allowed_tool_names {
-            definitions.retain(|definition| allowed_tool_names.contains(&definition.name));
-        }
-        let tools: Vec<_> = definitions
-            .iter()
-            .map(AgentToolDefinition::to_chat_completions_tool)
-            .collect();
-        let codex_tools: Vec<_> = definitions
-            .iter()
-            .map(AgentToolDefinition::to_codex_responses_tool)
-            .collect();
-
-        let mut chat_payload = serde_json::json!({
-            "model": state.model,
-            "messages": api_msgs,
-            "tools": tools,
-            "stream": true,
-            "stream_options": { "include_usage": true }
-        });
-        let mut codex_payload = serde_json::json!({
-            "model": state.model,
-            "instructions": instructions,
-            "input": codex_msgs,
-            "store": false,
-            "stream": true,
-            "tools": codex_tools
-        });
-
-        if let Some(prompt_cache_key) = &self.prompt_cache_key {
-            chat_payload["prompt_cache_key"] = prompt_cache_key.clone().into();
-            codex_payload["prompt_cache_key"] = prompt_cache_key.clone().into();
-        }
-
-        if let Some(effort) = state.reasoning_effort.as_api_str() {
-            chat_payload["reasoning_effort"] = effort.into();
-            codex_payload["reasoning"] = serde_json::json!({
-                "effort": effort,
-                "summary": "auto"
-            });
-        }
-
-        (chat_payload, codex_payload)
+        (
+            self.build_chat_payload().await,
+            self.build_codex_payload().await,
+        )
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
@@ -635,7 +691,35 @@ impl AgentLoop {
 
             let _ = self.event_tx.send(AgentEvent::TurnStart { turn_number });
 
-            let (api_payload, codex_payload) = self.build_api_payloads().await;
+            let model = {
+                let state = self.state.lock().await;
+                state.model.clone()
+            };
+
+            let state = self.state.clone();
+            let tool_executors = self.tool_executors.clone();
+            let allowed_tool_names = self.allowed_tool_names.clone();
+            let compatibility_executor = self.compatibility_executor();
+            let pc_key = self.prompt_cache_key.clone();
+
+            let payload_source = PayloadSource::lazy(model, move |format| {
+                let state = state.clone();
+                let tool_executors = tool_executors.clone();
+                let allowed_tool_names = allowed_tool_names.clone();
+                let compatibility_executor = compatibility_executor.clone();
+                let pc_key = pc_key.clone();
+                Box::pin(async move {
+                    Self::build_payload_helper(
+                        &state,
+                        &tool_executors,
+                        allowed_tool_names.as_ref(),
+                        compatibility_executor.as_ref(),
+                        pc_key.as_deref(),
+                        format,
+                    )
+                    .await
+                })
+            });
 
             let (stream_tx, mut stream_rx) = mpsc::channel(100);
             let client = self.provider_client.clone();
@@ -643,7 +727,7 @@ impl AgentLoop {
 
             tokio::spawn(async move {
                 client
-                    .stream_chat_completion(api_payload, codex_payload, prompt_cache_key, stream_tx)
+                    .stream_chat_completion(payload_source, prompt_cache_key, stream_tx)
                     .await;
             });
 

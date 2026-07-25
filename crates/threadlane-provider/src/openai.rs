@@ -714,18 +714,20 @@ impl OpenAIClient {
             title_response_text(&value)
         }
     }
+    pub fn is_codex(&self) -> bool {
+        self.account_id.is_some() || self.api_key.starts_with("ey")
+    }
+
     pub async fn stream_chat_completion(
         &self,
-        api_payload: Value,
-        codex_payload: Value,
+        payload: Value,
         prompt_cache_key: Option<String>,
         event_tx: mpsc::Sender<StreamEvent>,
     ) {
-        let is_codex = self.account_id.is_some() || self.api_key.starts_with("ey");
-        if !is_codex {
+        if !self.is_codex() {
             self.stream_sse(
                 "https://api.openai.com/v1/chat/completions",
-                api_payload,
+                payload,
                 None,
                 false,
                 &event_tx,
@@ -744,7 +746,7 @@ impl OpenAIClient {
         };
 
         match self
-            .stream_codex_websocket(codex_payload.clone(), &session_key, &event_tx)
+            .stream_codex_websocket(payload.clone(), &session_key, &event_tx)
             .await
         {
             WsResult::Finished | WsResult::Aborted => {}
@@ -767,7 +769,7 @@ impl OpenAIClient {
             } => {
                 self.stream_sse(
                     CODEX_SSE_URL,
-                    codex_payload,
+                    payload,
                     Some(&session_key),
                     true,
                     &event_tx,
@@ -1111,8 +1113,7 @@ impl OpenAIClient {
             };
             buffer.push_str(&String::from_utf8_lossy(&chunk));
             while let Some(position) = buffer.find("\n\n") {
-                let block = buffer[..position].to_string();
-                buffer = buffer[position + 2..].to_string();
+                let block = &buffer[..position];
                 for line in block.lines().map(str::trim) {
                     let Some(data) = line.strip_prefix("data: ") else {
                         continue;
@@ -1145,6 +1146,7 @@ impl OpenAIClient {
                         }
                     }
                 }
+                buffer.drain(..position + 2);
                 if terminated {
                     break;
                 }

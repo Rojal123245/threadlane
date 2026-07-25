@@ -614,6 +614,10 @@ pub struct ChatList {
     #[rust]
     cached_rows: Vec<DisplayRow>,
     #[rust]
+    cached_base_rows: Vec<DisplayRow>,
+    #[rust]
+    cached_base_revision: u64,
+    #[rust]
     cached_msg_count: usize,
     #[rust]
     cached_streaming_kind: Option<StreamingKind>,
@@ -634,8 +638,8 @@ pub struct SubagentRail {
     #[source]
     source: ScriptObjectRef,
     #[redraw]
-    #[rust]
-    area: Area,
+    #[live]
+    draw_bg: DrawColor,
     #[walk]
     walk: Walk,
     #[layout]
@@ -656,7 +660,7 @@ impl Widget for SubagentRail {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
-        cx.begin_turtle(walk, self.layout);
+        self.draw_bg.begin(cx, walk, self.layout);
         for (index, item) in self.items.iter().enumerate() {
             let row_id = LiveId::from_num(1, index as u64);
             let template = self.row_template;
@@ -692,7 +696,7 @@ impl Widget for SubagentRail {
             );
             row.draw_all_unscoped(cx);
         }
-        cx.end_turtle_with_area(&mut self.area);
+        self.draw_bg.end(cx);
         DrawStep::done()
     }
 }
@@ -716,8 +720,20 @@ impl Widget for ChatList {
             || streaming_text_len != self.cached_streaming_text_len
             || data.revision != self.cached_revision
         {
-            self.cached_rows =
-                display_rows(&data.messages, data.streaming_kind, &data.streaming_text);
+            if msg_count != self.cached_msg_count || data.revision != self.cached_base_revision {
+                self.cached_base_rows = display_rows(&data.messages, None, "");
+                self.cached_base_revision = data.revision;
+            }
+
+            if data.streaming_kind == Some(StreamingKind::Assistant) {
+                self.cached_rows = self.cached_base_rows.clone();
+                if !data.streaming_text.is_empty() {
+                    self.cached_rows.push(DisplayRow::StreamingAssistant);
+                }
+            } else {
+                self.cached_rows =
+                    display_rows(&data.messages, data.streaming_kind, &data.streaming_text);
+            }
             self.cached_msg_count = msg_count;
             self.cached_streaming_kind = data.streaming_kind;
             self.cached_streaming_text_len = streaming_text_len;
@@ -776,14 +792,8 @@ impl Widget for ChatList {
                         DisplayRow::ActivityGroup(group) => {
                             let item_widget = list.item(cx, item_id, id!(ActivityGroupMsg));
                             show_tool_icon(cx, &item_widget, group.tool_icon);
-                            let title_lbl = item_widget.label(cx, ids!(title_lbl));
-                            if title_lbl.text() != group.title {
-                                title_lbl.set_text(cx, group.title);
-                            }
-                            let preview_lbl = item_widget.label(cx, ids!(preview_lbl));
-                            if preview_lbl.text() != group.preview {
-                                preview_lbl.set_text(cx, &group.preview);
-                            }
+                            item_widget.label(cx, ids!(title_lbl)).set_text(cx, group.title);
+                            item_widget.label(cx, ids!(preview_lbl)).set_text(cx, &group.preview);
                             update_activity_status(
                                 cx,
                                 &item_widget,
@@ -805,10 +815,7 @@ impl Widget for ChatList {
                                 continue;
                             };
                             let item_widget = list.item(cx, item_id, id!(SubagentMsg));
-                            let preview_lbl = item_widget.label(cx, ids!(preview_lbl));
-                            if preview_lbl.text() != tool.preview {
-                                preview_lbl.set_text(cx, &tool.preview);
-                            }
+                            item_widget.label(cx, ids!(preview_lbl)).set_text(cx, &tool.preview);
                             update_activity_status(
                                 cx,
                                 &item_widget,
@@ -844,45 +851,26 @@ impl Widget for ChatList {
 
                             let item_widget = list.item(cx, item_id, id!(ToolMsg));
                             show_tool_icon(cx, &item_widget, presentation.icon);
-                            let title_lbl = item_widget.label(cx, ids!(title_lbl));
-                            if title_lbl.text() != presentation.title {
-                                title_lbl.set_text(cx, &presentation.title);
-                            }
-                            let meta_lbl = item_widget.label(cx, ids!(meta_lbl));
-                            if meta_lbl.text() != presentation.metadata {
-                                meta_lbl.set_text(cx, &presentation.metadata);
-                            }
+                            item_widget.label(cx, ids!(title_lbl)).set_text(cx, &presentation.title);
+                            item_widget.label(cx, ids!(meta_lbl)).set_text(cx, &presentation.metadata);
                             item_widget
                                 .widget(cx, ids!(meta_lbl))
                                 .set_visible(cx, !presentation.metadata.is_empty());
-                            let preview_lbl = item_widget.label(cx, ids!(preview_lbl));
-                            if preview_lbl.text() != presentation.primary {
-                                preview_lbl.set_text(cx, &presentation.primary);
-                            }
-                            let result_meta_lbl = item_widget.label(cx, ids!(result_meta_lbl));
-                            if result_meta_lbl.text() != *result_metadata {
-                                result_meta_lbl.set_text(cx, result_metadata);
-                            }
+                            item_widget.label(cx, ids!(preview_lbl)).set_text(cx, &presentation.primary);
+                            item_widget.label(cx, ids!(result_meta_lbl)).set_text(cx, result_metadata);
                             item_widget
                                 .widget(cx, ids!(result_meta_lbl))
                                 .set_visible(cx, !result_metadata.is_empty());
 
                             let has_completed_result = *status != ToolStatus::Running;
-                            let result_preview_lbl = item_widget.label(cx, ids!(result_preview_lbl));
-                            if result_preview_lbl.text() != *result_preview {
-                                result_preview_lbl.set_text(cx, result_preview);
-                            }
+                            item_widget.label(cx, ids!(result_preview_lbl)).set_text(cx, result_preview);
                             item_widget
                                 .widget(cx, ids!(result_preview_lbl))
                                 .set_visible(
                                     cx,
                                     has_completed_result && !result_preview.is_empty(),
                                 );
-                            let result_meta_header_lbl =
-                                item_widget.label(cx, ids!(result_meta_header_lbl));
-                            if result_meta_header_lbl.text() != *result_metadata {
-                                result_meta_header_lbl.set_text(cx, result_metadata);
-                            }
+                            item_widget.label(cx, ids!(result_meta_header_lbl)).set_text(cx, result_metadata);
                             item_widget
                                 .widget(cx, ids!(result_meta_header_lbl))
                                 .set_visible(

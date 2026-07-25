@@ -833,6 +833,7 @@ script_mod! {
                         height: Fit
                         flow: Down
                         spacing: 7
+                        draw_bg +: { color: #x00000000 }
                         row_template: #(ToolFoldHeader::register_widget(vm)) {
                             width: Fill
                             height: Fit

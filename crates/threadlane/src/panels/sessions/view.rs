@@ -300,7 +300,8 @@ impl Widget for SessionList {
                                 .set_text(cx, &relative_time_label(session.updated_at));
                             let working = data
                                 .working_sessions
-                                .contains(&(session.work_dir.clone(), session.id.clone()));
+                                .iter()
+                                .any(|(dir, id)| dir == &session.work_dir && id == &session.id);
                             item_widget
                                 .widget(cx, ids!(session_row_spinner))
                                 .set_visible(cx, working);

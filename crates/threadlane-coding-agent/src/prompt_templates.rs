@@ -62,8 +62,8 @@ pub fn substitute_args(content: &str, args: &[String]) -> String {
             let rest = &content[i + 1..];
 
             // Check for ${...}
-            if rest.starts_with('{') {
-                if let Some(close_offset) = rest[1..].find('}') {
+            if let Some(braced) = rest.strip_prefix('{') {
+                if let Some(close_offset) = braced.find('}') {
                     let close_idx = i + 1 + 1 + close_offset;
                     let expr = &content[i + 2..close_idx];
                     let substituted = eval_braced_expr(expr, args, &all_args);

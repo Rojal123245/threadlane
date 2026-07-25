@@ -1065,9 +1065,11 @@ async fn consume_openai_stream(
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|error| format!("Antigravity stream error: {error}"))?;
         buffer.push_str(&String::from_utf8_lossy(&chunk));
-        while let Some(newline) = buffer.find('\n') {
-            let line = buffer[..newline].trim_end_matches('\r').to_string();
-            buffer.drain(..=newline);
+        let mut start = 0;
+        while let Some(rel_newline) = buffer[start..].find('\n') {
+            let newline = start + rel_newline;
+            let line = buffer[start..newline].trim_end_matches('\r');
+            start = newline + 1;
             let Some(data) = line.strip_prefix("data:").map(str::trim) else {
                 continue;
             };
@@ -1131,6 +1133,9 @@ async fn consume_openai_stream(
         if finished {
             break;
         }
+        if start > 0 {
+            buffer.drain(..start);
+        }
     }
 
     let _ = event_tx
@@ -1158,9 +1163,11 @@ async fn consume_legacy_stream(
             }
         };
         buffer.push_str(&String::from_utf8_lossy(&chunk));
-        while let Some(newline) = buffer.find('\n') {
-            let line = buffer[..newline].trim_end_matches('\r').to_string();
-            buffer.drain(..=newline);
+        let mut start = 0;
+        while let Some(rel_newline) = buffer[start..].find('\n') {
+            let newline = start + rel_newline;
+            let line = buffer[start..newline].trim_end_matches('\r');
+            start = newline + 1;
             let Some(data) = line.strip_prefix("data:").map(str::trim) else {
                 continue;
             };
@@ -1206,6 +1213,9 @@ async fn consume_legacy_stream(
             if let Some(reason) = parsed.finish_reason {
                 let _ = tx.send(AntigravityStreamEvent::FinishReason(reason)).await;
             }
+        }
+        if start > 0 {
+            buffer.drain(..start);
         }
     }
 }
