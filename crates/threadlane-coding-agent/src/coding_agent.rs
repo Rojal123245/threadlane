@@ -2085,17 +2085,8 @@ fn subagent_ui_event(event: AgentEvent, tool_call_prefix: &str) -> Option<AgentE
         | AgentEvent::AgentError { .. }
         | AgentEvent::TurnStart { .. }
         | AgentEvent::TurnEnd { .. } => None,
-        // Keep internal child prose out of the transcript: the labelled tool or
-        // command result is the child’s final report. Reasoning remains visible.
-        AgentEvent::MessageUpdate {
-            reasoning_delta: Some(reasoning_delta),
-            tool_call_name,
-            ..
-        } => Some(AgentEvent::MessageUpdate {
-            text_delta: None,
-            reasoning_delta: Some(reasoning_delta),
-            tool_call_name,
-        }),
+        // Keep child prose and reasoning inside the child session. The final
+        // labelled result renders it under the matching task after completion.
         AgentEvent::MessageUpdate { .. } => None,
         AgentEvent::ToolExecutionStart {
             tool_call_id,
@@ -2426,14 +2417,7 @@ mod tests {
             },
             "child:",
         );
-        assert!(matches!(
-            reasoning,
-            Some(AgentEvent::MessageUpdate {
-                text_delta: None,
-                reasoning_delta: Some(text),
-                ..
-            }) if text == "visible progress"
-        ));
+        assert!(reasoning.is_none());
 
         let tool = subagent_ui_event(
             AgentEvent::ToolExecutionStart {

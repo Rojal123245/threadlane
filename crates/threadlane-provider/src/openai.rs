@@ -1228,9 +1228,7 @@ mod tests {
         );
         assert_eq!(title_stream_text(deltas).unwrap(), "Fix login");
 
-        let terminal = concat!(
-            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Terminal title\"}]}]}}\n\n"
-        );
+        let terminal = "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Terminal title\"}]}]}}\n\n";
         assert_eq!(title_stream_text(terminal).unwrap(), "Terminal title");
     }
 

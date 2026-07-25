@@ -17,7 +17,7 @@ script_mod! {
 
     mod.components.SectionHeader = View {
         width: Fill
-        height: 30
+        height: 28.0
         cursor: MouseCursor.Arrow
         flow: Right
         spacing: 8

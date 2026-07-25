@@ -137,6 +137,8 @@ Keep the SVG view box itself centered. Do not compensate for inherited empty-lab
 
 - Define all relevant button states together: `color`, `color_hover`, `color_focus`, and `color_down`.
 - If borders should remain invisible, also set all border-state colors explicitly. Inherited focus colors can otherwise appear unexpectedly.
+- Standard Makepad `Button` does not expose a top-level `cursor` script property; it already supplies pointer cursor behavior through its interaction state.
+- Toggle a button's runtime visibility through a typed `.button(...)` reference. Generic `.widget(...).set_visible(...)` dispatches the default no-op because `Button` does not override `Widget::set_visible`.
 - The widget that owns text and click handling should also own its hover/pressed background.
 - Use matching interaction and drawing bounds so the hover surface always contains the label.
 - Include keyboard focus behavior when restyling interactive controls; do not optimize only for mouse hover.
@@ -204,6 +206,7 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 ### Shaders and Colors
 
 - Follow existing `#xRRGGBB` and `#xRRGGBBAA` color syntax.
+- A custom `View` widget does not inherit `RoundedView` shader fields. If its shader references `border_size` or `border_color`, declare them explicitly with `uniform(...)`; Rust compilation does not catch missing script shader fields.
 - Keep custom SDF shaders simple and ensure dimensions cannot become negative; use `max(0.0, ...)` for computed sizes where appropriate.
 - Shader uniforms and instance fields must be declared consistently with how they are animated or updated.
 - `Sdf2d.fill_keep(...)` retains the current shape. Consume it with `stroke(...)` before constructing unrelated geometry, even when the stroke width is zero, or a later fill can repaint the retained shape.
@@ -213,12 +216,16 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 
 ## Session and Context-Menu Behavior
 
-- The sidebar keeps secondary actions quiet: the project attach button appears while hovering the `PROJECTS` header, and per-project detach/new-session buttons appear while hovering that project row.
-- Hover-revealed sidebar actions are synchronized from the retained pointer position and actual widget bounds in `App::sync_sidebar_action_visibility`. Run this after every `self.ui.handle_event(...)`, not only pointer events, because Makepad updates hit-routing and recycled `PortalList` rows while traversing the UI. Clear the retained pointer on `MouseLeave`. Do not rely only on one-shot hover-enter/leave actions for recycled rows; redraws can otherwise leave child visibility stale.
+- The project attach button appears while hovering the `PROJECTS` header. It is the only sidebar action synchronized from `App::sync_sidebar_action_visibility` and the retained app-level pointer.
+- `ProjectHeader` locally owns project-row hover hit-testing, action-button paint/redraw, and typed select/new/detach actions for both fixed and portal-list headers. Keep its controls laid out inside the fixed-width action slot; do not restore app-level project-row geometry synchronization.
+- Compute `ProjectHeader` hover from `MouseMove` against the header's clipped rectangle. Parent `FingerHoverOut` can fire when the pointer enters a nested button, which must not hide the action group.
+- Keep project collapse clicks on the bounded `project_toggle_surface` child and consume its `finger_up` action after child event dispatch. Post-dispatch hit-testing on the parent header can miss pointers already handled by its inner view.
 - A hidden child has no drawable area to invalidate. When changing a hover-revealed child from hidden to visible, explicitly redraw its owning header or list row; otherwise it may not appear until an unrelated click triggers a broader redraw.
 - Session rows are rendered by a `PortalList`; templates are selected from shared session state during draw.
+- The session sidebar feeds `PortalList` one flattened visible-row stream derived from runtime project tree state. Expanded projects show four preview sessions, substituting an older active session for the fourth item; overflow and collapsed rows must be represented in that stream rather than hidden only at draw time.
+- Clicking a project header toggles its children. Collapsing clears that project's show-all state, so reopening returns to the four-session preview; detach and new-session child buttons remain independent of the toggle hit area.
 - Session titles use the clipped `SessionTitle` marquee component. On title hover, only overflowing text scrolls to its measured end, pauses, resets to the beginning, and repeats; leaving the title immediately restores the starting position.
-- The sidebar presents projects and sessions as a tree: project headers draw the parent stem, session rows draw child connectors, and the final session uses a terminating connector template. Session hover and active states use accent underlines across the bounded, ellipsized title column rather than filled pills so they never cover the tree; both states share identical geometry, with the active color taking precedence, and a filled row surface is reserved for the context target. Selecting a session highlights only that session; reserve the active project-header treatment for a project draft with no active session.
+- The sidebar presents projects and sessions as a tree: project headers draw the parent stem, session rows draw child connectors, and the final session uses a terminating connector template. Session hover and active states use subtle filled surfaces without accent underlines; keep those surfaces to the right of the tree so connectors remain visible. Selecting a session highlights only that session; reserve the active project-header treatment for a project draft with no active session.
 - The context-target state is distinct from the active-session state.
 - Opening a session context menu sets the context target; closing it must always clear that target.
 - Archive and delete actions should flow through `SessionContextMenuAction` and the app’s existing action handler.

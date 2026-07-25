@@ -272,6 +272,17 @@ struct ToolExecutorRoute {
     tool_names: HashSet<String>,
 }
 
+#[derive(Clone)]
+struct ToolRunContext {
+    before_hook: Option<Arc<dyn BeforeToolCallHook>>,
+    after_hook: Option<Arc<dyn AfterToolCallHook>>,
+    event_tx: broadcast::Sender<AgentEvent>,
+    state: Arc<Mutex<AgentState>>,
+    tool_routes: Vec<ToolExecutorRoute>,
+    allowed_tool_names: Option<HashSet<String>>,
+    work_dir: Option<PathBuf>,
+}
+
 pub struct AgentLoop {
     pub state: Arc<Mutex<AgentState>>,
     pub api_key: String,
@@ -827,27 +838,19 @@ impl AgentLoop {
             let mut handles = Vec::new();
             for tc in tool_calls {
                 let tc_clone = tc.clone();
-                let before_hook = self.before_tool_call_hook.clone();
-                let after_hook = self.after_tool_call_hook.clone();
-                let event_tx = self.event_tx.clone();
-                let state = self.state.clone();
-                let tool_routes = tool_routes.clone();
-                let allowed_tool_names = allowed_tool_names.clone();
-                let work_dir = self.work_dir.clone();
+                let context = ToolRunContext {
+                    before_hook: self.before_tool_call_hook.clone(),
+                    after_hook: self.after_tool_call_hook.clone(),
+                    event_tx: self.event_tx.clone(),
+                    state: self.state.clone(),
+                    tool_routes: tool_routes.clone(),
+                    allowed_tool_names: allowed_tool_names.clone(),
+                    work_dir: self.work_dir.clone(),
+                };
 
                 let handle_tool_call = tc.clone();
                 let handle = tokio::spawn(async move {
-                    Self::run_tool_with_hooks(
-                        tc_clone,
-                        before_hook,
-                        after_hook,
-                        event_tx,
-                        state,
-                        tool_routes,
-                        allowed_tool_names,
-                        work_dir,
-                    )
-                    .await
+                    Self::run_tool_with_hooks(tc_clone, context).await
                 });
                 handles.push((handle_tool_call, handle));
             }
@@ -885,31 +888,27 @@ impl AgentLoop {
     ) -> AgentToolResult {
         Self::run_tool_with_hooks(
             tc.clone(),
-            self.before_tool_call_hook.clone(),
-            self.after_tool_call_hook.clone(),
-            self.event_tx.clone(),
-            self.state.clone(),
-            tool_routes,
-            allowed_tool_names,
-            self.work_dir.clone(),
+            ToolRunContext {
+                before_hook: self.before_tool_call_hook.clone(),
+                after_hook: self.after_tool_call_hook.clone(),
+                event_tx: self.event_tx.clone(),
+                state: self.state.clone(),
+                tool_routes,
+                allowed_tool_names,
+                work_dir: self.work_dir.clone(),
+            },
         )
         .await
     }
 
     async fn run_tool_with_hooks(
         tc: ToolCall,
-        before_hook: Option<Arc<dyn BeforeToolCallHook>>,
-        after_hook: Option<Arc<dyn AfterToolCallHook>>,
-        event_tx: broadcast::Sender<AgentEvent>,
-        state: Arc<Mutex<AgentState>>,
-        tool_routes: Vec<ToolExecutorRoute>,
-        allowed_tool_names: Option<HashSet<String>>,
-        work_dir: Option<PathBuf>,
+        context: ToolRunContext,
     ) -> AgentToolResult {
         let arguments = normalize_tool_arguments(
             &tc.function.name,
             &tc.function.arguments,
-            work_dir.as_deref(),
+            context.work_dir.as_deref(),
         );
         let agent_tool_call = AgentToolCall {
             id: tc.id.clone(),
@@ -917,7 +916,7 @@ impl AgentLoop {
             arguments: arguments.clone(),
         };
 
-        if allowed_tool_names
+        if context.allowed_tool_names
             .as_ref()
             .is_some_and(|allowed| !allowed.contains(&tc.function.name))
         {
@@ -931,7 +930,7 @@ impl AgentLoop {
                 is_error: true,
                 terminate: false,
             };
-            let _ = event_tx.send(AgentEvent::ToolExecutionEnd {
+            let _ = context.event_tx.send(AgentEvent::ToolExecutionEnd {
                 tool_call_id: tc.id,
                 name: tc.function.name,
                 result: result.clone(),
@@ -939,8 +938,8 @@ impl AgentLoop {
             return result;
         }
 
-        if let Some(ref hook) = before_hook {
-            let state_snapshot = state.lock().await.clone();
+        if let Some(ref hook) = context.before_hook {
+            let state_snapshot = context.state.lock().await.clone();
             let check = hook
                 .before_tool_call(&agent_tool_call, &state_snapshot)
                 .await;
@@ -954,7 +953,7 @@ impl AgentLoop {
                     is_error: true,
                     terminate: false,
                 };
-                let _ = event_tx.send(AgentEvent::ToolExecutionEnd {
+                let _ = context.event_tx.send(AgentEvent::ToolExecutionEnd {
                     tool_call_id: tc.id.clone(),
                     name: tc.function.name.clone(),
                     result: res.clone(),
@@ -963,14 +962,14 @@ impl AgentLoop {
             }
         }
 
-        let _ = event_tx.send(AgentEvent::ToolExecutionStart {
+        let _ = context.event_tx.send(AgentEvent::ToolExecutionStart {
             tool_call_id: tc.id.clone(),
             name: tc.function.name.clone(),
             arguments: arguments.clone(),
         });
 
         let mut execution_result = None;
-        for route in tool_routes {
+        for route in context.tool_routes {
             if !route.tool_names.contains(&tc.function.name) {
                 continue;
             }
@@ -984,7 +983,7 @@ impl AgentLoop {
             }
         }
         let execution_result = execution_result.unwrap_or_else(|| {
-            Ok(match work_dir.as_deref() {
+            Ok(match context.work_dir.as_deref() {
                 Some(dir) => execute_tool_in_workspace(&tc.function.name, &arguments, dir),
                 None => execute_tool(&tc.function.name, &arguments),
             })
@@ -1001,8 +1000,8 @@ impl AgentLoop {
             terminate: false,
         };
 
-        if let Some(ref hook) = after_hook {
-            let state_snapshot = state.lock().await.clone();
+        if let Some(ref hook) = context.after_hook {
+            let state_snapshot = context.state.lock().await.clone();
             let override_res = hook
                 .after_tool_call(&agent_tool_call, &final_result, &state_snapshot)
                 .await;
@@ -1017,7 +1016,7 @@ impl AgentLoop {
             }
         }
 
-        let _ = event_tx.send(AgentEvent::ToolExecutionEnd {
+        let _ = context.event_tx.send(AgentEvent::ToolExecutionEnd {
             tool_call_id: tc.id.clone(),
             name: tc.function.name.clone(),
             result: final_result.clone(),
@@ -1082,29 +1081,23 @@ fn normalize_tool_arguments(
     let Ok(mut value) = serde_json::from_str::<Value>(arguments) else {
         return arguments.to_string();
     };
-    let Some(object) = value.as_object_mut() else {
-        return arguments.to_string();
-    };
-
     let workspace = work_dir.to_string_lossy().to_string();
-    match name {
-        "read_file" | "write_file" | "edit_file" | "list_dir" => {
+    match (name, value.as_object_mut()) {
+        ("read_file" | "write_file" | "edit_file" | "list_dir", Some(object))
             if object
                 .get("path")
                 .and_then(Value::as_str)
-                .is_some_and(str::is_empty)
-            {
-                object.insert("path".into(), Value::String(workspace));
-            }
+                .is_some_and(str::is_empty) =>
+        {
+            object.insert("path".into(), Value::String(workspace));
         }
-        "run_command" => {
+        ("run_command", Some(object))
             if object
                 .get("cwd")
                 .and_then(Value::as_str)
-                .map_or(true, str::is_empty)
-            {
-                object.insert("cwd".into(), Value::String(workspace));
-            }
+                .is_none_or(str::is_empty) =>
+        {
+            object.insert("cwd".into(), Value::String(workspace));
         }
         _ => {}
     }

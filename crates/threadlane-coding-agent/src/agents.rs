@@ -7,18 +7,13 @@ use std::path::{Path, PathBuf};
 const MAX_AGENT_DIRECTORY_ENTRIES: usize = 256;
 const MAX_AGENT_DEFINITION_SIZE: u64 = 256 * 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentScope {
+    #[default]
     User,
     Project,
     Both,
-}
-
-impl Default for AgentScope {
-    fn default() -> Self {
-        AgentScope::User
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,10 +116,8 @@ fn load_agents_from_dir(dir: &Path, source: AgentSource) -> Vec<AgentConfig> {
     };
 
     let mut paths = Vec::with_capacity(MAX_AGENT_DIRECTORY_ENTRIES + 1);
-    for entry in entries.take(MAX_AGENT_DIRECTORY_ENTRIES + 1) {
-        if let Ok(entry) = entry {
-            paths.push(entry.path());
-        }
+    for entry in entries.take(MAX_AGENT_DIRECTORY_ENTRIES + 1).flatten() {
+        paths.push(entry.path());
     }
     if paths.len() > MAX_AGENT_DIRECTORY_ENTRIES {
         return agents;

@@ -19,7 +19,7 @@ pub struct HashlineEdit {
 
 /// Compute a 3-character hex hash for a line of text.
 pub fn compute_line_hash(line: &str) -> String {
-    let clean = line.trim_end_matches(&['\r', '\n']);
+    let clean = line.trim_end_matches(['\r', '\n']);
     let mut hash: u32 = 2166136261;
     for byte in clean.bytes() {
         hash ^= u32::from(byte);
@@ -136,7 +136,7 @@ pub fn apply_hashline_edits(content: &str, edits: &[HashlineEdit]) -> Result<Str
     }
 
     // Sort edits descending by start_idx to avoid shifting target indices when modifying `lines`
-    validated_edits.sort_by(|a, b| b.start_idx.cmp(&a.start_idx));
+    validated_edits.sort_by_key(|edit| std::cmp::Reverse(edit.start_idx));
 
     // Ensure no overlapping edit ranges
     for i in 0..validated_edits.len().saturating_sub(1) {

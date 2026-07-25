@@ -468,13 +468,15 @@ fn encode_state_component(component: &str) -> String {
         .collect()
 }
 
+type PendingExtensionEvents = HashMap<Option<String>, HashMap<String, Vec<WasiExtensionEvent>>>;
+
 #[derive(Default)]
 pub struct WasiExtensionManager {
     pub extensions: HashMap<String, WasiExtension>,
     states: Mutex<HashMap<String, Value>>,
     host_state: Mutex<HashMap<String, Value>>,
     subscriptions: Mutex<HashMap<String, HashSet<String>>>,
-    pending_events: Mutex<HashMap<Option<String>, HashMap<String, Vec<WasiExtensionEvent>>>>,
+    pending_events: Mutex<PendingExtensionEvents>,
     pending_broker_requests: Mutex<HashMap<Option<String>, Vec<HostBrokerRequest>>>,
     capability_grant_policy: Mutex<HostCapabilityGrantPolicy>,
     state_dir: Option<PathBuf>,

@@ -165,17 +165,6 @@ impl ProjectRegistry {
             .ok_or_else(|| ProjectRegistryError::ProjectNotAttached(canonical_path.to_path_buf()))
     }
 
-    pub fn touch(&mut self, canonical_path: &Path) -> Result<(), ProjectRegistryError> {
-        let index = self.project_index(canonical_path)?;
-        let previous = self.projects[index].last_opened_at;
-        self.projects[index].last_opened_at = unix_timestamp().max(previous.saturating_add(1));
-        if let Err(error) = self.persist() {
-            self.projects[index].last_opened_at = previous;
-            return Err(error);
-        }
-        Ok(())
-    }
-
     pub fn remember_selection(
         &mut self,
         canonical_path: &Path,
@@ -321,6 +310,20 @@ fn io_error(operation: &'static str, path: &Path, source: io::Error) -> ProjectR
 }
 
 #[cfg(test)]
+impl ProjectRegistry {
+    fn touch(&mut self, canonical_path: &Path) -> Result<(), ProjectRegistryError> {
+        let index = self.project_index(canonical_path)?;
+        let previous = self.projects[index].last_opened_at;
+        self.projects[index].last_opened_at = unix_timestamp().max(previous.saturating_add(1));
+        if let Err(error) = self.persist() {
+            self.projects[index].last_opened_at = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
@@ -366,7 +369,7 @@ mod tests {
 
         assert_eq!(attached.path, fs::canonicalize(&project).unwrap());
         assert_eq!(attached.display_name, "project");
-        assert_eq!(registry.projects(), &[attached.clone()]);
+        assert_eq!(registry.projects(), std::slice::from_ref(&attached));
         assert!(attached.attached_at > 0);
         assert_eq!(attached.attached_at, attached.last_opened_at);
         assert!(attached.last_session_id.is_none());

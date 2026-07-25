@@ -3,6 +3,7 @@
 use super::state::{
     relative_time_label, ProjectGroup, SessionListRow, SessionsData, SESSIONS_DATA,
 };
+use crate::components::session_row::ProjectHeaderAction;
 use crate::path_utils::truncate_chars;
 use makepad_widgets::*;
 use std::path::PathBuf;
@@ -17,7 +18,7 @@ struct FixedProject {
 
 #[derive(Clone, Debug, Default)]
 pub enum SessionListAction {
-    SelectProject(PathBuf),
+    ToggleProject(PathBuf),
     NewSession(PathBuf),
     DetachProject(PathBuf),
     #[default]
@@ -81,8 +82,6 @@ pub struct SessionList {
     fixed_work_dir: Option<PathBuf>,
     #[rust]
     fixed_active: bool,
-    #[rust]
-    pointer: Option<Vec2d>,
     #[rust]
     list_hovered: bool,
     #[rust]
@@ -150,60 +149,21 @@ impl SessionList {
         )
     }
 
-    fn set_fixed_action_visibility(&self, cx: &mut Cx, visible: bool) {
-        for (row_active, row_id) in [
-            (false, ids!(fixed_project_header)),
-            (true, ids!(fixed_project_header_active)),
-        ] {
-            let row = self.view.widget(cx, row_id);
-            let row_visible = visible && row_active == self.fixed_active;
-            let detach = row.widget(cx, ids!(detach_project_btn));
-            let create = row.widget(cx, ids!(new_project_session_btn));
-            if detach.visible() != row_visible || create.visible() != row_visible {
-                detach.set_visible(cx, row_visible);
-                create.set_visible(cx, row_visible);
-                row.redraw(cx);
-            }
-        }
-    }
-
-    fn sync_fixed_action_visibility(&self, cx: &mut Cx, context_menu_open: bool) {
-        let row = self.fixed_row(cx);
-        let visible = !context_menu_open
-            && self.fixed_work_dir.is_some()
-            && self
-                .pointer
-                .is_some_and(|position| row.area().rect(cx).contains(position));
-        self.set_fixed_action_visibility(cx, visible);
-    }
-
     fn handle_fixed_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         let Some(work_dir) = self.fixed_work_dir.clone() else {
             return;
         };
         let row = self.fixed_row(cx);
-        if row.button(cx, ids!(detach_project_btn)).clicked(actions) {
-            cx.widget_action(
-                self.widget_uid(),
-                SessionListAction::DetachProject(work_dir),
-            );
+        let Some(action) = actions.find_widget_action(row.widget_uid()) else {
             return;
-        }
-        if row
-            .button(cx, ids!(new_project_session_btn))
-            .clicked(actions)
-        {
-            cx.widget_action(self.widget_uid(), SessionListAction::NewSession(work_dir));
-            return;
-        }
-        if let Some(event) = row.as_view().finger_up(actions) {
-            if event.is_over && event.is_primary_hit() && event.was_tap() {
-                cx.widget_action(
-                    self.widget_uid(),
-                    SessionListAction::SelectProject(work_dir),
-                );
-            }
-        }
+        };
+        let action = match action.cast::<ProjectHeaderAction>() {
+            ProjectHeaderAction::Toggle => SessionListAction::ToggleProject(work_dir),
+            ProjectHeaderAction::NewSession => SessionListAction::NewSession(work_dir),
+            ProjectHeaderAction::Detach => SessionListAction::DetachProject(work_dir),
+            ProjectHeaderAction::None => return,
+        };
+        cx.widget_action(self.widget_uid(), action);
     }
 
     fn configure_fixed_header(&mut self, cx: &mut Cx, data: &SessionsData) {
@@ -211,7 +171,6 @@ impl SessionList {
         if data.projects.is_empty() {
             slot.set_visible(cx, false);
             self.fixed_work_dir = None;
-            self.set_fixed_action_visibility(cx, false);
             return;
         }
         slot.set_visible(cx, true);
@@ -234,12 +193,10 @@ impl SessionList {
         };
         let Some(fixed) = fixed else {
             self.fixed_work_dir = None;
-            self.set_fixed_action_visibility(cx, false);
             return;
         };
         let Some(project) = data.projects.get(fixed.project_idx) else {
             self.fixed_work_dir = None;
-            self.set_fixed_action_visibility(cx, false);
             return;
         };
 
@@ -249,10 +206,9 @@ impl SessionList {
         let active = self.view.widget(cx, ids!(fixed_project_header_active));
         normal.set_visible(cx, !self.fixed_active);
         active.set_visible(cx, self.fixed_active);
-        self.fixed_row(cx)
-            .label(cx, ids!(name_lbl))
+        let row = self.fixed_row(cx);
+        row.label(cx, ids!(name_lbl))
             .set_text(cx, &project_header_label(Some(project)));
-        self.sync_fixed_action_visibility(cx, data.context_session_id.is_some());
     }
 }
 
@@ -296,6 +252,22 @@ impl Widget for SessionList {
                         }
                         Some(SessionListRow::EmptyProject) => {
                             draw_empty_session_row(cx, &mut list, item_id);
+                        }
+                        Some(SessionListRow::Overflow {
+                            hidden_count,
+                            showing_all,
+                            ..
+                        }) => {
+                            let item_widget = list.item(cx, item_id, id!(SessionOverflow));
+                            let text = if *showing_all {
+                                "Show less".to_string()
+                            } else {
+                                format!("Show more · {hidden_count}")
+                            };
+                            item_widget
+                                .button(cx, ids!(overflow_btn))
+                                .set_text(cx, &text);
+                            item_widget.draw_all_unscoped(cx);
                         }
                         Some(SessionListRow::Session {
                             project_idx,
@@ -354,7 +326,6 @@ impl Widget for SessionList {
         let list_rect = self.view.widget(cx, ids!(list)).area().clipped_rect(cx);
         match event {
             Event::MouseMove(event) => {
-                self.pointer = Some(event.abs);
                 self.list_hovered = list_rect.contains(event.abs);
                 if self.list_hovered {
                     self.set_scrollbar_revealed(cx, true);
@@ -363,7 +334,6 @@ impl Widget for SessionList {
                 }
             }
             Event::MouseLeave(_) => {
-                self.pointer = None;
                 self.list_hovered = false;
                 if !self.scrolling_recently {
                     self.set_scrollbar_revealed(cx, false);
@@ -378,7 +348,6 @@ impl Widget for SessionList {
         // The context menu is an overlay, so list rows beneath it must not also
         // receive hover/press events while a context target is active.
         let context_menu_open = SESSIONS_DATA.read().unwrap().context_session_id.is_some();
-        self.sync_fixed_action_visibility(cx, context_menu_open);
         if context_menu_open {
             return;
         }
@@ -392,7 +361,6 @@ impl Widget for SessionList {
             }
             self.handle_fixed_actions(cx, actions);
         }
-        self.sync_fixed_action_visibility(cx, false);
     }
 }
 

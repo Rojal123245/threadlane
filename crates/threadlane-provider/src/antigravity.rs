@@ -15,6 +15,8 @@ const DAILY_BASE_URL: &str = "https://daily-cloudcode-pa.sandbox.googleapis.com"
 const STREAM_PATH: &str = "/v1internal:streamGenerateContent?alt=sse";
 const CLIENT_VERSION: &str = "1.15.8";
 
+type ProjectCache = Arc<Mutex<HashMap<[u8; 32], Arc<OnceCell<String>>>>>;
+
 #[derive(Debug, Clone)]
 pub enum AntigravityStreamEvent {
     ContentDelta(String),
@@ -202,7 +204,7 @@ pub fn build_gemini_request(
 #[derive(Clone)]
 pub struct AntigravityClient {
     client: reqwest::Client,
-    project_cache: Arc<Mutex<HashMap<[u8; 32], Arc<OnceCell<String>>>>>,
+    project_cache: ProjectCache,
 }
 
 impl Default for AntigravityClient {

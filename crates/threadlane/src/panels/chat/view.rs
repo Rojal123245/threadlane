@@ -467,7 +467,7 @@ impl Widget for SubagentRail {
         self.view.handle_event(cx, event, scope);
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.view.draw_bg.begin(cx, walk, self.view.layout);
         for (index, item) in self.items.iter().enumerate() {
             let row_id = LiveId::from_num(1, index as u64);
@@ -479,14 +479,19 @@ impl Widget for SubagentRail {
             row.label(cx, ids!(preview_lbl)).set_text(cx, &item.task);
             row.label(cx, ids!(status_lbl)).set_text(cx, &item.status);
             row.markdown(cx, ids!(detail_md)).set_text(cx, &item.detail);
+            row.widget(cx, ids!(working_detail)).set_visible(
+                cx,
+                item.status == "Working" && item.detail.trim().is_empty(),
+            );
             update_activity_status(
                 cx,
-                &row,
+                row,
                 item.status == "Working",
                 item.status == "Failed",
                 item.status == "Stopped",
             );
-            row.draw_all_unscoped(cx);
+            let row_walk = row.walk(cx);
+            row.draw_walk(cx, scope, row_walk)?;
         }
         self.view.draw_bg.end(cx);
         DrawStep::done()
@@ -737,18 +742,9 @@ impl Widget for ChatList {
                                         if let Some(mut rail) = rail.as_subagent_rail().borrow_mut() {
                                             rail.items = rail_items;
                                         }
-                                        let detail = if *status == ToolStatus::Running {
-                                            String::new()
-                                        } else {
-                                            super::state::subagent_result_markdown(
-                                                output,
-                                                &presentation.arguments_detail,
-                                            )
-                                        };
-                                        item_widget.markdown(cx, ids!(output_md)).set_text(cx, &detail);
                                         item_widget
                                             .widget(cx, ids!(detail_wrap))
-                                            .set_visible(cx, *status != ToolStatus::Running);
+                                            .set_visible(cx, false);
                                         item_widget.draw_all_unscoped(cx);
                                     } else {
                                         let item_widget = list.item(cx, item_id, id!(ToolMsg));
@@ -1062,7 +1058,7 @@ mod tests {
             r#"{"path":"src/app.rs"}"#,
         );
 
-        let orphaned_rows = display_rows(&[child.clone()], None, "");
+        let orphaned_rows = display_rows(std::slice::from_ref(&child), None, "");
         assert!(matches!(
             orphaned_rows.as_slice(),
             [DisplayRow::ActivityGroup {

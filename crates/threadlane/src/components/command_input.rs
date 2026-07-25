@@ -440,10 +440,6 @@ impl ThreadlaneCommandTextInput {
         }
     }
 
-    pub fn keyboard_focus_index(&self) -> Option<usize> {
-        self.keyboard_focus_index
-    }
-
     pub fn set_items(&mut self, cx: &mut Cx, items: Vec<CommandInfo>) {
         self.items = items;
         self.keyboard_focus_index = (!self.items.is_empty()).then_some(0);
@@ -650,8 +646,6 @@ impl ThreadlaneCommandTextInput {
                                 result.push_str(g);
                             }
                             return result;
-                        } else if t_idx == h_idx {
-                            return String::new();
                         } else {
                             return String::new();
                         }
@@ -738,7 +732,7 @@ impl ThreadlaneCommandTextInput {
 impl ThreadlaneCommandTextInputRef {
     pub fn should_build_items(&self, actions: &Actions) -> bool {
         self.borrow()
-            .map_or(false, |inner| inner.should_build_items(actions))
+            .is_some_and(|inner| inner.should_build_items(actions))
     }
 
     pub fn set_items(&self, cx: &mut Cx, items: Vec<CommandInfo>) {
@@ -755,13 +749,6 @@ impl ThreadlaneCommandTextInputRef {
         self.borrow()
             .map_or(WidgetRef::empty().as_text_input(), |inner| {
                 inner.text_input_ref(cx)
-            })
-    }
-
-    pub fn search_input_ref(&self, cx: &Cx) -> TextInputRef {
-        self.borrow()
-            .map_or(WidgetRef::empty().as_text_input(), |inner| {
-                inner.search_input_ref(cx)
             })
     }
 
@@ -800,6 +787,10 @@ fn get_head(text_input: &TextInputRef) -> usize {
     text_input.borrow().map_or(0, |p| p.cursor().index)
 }
 
+fn is_whitespace(grapheme: &str) -> bool {
+    grapheme.chars().all(char::is_whitespace)
+}
+
 #[cfg(test)]
 mod tests {
     use super::wrapped_selection_index;
@@ -817,8 +808,4 @@ mod tests {
         assert_eq!(wrapped_selection_index(None, 5, 1), 0);
         assert_eq!(wrapped_selection_index(None, 5, -1), 4);
     }
-}
-
-fn is_whitespace(grapheme: &str) -> bool {
-    grapheme.chars().all(char::is_whitespace)
 }

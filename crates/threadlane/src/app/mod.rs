@@ -3,6 +3,7 @@
 //! Chat, sessions, and command palette panels are modularized under `crate::panels`.
 
 use crate::components::model_dropdown::IconDropDownWidgetRefExt;
+use crate::components::session_row::ProjectHeaderAction;
 use crate::panels::chat::{
     accepts_generation_event, concise_status, draft_for_cancellation, submitted_draft, ChatList,
     ChatListWidgetRefExt, ComposerState, ComposerStatus, GenerationEvent, StarterPromptAction,
@@ -17,8 +18,9 @@ use crate::state::{
     active_session_entry, archive_session, begin_title_generation, builtin_commands,
     create_new_session, delete_session, end_title_generation, is_project_working,
     is_session_working, normalize_session_title, project_work_dir_at_row, refresh_sessions,
-    session_entry_at_row, session_title_eligible, set_active_project, set_active_session,
-    set_session_context_target, set_session_working, title_prompt_for_submission, truncate_chars,
+    session_entry_at_row, session_overflow_at_row, session_title_eligible, set_active_project,
+    set_active_session, set_session_context_target, set_session_working,
+    title_prompt_for_submission, toggle_project_collapsed, toggle_project_show_all, truncate_chars,
     CommandInfo, GuiAgentEvent, MsgRole, SessionEntry, ToolStatus,
 };
 use crate::updater::UpdateStatus;
@@ -871,6 +873,23 @@ script_mod! {
                                 width: Fill
                                 height: Fit
                                 padding: Inset{left: 30 top: 2 right: 18 bottom: 6}
+                                working_detail := View {
+                                    width: Fill
+                                    height: 18
+                                    visible: false
+                                    flow: Right
+                                    spacing: 7
+                                    align: Align{y: 0.5}
+                                    working_loader := ActivityLoader {
+                                        width: 18
+                                        height: 10
+                                        draw_bg +: { dot_radius: 1.0 speed: 3.6 }
+                                    }
+                                    working_lbl := Label {
+                                        text: "Working..."
+                                        draw_text +: { color: #x8794a3 text_style +: { font_size: 9.0 } }
+                                    }
+                                }
                                 draw_bg +: {
                                     color: #x00000000
                                     border_size: 0.0
@@ -996,8 +1015,10 @@ script_mod! {
                     border_color: #x34465a
                     border_size: 1.0
                 }
-                folder_icon +: { draw_icon +: { color: #x8fb9e8 } }
-                name_lbl +: { draw_text +: { color: #xe0e7ef } }
+                project_toggle_surface +: {
+                    folder_icon +: { draw_icon +: { color: #x8fb9e8 } }
+                    name_lbl +: { draw_text +: { color: #xe0e7ef } }
+                }
             }
         }
 
@@ -1038,8 +1059,10 @@ script_mod! {
                     border_color: #x34465a
                     border_size: 1.0
                 }
-                folder_icon +: { draw_icon +: { color: #x8fb9e8 } }
-                name_lbl +: { draw_text +: { color: #xe0e7ef } }
+                project_toggle_surface +: {
+                    folder_icon +: { draw_icon +: { color: #x8fb9e8 } }
+                    name_lbl +: { draw_text +: { color: #xe0e7ef } }
+                }
             }
 
             SessionRow := SessionRowBase {}
@@ -1061,9 +1084,6 @@ script_mod! {
                     title_lbl +: {
                         draw_text +: { color: #xe8edf4 }
                     }
-                }
-                session_icon +: {
-                    draw_icon +: { color: #x9fc3ef }
                 }
                 time_lbl +: {
                     draw_text +: {
@@ -1087,9 +1107,6 @@ script_mod! {
                         draw_text +: { color: #xe8edf4 }
                     }
                 }
-                session_icon +: {
-                    draw_icon +: { color: #x9fc3ef }
-                }
                 time_lbl +: {
                     draw_text +: {
                         color: #xaeb6c2
@@ -1104,9 +1121,6 @@ script_mod! {
                     border_color: #x4f82bd
                     border_size: 1.0
                     border_radius: 6.0
-                }
-                session_icon +: {
-                    draw_icon +: { color: #x8fb9e8 }
                 }
                 title_surface +: {
                     title_lbl +: {
@@ -1129,9 +1143,6 @@ script_mod! {
                     border_size: 1.0
                     border_radius: 6.0
                 }
-                session_icon +: {
-                    draw_icon +: { color: #x8fb9e8 }
-                }
                 title_surface +: {
                     title_lbl +: {
                         draw_text +: { color: #xf0f4fa }
@@ -1140,6 +1151,39 @@ script_mod! {
                 time_lbl +: {
                     draw_text +: {
                         color: #xb7c5d8
+                    }
+                }
+            }
+
+            SessionOverflow := View {
+                width: Fill
+                height: 28
+                padding: Inset{left: 43 right: 10}
+                align: Align{y: 0.5}
+                overflow_btn := Button {
+                    width: Fit
+                    height: 24
+                    padding: 0
+                    spacing: 0
+                    text: "Show more"
+                    align: Align{x: 0.0 y: 0.5}
+                    draw_bg +: {
+                        color: #x00000000
+                        color_hover: #x00000000
+                        color_focus: #x00000000
+                        color_down: #x00000000
+                        border_color: #x00000000
+                        border_color_hover: #x00000000
+                        border_color_focus: #x00000000
+                        border_color_down: #x00000000
+                        border_size: 0.0
+                    }
+                    draw_text +: {
+                        color: #x788596
+                        color_hover: #xaebdce
+                        color_focus: #xaebdce
+                        color_down: #xd7e2ee
+                        text_style +: { font_size: 9.5 }
                     }
                 }
             }
@@ -1755,6 +1799,7 @@ script_mod! {
                                 chat_working_indicator := View {
                                     width: Fill
                                     height: 18
+                                    padding: Inset{left: 20}
                                     visible: false
                                     align: Align{x: 0.0 y: 0.5}
                                     chat_working_spinner := ActivityLoader {
@@ -2766,8 +2811,9 @@ impl MatchEvent for App {
         let session_list_uid = self.ui.widget(cx, ids!(session_list)).widget_uid();
         if let Some(action) = actions.find_widget_action(session_list_uid) {
             match action.cast::<SessionListAction>() {
-                SessionListAction::SelectProject(work_dir) => {
-                    self.select_project_draft(cx, work_dir);
+                SessionListAction::ToggleProject(work_dir) => {
+                    toggle_project_collapsed(&work_dir);
+                    self.ui.widget(cx, ids!(session_list)).redraw(cx);
                 }
                 SessionListAction::NewSession(work_dir) => {
                     self.create_and_activate_session(cx, work_dir);
@@ -2780,18 +2826,26 @@ impl MatchEvent for App {
         }
         let session_list = self.ui.portal_list(cx, ids!(session_list.list));
         for (item_id, item) in session_list.items_with_actions(actions) {
-            if item.button(cx, ids!(detach_project_btn)).clicked(actions) {
-                if let Some(work_dir) = project_work_dir_at_row(item_id) {
-                    self.detach_project(cx, work_dir);
+            if let Some(work_dir) = project_work_dir_at_row(item_id) {
+                if let Some(action) = actions.find_widget_action(item.widget_uid()) {
+                    match action.cast::<ProjectHeaderAction>() {
+                        ProjectHeaderAction::Toggle => {
+                            toggle_project_collapsed(&work_dir);
+                            self.ui.widget(cx, ids!(session_list)).redraw(cx);
+                        }
+                        ProjectHeaderAction::NewSession => {
+                            self.create_and_activate_session(cx, work_dir);
+                        }
+                        ProjectHeaderAction::Detach => self.detach_project(cx, work_dir),
+                        ProjectHeaderAction::None => {}
+                    }
                 }
                 continue;
             }
-            if item
-                .button(cx, ids!(new_project_session_btn))
-                .clicked(actions)
-            {
-                if let Some(work_dir) = project_work_dir_at_row(item_id) {
-                    self.create_and_activate_session(cx, work_dir);
+            if item.button(cx, ids!(overflow_btn)).clicked(actions) {
+                if let Some((work_dir, _)) = session_overflow_at_row(item_id) {
+                    toggle_project_show_all(&work_dir);
+                    self.ui.widget(cx, ids!(session_list)).redraw(cx);
                 }
                 continue;
             }
@@ -3134,51 +3188,21 @@ impl App {
         }
         let pointer = self.sidebar_pointer;
 
-        let (project_rows, context_menu_open) = {
-            let data = crate::panels::sessions::state::SESSIONS_DATA
-                .read()
-                .unwrap();
-            let project_rows = data
-                .rows
-                .iter()
-                .enumerate()
-                .filter_map(|(row_id, row)| {
-                    matches!(
-                        row,
-                        crate::panels::sessions::state::SessionListRow::ProjectHeader { .. }
-                    )
-                    .then_some(row_id)
-                })
-                .collect::<Vec<_>>();
-            (project_rows, data.context_session_id.is_some())
-        };
+        let context_menu_open = crate::panels::sessions::state::SESSIONS_DATA
+            .read()
+            .unwrap()
+            .context_session_id
+            .is_some();
 
         let projects_header = self.ui.view(cx, ids!(projects_header));
         let add_project_visible = !context_menu_open
             && pointer.is_some_and(|position| projects_header.area().rect(cx).contains(position));
-        let add_project_btn = self.ui.widget(cx, ids!(add_project_btn));
+        let add_project_btn = self.ui.button(cx, ids!(add_project_btn));
         if add_project_btn.visible() != add_project_visible {
             add_project_btn.set_visible(cx, add_project_visible);
             projects_header.redraw(cx);
         }
 
-        let session_list = self.ui.portal_list(cx, ids!(session_list.list));
-        for row_id in project_rows {
-            let Some((_, item)) = session_list.get_item(row_id) else {
-                continue;
-            };
-            let actions_visible = !context_menu_open
-                && pointer.is_some_and(|position| item.area().rect(cx).contains(position));
-            let detach_btn = item.widget(cx, ids!(detach_project_btn));
-            let new_session_btn = item.widget(cx, ids!(new_project_session_btn));
-            if detach_btn.visible() != actions_visible
-                || new_session_btn.visible() != actions_visible
-            {
-                detach_btn.set_visible(cx, actions_visible);
-                new_session_btn.set_visible(cx, actions_visible);
-                item.redraw(cx);
-            }
-        }
     }
 
     fn set_model_dropup_options(&mut self, cx: &mut Cx, models: Vec<String>, selected_model: &str) {
@@ -4499,10 +4523,7 @@ impl App {
             }
             end_title_generation(&work_dir, &session_id);
             if result.is_ok() {
-                let _ = tx.send(GuiAgentEvent::SessionTitleGenerated {
-                    work_dir,
-                    session_id,
-                });
+                let _ = tx.send(GuiAgentEvent::SessionTitleGenerated);
                 SignalToUI::set_ui_signal();
             }
         });
@@ -4619,7 +4640,7 @@ impl App {
             }
             // AgentEnd closes one agent loop, but CodingAgent may still run
             // hooks or scheduled work. GenerationFinished is the terminal event.
-            AgentEvent::AgentEnd { .. } if generation.is_none() => return,
+            AgentEvent::AgentEnd { .. } if generation.is_none() => (),
             AgentEvent::AgentEnd { .. } => {
                 let Some((key, id)) = generation else { return };
                 let accepted = self.session_runtimes.get(&key).is_some_and(|runtime| {
@@ -4746,9 +4767,6 @@ impl App {
 
         for evt in events {
             match evt {
-                GuiAgentEvent::TaskEvent(task_event) => {
-                    self.handle_agent_event(cx, task_event.event, None);
-                }
                 GuiAgentEvent::CommandOutput {
                     generation_id,
                     work_dir,
@@ -4802,7 +4820,7 @@ impl App {
                     self.refresh_registered_sessions();
                 }
 
-                GuiAgentEvent::SessionTitleGenerated { .. } => {
+                GuiAgentEvent::SessionTitleGenerated => {
                     self.refresh_registered_sessions();
                 }
                 GuiAgentEvent::AvailableModelsLoaded(models) => {
@@ -4922,7 +4940,6 @@ impl App {
                     }
                     self.handle_agent_event(cx, agent_event, Some((key, generation_id)))
                 }
-                GuiAgentEvent::Agent(agent_event) => self.handle_agent_event(cx, agent_event, None),
             }
         }
 

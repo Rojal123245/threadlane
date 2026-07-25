@@ -437,7 +437,7 @@ impl ScriptHook for IconPopupMenu {
         _value: ScriptValue,
     ) {
         if !self.menu_item.is_nil() {
-            for (_, item) in self.menu_items.iter_mut() {
+            for item in self.menu_items.values_mut() {
                 item.script_apply(vm, apply, scope, self.menu_item);
             }
         }

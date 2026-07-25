@@ -38,8 +38,6 @@ script_mod! {
             color: #x00000000
             color_hover: uniform(#x1e2430)
             tree_color: uniform(#x2f3844)
-            hover_line_color: uniform(#x61748b)
-            active_line_color: uniform(#x8fb9e8)
             border_radius: 7.0
 
             pixel: fn() {
@@ -67,22 +65,6 @@ script_mod! {
                 sdf.fill(self.tree_color)
                 sdf.rect(tree_x, tree_mid, surface_x - tree_x + 1.0, 1.0)
                 sdf.fill(self.tree_color)
-                let line_amount = max(self.hover, self.is_active)
-                if line_amount > 0.0 {
-                    let line_color = mix(
-                        self.hover_line_color
-                        self.active_line_color
-                        self.is_active
-                    )
-                    let underline_padding = surface_x - tree_x
-                    sdf.rect(
-                        surface_left + underline_padding
-                        max(0.0, self.rect_size.y - 2.5)
-                        max(0.0, surface_width - underline_padding * 2.0)
-                        2.0
-                    )
-                    sdf.fill(mix(#x00000000, line_color, line_amount))
-                }
                 return sdf.result
             }
         }
@@ -99,13 +81,6 @@ script_mod! {
                 }
             }
         }
-        session_icon := Icon {
-            icon_walk: Walk{width: 12 height: 12}
-            draw_icon +: {
-                svg: crate_resource("self:resources/icons/conversation.svg")
-                color: #x6b7a8e
-            }
-        }
         title_surface := mod.components.SessionTitle {}
         session_row_spinner := mod.components.ActivityLoader {
             width: 18
@@ -120,12 +95,11 @@ script_mod! {
         }
     }
 
-    mod.components.ProjectHeaderBase = RoundedView {
+    mod.components.ProjectHeaderBase = #(ProjectHeader::register_widget(vm)) {
         width: Fill
-        height: 38
-        cursor: MouseCursor.Hand
+        height: 36.0
         flow: Right
-        spacing: 8
+        spacing: 0
         align: Align{y: 0.5}
         margin: Inset{left: 3 right: 3 top: 4 bottom: 2}
         padding: Inset{left: 8 top: 4 right: 4 bottom: 4}
@@ -134,6 +108,8 @@ script_mod! {
             tree_color: uniform(#x2f3844)
             color: #x00000000
             color_hover: #x252b35
+            border_color: uniform(#x00000000)
+            border_size: uniform(0.0)
             border_radius: 8.0
 
             pixel: fn() {
@@ -166,40 +142,193 @@ script_mod! {
                 }
             }
         }
-        folder_icon := Icon {
-            width: 16
-            height: 16
-            icon_walk: Walk{width: 14 height: 14}
-            draw_icon +: {
-                svg: crate_resource("self:resources/icons/folder.svg")
-                color: #x8291a5
+        project_toggle_surface := View {
+            width: Fill
+            height: Fill
+            cursor: MouseCursor.Hand
+            flow: Right
+            spacing: 8
+            align: Align{y: 0.5}
+            folder_icon := Icon {
+                width: 16
+                height: 16
+                icon_walk: Walk{width: 14 height: 14}
+                draw_icon +: {
+                    svg: crate_resource("self:resources/icons/folder.svg")
+                    color: #x8291a5
+                }
+            }
+            name_lbl := mod.components.ClippedLabel {
+                height: 18
+                draw_text +: {
+                    color: #xc8d1e0
+                    text_style: theme.font_bold { font_size: 10.5 }
+                }
             }
         }
-        name_lbl := mod.components.ClippedLabel {
-            height: 18
-            draw_text +: {
-                color: #xc2cad5
-                text_style: theme.font_bold { font_size: 10.5 }
-            }
-        }
-        detach_project_btn := mod.components.IconButton {
-            width: 22
+        project_actions_slot := View {
+            width: 48
             height: 22
-            visible: false
-            text: "×"
-            draw_text +: {
-                color: #x626d7d
-                color_hover: #xd08a92
-                color_down: #xf2a0aa
-                text_style +: { font_size: 11.0 }
+            flow: Right
+            spacing: 4
+            detach_project_btn := mod.components.IconButton {
+                width: 22
+                height: 22
+                text: "×"
+                draw_text +: {
+                    color: #x00000000
+                    color_hover: #x00000000
+                    color_down: #x00000000
+                    text_style +: { font_size: 11.0 }
+                }
+                draw_bg +: {
+                    color_hover: #x00000000
+                    color_focus: #x00000000
+                    color_down: #x00000000
+                }
             }
-            draw_bg +: {
-                color_hover: #x36272d
-                color_focus: #x36272d
-                color_down: #x482c34
+            new_project_session_btn := mod.components.SidebarComposeButton {
+                visible: true
+                draw_icon +: {
+                    color: #x00000000
+                    color_hover: #x00000000
+                    color_down: #x00000000
+                }
+                draw_bg +: {
+                    color_hover: #x00000000
+                    color_focus: #x00000000
+                    color_down: #x00000000
+                }
             }
         }
-        new_project_session_btn := mod.components.SidebarComposeButton {}
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub enum ProjectHeaderAction {
+    Toggle,
+    NewSession,
+    Detach,
+    #[default]
+    None,
+}
+
+#[derive(Script, ScriptHook, Widget)]
+pub struct ProjectHeader {
+    #[deref]
+    view: View,
+    #[rust]
+    actions_painted: bool,
+}
+
+impl ProjectHeader {
+    fn set_actions_painted(&mut self, cx: &mut Cx, painted: bool) {
+        if self.actions_painted == painted {
+            return;
+        }
+        self.actions_painted = painted;
+
+        let mut detach = self.view.widget(cx, ids!(detach_project_btn));
+        let mut compose = self.view.widget(cx, ids!(new_project_session_btn));
+        if painted {
+            script_apply_eval!(cx, detach, {
+                draw_text +: {
+                    color: #x626d7d
+                    color_hover: #xd08a92
+                    color_down: #xf2a0aa
+                }
+                draw_bg +: {
+                    color_hover: #x36272d
+                    color_focus: #x36272d
+                    color_down: #x482c34
+                }
+            });
+            script_apply_eval!(cx, compose, {
+                draw_icon +: {
+                    color: #x758294
+                    color_hover: #xb8d5f5
+                    color_down: #xffffff
+                }
+                draw_bg +: {
+                    color_hover: #x283544
+                    color_focus: #x283544
+                    color_down: #x30445b
+                }
+            });
+        } else {
+            script_apply_eval!(cx, detach, {
+                draw_text +: {
+                    color: #x00000000
+                    color_hover: #x00000000
+                    color_down: #x00000000
+                }
+                draw_bg +: {
+                    color_hover: #x00000000
+                    color_focus: #x00000000
+                    color_down: #x00000000
+                }
+            });
+            script_apply_eval!(cx, compose, {
+                draw_icon +: {
+                    color: #x00000000
+                    color_hover: #x00000000
+                    color_down: #x00000000
+                }
+                draw_bg +: {
+                    color_hover: #x00000000
+                    color_focus: #x00000000
+                    color_down: #x00000000
+                }
+            });
+        }
+        detach.redraw(cx);
+        compose.redraw(cx);
+    }
+}
+
+impl Widget for ProjectHeader {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.view.draw_walk(cx, scope, walk)
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+
+        match event {
+            Event::MouseMove(event) => {
+                self.set_actions_painted(
+                    cx,
+                    self.view.area().clipped_rect(cx).contains(event.abs),
+                );
+            }
+            Event::MouseLeave(_) => self.set_actions_painted(cx, false),
+            _ => {}
+        }
+
+        let Event::Actions(actions) = event else {
+            return;
+        };
+        let uid = self.widget_uid();
+        if self
+            .view
+            .button(cx, ids!(detach_project_btn))
+            .clicked(actions)
+        {
+            cx.widget_action(uid, ProjectHeaderAction::Detach);
+        } else if self
+            .view
+            .button(cx, ids!(new_project_session_btn))
+            .clicked(actions)
+        {
+            cx.widget_action(uid, ProjectHeaderAction::NewSession);
+        } else if self
+            .view
+            .view(cx, ids!(project_toggle_surface))
+            .finger_up(actions)
+            .is_some_and(|event| event.is_over && event.is_primary_hit() && event.was_tap())
+        {
+            cx.widget_action(uid, ProjectHeaderAction::Toggle);
+        }
     }
 }
 
@@ -238,10 +367,8 @@ impl SessionTitle {
 
         self.hovered = hovered;
         self.reset(cx);
-        if hovered {
-            if self.max_offset > 0.5 {
-                self.next_frame = cx.new_next_frame();
-            }
+        if hovered && self.max_offset > 0.5 {
+            self.next_frame = cx.new_next_frame();
         }
     }
 

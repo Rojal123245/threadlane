@@ -108,18 +108,15 @@ pub fn substitute_args(content: &str, args: &[String]) -> String {
 }
 
 fn find_closing_brace(chars: &[char], start: usize) -> Option<usize> {
-    for idx in start..chars.len() {
-        if chars[idx] == '}' {
-            return Some(idx);
-        }
-    }
-    None
+    chars[start..]
+        .iter()
+        .position(|ch| *ch == '}')
+        .map(|offset| start + offset)
 }
 
 fn eval_braced_expr(expr: &str, args: &[String], all_args: &str) -> String {
     // 1. Check for slicing: @:N or @:N:L
-    if expr.starts_with("@:") {
-        let slice_spec = &expr[2..];
+    if let Some(slice_spec) = expr.strip_prefix("@:") {
         let parts: Vec<&str> = slice_spec.split(':').collect();
         let start_idx = parts
             .first()
@@ -190,7 +187,7 @@ pub fn load_prompt_templates_from_dir(dir: &Path, scope: &str) -> Vec<PromptTemp
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_file() && path.extension().map_or(false, |ext| ext == "md") {
+            if path.is_file() && path.extension().is_some_and(|ext| ext == "md") {
                 if let Ok(content) = fs::read_to_string(&path) {
                     let stem = path
                         .file_stem()
