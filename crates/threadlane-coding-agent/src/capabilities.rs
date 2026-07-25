@@ -56,17 +56,7 @@ impl CapabilityCatalog {
         }
     }
 
-    pub fn extensions(&self) -> &[ExtensionMetadata] {
-        &self.extensions
-    }
-
     pub fn packages(&self) -> &[PackageRecord] {
         &self.packages
-    }
-}
-
-impl ExtensionMetadata {
-    pub fn is_enabled(&self) -> bool {
-        self.enabled
     }
 }

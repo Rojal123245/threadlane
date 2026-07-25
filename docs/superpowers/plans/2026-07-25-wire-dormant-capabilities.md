@@ -1,5 +1,10 @@
 # Wire Dormant Capabilities Implementation Plan
 
+> **Superseded extension design:** Full-trust/native extension executables and
+> their approval/revocation UI described below are historical and unsupported.
+> Threadlane extensions are WASI modules, and LSP launches language servers
+> through brokered process capability.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make the tested supervisor, package, trust, and extension-management APIs reachable through Threadlane’s desktop application instead of leaving them dormant.

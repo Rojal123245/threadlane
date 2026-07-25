@@ -28,6 +28,7 @@ pub struct PackageRecord {
     enabled: bool,
 }
 
+#[derive(Default)]
 pub struct PackageManager;
 
 impl PackageManager {
@@ -168,10 +169,6 @@ impl PackageRecord {
 
     pub fn module_path(&self) -> &Path {
         &self.module_path
-    }
-
-    pub fn scope(&self) -> PackageScope {
-        self.scope
     }
 
     pub fn is_enabled(&self) -> bool {

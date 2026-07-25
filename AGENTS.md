@@ -254,7 +254,10 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 
 - `HarnessSupervisor` owns only explicit background tasks (currently `/task <prompt>`). Ordinary chat sessions continue to use the existing `SessionRuntime` path and must not be mirrored into supervisor tasks.
 - Forward supervisor events through `GuiAgentEvent`; update `BackgroundTaskState` and widgets only on the Makepad event thread.
-- Package install/remove operations use `PackageManager`. Full-trust executable approval and revocation use `TrustStore` and require a second explicit confirmation before persistence.
+- Threadlane extensions are WASI modules. Extension packages install one declared
+  module under `.threadlane/extensions/<package-id>/extension.wasm`; native
+  extension executables and trust approvals are unsupported. LSP remains a WASI
+  extension and launches language servers through brokered process capability.
 
 ## Updater Behavior
 
