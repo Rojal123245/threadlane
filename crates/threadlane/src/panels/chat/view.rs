@@ -1,6 +1,6 @@
 //! Chat panel main view & transcript list widget.
 
-use super::state::{ChatMessage, MsgRole, StreamingKind, ToolIcon, ToolStatus};
+use super::state::{ChatMessage, MsgRole, StreamingKind, SubagentRailItem, ToolIcon, ToolStatus};
 use crate::components::tool_fold_header::ToolFoldHeaderAction;
 use crate::path_utils::{compact_workspace_path, truncate_chars};
 use crate::workspace::AppState;
@@ -45,8 +45,41 @@ fn update_activity_status(
         .set_visible(cx, !running && error);
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Debug)]
+struct CachedActivityGroup {
+    detail: String,
+    preview: String,
+    title: &'static str,
+    tool_icon: ToolIcon,
+    running: bool,
+    has_error: bool,
+    has_cancelled: bool,
+}
+
+#[derive(Clone, Debug)]
+struct CachedSubagentTool {
+    message_index: usize,
+    rail_items: Vec<SubagentRailItem>,
+    preview: String,
+}
+
+#[derive(Clone, Debug)]
+struct CachedTool {
+    message_index: usize,
+    output_detail: String,
+}
+
+#[derive(Clone, Debug)]
 enum DisplayRow {
+    Message(usize),
+    SubagentTool(CachedSubagentTool),
+    Tool(CachedTool),
+    ActivityGroup(CachedActivityGroup),
+    StreamingAssistant,
+}
+
+#[derive(Clone, Copy)]
+enum InterimRow {
     Message(usize),
     ActivityGroup {
         start: usize,
@@ -96,10 +129,13 @@ impl ActivityCounts {
 }
 
 fn is_activity(message: &ChatMessage) -> bool {
-    matches!(
-        message,
-        ChatMessage::Thinking { .. } | ChatMessage::Tool { .. }
-    )
+    match message {
+        ChatMessage::Thinking { .. } => true,
+        ChatMessage::Tool {
+            name, presentation, ..
+        } => name != "subagent" && presentation.icon != ToolIcon::Subagent,
+        _ => false,
+    }
 }
 
 fn display_rows(
@@ -107,57 +143,207 @@ fn display_rows(
     streaming_kind: Option<StreamingKind>,
     streaming_text: &str,
 ) -> Vec<DisplayRow> {
-    let mut rows = Vec::new();
+    let mut interim = Vec::new();
+    let owned_subagent_runs = super::state::owned_subagent_child_runs(messages);
+    let owned_runs = owned_subagent_runs.values().copied().collect::<Vec<_>>();
 
     for (message_index, message) in messages.iter().enumerate() {
+        if super::state::is_owned_subagent_child_tool(message, &owned_runs) {
+            continue;
+        }
         if is_activity(message) {
-            if let Some(DisplayRow::ActivityGroup { end, .. }) = rows.last_mut() {
+            if let Some(InterimRow::ActivityGroup { end, .. }) = interim.last_mut() {
                 if *end == message_index {
                     *end = message_index + 1;
                     continue;
                 }
             }
-            rows.push(DisplayRow::ActivityGroup {
+            interim.push(InterimRow::ActivityGroup {
                 start: message_index,
                 end: message_index + 1,
                 streaming_thinking: false,
             });
         } else {
-            rows.push(DisplayRow::Message(message_index));
+            interim.push(InterimRow::Message(message_index));
         }
     }
 
     if !streaming_text.is_empty() {
         match streaming_kind {
             Some(StreamingKind::Thinking) => {
-                if let Some(DisplayRow::ActivityGroup {
+                if let Some(InterimRow::ActivityGroup {
                     end,
                     streaming_thinking,
                     ..
-                }) = rows.last_mut()
+                }) = interim.last_mut()
                 {
                     if *end == messages.len() {
                         *streaming_thinking = true;
                     } else {
-                        rows.push(DisplayRow::ActivityGroup {
+                        interim.push(InterimRow::ActivityGroup {
                             start: messages.len(),
                             end: messages.len(),
                             streaming_thinking: true,
                         });
                     }
                 } else {
-                    rows.push(DisplayRow::ActivityGroup {
+                    interim.push(InterimRow::ActivityGroup {
                         start: messages.len(),
                         end: messages.len(),
                         streaming_thinking: true,
                     });
                 }
             }
-            _ => rows.push(DisplayRow::StreamingAssistant),
+            _ => interim.push(InterimRow::StreamingAssistant),
         }
     }
 
-    rows
+    interim
+        .into_iter()
+        .map(|row| match row {
+            InterimRow::StreamingAssistant => DisplayRow::StreamingAssistant,
+            InterimRow::ActivityGroup {
+                start,
+                end,
+                streaming_thinking,
+            } => {
+                let mut counts = ActivityCounts::default();
+                let mut has_thinking = streaming_thinking;
+                let mut running = streaming_thinking;
+                let mut has_error = false;
+                let mut has_cancelled = false;
+                let mut first_icon = None;
+                let mut mixed_icons = false;
+
+                if start < messages.len() {
+                    let group_end = end.min(messages.len());
+                    for message in &messages[start..group_end] {
+                        match message {
+                            ChatMessage::Thinking { .. } => has_thinking = true,
+                            ChatMessage::Tool {
+                                name,
+                                status,
+                                presentation,
+                                ..
+                            } => {
+                                let kind = activity_kind(name, presentation.icon);
+                                counts.add(kind);
+                                running |= *status == ToolStatus::Running;
+                                has_error |= *status == ToolStatus::Error;
+                                has_cancelled |= *status == ToolStatus::Cancelled;
+                                if let Some(icon) = first_icon {
+                                    mixed_icons |= icon != presentation.icon;
+                                } else {
+                                    first_icon = Some(presentation.icon);
+                                }
+                            }
+                            ChatMessage::Text { .. } => {}
+                        }
+                    }
+                }
+
+                let detail = activity_detail(
+                    if start < messages.len() {
+                        &messages[start..end.min(messages.len())]
+                    } else {
+                        &[]
+                    },
+                    streaming_thinking.then_some(streaming_text),
+                );
+
+                let title = if running {
+                    "Working"
+                } else if has_cancelled {
+                    "Stopped"
+                } else {
+                    "Worked"
+                };
+
+                let preview = activity_preview(&counts, has_thinking);
+
+                let tool_icon = if mixed_icons {
+                    ToolIcon::Generic
+                } else {
+                    first_icon.unwrap_or(ToolIcon::Generic)
+                };
+
+                DisplayRow::ActivityGroup(CachedActivityGroup {
+                    detail,
+                    preview,
+                    title,
+                    tool_icon,
+                    running,
+                    has_error,
+                    has_cancelled,
+                })
+            }
+            InterimRow::Message(message_index) => {
+                let Some(message) = messages.get(message_index) else {
+                    return DisplayRow::Message(message_index);
+                };
+                match message {
+                    ChatMessage::Tool {
+                        name,
+                        arguments,
+                        output,
+                        status,
+                        presentation,
+                        result_metadata,
+                        ..
+                    } => {
+                        if name == "subagent" || presentation.icon == ToolIcon::Subagent {
+                            let rail_items = super::state::subagent_rail_items(
+                                arguments,
+                                output,
+                                *status,
+                                messages,
+                                owned_subagent_runs.get(&message_index).copied(),
+                            );
+                            let working = rail_items
+                                .iter()
+                                .filter(|item| item.status == "Working")
+                                .count();
+                            let queued = rail_items
+                                .iter()
+                                .filter(|item| item.status == "Queued")
+                                .count();
+                            let preview = if *status == ToolStatus::Running {
+                                let suffix = if queued > 0 {
+                                    format!(" · {queued} queued")
+                                } else {
+                                    String::new()
+                                };
+                                format!(
+                                    "{} agent{} · {working} working{suffix}",
+                                    rail_items.len(),
+                                    if rail_items.len() == 1 { "" } else { "s" },
+                                )
+                            } else {
+                                format!(
+                                    "{} agent{} · {}",
+                                    rail_items.len(),
+                                    if rail_items.len() == 1 { "" } else { "s" },
+                                    result_metadata,
+                                )
+                            };
+                            DisplayRow::SubagentTool(CachedSubagentTool {
+                                message_index,
+                                rail_items,
+                                preview,
+                            })
+                        } else {
+                            let output_detail = super::state::tool_result_detail(output, 6_000);
+                            DisplayRow::Tool(CachedTool {
+                                message_index,
+                                output_detail,
+                            })
+                        }
+                    }
+                    _ => DisplayRow::Message(message_index),
+                }
+            }
+        })
+        .collect()
 }
 
 fn activity_kind(name: &str, icon: ToolIcon) -> ActivityKind {
@@ -338,20 +524,32 @@ fn activity_detail(messages: &[ChatMessage], streaming_thinking: Option<&str>) -
                 status,
                 presentation,
                 result_metadata,
+                output,
                 ..
             } => {
                 let kind = activity_kind(name, presentation.icon);
+                let mut line = activity_line(
+                    kind,
+                    &presentation.title,
+                    &presentation.primary,
+                    result_metadata,
+                    *status,
+                );
+                if name == "subagent" || presentation.icon == ToolIcon::Subagent {
+                    if !presentation.arguments_detail.is_empty() {
+                        line.push_str("\n\n");
+                        line.push_str(&presentation.arguments_detail);
+                    }
+                    if !output.trim().is_empty() {
+                        line.push_str("\n\n");
+                        line.push_str(output.trim());
+                    }
+                }
                 append_activity_detail(
                     &mut detail,
                     &mut previous_kind,
                     ActivityDetailKind::Tool,
-                    &activity_line(
-                        kind,
-                        &presentation.title,
-                        &presentation.primary,
-                        result_metadata,
-                        *status,
-                    ),
+                    &line,
                 );
             }
             ChatMessage::Text { .. } => {}
@@ -395,7 +593,10 @@ fn draw_markdown_item(
     text: &str,
 ) {
     let item_widget = list.item(cx, item_id, template);
-    item_widget.markdown(cx, ids!(md)).set_text(cx, text);
+    let mut md = item_widget.markdown(cx, ids!(md));
+    if md.text() != text {
+        md.set_text(cx, text);
+    }
     item_widget.draw_all_unscoped(cx);
 }
 
@@ -417,15 +618,95 @@ pub struct ChatList {
     #[rust]
     cached_rows: Vec<DisplayRow>,
     #[rust]
+    cached_base_rows: Vec<DisplayRow>,
+    #[rust]
+    cached_base_revision: u64,
+    #[rust]
     cached_msg_count: usize,
     #[rust]
     cached_streaming_kind: Option<StreamingKind>,
     #[rust]
     cached_streaming_text_len: usize,
     #[rust]
+    cached_revision: u64,
+    #[rust]
     hovered_starter: Option<StarterPromptAction>,
     #[rust]
     pressed_starter: Option<StarterPromptAction>,
+}
+
+#[derive(Script, ScriptHook, Widget)]
+pub struct SubagentRail {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[redraw]
+    #[live]
+    draw_bg: DrawColor,
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
+    #[live]
+    row_template: ScriptValue,
+    #[rust]
+    rows: ComponentMap<LiveId, WidgetRef>,
+    #[rust]
+    pub items: Vec<SubagentRailItem>,
+}
+
+impl Widget for SubagentRail {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        for row in self.rows.values_mut() {
+            row.handle_event(cx, event, scope);
+        }
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.draw_bg.begin(cx, walk, self.layout);
+        let item_count = self.items.len();
+        self.rows.retain(|row_id, _| {
+            (0..item_count).any(|index| *row_id == LiveId::from_num(1, index as u64))
+        });
+        for (index, item) in self.items.iter().enumerate() {
+            let row_id = LiveId::from_num(1, index as u64);
+            let template = self.row_template;
+            let row = self.rows.get_or_insert(cx, row_id, |cx| {
+                cx.with_vm(|vm| WidgetRef::script_from_value(vm, template))
+            });
+            let title = row.label(cx, ids!(title_lbl));
+            if title.text() != item.agent {
+                title.set_text(cx, &item.agent);
+            }
+            let preview = row.label(cx, ids!(preview_lbl));
+            if preview.text() != item.task {
+                preview.set_text(cx, &item.task);
+            }
+            let status = row.label(cx, ids!(status_lbl));
+            if status.text() != item.status {
+                status.set_text(cx, &item.status);
+            }
+            let mut md = row.markdown(cx, ids!(detail_md));
+            if md.text() != item.detail {
+                md.set_text(cx, &item.detail);
+            }
+            row.widget(cx, ids!(working_detail)).set_visible(
+                cx,
+                item.status == "Working" && item.detail.trim().is_empty(),
+            );
+            update_activity_status(
+                cx,
+                row,
+                item.status == "Working",
+                item.status == "Failed",
+                item.status == "Stopped",
+            );
+            row.draw_all_unscoped(cx);
+        }
+        self.draw_bg.end(cx);
+        DrawStep::done()
+    }
 }
 
 impl Widget for ChatList {
@@ -445,12 +726,26 @@ impl Widget for ChatList {
         if msg_count != self.cached_msg_count
             || data.streaming_kind != self.cached_streaming_kind
             || streaming_text_len != self.cached_streaming_text_len
+            || data.revision != self.cached_revision
         {
-            self.cached_rows =
-                display_rows(&data.messages, data.streaming_kind, &data.streaming_text);
+            if msg_count != self.cached_msg_count || data.revision != self.cached_base_revision {
+                self.cached_base_rows = display_rows(&data.messages, None, "");
+                self.cached_base_revision = data.revision;
+            }
+
+            if data.streaming_kind == Some(StreamingKind::Assistant) {
+                self.cached_rows = self.cached_base_rows.clone();
+                if !data.streaming_text.is_empty() {
+                    self.cached_rows.push(DisplayRow::StreamingAssistant);
+                }
+            } else {
+                self.cached_rows =
+                    display_rows(&data.messages, data.streaming_kind, &data.streaming_text);
+            }
             self.cached_msg_count = msg_count;
             self.cached_streaming_kind = data.streaming_kind;
             self.cached_streaming_text_len = streaming_text_len;
+            self.cached_revision = data.revision;
         }
         let rows = &self.cached_rows;
 
@@ -488,7 +783,7 @@ impl Widget for ChatList {
                 list.set_item_range(cx, 0, rows.len());
 
                 while let Some(item_id) = list.next_visible_item(cx) {
-                    let Some(row) = rows.get(item_id).copied() else {
+                    let Some(row) = rows.get(item_id) else {
                         continue;
                     };
 
@@ -502,81 +797,154 @@ impl Widget for ChatList {
                                 &data.streaming_text,
                             );
                         }
-                        DisplayRow::ActivityGroup {
-                            start,
-                            end,
-                            streaming_thinking,
-                        } => {
+                        DisplayRow::ActivityGroup(group) => {
                             let item_widget = list.item(cx, item_id, id!(ActivityGroupMsg));
-                            let mut counts = ActivityCounts::default();
-                            let mut has_thinking = streaming_thinking;
-                            let mut running = streaming_thinking;
-                            let mut has_error = false;
-                            let mut has_cancelled = false;
-                            let mut first_icon = None;
-                            let mut mixed_icons = false;
-
-                            for message in &data.messages[start..end] {
-                                match message {
-                                    ChatMessage::Thinking { .. } => has_thinking = true,
-                                    ChatMessage::Tool {
-                                        name,
-                                        status,
-                                        presentation,
-                                        ..
-                                    } => {
-                                        let kind = activity_kind(name, presentation.icon);
-                                        counts.add(kind);
-                                        running |= *status == ToolStatus::Running;
-                                        has_error |= *status == ToolStatus::Error;
-                                        has_cancelled |= *status == ToolStatus::Cancelled;
-                                        if let Some(icon) = first_icon {
-                                            mixed_icons |= icon != presentation.icon;
-                                        } else {
-                                            first_icon = Some(presentation.icon);
-                                        }
-                                    }
-                                    ChatMessage::Text { .. } => {}
-                                }
-                            }
-
-                            let detail = activity_detail(
-                                &data.messages[start..end],
-                                streaming_thinking.then_some(data.streaming_text.as_str()),
-                            );
-
-                            show_tool_icon(
-                                cx,
-                                &item_widget,
-                                if mixed_icons {
-                                    ToolIcon::Generic
-                                } else {
-                                    first_icon.unwrap_or(ToolIcon::Generic)
-                                },
-                            );
-                            let title = if running {
-                                "Working"
-                            } else if has_cancelled {
-                                "Stopped"
-                            } else {
-                                "Worked"
-                            };
-                            item_widget.label(cx, ids!(title_lbl)).set_text(cx, title);
+                            show_tool_icon(cx, &item_widget, group.tool_icon);
+                            item_widget
+                                .label(cx, ids!(title_lbl))
+                                .set_text(cx, group.title);
                             item_widget
                                 .label(cx, ids!(preview_lbl))
-                                .set_text(cx, &activity_preview(&counts, has_thinking));
+                                .set_text(cx, &group.preview);
                             update_activity_status(
                                 cx,
                                 &item_widget,
-                                running,
-                                has_error,
-                                has_cancelled,
+                                group.running,
+                                group.has_error,
+                                group.has_cancelled,
                             );
-                            item_widget.markdown(cx, ids!(md)).set_text(cx, &detail);
+                            let mut md = item_widget.markdown(cx, ids!(md));
+                            if md.text() != group.detail {
+                                md.set_text(cx, &group.detail);
+                            }
+                            item_widget.draw_all_unscoped(cx);
+                        }
+                        DisplayRow::SubagentTool(tool) => {
+                            let Some(message) = data.messages.get(tool.message_index) else {
+                                continue;
+                            };
+                            let ChatMessage::Tool { status, .. } = message else {
+                                continue;
+                            };
+                            let item_widget = list.item(cx, item_id, id!(SubagentMsg));
+                            item_widget
+                                .label(cx, ids!(preview_lbl))
+                                .set_text(cx, &tool.preview);
+                            update_activity_status(
+                                cx,
+                                &item_widget,
+                                *status == ToolStatus::Running,
+                                *status == ToolStatus::Error,
+                                *status == ToolStatus::Cancelled,
+                            );
+                            let rail = item_widget.widget(cx, ids!(rail));
+                            if let Some(mut rail) = rail.as_subagent_rail().borrow_mut() {
+                                if rail.items != tool.rail_items {
+                                    rail.items = tool.rail_items.clone();
+                                }
+                            }
+                            item_widget.draw_all_unscoped(cx);
+                        }
+                        DisplayRow::Tool(tool) => {
+                            let Some(message) = data.messages.get(tool.message_index) else {
+                                continue;
+                            };
+                            let ChatMessage::Tool {
+                                status,
+                                presentation,
+                                result_preview,
+                                result_metadata,
+                                output,
+                                ..
+                            } = message
+                            else {
+                                continue;
+                            };
+
+                            let item_widget = list.item(cx, item_id, id!(ToolMsg));
+                            show_tool_icon(cx, &item_widget, presentation.icon);
+                            item_widget
+                                .label(cx, ids!(title_lbl))
+                                .set_text(cx, &presentation.title);
+                            item_widget
+                                .label(cx, ids!(meta_lbl))
+                                .set_text(cx, &presentation.metadata);
+                            item_widget
+                                .widget(cx, ids!(meta_lbl))
+                                .set_visible(cx, !presentation.metadata.is_empty());
+                            item_widget
+                                .label(cx, ids!(preview_lbl))
+                                .set_text(cx, &presentation.primary);
+                            item_widget
+                                .label(cx, ids!(result_meta_lbl))
+                                .set_text(cx, result_metadata);
+                            item_widget
+                                .widget(cx, ids!(result_meta_lbl))
+                                .set_visible(cx, !result_metadata.is_empty());
+
+                            let has_completed_result = *status != ToolStatus::Running;
+                            item_widget
+                                .label(cx, ids!(result_preview_lbl))
+                                .set_text(cx, result_preview);
+                            item_widget
+                                .widget(cx, ids!(result_preview_lbl))
+                                .set_visible(
+                                    cx,
+                                    has_completed_result && !result_preview.is_empty(),
+                                );
+                            item_widget
+                                .label(cx, ids!(result_meta_header_lbl))
+                                .set_text(cx, result_metadata);
+                            item_widget
+                                .widget(cx, ids!(result_meta_header_lbl))
+                                .set_visible(
+                                    cx,
+                                    has_completed_result && !result_metadata.is_empty(),
+                                );
+
+                            update_activity_status(
+                                cx,
+                                &item_widget,
+                                *status == ToolStatus::Running,
+                                *status == ToolStatus::Error,
+                                *status == ToolStatus::Cancelled,
+                            );
+
+                            let args_section = item_widget.widget(cx, ids!(args_section));
+                            let content_lbl = args_section.label(cx, ids!(content_lbl));
+                            if content_lbl.text() != presentation.arguments_detail {
+                                content_lbl.set_text(cx, &presentation.arguments_detail);
+                            }
+                            let arguments_are_fully_summarized = matches!(
+                                presentation.icon,
+                                ToolIcon::ReadFile | ToolIcon::ListDirectory | ToolIcon::Skill
+                            );
+                            args_section.set_visible(
+                                cx,
+                                !arguments_are_fully_summarized
+                                    && !presentation.arguments_detail.is_empty(),
+                            );
+
+                            let result_section = item_widget.widget(cx, ids!(result_section));
+                            let res_lbl = result_section.label(cx, ids!(content_lbl));
+                            if res_lbl.text() != tool.output_detail {
+                                res_lbl.set_text(cx, &tool.output_detail);
+                            }
+                            result_section
+                                .widget(cx, ids!(content_lbl))
+                                .set_visible(cx, !presentation.output_markdown);
+
+                            let content_md_wrap = result_section.widget(cx, ids!(content_md_wrap));
+                            let mut md = content_md_wrap.markdown(cx, ids!(content_md));
+                            if md.text() != tool.output_detail {
+                                md.set_text(cx, &tool.output_detail);
+                            }
+                            content_md_wrap.set_visible(cx, presentation.output_markdown);
+                            result_section.set_visible(cx, !output.is_empty());
                             item_widget.draw_all_unscoped(cx);
                         }
                         DisplayRow::Message(message_index) => {
-                            let Some(message) = data.messages.get(message_index) else {
+                            let Some(message) = data.messages.get(*message_index) else {
                                 continue;
                             };
                             match message {
@@ -600,108 +968,28 @@ impl Widget for ChatList {
                                     }
                                     MsgRole::System => {
                                         let item_widget = list.item(cx, item_id, id!(SystemMsg));
-                                        item_widget.label(cx, ids!(lbl)).set_text(cx, text);
+                                        let lbl = item_widget.label(cx, ids!(lbl));
+                                        if lbl.text() != *text {
+                                            lbl.set_text(cx, text);
+                                        }
                                         item_widget.draw_all_unscoped(cx);
                                     }
                                 },
                                 ChatMessage::Thinking { text } => {
                                     let item_widget = list.item(cx, item_id, id!(ThinkingMsg));
-                                    item_widget.markdown(cx, ids!(md)).set_text(cx, text);
-                                    item_widget.label(cx, ids!(preview_lbl)).set_text(
-                                        cx,
-                                        &super::state::collapsed_thinking_preview(text, 72),
-                                    );
+                                    let mut md = item_widget.markdown(cx, ids!(md));
+                                    if md.text() != *text {
+                                        md.set_text(cx, text);
+                                    }
+                                    let preview_lbl = item_widget.label(cx, ids!(preview_lbl));
+                                    let preview_text =
+                                        super::state::collapsed_thinking_preview(text, 72);
+                                    if preview_lbl.text() != preview_text {
+                                        preview_lbl.set_text(cx, &preview_text);
+                                    }
                                     item_widget.draw_all_unscoped(cx);
                                 }
-                                ChatMessage::Tool {
-                                    output,
-                                    status,
-                                    presentation,
-                                    result_preview,
-                                    result_metadata,
-                                    ..
-                                } => {
-                                    let item_widget = list.item(cx, item_id, id!(ToolMsg));
-                                    show_tool_icon(cx, &item_widget, presentation.icon);
-                                    item_widget
-                                        .label(cx, ids!(title_lbl))
-                                        .set_text(cx, &presentation.title);
-                                    item_widget
-                                        .label(cx, ids!(meta_lbl))
-                                        .set_text(cx, &presentation.metadata);
-                                    item_widget
-                                        .widget(cx, ids!(meta_lbl))
-                                        .set_visible(cx, !presentation.metadata.is_empty());
-                                    item_widget
-                                        .label(cx, ids!(preview_lbl))
-                                        .set_text(cx, &presentation.primary);
-                                    item_widget
-                                        .label(cx, ids!(result_meta_lbl))
-                                        .set_text(cx, result_metadata);
-                                    item_widget
-                                        .widget(cx, ids!(result_meta_lbl))
-                                        .set_visible(cx, !result_metadata.is_empty());
-
-                                    let has_completed_result = *status != ToolStatus::Running;
-                                    item_widget
-                                        .label(cx, ids!(result_preview_lbl))
-                                        .set_text(cx, result_preview);
-                                    item_widget
-                                        .widget(cx, ids!(result_preview_lbl))
-                                        .set_visible(
-                                            cx,
-                                            has_completed_result && !result_preview.is_empty(),
-                                        );
-                                    item_widget
-                                        .label(cx, ids!(result_meta_header_lbl))
-                                        .set_text(cx, result_metadata);
-                                    item_widget
-                                        .widget(cx, ids!(result_meta_header_lbl))
-                                        .set_visible(
-                                            cx,
-                                            has_completed_result && !result_metadata.is_empty(),
-                                        );
-                                    update_activity_status(
-                                        cx,
-                                        &item_widget,
-                                        *status == ToolStatus::Running,
-                                        *status == ToolStatus::Error,
-                                        *status == ToolStatus::Cancelled,
-                                    );
-                                    item_widget
-                                        .widget(cx, ids!(args_section))
-                                        .label(cx, ids!(content_lbl))
-                                        .set_text(cx, &presentation.arguments_detail);
-                                    let arguments_are_fully_summarized = matches!(
-                                        presentation.icon,
-                                        ToolIcon::ReadFile
-                                            | ToolIcon::ListDirectory
-                                            | ToolIcon::Skill
-                                    );
-                                    item_widget.widget(cx, ids!(args_section)).set_visible(
-                                        cx,
-                                        !arguments_are_fully_summarized
-                                            && !presentation.arguments_detail.is_empty(),
-                                    );
-                                    let output_detail =
-                                        super::state::tool_result_detail(output, 6_000);
-                                    let result_section =
-                                        item_widget.widget(cx, ids!(result_section));
-                                    result_section
-                                        .label(cx, ids!(content_lbl))
-                                        .set_text(cx, &output_detail);
-                                    result_section
-                                        .widget(cx, ids!(content_lbl))
-                                        .set_visible(cx, !presentation.output_markdown);
-                                    let content_md_wrap =
-                                        result_section.widget(cx, ids!(content_md_wrap));
-                                    content_md_wrap
-                                        .markdown(cx, ids!(content_md))
-                                        .set_text(cx, &output_detail);
-                                    content_md_wrap.set_visible(cx, presentation.output_markdown);
-                                    result_section.set_visible(cx, !output.is_empty());
-                                    item_widget.draw_all_unscoped(cx);
-                                }
+                                ChatMessage::Tool { .. } => {}
                             }
                         }
                     }
@@ -732,19 +1020,14 @@ impl Widget for ChatList {
 
         if let Event::Actions(actions) = event {
             let list = self.view.portal_list(cx, ids!(list));
-            let layout_changed = list
-                .items_with_actions(actions)
-                .into_iter()
-                .any(|(_, item)| {
-                    actions
-                        .find_widget_action(item.widget_uid())
-                        .is_some_and(|action| {
-                            matches!(
-                                action.cast::<ToolFoldHeaderAction>(),
-                                ToolFoldHeaderAction::LayoutChanged
-                            )
-                        })
-                });
+            let layout_changed = actions.iter().any(|action| {
+                action.downcast_ref::<WidgetAction>().is_some_and(|action| {
+                    matches!(
+                        action.cast::<ToolFoldHeaderAction>(),
+                        ToolFoldHeaderAction::LayoutChanged
+                    )
+                })
+            });
             if layout_changed {
                 list.redraw(cx);
             }
@@ -915,15 +1198,35 @@ mod tests {
 
         let rows = display_rows(&messages, None, "");
         assert_eq!(rows.len(), 2);
-        assert!(matches!(
-            rows[0],
-            DisplayRow::ActivityGroup {
-                start: 0,
-                end: 3,
-                streaming_thinking: false
-            }
-        ));
+        assert!(matches!(rows[0], DisplayRow::ActivityGroup(_)));
         assert!(matches!(rows[1], DisplayRow::Message(3)));
+    }
+
+    #[test]
+    fn child_tool_rows_are_hidden_only_when_a_subagent_parent_is_rendered() {
+        let child = tool(
+            "subagent-404:0:read",
+            "read_file",
+            r#"{"path":"src/app.rs"}"#,
+        );
+
+        let orphaned_rows = display_rows(std::slice::from_ref(&child), None, "");
+        assert_eq!(orphaned_rows.len(), 1);
+        assert!(matches!(orphaned_rows[0], DisplayRow::ActivityGroup(_)));
+
+        let unrelated_child = tool(
+            "subagent-405:0:read",
+            "read_file",
+            r#"{"path":"src/unrelated.rs"}"#,
+        );
+        let owned_rows = display_rows(
+            &[tool("delegate", "subagent", "{}"), child, unrelated_child],
+            None,
+            "",
+        );
+        assert_eq!(owned_rows.len(), 2);
+        assert!(matches!(owned_rows[0], DisplayRow::SubagentTool(_)));
+        assert!(matches!(owned_rows[1], DisplayRow::ActivityGroup(_)));
     }
 
     #[test]
@@ -932,14 +1235,7 @@ mod tests {
 
         let rows = display_rows(&messages, Some(StreamingKind::Thinking), "Reviewing");
         assert_eq!(rows.len(), 1);
-        assert!(matches!(
-            rows[0],
-            DisplayRow::ActivityGroup {
-                start: 0,
-                end: 1,
-                streaming_thinking: true
-            }
-        ));
+        assert!(matches!(rows[0], DisplayRow::ActivityGroup(_)));
     }
 
     #[test]

@@ -3,22 +3,24 @@
 //! Chat, sessions, and command palette panels are modularized under `crate::panels`.
 
 use crate::components::model_dropdown::IconDropDownWidgetRefExt;
+use crate::components::session_row::ProjectHeaderAction;
 use crate::panels::chat::{
     accepts_generation_event, concise_status, draft_for_cancellation, submitted_draft, ChatList,
     ChatListWidgetRefExt, ComposerState, ComposerStatus, GenerationEvent, StarterPromptAction,
-    ToolFoldHeader,
+    SubagentRail, ToolFoldHeader,
 };
 use crate::panels::command_palette::*;
 
 use crate::panels::sessions::{
-    ProjectRegistry, SessionContextMenu, SessionContextMenuAction, SessionList,
+    ProjectRegistry, SessionContextMenu, SessionContextMenuAction, SessionList, SessionListAction,
 };
 use crate::state::{
     active_session_entry, archive_session, begin_title_generation, builtin_commands,
     create_new_session, delete_session, end_title_generation, is_project_working,
     is_session_working, normalize_session_title, project_work_dir_at_row, refresh_sessions,
-    session_entry_at_row, session_title_eligible, set_active_project, set_active_session,
-    set_session_context_target, set_session_working, title_prompt_for_submission, truncate_chars,
+    session_entry_at_row, session_overflow_at_row, session_title_eligible, set_active_project,
+    set_active_session, set_session_context_target, set_session_working,
+    title_prompt_for_submission, toggle_project_collapsed, toggle_project_show_all, truncate_chars,
     CommandInfo, GuiAgentEvent, MsgRole, SessionEntry, ToolStatus,
 };
 use crate::updater::UpdateStatus;
@@ -698,7 +700,7 @@ script_mod! {
                 height: Fit
                 flow: Down
                 body_walk: Walk{width: Fill, height: Fit}
-                margin: Inset{top: 1 bottom: 1 left: 20 right: 24}
+                margin: Inset{top: 4 bottom: 2 left: 20 right: 24}
                 opened: 0.0
                 animator +: {
                     active: { default: @off }
@@ -740,7 +742,7 @@ script_mod! {
                 height: Fit
                 flow: Down
                 body_walk: Walk{width: Fill, height: Fit}
-                margin: Inset{top: 1 bottom: 1 left: 20 right: 24}
+                margin: Inset{top: 4 bottom: 2 left: 20 right: 24}
                 opened: 0.0
                 animator +: {
                     active: { default: @off }
@@ -782,12 +784,147 @@ script_mod! {
                 }
             }
 
+            SubagentMsg := #(ToolFoldHeader::register_widget(vm)) {
+                width: Fill
+                height: Fit
+                flow: Down
+                body_walk: Walk{width: Fill, height: Fit}
+                margin: Inset{top: 4 bottom: 2 left: 20 right: 24}
+                opened: 0.0
+                animator +: {
+                    active: { default: @off }
+                }
+                header: ActivityHeader {
+                    width: Fill
+                    height: 26
+                    title_lbl +: { width: 92, text: "Agent tasks" }
+                    icon_tile +: {
+                        icon_stack +: {
+                            icon_generic +: { visible: false }
+                            icon_subagent +: { visible: true }
+                        }
+                    }
+                    summary := View {
+                        width: Fill
+                        height: 20
+                        flow: Right
+                        spacing: 7
+                        align: Align{y: 0.5}
+                        clip_x: true
+                        preview_lbl := mod.components.ClippedLabel {
+                            width: Fit
+                            draw_text +: { color: #x8794a3 }
+                        }
+                        status_indicator := ActivityStatusIndicator {}
+                    }
+                }
+                body: RoundedView {
+                    width: Fill
+                    height: Fit
+                    padding: Inset{left: 30 top: 4 right: 18 bottom: 8}
+                    flow: Down
+                    spacing: 6
+                    draw_bg +: {
+                        color: #x00000000
+                        border_size: 0.0
+                    }
+                    rail := #(SubagentRail::register_widget(vm)) {
+                        width: Fill
+                        height: Fit
+                        flow: Down
+                        spacing: 7
+                        draw_bg +: { color: #x00000000 }
+                        row_template: #(ToolFoldHeader::register_widget(vm)) {
+                            width: Fill
+                            height: Fit
+                            flow: Down
+                            body_walk: Walk{width: Fill, height: Fit}
+                            opened: 0.0
+                            animator +: {
+                                active: { default: @off }
+                            }
+                            header: ActivityHeader {
+                                width: Fill
+                                height: 28
+                                padding: Inset{left: 3 top: 0 right: 4 bottom: 0}
+                                title_lbl +: {
+                                    width: 82
+                                    height: 20
+                                    padding: 0
+                                    align: Align{y: 0.5}
+                                    draw_text +: {
+                                        color: #xd5dbe4
+                                        text_style: theme.font_regular { font_size: 12.0 }
+                                    }
+                                }
+                                summary := View {
+                                    width: Fill
+                                    height: 20
+                                    flow: Right
+                                    spacing: 7
+                                    align: Align{y: 0.5}
+                                    clip_x: true
+                                    preview_lbl := mod.components.ClippedLabel {
+                                        width: Fill
+                                        height: 20
+                                        padding: 0
+                                        align: Align{y: 0.5}
+                                        draw_text +: { color: #x8794a3 }
+                                    }
+                                    status_lbl := Label {
+                                        width: Fit
+                                        height: 20
+                                        align: Align{y: 0.5}
+                                        padding: 0
+                                        draw_text +: {
+                                            color: #x8794a3
+                                            text_style +: { font_size: 9.0 }
+                                        }
+                                    }
+                                    status_indicator := ActivityStatusIndicator {
+                                        height: 20
+                                        align: Align{y: 0.5}
+                                    }
+                                }
+                            }
+                            body: RoundedView {
+                                width: Fill
+                                height: Fit
+                                padding: Inset{left: 30 top: 2 right: 18 bottom: 6}
+                                working_detail := View {
+                                    width: Fill
+                                    height: 18
+                                    visible: false
+                                    flow: Right
+                                    spacing: 7
+                                    align: Align{y: 0.5}
+                                    working_loader := ActivityLoader {
+                                        width: 18
+                                        height: 10
+                                        draw_bg +: { dot_radius: 1.0 speed: 3.6 }
+                                    }
+                                    working_lbl := Label {
+                                        text: "Working..."
+                                        draw_text +: { color: #x8794a3 text_style +: { font_size: 9.0 } }
+                                    }
+                                }
+                                draw_bg +: {
+                                    color: #x00000000
+                                    border_size: 0.0
+                                }
+                                detail_md := mod.components.ChatMarkdown {}
+                            }
+                        }
+                    }
+                }
+            }
+
             ToolMsg := #(ToolFoldHeader::register_widget(vm)) {
                 width: Fill
                 height: Fit
                 flow: Down
                 body_walk: Walk{width: Fill, height: Fit}
-                margin: Inset{top: 1 bottom: 1 left: 20 right: 24}
+                margin: Inset{top: 4 bottom: 2 left: 20 right: 24}
                 opened: 0.0
                 animator +: {
                     active: { default: @off }
@@ -871,12 +1008,59 @@ script_mod! {
     let SessionList = #(SessionList::register_widget(vm)) {
         width: Fill
         height: Fill
+        flow: Down
+        spacing: 0
+
+        fixed_header_slot := View {
+            width: Fill
+            height: 44
+            flow: Overlay
+            clip_x: true
+            clip_y: true
+
+            fixed_project_header := mod.components.ProjectHeaderBase {}
+            fixed_project_header_active := mod.components.ProjectHeaderBase {
+                visible: false
+                draw_bg +: {
+                    color: #x222c38
+                    color_hover: #x283543
+                    border_color: #x34465a
+                    border_size: 1.0
+                }
+                project_toggle_surface +: {
+                    folder_icon +: { draw_icon +: { color: #x8fb9e8 } }
+                    name_lbl +: { draw_text +: { color: #xe0e7ef } }
+                }
+            }
+        }
 
         list := PortalList {
             width: Fill
             height: Fill
             flow: Down
             drag_scrolling: true
+            scroll_bar: mod.widgets.ScrollBar {
+                bar_size: 10.0
+                bar_side_margin: 3.0
+                min_handle_size: 30.0
+                draw_bg +: {
+                    size: 5.0
+                    border_size: 0.0
+                    color: #x00000000
+                    color_hover: #x00000000
+                    color_drag: #x00000000
+                    border_color: #x00000000
+                    border_color_hover: #x00000000
+                    border_color_drag: #x00000000
+                }
+            }
+
+            FixedHeaderSpacer := View {
+                width: Fill
+                height: 1
+                show_bg: true
+                draw_bg +: { color: #x00000000 }
+            }
 
             ProjectHeader := mod.components.ProjectHeaderBase {}
 
@@ -887,8 +1071,10 @@ script_mod! {
                     border_color: #x34465a
                     border_size: 1.0
                 }
-                folder_icon +: { draw_icon +: { color: #x8fb9e8 } }
-                name_lbl +: { draw_text +: { color: #xe0e7ef } }
+                project_toggle_surface +: {
+                    folder_icon +: { draw_icon +: { color: #x8fb9e8 } }
+                    name_lbl +: { draw_text +: { color: #xe0e7ef } }
+                }
             }
 
             SessionRow := SessionRowBase {}
@@ -910,9 +1096,6 @@ script_mod! {
                     title_lbl +: {
                         draw_text +: { color: #xe8edf4 }
                     }
-                }
-                session_icon +: {
-                    draw_icon +: { color: #x9fc3ef }
                 }
                 time_lbl +: {
                     draw_text +: {
@@ -936,9 +1119,6 @@ script_mod! {
                         draw_text +: { color: #xe8edf4 }
                     }
                 }
-                session_icon +: {
-                    draw_icon +: { color: #x9fc3ef }
-                }
                 time_lbl +: {
                     draw_text +: {
                         color: #xaeb6c2
@@ -953,9 +1133,6 @@ script_mod! {
                     border_color: #x4f82bd
                     border_size: 1.0
                     border_radius: 6.0
-                }
-                session_icon +: {
-                    draw_icon +: { color: #x8fb9e8 }
                 }
                 title_surface +: {
                     title_lbl +: {
@@ -978,9 +1155,6 @@ script_mod! {
                     border_size: 1.0
                     border_radius: 6.0
                 }
-                session_icon +: {
-                    draw_icon +: { color: #x8fb9e8 }
-                }
                 title_surface +: {
                     title_lbl +: {
                         draw_text +: { color: #xf0f4fa }
@@ -989,6 +1163,39 @@ script_mod! {
                 time_lbl +: {
                     draw_text +: {
                         color: #xb7c5d8
+                    }
+                }
+            }
+
+            SessionOverflow := View {
+                width: Fill
+                height: 28
+                padding: Inset{left: 43 right: 10}
+                align: Align{y: 0.5}
+                overflow_btn := Button {
+                    width: Fit
+                    height: 24
+                    padding: 0
+                    spacing: 0
+                    text: "Show more"
+                    align: Align{x: 0.0 y: 0.5}
+                    draw_bg +: {
+                        color: #x00000000
+                        color_hover: #x00000000
+                        color_focus: #x00000000
+                        color_down: #x00000000
+                        border_color: #x00000000
+                        border_color_hover: #x00000000
+                        border_color_focus: #x00000000
+                        border_color_down: #x00000000
+                        border_size: 0.0
+                    }
+                    draw_text +: {
+                        color: #x788596
+                        color_hover: #xaebdce
+                        color_focus: #xaebdce
+                        color_down: #xd7e2ee
+                        text_style +: { font_size: 9.5 }
                     }
                 }
             }
@@ -1264,7 +1471,7 @@ script_mod! {
         ui: Root {
             main_window := Window {
                 window.inner_size: vec2(1280, 768)
-                window.title: "threadlane"
+                window.title: "Threadlane"
                 pass.clear_color: #x181a1f
                 body +: {
                     window_body := View {
@@ -1407,8 +1614,8 @@ script_mod! {
                                 section_label +: { text: "PROJECTS" }
                                 add_project_btn := mod.components.SidebarComposeButton {}
                             }
-                            session_context_menu := SessionContextMenu {}
                             session_list := SessionList { height: Fill }
+                            session_context_menu := SessionContextMenu {}
                             providers_modal := ProvidersModal {}
                             update_action_row := View {
                                 width: Fill
@@ -1603,7 +1810,9 @@ script_mod! {
                                 }
                                 chat_working_indicator := View {
                                     width: Fill
-                                    height: 18
+                                    height: 26
+                                    margin: Inset{top: 8 bottom: 4}
+                                    padding: Inset{left: 20}
                                     visible: false
                                     align: Align{x: 0.0 y: 0.5}
                                     chat_working_spinner := ActivityLoader {
@@ -1979,6 +2188,9 @@ fn image_attachment_from_rgba(
     height: usize,
     rgba: &[u8],
 ) -> Result<ImageAttachment, String> {
+    if width == 0 || height == 0 {
+        return Err("Clipboard image has invalid dimensions".to_string());
+    }
     let expected_len = width
         .checked_mul(height)
         .and_then(|pixels| pixels.checked_mul(4))
@@ -1987,16 +2199,37 @@ fn image_attachment_from_rgba(
         return Err("Clipboard image has invalid pixel data".to_string());
     }
 
+    let max_dim = 1600;
+    let (target_w, target_h, src_rgba) = if width > max_dim || height > max_dim {
+        let scale = (max_dim as f64) / (width.max(height) as f64);
+        let tw = ((width as f64 * scale) as usize).max(1);
+        let th = ((height as f64 * scale) as usize).max(1);
+        let mut resized = vec![0u8; tw * th * 4];
+        for y in 0..th {
+            let src_y = ((y as f64 / scale) as usize).min(height - 1);
+            for x in 0..tw {
+                let src_x = ((x as f64 / scale) as usize).min(width - 1);
+                let src_idx = (src_y * width + src_x) * 4;
+                let dst_idx = (y * tw + x) * 4;
+                resized[dst_idx..dst_idx + 4].copy_from_slice(&rgba[src_idx..src_idx + 4]);
+            }
+        }
+        (tw, th, std::borrow::Cow::Owned(resized))
+    } else {
+        (width, height, std::borrow::Cow::Borrowed(rgba))
+    };
+
     let mut encoded = Vec::new();
     {
-        let mut encoder = png::Encoder::new(&mut encoded, width as u32, height as u32);
+        let mut encoder = png::Encoder::new(&mut encoded, target_w as u32, target_h as u32);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(png::Compression::Fast);
         let mut writer = encoder
             .write_header()
             .map_err(|error| format!("Could not encode clipboard image: {error}"))?;
         writer
-            .write_image_data(rgba)
+            .write_image_data(&src_rgba)
             .map_err(|error| format!("Could not encode clipboard image: {error}"))?;
     }
     if encoded.len() as u64 > MAX_IMAGE_BYTES {
@@ -2010,6 +2243,16 @@ fn image_attachment_from_rgba(
             base64::engine::general_purpose::STANDARD.encode(encoded)
         ),
     })
+}
+
+#[cfg(test)]
+mod image_attachment_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_zero_dimensions_before_resizing() {
+        assert!(image_attachment_from_rgba("clipboard.png".into(), 0, 1601, &[]).is_err());
+    }
 }
 
 fn clipboard_image_attachment() -> Result<Option<ImageAttachment>, String> {
@@ -2329,13 +2572,8 @@ impl MatchEvent for App {
             .filter(|skill| skill.enabled && skill.is_valid)
             .collect();
         let discovered_agents = discover_agents(&work_dir, AgentScope::Both).agents;
-        let subagent_enabled = coding_agent
-            .wasi_extensions
-            .get_tools()
-            .iter()
-            .any(|tool| tool["function"]["name"] == "subagent");
         self.capabilities_summary =
-            format_capabilities_summary(&discovered_skills, &discovered_agents, subagent_enabled);
+            format_capabilities_summary(&discovered_skills, &discovered_agents);
         self.ui.button(cx, ids!(caps_btn)).set_text(
             cx,
             &format!(
@@ -2619,20 +2857,44 @@ impl MatchEvent for App {
                 SessionContextMenuAction::None => {}
             }
         }
+        let session_list_uid = self.ui.widget(cx, ids!(session_list)).widget_uid();
+        if let Some(action) = actions.find_widget_action(session_list_uid) {
+            match action.cast::<SessionListAction>() {
+                SessionListAction::ToggleProject(work_dir) => {
+                    toggle_project_collapsed(&work_dir);
+                    self.ui.widget(cx, ids!(session_list)).redraw(cx);
+                }
+                SessionListAction::NewSession(work_dir) => {
+                    self.create_and_activate_session(cx, work_dir);
+                }
+                SessionListAction::DetachProject(work_dir) => {
+                    self.detach_project(cx, work_dir);
+                }
+                SessionListAction::None => {}
+            }
+        }
         let session_list = self.ui.portal_list(cx, ids!(session_list.list));
         for (item_id, item) in session_list.items_with_actions(actions) {
-            if item.button(cx, ids!(detach_project_btn)).clicked(actions) {
-                if let Some(work_dir) = project_work_dir_at_row(item_id) {
-                    self.detach_project(cx, work_dir);
+            if let Some(work_dir) = project_work_dir_at_row(item_id) {
+                if let Some(action) = actions.find_widget_action(item.widget_uid()) {
+                    match action.cast::<ProjectHeaderAction>() {
+                        ProjectHeaderAction::Toggle => {
+                            toggle_project_collapsed(&work_dir);
+                            self.ui.widget(cx, ids!(session_list)).redraw(cx);
+                        }
+                        ProjectHeaderAction::NewSession => {
+                            self.create_and_activate_session(cx, work_dir);
+                        }
+                        ProjectHeaderAction::Detach => self.detach_project(cx, work_dir),
+                        ProjectHeaderAction::None => {}
+                    }
                 }
                 continue;
             }
-            if item
-                .button(cx, ids!(new_project_session_btn))
-                .clicked(actions)
-            {
-                if let Some(work_dir) = project_work_dir_at_row(item_id) {
-                    self.create_and_activate_session(cx, work_dir);
+            if item.button(cx, ids!(overflow_btn)).clicked(actions) {
+                if let Some((work_dir, _)) = session_overflow_at_row(item_id) {
+                    toggle_project_show_all(&work_dir);
+                    self.ui.widget(cx, ids!(session_list)).redraw(cx);
                 }
                 continue;
             }
@@ -2816,11 +3078,7 @@ fn normalize_catalog_text(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn format_capabilities_summary(
-    skills: &[SkillMetadata],
-    agents: &[AgentConfig],
-    subagent_enabled: bool,
-) -> String {
+fn format_capabilities_summary(skills: &[SkillMetadata], agents: &[AgentConfig]) -> String {
     let mut summary = format!(
         "Capabilities\n\nSkills ({}) — use /skill <id> or let the model load one automatically.",
         skills.len()
@@ -2845,13 +3103,8 @@ fn format_capabilities_summary(
     }
 
     summary.push_str(&format!(
-        "\n\nSubagents ({}) — {}",
+        "\n\nSubagents ({}) — use /subagent <task>, or let the model delegate automatically.",
         agents.len(),
-        if subagent_enabled {
-            "use /subagent <task>, or let the model delegate automatically."
-        } else {
-            "the subagent extension is not loaded."
-        }
     ));
     if agents.is_empty() {
         summary.push_str("\n  No agent presets discovered.");
@@ -2902,8 +3155,7 @@ impl App {
     }
 
     fn refresh_provider_connection_ui(&mut self, cx: &mut Cx) {
-        if let Some(creds) = threadlane_provider::antigravity_auth::load_antigravity_credentials()
-        {
+        if let Some(creds) = threadlane_provider::antigravity_auth::load_antigravity_credentials() {
             let status_text = match creds.account_email {
                 Some(ref email) => format!("✓ Connected ({email})"),
                 None => "✓ Connected".to_string(),
@@ -3040,50 +3292,19 @@ impl App {
         }
         let pointer = self.sidebar_pointer;
 
-        let (project_rows, context_menu_open) = {
-            let data = crate::panels::sessions::state::SESSIONS_DATA
-                .read()
-                .unwrap();
-            let project_rows = data
-                .rows
-                .iter()
-                .enumerate()
-                .filter_map(|(row_id, row)| {
-                    matches!(
-                        row,
-                        crate::panels::sessions::state::SessionListRow::ProjectHeader { .. }
-                    )
-                    .then_some(row_id)
-                })
-                .collect::<Vec<_>>();
-            (project_rows, data.context_session_id.is_some())
-        };
+        let context_menu_open = crate::panels::sessions::state::SESSIONS_DATA
+            .read()
+            .unwrap()
+            .context_session_id
+            .is_some();
 
         let projects_header = self.ui.view(cx, ids!(projects_header));
         let add_project_visible = !context_menu_open
             && pointer.is_some_and(|position| projects_header.area().rect(cx).contains(position));
-        let add_project_btn = self.ui.widget(cx, ids!(add_project_btn));
+        let add_project_btn = self.ui.button(cx, ids!(add_project_btn));
         if add_project_btn.visible() != add_project_visible {
             add_project_btn.set_visible(cx, add_project_visible);
             projects_header.redraw(cx);
-        }
-
-        let session_list = self.ui.portal_list(cx, ids!(session_list.list));
-        for row_id in project_rows {
-            let Some((_, item)) = session_list.get_item(row_id) else {
-                continue;
-            };
-            let actions_visible = !context_menu_open
-                && pointer.is_some_and(|position| item.area().rect(cx).contains(position));
-            let detach_btn = item.widget(cx, ids!(detach_project_btn));
-            let new_session_btn = item.widget(cx, ids!(new_project_session_btn));
-            if detach_btn.visible() != actions_visible
-                || new_session_btn.visible() != actions_visible
-            {
-                detach_btn.set_visible(cx, actions_visible);
-                new_session_btn.set_visible(cx, actions_visible);
-                item.redraw(cx);
-            }
         }
     }
 
@@ -3739,11 +3960,6 @@ impl App {
                     .filter(|skill| skill.enabled && skill.is_valid)
                     .collect::<Vec<_>>();
                 let agents = discover_agents(&canonical, AgentScope::Both).agents;
-                let subagent_enabled = agent
-                    .wasi_extensions
-                    .get_tools()
-                    .iter()
-                    .any(|tool| tool["function"]["name"] == "subagent");
                 let mut commands = builtin_commands();
                 commands.extend(skills.iter().map(|skill| CommandInfo {
                     name: format!("skill {}", skill.id),
@@ -3762,7 +3978,7 @@ impl App {
                     }));
                 }
                 let capabilities = ProjectCapabilities {
-                    summary: format_capabilities_summary(&skills, &agents, subagent_enabled),
+                    summary: format_capabilities_summary(&skills, &agents),
                     button_text: format!("{} skills · {} agents", skills.len(), agents.len()),
                     commands,
                 };
@@ -4409,10 +4625,7 @@ impl App {
             }
             end_title_generation(&work_dir, &session_id);
             if result.is_ok() {
-                let _ = tx.send(GuiAgentEvent::SessionTitleGenerated {
-                    work_dir,
-                    session_id,
-                });
+                let _ = tx.send(GuiAgentEvent::SessionTitleGenerated);
                 SignalToUI::set_ui_signal();
             }
         });
@@ -4529,7 +4742,7 @@ impl App {
             }
             // AgentEnd closes one agent loop, but CodingAgent may still run
             // hooks or scheduled work. GenerationFinished is the terminal event.
-            AgentEvent::AgentEnd { .. } if generation.is_none() => return,
+            AgentEvent::AgentEnd { .. } if generation.is_none() => (),
             AgentEvent::AgentEnd { .. } => {
                 let Some((key, id)) = generation else { return };
                 let accepted = self.session_runtimes.get(&key).is_some_and(|runtime| {
@@ -4656,9 +4869,6 @@ impl App {
 
         for evt in events {
             match evt {
-                GuiAgentEvent::TaskEvent(task_event) => {
-                    self.handle_agent_event(cx, task_event.event, None);
-                }
                 GuiAgentEvent::CommandOutput {
                     generation_id,
                     work_dir,
@@ -4712,8 +4922,9 @@ impl App {
                     self.refresh_registered_sessions();
                 }
 
-                GuiAgentEvent::SessionTitleGenerated { .. } => {
+                GuiAgentEvent::SessionTitleGenerated => {
                     self.refresh_registered_sessions();
+                    self.ui.widget(cx, ids!(session_list)).redraw(cx);
                 }
                 GuiAgentEvent::AvailableModelsLoaded(models) => {
                     let selected_model = self
@@ -4834,11 +5045,10 @@ impl App {
                     }
                     self.handle_agent_event(cx, agent_event, Some((key, generation_id)))
                 }
-                GuiAgentEvent::Agent(agent_event) => self.handle_agent_event(cx, agent_event, None),
             }
         }
 
-        cx.redraw_all();
+        self.ui.view(cx, ids!(chat_panel)).redraw(cx);
     }
 }
 

@@ -18,6 +18,7 @@ pub fn builtin_commands() -> Vec<CommandInfo> {
         ("fork", "Fork a session tree branch"),
         ("clone", "Clone the active session tree"),
         ("skill", "Load a discovered skill by ID"),
+        ("subagent", "Delegate tasks to subagents in parallel or sequentially"),
         ("clear-plan", "Clear active plan items"),
         ("quit", "Quit threadlane agent"),
     ]

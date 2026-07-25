@@ -26,6 +26,10 @@ impl PendingMessageQueue {
         self.messages.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty()
+    }
+
     pub fn drain(&mut self) -> Vec<AgentMessage> {
         match self.mode {
             QueueMode::All => std::mem::take(&mut self.messages),

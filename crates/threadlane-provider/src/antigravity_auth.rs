@@ -284,11 +284,9 @@ pub async fn get_valid_antigravity_token() -> Result<String, String> {
 
     let now = current_timestamp();
     // Refresh if within 5 minutes (300 seconds) of expiration
-    if creds.expires_at <= now + 300 {
-        if creds.refresh_token.is_some() {
-            let refreshed = refresh_antigravity_token(&creds).await?;
-            return Ok(refreshed.access_token);
-        }
+    if creds.expires_at <= now + 300 && creds.refresh_token.is_some() {
+        let refreshed = refresh_antigravity_token(&creds).await?;
+        return Ok(refreshed.access_token);
     }
 
     Ok(creds.access_token)

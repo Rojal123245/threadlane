@@ -134,6 +134,10 @@ pub fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> String {
         if available_tool_names.contains("run_command") {
             add_guideline("Run focused validation after changes when practical, and never claim a command passed unless you ran it successfully.");
         }
+        if available_tool_names.contains("subagent") {
+            add_guideline("STRICT SUBAGENT DELEGATION: You are an orchestrator. For any multi-step task, multi-file inspection, complex refactoring, testing, or code review, ALWAYS use the `subagent` tool to fan out work to specialized subagents in parallel to complete tasks faster.");
+            add_guideline("When invoking `subagent`, generate clear custom `instructions` (system prompt) and specify the precise list of allowed `tools` for each subagent.");
+        }
         for guideline in &options.config.guidelines {
             add_guideline(guideline);
         }

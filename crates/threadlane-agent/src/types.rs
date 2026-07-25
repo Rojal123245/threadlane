@@ -95,12 +95,13 @@ impl AgentToolDefinition {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
     Off,
     Minimal,
     Low,
+    #[default]
     Medium,
     High,
     XHigh,
@@ -147,37 +148,22 @@ impl ReasoningEffort {
     }
 }
 
-impl Default for ReasoningEffort {
-    fn default() -> Self {
-        Self::Medium
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum ToolExecutionMode {
     Sequential,
+    #[default]
     Parallel,
 }
 
-impl Default for ToolExecutionMode {
-    fn default() -> Self {
-        Self::Parallel
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum QueueMode {
+    #[default]
     All,
     OneAtATime,
 }
 
-impl Default for QueueMode {
-    fn default() -> Self {
-        Self::All
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageAttachment {

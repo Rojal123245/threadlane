@@ -54,17 +54,19 @@ pub fn parse_command_args(args_string: &str) -> Vec<String> {
 pub fn substitute_args(content: &str, args: &[String]) -> String {
     let all_args = args.join(" ");
     let mut result = String::new();
-    let chars: Vec<char> = content.chars().collect();
-    let len = chars.len();
     let mut i = 0;
+    let len = content.len();
 
     while i < len {
-        if chars[i] == '$' {
+        if content[i..].starts_with('$') {
+            let rest = &content[i + 1..];
+
             // Check for ${...}
-            if i + 1 < len && chars[i + 1] == '{' {
-                if let Some(close_idx) = find_closing_brace(&chars, i + 2) {
-                    let expr: String = chars[i + 2..close_idx].iter().collect();
-                    let substituted = eval_braced_expr(&expr, args, &all_args);
+            if let Some(braced) = rest.strip_prefix('{') {
+                if let Some(close_offset) = braced.find('}') {
+                    let close_idx = i + 1 + 1 + close_offset;
+                    let expr = &content[i + 2..close_idx];
+                    let substituted = eval_braced_expr(expr, args, &all_args);
                     result.push_str(&substituted);
                     i = close_idx + 1;
                     continue;
@@ -72,7 +74,6 @@ pub fn substitute_args(content: &str, args: &[String]) -> String {
             }
 
             // Check simple replacements: $ARGUMENTS, $@, $1, $2, etc.
-            let rest: String = chars[i + 1..].iter().collect();
             if rest.starts_with("ARGUMENTS") {
                 result.push_str(&all_args);
                 i += 1 + "ARGUMENTS".len();
@@ -82,44 +83,31 @@ pub fn substitute_args(content: &str, args: &[String]) -> String {
                 i += 2;
                 continue;
             } else {
-                let mut num_str = String::new();
-                let mut j = i + 1;
-                while j < len && chars[j].is_ascii_digit() {
-                    num_str.push(chars[j]);
-                    j += 1;
-                }
-                if !num_str.is_empty() {
+                let digit_len = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
+                if digit_len > 0 {
+                    let num_str = &rest[..digit_len];
                     if let Ok(idx) = num_str.parse::<usize>() {
                         if idx > 0 && idx <= args.len() {
                             result.push_str(&args[idx - 1]);
                         }
                     }
-                    i = j;
+                    i += 1 + digit_len;
                     continue;
                 }
             }
         }
 
-        result.push(chars[i]);
-        i += 1;
+        let ch = content[i..].chars().next().unwrap();
+        result.push(ch);
+        i += ch.len_utf8();
     }
 
     result
 }
 
-fn find_closing_brace(chars: &[char], start: usize) -> Option<usize> {
-    for idx in start..chars.len() {
-        if chars[idx] == '}' {
-            return Some(idx);
-        }
-    }
-    None
-}
-
 fn eval_braced_expr(expr: &str, args: &[String], all_args: &str) -> String {
     // 1. Check for slicing: @:N or @:N:L
-    if expr.starts_with("@:") {
-        let slice_spec = &expr[2..];
+    if let Some(slice_spec) = expr.strip_prefix("@:") {
         let parts: Vec<&str> = slice_spec.split(':').collect();
         let start_idx = parts
             .first()
@@ -190,7 +178,7 @@ pub fn load_prompt_templates_from_dir(dir: &Path, scope: &str) -> Vec<PromptTemp
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_file() && path.extension().map_or(false, |ext| ext == "md") {
+            if path.is_file() && path.extension().is_some_and(|ext| ext == "md") {
                 if let Ok(content) = fs::read_to_string(&path) {
                     let stem = path
                         .file_stem()

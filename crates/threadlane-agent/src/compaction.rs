@@ -31,10 +31,18 @@ pub fn estimate_message_tokens(message: &AgentMessage) -> usize {
             tool_calls,
         } => {
             content.as_deref().map_or(0, str::len)
-                + tool_calls
-                    .as_ref()
-                    .and_then(|calls| serde_json::to_string(calls).ok())
-                    .map_or(0, |calls| calls.len())
+                + tool_calls.as_ref().map_or(0, |calls| {
+                    calls
+                        .iter()
+                        .map(|call| {
+                            call.id.len()
+                                + call.r#type.len()
+                                + call.function.name.len()
+                                + call.function.arguments.len()
+                                + call.thought_signature.as_deref().map_or(0, str::len)
+                        })
+                        .sum()
+                })
         }
         AgentMessage::Tool { name, content, .. } => name.len() + content.len(),
         AgentMessage::Custom { payload, .. } => payload.to_string().len(),

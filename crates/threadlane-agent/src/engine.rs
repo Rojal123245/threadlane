@@ -62,7 +62,7 @@ impl AgentEngine {
 
             let handle = get_runtime().spawn(async move {
                 client
-                    .stream_chat_completion(api_payload, codex_payload, None, event_tx)
+                    .stream_chat_completion((api_payload, codex_payload), None, event_tx)
                     .await;
             });
 

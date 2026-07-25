@@ -256,8 +256,7 @@ impl SessionTree {
 
         if let Some(ref path) = self.file_path {
             let _guard = session_file_lock().lock().unwrap();
-            let _ = self.append_node_to_file(path, &node);
-            let _ = self.append_metadata_to_file(path);
+            let _ = self.append_node_and_metadata_to_file(path, &node);
         }
 
         node_id
@@ -369,7 +368,6 @@ impl SessionTree {
         }
         Ok(())
     }
-
     fn append_metadata_to_file(&self, path: &Path) -> std::io::Result<()> {
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
         let metadata = SessionRecord::Metadata {
@@ -382,9 +380,16 @@ impl SessionTree {
         Ok(())
     }
 
-    fn append_node_to_file(&self, path: &Path, node: &SessionNode) -> std::io::Result<()> {
+    fn append_node_and_metadata_to_file(&self, path: &Path, node: &SessionNode) -> std::io::Result<()> {
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
         writeln!(file, "{}", serde_json::to_string(node)?)?;
+        let metadata = SessionRecord::Metadata {
+            name: self.name.clone(),
+            title_attempted: self.title_attempted,
+            active_node_id: self.active_node_id.clone(),
+            model: self.model.clone(),
+        };
+        writeln!(file, "{}", serde_json::to_string(&metadata)?)?;
         Ok(())
     }
 

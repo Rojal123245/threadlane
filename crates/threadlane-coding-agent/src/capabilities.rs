@@ -36,7 +36,7 @@ impl CapabilityCatalog {
         let pkg_mgr = PackageManager::new(global_dir.to_path_buf());
         let packages = pkg_mgr.list_packages(project_root);
 
-        let cwd = project_root.unwrap_or_else(|| global_dir);
+        let cwd = project_root.unwrap_or(global_dir);
         let agents = discover_agents(cwd, AgentScope::Both).agents;
 
         let mut extensions = Vec::new();

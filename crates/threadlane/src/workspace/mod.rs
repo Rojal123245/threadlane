@@ -46,6 +46,7 @@ impl Default for SessionWorkspace {
                 messages: Vec::new(),
                 streaming_text: String::new(),
                 streaming_kind: None,
+                revision: 0,
             },
 
             ui: WorkspaceUiState::default(),

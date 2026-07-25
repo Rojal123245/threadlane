@@ -165,17 +165,6 @@ impl ProjectRegistry {
             .ok_or_else(|| ProjectRegistryError::ProjectNotAttached(canonical_path.to_path_buf()))
     }
 
-    pub fn touch(&mut self, canonical_path: &Path) -> Result<(), ProjectRegistryError> {
-        let index = self.project_index(canonical_path)?;
-        let previous = self.projects[index].last_opened_at;
-        self.projects[index].last_opened_at = unix_timestamp().max(previous.saturating_add(1));
-        if let Err(error) = self.persist() {
-            self.projects[index].last_opened_at = previous;
-            return Err(error);
-        }
-        Ok(())
-    }
-
     pub fn remember_selection(
         &mut self,
         canonical_path: &Path,
@@ -366,7 +355,7 @@ mod tests {
 
         assert_eq!(attached.path, fs::canonicalize(&project).unwrap());
         assert_eq!(attached.display_name, "project");
-        assert_eq!(registry.projects(), &[attached.clone()]);
+        assert_eq!(registry.projects(), std::slice::from_ref(&attached));
         assert!(attached.attached_at > 0);
         assert_eq!(attached.attached_at, attached.last_opened_at);
         assert!(attached.last_session_id.is_none());
@@ -438,10 +427,6 @@ mod tests {
         let loaded = ProjectRegistry::load(&global).unwrap();
         assert_eq!(loaded.projects(), registry.projects());
         assert_eq!(loaded.projects().len(), 1);
-        assert!(matches!(
-            registry.touch(&second.path),
-            Err(ProjectRegistryError::ProjectNotAttached(_))
-        ));
     }
 
     #[test]

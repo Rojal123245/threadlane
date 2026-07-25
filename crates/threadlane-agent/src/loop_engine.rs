@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use threadlane_provider::openai::{clamp_prompt_cache_key, ProviderUsage, StreamEvent, ToolCall};
-use threadlane_provider::router::ProviderClient;
+use threadlane_provider::router::{PayloadFormat, PayloadSource, ProviderClient};
 use threadlane_tools::{
     execute_tool, execute_tool_in_workspace, get_available_tools, get_codex_tools,
 };
@@ -272,6 +272,17 @@ struct ToolExecutorRoute {
     tool_names: HashSet<String>,
 }
 
+#[derive(Clone)]
+struct ToolRunContext {
+    before_hook: Option<Arc<dyn BeforeToolCallHook>>,
+    after_hook: Option<Arc<dyn AfterToolCallHook>>,
+    event_tx: broadcast::Sender<AgentEvent>,
+    state: Arc<Mutex<AgentState>>,
+    tool_routes: Vec<ToolExecutorRoute>,
+    allowed_tool_names: Option<HashSet<String>>,
+    work_dir: Option<PathBuf>,
+}
+
 pub struct AgentLoop {
     pub state: Arc<Mutex<AgentState>>,
     pub api_key: String,
@@ -483,59 +494,115 @@ impl AgentLoop {
         routes
     }
 
-    /// Builds both provider payloads without making a network request.
-    pub async fn build_api_payloads(&self) -> (Value, Value) {
-        let mut state = self.state.lock().await.clone();
+    async fn build_payload_helper(
+        state_mutex: &Arc<Mutex<AgentState>>,
+        tool_executors: &[Arc<dyn ToolExecutor>],
+        allowed_tool_names: Option<&HashSet<String>>,
+        compatibility_executor: Option<&Arc<dyn ToolExecutor>>,
+        prompt_cache_key: Option<&str>,
+        format: PayloadFormat,
+    ) -> Value {
+        let mut state = state_mutex.lock().await.clone();
         repair_interrupted_tool_turn(&mut state.messages);
-        let api_msgs = convert_to_llm(&state.messages);
-        let (instructions, codex_msgs) = convert_to_codex_llm(&state.messages);
-        let mut definitions = collect_tool_definitions(
-            &state.tools,
-            &self.tool_executors,
-            self.compatibility_executor().as_ref(),
-        );
-        if let Some(allowed_tool_names) = &self.allowed_tool_names {
+
+        let mut definitions =
+            collect_tool_definitions(&state.tools, tool_executors, compatibility_executor);
+        if let Some(allowed_tool_names) = allowed_tool_names {
             definitions.retain(|definition| allowed_tool_names.contains(&definition.name));
         }
-        let tools: Vec<_> = definitions
-            .iter()
-            .map(AgentToolDefinition::to_chat_completions_tool)
-            .collect();
-        let codex_tools: Vec<_> = definitions
-            .iter()
-            .map(AgentToolDefinition::to_codex_responses_tool)
-            .collect();
 
-        let mut chat_payload = serde_json::json!({
-            "model": state.model,
-            "messages": api_msgs,
-            "tools": tools,
-            "stream": true,
-            "stream_options": { "include_usage": true }
-        });
-        let mut codex_payload = serde_json::json!({
-            "model": state.model,
-            "instructions": instructions,
-            "input": codex_msgs,
-            "store": false,
-            "stream": true,
-            "tools": codex_tools
-        });
-
-        if let Some(prompt_cache_key) = &self.prompt_cache_key {
-            chat_payload["prompt_cache_key"] = prompt_cache_key.clone().into();
-            codex_payload["prompt_cache_key"] = prompt_cache_key.clone().into();
+        match format {
+            PayloadFormat::ChatCompletions => {
+                let api_msgs = convert_to_llm(&state.messages);
+                let tools: Vec<_> = definitions
+                    .iter()
+                    .map(AgentToolDefinition::to_chat_completions_tool)
+                    .collect();
+                let mut chat_payload = serde_json::json!({
+                    "model": state.model,
+                    "messages": api_msgs,
+                    "tools": tools,
+                    "stream": true,
+                    "stream_options": { "include_usage": true }
+                });
+                if let Some(key) = prompt_cache_key {
+                    chat_payload["prompt_cache_key"] = key.into();
+                }
+                if let Some(effort) = state.reasoning_effort.as_api_str() {
+                    chat_payload["reasoning_effort"] = effort.into();
+                }
+                chat_payload
+            }
+            PayloadFormat::Codex => {
+                let (instructions, codex_msgs) = convert_to_codex_llm(&state.messages);
+                let codex_tools: Vec<_> = definitions
+                    .iter()
+                    .map(AgentToolDefinition::to_codex_responses_tool)
+                    .collect();
+                let mut codex_payload = serde_json::json!({
+                    "model": state.model,
+                    "instructions": instructions,
+                    "input": codex_msgs,
+                    "store": false,
+                    "stream": true,
+                    "tools": codex_tools
+                });
+                if let Some(key) = prompt_cache_key {
+                    codex_payload["prompt_cache_key"] = key.into();
+                }
+                if let Some(effort) = state.reasoning_effort.as_api_str() {
+                    codex_payload["reasoning"] = serde_json::json!({
+                        "effort": effort,
+                        "summary": "auto"
+                    });
+                }
+                codex_payload
+            }
         }
+    }
 
-        if let Some(effort) = state.reasoning_effort.as_api_str() {
-            chat_payload["reasoning_effort"] = effort.into();
-            codex_payload["reasoning"] = serde_json::json!({
-                "effort": effort,
-                "summary": "auto"
-            });
-        }
+    pub async fn build_chat_payload(&self) -> Value {
+        Self::build_payload_helper(
+            &self.state,
+            &self.tool_executors,
+            self.allowed_tool_names.as_ref(),
+            self.compatibility_executor().as_ref(),
+            self.prompt_cache_key.as_deref(),
+            PayloadFormat::ChatCompletions,
+        )
+        .await
+    }
 
-        (chat_payload, codex_payload)
+    pub async fn build_codex_payload(&self) -> Value {
+        Self::build_payload_helper(
+            &self.state,
+            &self.tool_executors,
+            self.allowed_tool_names.as_ref(),
+            self.compatibility_executor().as_ref(),
+            self.prompt_cache_key.as_deref(),
+            PayloadFormat::Codex,
+        )
+        .await
+    }
+
+    pub async fn build_payload_for_format(&self, format: PayloadFormat) -> Value {
+        Self::build_payload_helper(
+            &self.state,
+            &self.tool_executors,
+            self.allowed_tool_names.as_ref(),
+            self.compatibility_executor().as_ref(),
+            self.prompt_cache_key.as_deref(),
+            format,
+        )
+        .await
+    }
+
+    /// Builds both provider payloads without making a network request.
+    pub async fn build_api_payloads(&self) -> (Value, Value) {
+        (
+            self.build_chat_payload().await,
+            self.build_codex_payload().await,
+        )
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
@@ -624,7 +691,35 @@ impl AgentLoop {
 
             let _ = self.event_tx.send(AgentEvent::TurnStart { turn_number });
 
-            let (api_payload, codex_payload) = self.build_api_payloads().await;
+            let model = {
+                let state = self.state.lock().await;
+                state.model.clone()
+            };
+
+            let state = self.state.clone();
+            let tool_executors = self.tool_executors.clone();
+            let allowed_tool_names = self.allowed_tool_names.clone();
+            let compatibility_executor = self.compatibility_executor();
+            let pc_key = self.prompt_cache_key.clone();
+
+            let payload_source = PayloadSource::lazy(model, move |format| {
+                let state = state.clone();
+                let tool_executors = tool_executors.clone();
+                let allowed_tool_names = allowed_tool_names.clone();
+                let compatibility_executor = compatibility_executor.clone();
+                let pc_key = pc_key.clone();
+                Box::pin(async move {
+                    Self::build_payload_helper(
+                        &state,
+                        &tool_executors,
+                        allowed_tool_names.as_ref(),
+                        compatibility_executor.as_ref(),
+                        pc_key.as_deref(),
+                        format,
+                    )
+                    .await
+                })
+            });
 
             let (stream_tx, mut stream_rx) = mpsc::channel(100);
             let client = self.provider_client.clone();
@@ -632,7 +727,7 @@ impl AgentLoop {
 
             tokio::spawn(async move {
                 client
-                    .stream_chat_completion(api_payload, codex_payload, prompt_cache_key, stream_tx)
+                    .stream_chat_completion(payload_source, prompt_cache_key, stream_tx)
                     .await;
             });
 
@@ -644,7 +739,8 @@ impl AgentLoop {
             let mut current_turn_reasoning = String::new();
             let mut captured_tool_calls: Vec<ToolCall> = Vec::new();
 
-            let mut stream_monitor = crate::rules::StreamRuleMonitor::new(self.stream_rules.clone());
+            let mut stream_monitor =
+                crate::rules::StreamRuleMonitor::new(self.stream_rules.clone());
             let mut rule_triggered = None;
 
             while let Some(evt) = stream_rx.recv().await {
@@ -827,28 +923,19 @@ impl AgentLoop {
             let mut handles = Vec::new();
             for tc in tool_calls {
                 let tc_clone = tc.clone();
-                let before_hook = self.before_tool_call_hook.clone();
-                let after_hook = self.after_tool_call_hook.clone();
-                let event_tx = self.event_tx.clone();
-                let state = self.state.clone();
-                let tool_routes = tool_routes.clone();
-                let allowed_tool_names = allowed_tool_names.clone();
-                let work_dir = self.work_dir.clone();
+                let context = ToolRunContext {
+                    before_hook: self.before_tool_call_hook.clone(),
+                    after_hook: self.after_tool_call_hook.clone(),
+                    event_tx: self.event_tx.clone(),
+                    state: self.state.clone(),
+                    tool_routes: tool_routes.clone(),
+                    allowed_tool_names: allowed_tool_names.clone(),
+                    work_dir: self.work_dir.clone(),
+                };
 
                 let handle_tool_call = tc.clone();
-                let handle = tokio::spawn(async move {
-                    Self::run_tool_with_hooks(
-                        tc_clone,
-                        before_hook,
-                        after_hook,
-                        event_tx,
-                        state,
-                        tool_routes,
-                        allowed_tool_names,
-                        work_dir,
-                    )
-                    .await
-                });
+                let handle =
+                    tokio::spawn(async move { Self::run_tool_with_hooks(tc_clone, context).await });
                 handles.push((handle_tool_call, handle));
             }
 
@@ -885,31 +972,24 @@ impl AgentLoop {
     ) -> AgentToolResult {
         Self::run_tool_with_hooks(
             tc.clone(),
-            self.before_tool_call_hook.clone(),
-            self.after_tool_call_hook.clone(),
-            self.event_tx.clone(),
-            self.state.clone(),
-            tool_routes,
-            allowed_tool_names,
-            self.work_dir.clone(),
+            ToolRunContext {
+                before_hook: self.before_tool_call_hook.clone(),
+                after_hook: self.after_tool_call_hook.clone(),
+                event_tx: self.event_tx.clone(),
+                state: self.state.clone(),
+                tool_routes,
+                allowed_tool_names,
+                work_dir: self.work_dir.clone(),
+            },
         )
         .await
     }
 
-    async fn run_tool_with_hooks(
-        tc: ToolCall,
-        before_hook: Option<Arc<dyn BeforeToolCallHook>>,
-        after_hook: Option<Arc<dyn AfterToolCallHook>>,
-        event_tx: broadcast::Sender<AgentEvent>,
-        state: Arc<Mutex<AgentState>>,
-        tool_routes: Vec<ToolExecutorRoute>,
-        allowed_tool_names: Option<HashSet<String>>,
-        work_dir: Option<PathBuf>,
-    ) -> AgentToolResult {
+    async fn run_tool_with_hooks(tc: ToolCall, context: ToolRunContext) -> AgentToolResult {
         let arguments = normalize_tool_arguments(
             &tc.function.name,
             &tc.function.arguments,
-            work_dir.as_deref(),
+            context.work_dir.as_deref(),
         );
         let agent_tool_call = AgentToolCall {
             id: tc.id.clone(),
@@ -917,7 +997,8 @@ impl AgentLoop {
             arguments: arguments.clone(),
         };
 
-        if allowed_tool_names
+        if context
+            .allowed_tool_names
             .as_ref()
             .is_some_and(|allowed| !allowed.contains(&tc.function.name))
         {
@@ -931,7 +1012,7 @@ impl AgentLoop {
                 is_error: true,
                 terminate: false,
             };
-            let _ = event_tx.send(AgentEvent::ToolExecutionEnd {
+            let _ = context.event_tx.send(AgentEvent::ToolExecutionEnd {
                 tool_call_id: tc.id,
                 name: tc.function.name,
                 result: result.clone(),
@@ -939,8 +1020,8 @@ impl AgentLoop {
             return result;
         }
 
-        if let Some(ref hook) = before_hook {
-            let state_snapshot = state.lock().await.clone();
+        if let Some(ref hook) = context.before_hook {
+            let state_snapshot = context.state.lock().await.clone();
             let check = hook
                 .before_tool_call(&agent_tool_call, &state_snapshot)
                 .await;
@@ -954,7 +1035,7 @@ impl AgentLoop {
                     is_error: true,
                     terminate: false,
                 };
-                let _ = event_tx.send(AgentEvent::ToolExecutionEnd {
+                let _ = context.event_tx.send(AgentEvent::ToolExecutionEnd {
                     tool_call_id: tc.id.clone(),
                     name: tc.function.name.clone(),
                     result: res.clone(),
@@ -963,14 +1044,14 @@ impl AgentLoop {
             }
         }
 
-        let _ = event_tx.send(AgentEvent::ToolExecutionStart {
+        let _ = context.event_tx.send(AgentEvent::ToolExecutionStart {
             tool_call_id: tc.id.clone(),
             name: tc.function.name.clone(),
             arguments: arguments.clone(),
         });
 
         let mut execution_result = None;
-        for route in tool_routes {
+        for route in context.tool_routes {
             if !route.tool_names.contains(&tc.function.name) {
                 continue;
             }
@@ -984,7 +1065,7 @@ impl AgentLoop {
             }
         }
         let execution_result = execution_result.unwrap_or_else(|| {
-            Ok(match work_dir.as_deref() {
+            Ok(match context.work_dir.as_deref() {
                 Some(dir) => execute_tool_in_workspace(&tc.function.name, &arguments, dir),
                 None => execute_tool(&tc.function.name, &arguments),
             })
@@ -1001,8 +1082,8 @@ impl AgentLoop {
             terminate: false,
         };
 
-        if let Some(ref hook) = after_hook {
-            let state_snapshot = state.lock().await.clone();
+        if let Some(ref hook) = context.after_hook {
+            let state_snapshot = context.state.lock().await.clone();
             let override_res = hook
                 .after_tool_call(&agent_tool_call, &final_result, &state_snapshot)
                 .await;
@@ -1017,7 +1098,7 @@ impl AgentLoop {
             }
         }
 
-        let _ = event_tx.send(AgentEvent::ToolExecutionEnd {
+        let _ = context.event_tx.send(AgentEvent::ToolExecutionEnd {
             tool_call_id: tc.id.clone(),
             name: tc.function.name.clone(),
             result: final_result.clone(),
@@ -1082,32 +1163,39 @@ fn normalize_tool_arguments(
     let Ok(mut value) = serde_json::from_str::<Value>(arguments) else {
         return arguments.to_string();
     };
-    let Some(object) = value.as_object_mut() else {
-        return arguments.to_string();
-    };
-
     let workspace = work_dir.to_string_lossy().to_string();
-    match name {
-        "read_file" | "write_file" | "edit_file" | "list_dir" => {
+    match (name, value.as_object_mut()) {
+        ("read_file" | "write_file" | "edit_file" | "list_dir", Some(object))
             if object
                 .get("path")
                 .and_then(Value::as_str)
-                .is_some_and(str::is_empty)
-            {
-                object.insert("path".into(), Value::String(workspace));
-            }
+                .is_none_or(str::is_empty) =>
+        {
+            object.insert("path".into(), Value::String(workspace));
         }
-        "run_command" => {
+        ("run_command", Some(object))
             if object
                 .get("cwd")
                 .and_then(Value::as_str)
-                .map_or(true, str::is_empty)
-            {
-                object.insert("cwd".into(), Value::String(workspace));
-            }
+                .is_none_or(str::is_empty) =>
+        {
+            object.insert("cwd".into(), Value::String(workspace));
         }
         _ => {}
     }
 
     serde_json::to_string(&value).unwrap_or_else(|_| arguments.to_string())
+}
+
+#[cfg(test)]
+mod normalize_tool_arguments_tests {
+    use super::*;
+
+    #[test]
+    fn fills_missing_file_paths_from_the_workspace() {
+        let arguments =
+            normalize_tool_arguments("read_file", "{}", Some(std::path::Path::new("/workspace")));
+
+        assert_eq!(arguments, r#"{"path":"/workspace"}"#);
+    }
 }

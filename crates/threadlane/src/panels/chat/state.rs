@@ -1,5 +1,6 @@
 //! Chat panel state: chat messages, tool call presentations, and streaming status.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 use threadlane_agent::AgentMessage;
@@ -17,17 +18,6 @@ pub enum ToolStatus {
     Done,
     Error,
     Cancelled,
-}
-
-impl ToolStatus {
-    pub fn glyph(self) -> &'static str {
-        match self {
-            ToolStatus::Running => "◌",
-            ToolStatus::Done => "✓",
-            ToolStatus::Error => "✗",
-            ToolStatus::Cancelled => "-",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,6 +42,220 @@ pub struct ToolPresentation {
     pub output_markdown: bool,
 }
 
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct SubagentSessionData {
+    pub task: String,
+    pub agent: String,
+    pub status: String,
+    pub thinking: String,
+    pub inner_tools: Vec<SubagentInnerToolData>,
+    pub output: String,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct SubagentInnerToolData {
+    pub name: String,
+    pub target_preview: String,
+    pub is_error: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubagentRailItem {
+    pub agent: String,
+    pub task: String,
+    pub status: String,
+    pub detail: String,
+}
+
+pub fn subagent_rail_items(
+    arguments: &str,
+    output: &str,
+    status: ToolStatus,
+    messages: &[ChatMessage],
+    child_run: Option<u64>,
+) -> Vec<SubagentRailItem> {
+    let child_run = (status == ToolStatus::Running)
+        .then_some(child_run)
+        .flatten();
+    if let Ok(sessions) = serde_json::from_str::<Vec<SubagentSessionData>>(output) {
+        if !sessions.is_empty() {
+            return sessions
+                .into_iter()
+                .enumerate()
+                .map(|(index, session)| {
+                    let detail = if child_run.is_some() {
+                        subagent_task_activity_detail(messages, child_run, index)
+                    } else {
+                        subagent_session_detail(&session)
+                    };
+                    SubagentRailItem {
+                        agent: session.agent,
+                        task: normalize_whitespace_bounded(&session.task, 160),
+                        status: session.status,
+                        detail,
+                    }
+                })
+                .collect();
+        }
+    }
+
+    let parsed = serde_json::from_str::<serde_json::Value>(arguments).ok();
+    let parallel = parsed
+        .as_ref()
+        .and_then(|value| value.get("parallel"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    parsed
+        .as_ref()
+        .and_then(|value| value.get("tasks"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .map(|(index, task)| SubagentRailItem {
+            agent: task
+                .get("agent")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("subagent")
+                .to_string(),
+            task: task
+                .get("task")
+                .and_then(serde_json::Value::as_str)
+                .map(|task| normalize_whitespace_bounded(task, 160))
+                .unwrap_or_default(),
+            status: match status {
+                ToolStatus::Running if parallel || index == 0 => "Working",
+                ToolStatus::Running => "Queued",
+                ToolStatus::Done => "Done",
+                ToolStatus::Error => "Failed",
+                ToolStatus::Cancelled => "Stopped",
+            }
+            .to_string(),
+            detail: subagent_task_activity_detail(messages, child_run, index),
+        })
+        .collect()
+}
+
+pub fn is_subagent_child_tool(message: &ChatMessage) -> bool {
+    matches!(message, ChatMessage::Tool { id, .. } if subagent_child_tool_tag(id).is_some())
+}
+
+pub fn owned_subagent_child_runs(messages: &[ChatMessage]) -> HashMap<usize, u64> {
+    let mut runs = HashMap::new();
+    let mut parent_index = None;
+
+    for (index, message) in messages.iter().enumerate() {
+        if is_subagent_parent_tool(message) {
+            parent_index = Some(index);
+        } else if let Some(parent) = parent_index {
+            if let ChatMessage::Tool { id, .. } = message {
+                if let Some(tag) = subagent_child_tool_tag(id) {
+                    runs.entry(parent).or_insert(tag.run_id);
+                    parent_index = None;
+                }
+            }
+        }
+    }
+
+    runs
+}
+
+pub fn is_owned_subagent_child_tool(message: &ChatMessage, owned_runs: &[u64]) -> bool {
+    is_subagent_child_tool(message)
+        && matches!(message, ChatMessage::Tool { id, .. } if matches!(subagent_child_tool_tag(id), Some(tag) if owned_runs.contains(&tag.run_id)))
+}
+
+fn is_subagent_parent_tool(message: &ChatMessage) -> bool {
+    matches!(message, ChatMessage::Tool { name, presentation, .. } if name == "subagent" || presentation.icon == ToolIcon::Subagent)
+}
+
+fn subagent_task_activity_detail(
+    messages: &[ChatMessage],
+    run_id: Option<u64>,
+    task_index: usize,
+) -> String {
+    let Some(run_id) = run_id else {
+        return String::new();
+    };
+    messages
+        .iter()
+        .filter_map(|message| match message {
+            ChatMessage::Tool {
+                id,
+                name,
+                presentation,
+                status,
+                ..
+            } if matches!(subagent_child_tool_tag(id), Some(tag) if tag.run_id == run_id && tag.task_index == task_index) => {
+                let target = if presentation.primary.is_empty() {
+                    String::new()
+                } else {
+                    format!(" `{}`", presentation.primary)
+                };
+                Some(format!("- **{}**{} · {}", name, target, subagent_tool_status(*status)))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SubagentChildToolTag {
+    run_id: u64,
+    task_index: usize,
+}
+
+fn subagent_child_tool_tag(tool_call_id: &str) -> Option<SubagentChildToolTag> {
+    let tagged = tool_call_id.strip_prefix("subagent-")?;
+    let (run_id, tagged) = tagged.split_once(':')?;
+    let (task_index, tool_call_id) = tagged.split_once(':')?;
+    if run_id.is_empty()
+        || task_index.is_empty()
+        || tool_call_id.is_empty()
+        || !run_id.bytes().all(|byte| byte.is_ascii_digit())
+        || !task_index.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(SubagentChildToolTag {
+        run_id: run_id.parse().ok()?,
+        task_index: task_index.parse().ok()?,
+    })
+}
+
+fn subagent_tool_status(status: ToolStatus) -> &'static str {
+    match status {
+        ToolStatus::Running => "Working",
+        ToolStatus::Done => "Done",
+        ToolStatus::Error => "Failed",
+        ToolStatus::Cancelled => "Stopped",
+    }
+}
+
+fn subagent_session_detail(session: &SubagentSessionData) -> String {
+    let mut sections = Vec::new();
+    if !session.thinking.trim().is_empty() {
+        sections.push(format!("**Thinking**\n\n{}", session.thinking));
+    }
+    if !session.inner_tools.is_empty() {
+        let mut activity = "**Activity**".to_string();
+        for tool in &session.inner_tools {
+            let status = if tool.is_error { "✗" } else { "✓" };
+            activity.push_str(&format!(
+                "\n- {status} `{}` · {}",
+                tool.name, tool.target_preview
+            ));
+        }
+        sections.push(activity);
+    }
+    if !session.output.trim().is_empty() {
+        sections.push(format!("**Report**\n\n{}", session.output));
+    }
+    sections.join("\n\n")
+}
+
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum ChatMessage {
     Text {
@@ -85,6 +289,7 @@ pub struct ChatData {
     pub messages: Vec<ChatMessage>,
     pub streaming_text: String,
     pub streaming_kind: Option<StreamingKind>,
+    pub revision: u64,
 }
 
 impl ChatData {
@@ -93,10 +298,12 @@ impl ChatData {
             role,
             text: text.into(),
         });
+        self.revision = self.revision.wrapping_add(1);
     }
 
     pub fn push_thinking(&mut self, text: String) {
         push_thinking_locked(self, text);
+        self.revision = self.revision.wrapping_add(1);
     }
 
     pub fn push_stream_delta(&mut self, kind: StreamingKind, delta: &str) {
@@ -146,6 +353,7 @@ impl ChatData {
             *result_metadata =
                 result_metadata_for_tool(name, output, ToolStatus::Cancelled, started_at.elapsed());
         }
+        self.revision = self.revision.wrapping_add(1);
     }
 
     pub fn push_tool(&mut self, id: String, name: String, arguments: String) {
@@ -172,6 +380,7 @@ impl ChatData {
             result_metadata.clear();
             *status = ToolStatus::Running;
             *started_at = Instant::now();
+            self.revision = self.revision.wrapping_add(1);
             return;
         }
         self.messages.push(ChatMessage::Tool {
@@ -185,6 +394,7 @@ impl ChatData {
             result_metadata: String::new(),
             started_at: Instant::now(),
         });
+        self.revision = self.revision.wrapping_add(1);
     }
 
     pub fn update_tool(&mut self, id: &str, output: String, status: Option<ToolStatus>) {
@@ -210,6 +420,7 @@ impl ChatData {
             if let Some(status) = status {
                 *existing_status = status;
             }
+            self.revision = self.revision.wrapping_add(1);
         }
     }
 
@@ -217,6 +428,7 @@ impl ChatData {
         self.messages.clear();
         self.streaming_text.clear();
         self.streaming_kind = None;
+        self.revision = self.revision.wrapping_add(1);
         for msg in messages {
             match msg {
                 AgentMessage::User { content } => self.push_chat(MsgRole::User, content.clone()),
@@ -546,8 +758,12 @@ fn subagent_presentation(
         }
     };
     let mut detail = format!(
-        "Mode: {}\nTasks:",
-        if parallel { "Parallel" } else { "Sequential" }
+        "### Subagent Delegation ({})\n",
+        if parallel {
+            "Parallel Execution"
+        } else {
+            "Sequential Chain"
+        }
     );
     for (index, task) in visible_tasks.iter().enumerate() {
         let agent = task
@@ -556,11 +772,28 @@ fn subagent_presentation(
             .map(|agent| truncate_chars(agent, MAX_VISIBLE_AGENT_CHARS))
             .unwrap_or_else(|| "subagent".into());
         let summary = task_summary(task);
-        detail.push_str(&format!("\n{}. {} — {}", index + 1, agent, summary));
+        detail.push_str(&format!(
+            "\n**Subagent Session {} (`{}`)**\n- **Task**: {}\n",
+            index + 1,
+            agent,
+            summary
+        ));
+        if let Some(inst) = task.get("instructions").and_then(serde_json::Value::as_str) {
+            detail.push_str(&format!(
+                "- **Instructions**: {}\n",
+                normalize_whitespace_bounded(inst, 180)
+            ));
+        }
+        if let Some(tools) = task.get("tools").and_then(serde_json::Value::as_array) {
+            let tool_names: Vec<_> = tools.iter().filter_map(serde_json::Value::as_str).collect();
+            if !tool_names.is_empty() {
+                detail.push_str(&format!("- **Tools**: `{}`\n", tool_names.join("`, `")));
+            }
+        }
     }
     if tasks.len() > visible_tasks.len() {
         detail.push_str(&format!(
-            "\n… {} additional tasks omitted",
+            "\n… {} additional subagent tasks omitted",
             tasks.len() - visible_tasks.len()
         ));
     }
@@ -684,17 +917,6 @@ fn ordered_list_marker_end(line: &str) -> Option<usize> {
         .then_some(marker_end)
 }
 
-pub fn tool_preview(name: &str, arguments: &str) -> String {
-    let presentation = tool_presentation(name, arguments);
-    if presentation.metadata.is_empty() {
-        presentation.primary
-    } else if name == "read_file" {
-        format!("{}  ({})", presentation.primary, presentation.metadata)
-    } else {
-        presentation.primary
-    }
-}
-
 fn compact_command(command: &str) -> String {
     let normalized = command.split_whitespace().collect::<Vec<_>>().join(" ");
     truncate_chars(&normalized, 48)
@@ -789,7 +1011,8 @@ pub fn tool_result_detail(output: &str, max_chars: usize) -> String {
     format!("{body}\n{notice}")
 }
 
-pub fn result_metadata_for(output: &str, status: ToolStatus, duration: Duration) -> String {
+#[cfg(test)]
+fn result_metadata_for(output: &str, status: ToolStatus, duration: Duration) -> String {
     result_metadata_for_tool("", output, status, duration)
 }
 
@@ -801,7 +1024,7 @@ fn result_metadata_for_tool(
 ) -> String {
     let secs = duration.as_secs_f32();
     let time_label = if secs < 0.1 {
-        format!("<0.1s")
+        "<0.1s".to_string()
     } else {
         format!("{secs:.1}s")
     };
@@ -968,11 +1191,165 @@ mod tests {
         assert_eq!(presentation.title, "Delegate");
         assert_eq!(presentation.primary, "2 tasks");
         assert_eq!(presentation.metadata, "parallel · scout, reviewer");
-        assert!(presentation.arguments_detail.contains("Mode: Parallel"));
         assert!(presentation
             .arguments_detail
-            .contains("1. scout — Inspect the repository structure"));
+            .contains("Subagent Delegation (Parallel Execution)"));
+        assert!(presentation
+            .arguments_detail
+            .contains("Subagent Session 1 (`scout`)"));
         assert!(presentation.output_markdown);
+    }
+
+    #[test]
+    fn updating_a_tool_advances_the_chat_revision() {
+        let mut data = ChatData::default();
+        data.push_tool(
+            "delegation".into(),
+            "subagent".into(),
+            "{\"tasks\":[]}".into(),
+        );
+        let revision = data.revision;
+
+        data.update_tool("delegation", "[]".into(), Some(ToolStatus::Done));
+
+        assert!(data.revision > revision);
+    }
+
+    #[test]
+    fn subagent_rail_marks_only_the_first_sequential_task_as_running() {
+        let arguments = serde_json::json!({
+            "parallel": false,
+            "tasks": [
+                {"agent": "scout", "task": "Inspect the repository"},
+                {"agent": "reviewer", "task": "Review the change"}
+            ]
+        })
+        .to_string();
+
+        let items = subagent_rail_items(&arguments, "", ToolStatus::Running, &[], None);
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].agent, "scout");
+        assert_eq!(items[0].status, "Working");
+        assert_eq!(items[1].status, "Queued");
+    }
+
+    #[test]
+    fn subagent_rail_places_tagged_child_tool_under_its_task() {
+        let child_tool = |id: &str, name: &str, path: &str| ChatMessage::Tool {
+            id: id.into(),
+            name: name.into(),
+            arguments: format!(r#"{{"path":"{path}"}}"#),
+            output: String::new(),
+            status: ToolStatus::Running,
+            presentation: tool_presentation(name, &format!(r#"{{"path":"{path}"}}"#)),
+            result_preview: String::new(),
+            result_metadata: String::new(),
+            started_at: Instant::now(),
+        };
+        let messages = [
+            child_tool("subagent-40:0:stale", "read_file", "src/stale.rs"),
+            child_tool("subagent-41:0:read", "read_file", "src/lib.rs"),
+            child_tool("subagent-41:1:read", "read_file", "src/state.rs"),
+            child_tool(
+                "subagent-not-a-run:0:ignored",
+                "write_file",
+                "src/ignored.rs",
+            ),
+        ];
+
+        let items = subagent_rail_items(
+            r#"{"parallel":true,"tasks":[{"agent":"scout","task":"inspect"},{"agent":"reviewer","task":"review"}]}"#,
+            "",
+            ToolStatus::Running,
+            &messages,
+            Some(41),
+        );
+
+        assert!(items[0].detail.contains("read_file"));
+        assert!(items[0].detail.contains("src/lib.rs"));
+        assert!(!items[0].detail.contains("src/stale.rs"));
+        assert!(!items[0].detail.contains("src/state.rs"));
+        assert!(!items[0].detail.contains("src/ignored.rs"));
+        assert!(items[1].detail.contains("read_file"));
+        assert!(items[1].detail.contains("src/state.rs"));
+        assert!(!items[1].detail.contains("src/lib.rs"));
+        assert!(!items[1].detail.contains("src/ignored.rs"));
+    }
+
+    #[test]
+    fn running_subagent_rows_use_their_own_child_run() {
+        let parent = |id: &str| ChatMessage::Tool {
+            id: id.into(),
+            name: "subagent".into(),
+            arguments: r#"{"tasks":[{"agent":"worker","task":"inspect"}]}"#.into(),
+            output: String::new(),
+            status: ToolStatus::Running,
+            presentation: tool_presentation("subagent", "{}"),
+            result_preview: String::new(),
+            result_metadata: String::new(),
+            started_at: Instant::now(),
+        };
+        let child = |id: &str, path: &str| ChatMessage::Tool {
+            id: id.into(),
+            name: "read_file".into(),
+            arguments: format!(r#"{{"path":"{path}"}}"#),
+            output: String::new(),
+            status: ToolStatus::Running,
+            presentation: tool_presentation("read_file", &format!(r#"{{"path":"{path}"}}"#)),
+            result_preview: String::new(),
+            result_metadata: String::new(),
+            started_at: Instant::now(),
+        };
+        let messages = [
+            parent("first"),
+            child("subagent-40:0:first", "src/first.rs"),
+            parent("second"),
+            child("subagent-41:0:second", "src/second.rs"),
+        ];
+
+        let first = subagent_rail_items(
+            r#"{"tasks":[{"agent":"worker","task":"inspect"}]}"#,
+            "",
+            ToolStatus::Running,
+            &messages[..2],
+            Some(40),
+        );
+        let second = subagent_rail_items(
+            r#"{"tasks":[{"agent":"worker","task":"inspect"}]}"#,
+            "",
+            ToolStatus::Running,
+            &messages,
+            Some(41),
+        );
+
+        assert!(first[0].detail.contains("src/first.rs"));
+        assert!(second[0].detail.contains("src/second.rs"));
+    }
+
+    #[test]
+    fn completed_subagent_rail_items_keep_their_persisted_detail() {
+        let output = serde_json::json!([{
+            "agent": "scout",
+            "task": "Inspect the workspace",
+            "status": "Done",
+            "thinking": "I will inspect the entry point.",
+            "inner_tools": [{
+                "name": "read_file",
+                "target_preview": "src/main.rs",
+                "is_error": false
+            }],
+            "output": "The entry point is ready."
+        }])
+        .to_string();
+
+        let items = subagent_rail_items("", &output, ToolStatus::Done, &[], None);
+
+        assert_eq!(items.len(), 1);
+        assert!(items[0].detail.contains("I will inspect the entry point."));
+        assert!(items[0].detail.contains("read_file"));
+        assert!(items[0].detail.contains("src/main.rs"));
+        assert!(items[0].detail.contains("The entry point is ready."));
     }
 
     #[test]

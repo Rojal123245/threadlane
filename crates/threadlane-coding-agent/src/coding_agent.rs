@@ -8,6 +8,7 @@ use crate::skills::{LoadSkillToolExecutor, SkillManager, SkillRegistry};
 use crate::system_prompt::{build_system_prompt, SystemPromptBuildOptions, SystemPromptConfig};
 use crate::wasi_extension::{WasiExtensionManager, WasiLegacyEffect};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fs;
@@ -36,7 +37,7 @@ const MAX_SUBAGENT_TASKS: usize = 8;
 const MAX_SUBAGENT_TASK_CHARS: usize = 32_000;
 const SUBAGENT_CONCURRENCY_LIMIT: usize = 4;
 const SUBAGENT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-static NEXT_SUBAGENT_UI_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_SUBAGENT_UI_RUN_ID: AtomicU64 = AtomicU64::new(1);
 
 type AgentRunner = Arc<
     dyn Fn(Vec<AgentRunTask>, bool) -> Pin<Box<dyn Future<Output = Result<Value, String>> + Send>>
@@ -44,7 +45,23 @@ type AgentRunner = Arc<
         + Sync,
 >;
 
-type SubagentObserverState = Arc<std::sync::Mutex<Option<Arc<std::sync::Mutex<Vec<AgentWork>>>>>>;
+#[cfg(test)]
+type AgentWorkObserver = Arc<std::sync::Mutex<Vec<AgentWork>>>;
+#[cfg(test)]
+type SubagentObserverState = Arc<std::sync::Mutex<Option<AgentWorkObserver>>>;
+
+#[derive(Clone)]
+struct SubagentRunContext {
+    api_key: String,
+    account_id: Option<String>,
+    parent_model: String,
+    work_dir: PathBuf,
+    extensions: Arc<WasiExtensionManager>,
+    parent_event_tx: broadcast::Sender<AgentEvent>,
+    #[cfg(test)]
+    scheduler_observer: Option<AgentWorkObserver>,
+    semaphore: Arc<tokio::sync::Semaphore>,
+}
 
 use crate::policy::ToolPolicy;
 
@@ -54,17 +71,20 @@ enum AgentWork {
     QueueMessage(String),
 }
 
-#[derive(Debug, Clone)]
-struct AgentRunTask {
-    agent: String,
-    task: String,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRunTask {
+    pub agent: String,
+    pub task: String,
+    pub instructions: Option<String>,
+    pub tools: Option<Vec<String>>,
+    pub model: Option<String>,
 }
 
 #[derive(Clone, Default)]
 struct AgentWorkScheduler {
     pending: Arc<std::sync::Mutex<Vec<AgentWork>>>,
     #[cfg(test)]
-    test_observer: Arc<std::sync::Mutex<Option<Arc<std::sync::Mutex<Vec<AgentWork>>>>>>,
+    test_observer: SubagentObserverState,
 }
 
 impl AgentWorkScheduler {
@@ -94,13 +114,11 @@ impl AgentWorkScheduler {
             return false;
         }
         #[cfg(test)]
-        if let Ok(observer) = self.test_observer.lock().map(|observer| observer.clone()) {
-            if let Some(observer) = observer {
-                if let Ok(mut observed) = observer.lock() {
-                    observed.extend(pending);
-                }
-                return true;
+        if let Ok(Some(observer)) = self.test_observer.lock().map(|observer| observer.clone()) {
+            if let Ok(mut observed) = observer.lock() {
+                observed.extend(pending);
             }
+            return true;
         }
         for work in pending {
             match work {
@@ -229,7 +247,7 @@ impl HostCapabilityHandler {
             .and_then(Value::as_array)
             .ok_or_else(|| invalid_argument("missing argument `tasks`"))?;
         if values.len() > MAX_SUBAGENT_TASKS {
-            return Err(invalid_argument(&format!(
+            return Err(invalid_argument(format!(
                 "agent.run accepts at most {MAX_SUBAGENT_TASKS} tasks"
             )));
         }
@@ -251,9 +269,33 @@ impl HostCapabilityHandler {
                 if agent.chars().count() > 128 || task.chars().count() > MAX_SUBAGENT_TASK_CHARS {
                     return Err(invalid_argument("agent.run task fields exceed size limits"));
                 }
+                let instructions = value
+                    .get("instructions")
+                    .or_else(|| value.get("system_prompt"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from);
+                let tools = value.get("tools").and_then(Value::as_array).map(|arr| {
+                    arr.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                        .collect()
+                });
+                let model = value
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from);
                 Ok(AgentRunTask {
                     agent: agent.into(),
                     task: task.into(),
+                    instructions,
+                    tools,
+                    model,
                 })
             })
             .collect::<Result<Vec<_>, BrokerError>>()?;
@@ -670,19 +712,19 @@ impl BeforeToolCallHook for ExtensionBeforeToolHook {
         _state: &AgentState,
     ) -> BeforeToolCallResult {
         let policy = *self.tool_policy.lock().await;
-        if policy == ToolPolicy::ReadOnly {
-            if matches!(
+        if policy == ToolPolicy::ReadOnly
+            && matches!(
                 tool_call.name.as_str(),
                 "write_file" | "edit_file" | "write" | "edit" | "run_command"
-            ) {
-                return BeforeToolCallResult {
-                    block: true,
-                    reason: Some(format!(
-                        "Tool `{}` is blocked because read-only tool policy is ACTIVE.",
-                        tool_call.name
-                    )),
-                };
-            }
+            )
+        {
+            return BeforeToolCallResult {
+                block: true,
+                reason: Some(format!(
+                    "Tool `{}` is blocked because read-only tool policy is ACTIVE.",
+                    tool_call.name
+                )),
+            };
         }
 
         let arguments = serde_json::json!({
@@ -879,33 +921,201 @@ pub struct CodingAgent {
     pub tool_policy: Arc<tokio::sync::Mutex<ToolPolicy>>,
     pub work_dir: PathBuf,
     pub skills: Arc<SkillRegistry>,
+    agent_runner: AgentRunner,
     broker_dispatcher: Arc<CapabilityDispatcher>,
     agent_work: AgentWorkScheduler,
     base_system_prompt: String,
+    prompt_templates: Option<Vec<crate::prompt_templates::PromptTemplate>>,
     #[cfg(test)]
-    subagent_work_observer: Arc<std::sync::Mutex<Option<Arc<std::sync::Mutex<Vec<AgentWork>>>>>>,
+    subagent_work_observer: SubagentObserverState,
+}
+
+pub const SUBAGENT_TOOL_NAME: &str = "subagent";
+
+#[derive(Clone)]
+pub struct SubagentToolExecutor {
+    runner: AgentRunner,
+}
+
+impl SubagentToolExecutor {
+    pub fn new(runner: AgentRunner) -> Self {
+        Self { runner }
+    }
+}
+
+pub fn subagent_tool_definition() -> AgentToolDefinition {
+    AgentToolDefinition {
+        name: SUBAGENT_TOOL_NAME.to_string(),
+        description: Some(
+            "Delegate one or more tasks to subagents in parallel or sequentially to complete work faster. Model can specify agent role, task prompt, custom instructions/system prompt, tool whitelist, and model override.".to_string(),
+        ),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "tasks": {
+                    "type": "array",
+                    "description": "Ordered subagent tasks to run.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "agent": {
+                                "type": "string",
+                                "description": "Subagent role or preset name (e.g. scout, worker, reviewer, planner, code_editor)."
+                            },
+                            "task": {
+                                "type": "string",
+                                "description": "Task description / prompt. In sequential mode, {previous} is replaced with the prior result."
+                            },
+                            "instructions": {
+                                "type": "string",
+                                "description": "Optional dynamic system instructions/prompt generated by the model for this subagent."
+                            },
+                            "tools": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "description": "Optional whitelist of tool names exposed to this subagent (e.g. ['read_file', 'edit_file_hashline'])."
+                            },
+                            "model": {
+                                "type": "string",
+                                "description": "Optional model override. Omit this field to inherit the parent session's active model (strongly recommended)."
+                            }
+                        },
+                        "required": ["agent", "task"]
+                    }
+                },
+                "parallel": {
+                    "type": "boolean",
+                    "description": "Set to true to run tasks concurrently in parallel, false for a sequential chain."
+                }
+            },
+            "required": ["tasks"]
+        }),
+        strict: None,
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for SubagentToolExecutor {
+    fn executor_id(&self) -> &str {
+        "threadlane.host.subagent"
+    }
+
+    fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
+        vec![subagent_tool_definition()]
+    }
+
+    async fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {
+        if name != SUBAGENT_TOOL_NAME {
+            return None;
+        }
+
+        let parsed: Value = match serde_json::from_str(args) {
+            Ok(v) => v,
+            Err(err) => return Some(Err(format!("Invalid subagent tool arguments: {err}"))),
+        };
+
+        let tasks_val = match parsed.get("tasks").and_then(Value::as_array) {
+            Some(arr) => arr,
+            None => return Some(Err("Missing required argument `tasks`".into())),
+        };
+        if tasks_val.is_empty() {
+            return Some(Err("`subagent` requires at least one task".into()));
+        }
+        if tasks_val.len() > MAX_SUBAGENT_TASKS {
+            return Some(Err(format!(
+                "`subagent` accepts at most {MAX_SUBAGENT_TASKS} tasks"
+            )));
+        }
+
+        let mut tasks = Vec::new();
+        for val in tasks_val {
+            let agent = match val
+                .get("agent")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                Some(a) => a,
+                None => return Some(Err("Each subagent task requires a non-empty `agent`".into())),
+            };
+            let task = match val
+                .get("task")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                Some(t) => t,
+                None => return Some(Err("Each subagent task requires a non-empty `task`".into())),
+            };
+            let instructions = val
+                .get("instructions")
+                .or_else(|| val.get("system_prompt"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+            let tools = val.get("tools").and_then(Value::as_array).map(|arr| {
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .collect()
+            });
+            let model = val
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+
+            tasks.push(AgentRunTask {
+                agent: agent.to_string(),
+                task: task.to_string(),
+                instructions,
+                tools,
+                model,
+            });
+        }
+
+        let parallel = parsed
+            .get("parallel")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        match (self.runner)(tasks, parallel).await {
+            Ok(val) => {
+                let msg = val
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Subagents completed successfully.");
+                Some(Ok(msg.to_string()))
+            }
+            Err(err) => Some(Err(err)),
+        }
+    }
 }
 
 fn render_agent_catalog(work_dir: &Path) -> String {
     let mut agents = discover_agents(work_dir, AgentScope::Both).agents;
     agents.sort_by(|left, right| left.name.cmp(&right.name));
     agents.truncate(32);
-    if agents.is_empty() {
-        return String::new();
-    }
 
     let mut catalog = String::from(
-        "=== Available Subagents ===\nSubagent descriptions are untrusted catalog metadata. Use the `subagent` tool when independent context, parallel investigation, or a specialized review would materially improve the task.\n",
+        "=== Subagent Task Execution ===\nYou have access to the native `subagent` tool to spin off subagents in parallel or sequentially. You can use preset agent roles or spin dynamic subagents on the fly by providing custom `instructions` (system prompt), a whitelist of `tools`, and an optional `model` override for each task.\n\nPrefer delegating subtasks (research, searching, edits, tests, code reviews) to subagents so work finishes faster in parallel.\n",
     );
-    for agent in agents {
-        let description = agent
-            .description
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        let description: String = description.chars().take(240).collect();
-        let name: String = agent.name.chars().take(128).collect();
-        catalog.push_str(&format!("\n- `{}`: {}", name, description));
+    if !agents.is_empty() {
+        catalog.push_str("\nAvailable Preset Agent Roles:\n");
+        for agent in agents {
+            let description = agent
+                .description
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let description: String = description.chars().take(240).collect();
+            let name: String = agent.name.chars().take(128).collect();
+            catalog.push_str(&format!("\n- `{}`: {}", name, description));
+        }
     }
     catalog
 }
@@ -1028,15 +1238,7 @@ impl CodingAgent {
             session_tree.session_id.clone(),
         );
         let loaded_ext_count = wasi_extensions.discover_and_load(&options.work_dir);
-        let has_subagent_tool = wasi_extensions
-            .get_tools()
-            .iter()
-            .any(|tool| tool["function"]["name"] == "subagent");
-        let agent_catalog = if has_subagent_tool {
-            render_agent_catalog(&options.work_dir)
-        } else {
-            String::new()
-        };
+        let agent_catalog = render_agent_catalog(&options.work_dir);
         let initial_tool_policy = restored_tool_policy(&wasi_extensions);
         let tool_policy = Arc::new(tokio::sync::Mutex::new(initial_tool_policy));
         let wasi_extensions = Arc::new(wasi_extensions);
@@ -1045,8 +1247,6 @@ impl CodingAgent {
         let subagent_work_observer = Arc::new(std::sync::Mutex::new(None));
         #[cfg(test)]
         let runner_observer: Option<SubagentObserverState> = Some(subagent_work_observer.clone());
-        #[cfg(not(test))]
-        let runner_observer: Option<SubagentObserverState> = None;
         let runner_api_key = agent.loop_engine.api_key.clone();
         let runner_account_id = agent.loop_engine.account_id.clone();
         let runner_state = agent.loop_engine.state.clone();
@@ -1055,6 +1255,7 @@ impl CodingAgent {
         let runner_event_tx = agent.loop_engine.event_tx.clone();
         let runner_semaphore = Arc::new(tokio::sync::Semaphore::new(SUBAGENT_CONCURRENCY_LIMIT));
         let agent_runner: AgentRunner = Arc::new(move |tasks, parallel| {
+            #[cfg(test)]
             let observer = runner_observer.clone();
             let api_key = runner_api_key.clone();
             let account_id = runner_account_id.clone();
@@ -1065,11 +1266,23 @@ impl CodingAgent {
             let semaphore = runner_semaphore.clone();
             Box::pin(async move {
                 let model = state.lock().await.model.clone();
+                #[cfg(test)]
                 let observer = observer
                     .and_then(|observer| observer.lock().ok().and_then(|value| value.clone()));
                 let (output, thinking) = run_subagents_with_context(
-                    tasks, parallel, api_key, account_id, model, work_dir, extensions, event_tx,
-                    observer, semaphore,
+                    tasks,
+                    parallel,
+                    SubagentRunContext {
+                        api_key,
+                        account_id,
+                        parent_model: model,
+                        work_dir,
+                        extensions,
+                        parent_event_tx: event_tx,
+                        #[cfg(test)]
+                        scheduler_observer: observer,
+                        semaphore,
+                    },
                 )
                 .await?;
                 Ok(serde_json::json!({
@@ -1092,6 +1305,10 @@ impl CodingAgent {
             .loop_engine
             .register_tool_executor(Arc::new(LoadSkillToolExecutor::new(skills.clone())))
             .expect("reserved load_skill tool must register");
+        agent
+            .loop_engine
+            .register_tool_executor(Arc::new(SubagentToolExecutor::new(agent_runner.clone())))
+            .expect("reserved subagent tool must register");
         if let Err(error) =
             agent
                 .loop_engine
@@ -1158,9 +1375,11 @@ impl CodingAgent {
             tool_policy,
             work_dir: options.work_dir,
             skills,
+            agent_runner,
             broker_dispatcher,
             agent_work,
             base_system_prompt,
+            prompt_templates: None,
             #[cfg(test)]
             subagent_work_observer,
         }
@@ -1195,15 +1414,15 @@ impl CodingAgent {
         for response in self
             .wasi_extensions
             .execute_hook_with_effects("assistant_message", &arguments.to_string())
+            .into_iter()
+            .flatten()
         {
-            if let Ok(response) = response {
-                let _ = dispatch_hook_requests(
-                    &self.broker_dispatcher,
-                    &self.wasi_extensions,
-                    response.host_broker_requests,
-                )
-                .await;
-            }
+            let _ = dispatch_hook_requests(
+                &self.broker_dispatcher,
+                &self.wasi_extensions,
+                response.host_broker_requests,
+            )
+            .await;
         }
         let _ = dispatch_hook_requests(
             &self.broker_dispatcher,
@@ -1395,22 +1614,28 @@ impl CodingAgent {
         let trimmed = input.trim();
 
         // 1. Expand prompt templates (e.g. /review, /component Button) if match
-        let global_dir = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .map(|h| h.join(".threadlane"))
-            .unwrap_or_else(|| self.work_dir.join(".threadlane"));
-        let templates = crate::prompt_templates::load_prompt_templates(&self.work_dir, &global_dir);
-        let expanded_input = crate::prompt_templates::expand_prompt_template(trimmed, &templates);
+        if self.prompt_templates.is_none() {
+            let global_dir = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|h| h.join(".threadlane"))
+                .unwrap_or_else(|| self.work_dir.join(".threadlane"));
+            self.prompt_templates = Some(crate::prompt_templates::load_prompt_templates(
+                &self.work_dir,
+                &global_dir,
+            ));
+        }
+        let templates = self.prompt_templates.as_ref().unwrap();
+        let expanded_input = crate::prompt_templates::expand_prompt_template(trimmed, templates);
         let effective_input = expanded_input.trim();
 
-        if effective_input.starts_with('/') {
-            let mut parts = effective_input[1..].split_whitespace();
+        if let Some(command_input) = effective_input.strip_prefix('/') {
+            let mut parts = command_input.split_whitespace();
             let cmd_name = parts.next().unwrap_or("");
             let cmd_args = parts.collect::<Vec<&str>>().join(" ");
 
             if cmd_name.starts_with("skill:") || cmd_name == "skill" {
-                let skill_name = if cmd_name.starts_with("skill:") {
-                    &cmd_name[6..]
+                let skill_name = if let Some(skill_name) = cmd_name.strip_prefix("skill:") {
+                    skill_name
                 } else {
                     cmd_args.trim()
                 };
@@ -1432,6 +1657,43 @@ impl CodingAgent {
                     }
                     Err(err) => return Some(format!("Skill Error: {}", err)),
                 }
+            }
+
+            if cmd_name == "subagent" {
+                let task_prompt = cmd_args.trim();
+                if task_prompt.is_empty() {
+                    return Some("Usage: /subagent <task description>".to_string());
+                }
+                let task = AgentRunTask {
+                    agent: "worker".to_string(),
+                    task: task_prompt.to_string(),
+                    instructions: None,
+                    tools: None,
+                    model: None,
+                };
+                let result = match (self.agent_runner)(vec![task], false).await {
+                    Ok(result) => result,
+                    Err(err) => return Some(format!("Subagent Error: {err}")),
+                };
+                let output = result["output"].as_str().unwrap_or_default().to_string();
+                let thinking =
+                    match serde_json::from_value::<Vec<AgentMessage>>(result["thinking"].clone()) {
+                        Ok(thinking) => thinking,
+                        Err(err) => {
+                            return Some(format!("Subagent Error: invalid thinking: {err}"))
+                        }
+                    };
+                self.session_tree
+                    .add_message(AgentMessage::user(input, images.clone()));
+                for message in thinking {
+                    self.session_tree.add_message(message);
+                }
+                self.session_tree.add_message(AgentMessage::Assistant {
+                    content: Some(output.clone()),
+                    tool_calls: None,
+                });
+                self.run_scheduled_agent_work().await;
+                return Some(output);
             }
 
             if let Some(res) = self
@@ -1555,69 +1817,83 @@ impl CodingAgent {
 async fn run_subagents_with_context(
     tasks: Vec<AgentRunTask>,
     parallel: bool,
-    api_key: String,
-    account_id: Option<String>,
-    parent_model: String,
-    work_dir: PathBuf,
-    extensions: Arc<WasiExtensionManager>,
-    parent_event_tx: broadcast::Sender<AgentEvent>,
-    scheduler_observer: Option<Arc<std::sync::Mutex<Vec<AgentWork>>>>,
-    semaphore: Arc<tokio::sync::Semaphore>,
+    context: SubagentRunContext,
 ) -> Result<(String, Vec<AgentMessage>), String> {
-    let run_one = |task: AgentRunTask| {
-        let config = discover_agents(&work_dir, AgentScope::Both)
-            .agents
-            .into_iter()
+    let run_id = NEXT_SUBAGENT_UI_RUN_ID.fetch_add(1, Ordering::Relaxed);
+    let candidates = discover_agents(&context.work_dir, AgentScope::Both).agents;
+    let run_one = |task_index: usize, task: AgentRunTask| {
+        let candidate = candidates
+            .iter()
             .find(|candidate| candidate.name == task.agent)
-            .ok_or_else(|| {
-                format!(
-                    "Unknown subagent '{}'. Add it to .threadlane/agents or ~/.threadlane/agents.",
-                    task.agent
-                )
-            });
-        let semaphore = semaphore.clone();
-        let api_key = api_key.clone();
-        let account_id = account_id.clone();
-        let parent_model = parent_model.clone();
-        let work_dir = work_dir.clone();
-        let extensions = extensions.clone();
-        let parent_event_tx = parent_event_tx.clone();
-        let scheduler_observer = scheduler_observer.clone();
+            .cloned();
+
+        let mut config = match candidate {
+            Some(static_config) => static_config,
+            None => {
+                let sys_prompt = task.instructions.clone().unwrap_or_else(|| {
+                    format!(
+                        "You are a specialized subagent acting as '{}'. Complete only the assigned task and report results clearly to the parent agent.",
+                        task.agent
+                    )
+                });
+                AgentConfig {
+                    name: task.agent.clone(),
+                    description: format!("Dynamic subagent for {}", task.agent),
+                    tools: task.tools.clone(),
+                    model: task.model.clone(),
+                    system_prompt: sys_prompt,
+                    source: crate::agents::AgentSource::Project,
+                    file_path: context.work_dir.clone(),
+                }
+            }
+        };
+        if let Some(inst) = &task.instructions {
+            config.system_prompt = inst.clone();
+        }
+        if let Some(t) = &task.tools {
+            config.tools = Some(t.clone());
+        }
+        if let Some(m) = &task.model {
+            config.model = Some(m.clone());
+        }
+
+        let context = context.clone();
         async move {
-            let config = config?;
-            let _permit = semaphore
+            let _permit = context
+                .semaphore
+                .clone()
                 .acquire_owned()
                 .await
                 .map_err(|_| "Subagent concurrency limiter closed".to_string())?;
             timeout(
                 SUBAGENT_TIMEOUT,
-                run_subagent_task(
-                    config,
-                    task.task,
-                    api_key,
-                    account_id,
-                    parent_model,
-                    work_dir,
-                    extensions,
-                    parent_event_tx,
-                    scheduler_observer,
-                ),
+                run_subagent_task(config, task.task, context, run_id, task_index),
             )
             .await
             .map_err(|_| "Subagent timed out".to_string())?
         }
     };
     let results = if parallel {
-        futures::future::join_all(tasks.iter().cloned().map(run_one)).await
+        futures::future::join_all(
+            tasks
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(task_index, task)| run_one(task_index, task)),
+        )
+        .await
     } else {
         let mut previous = String::new();
         let mut results = Vec::with_capacity(tasks.len());
-        for task in tasks.iter().cloned() {
+        for (task_index, task) in tasks.iter().cloned().enumerate() {
             let task = AgentRunTask {
                 agent: task.agent,
                 task: task.task.replace("{previous}", &previous),
+                instructions: task.instructions,
+                tools: task.tools,
+                model: task.model,
             };
-            let result = run_one(task).await;
+            let result = run_one(task_index, task).await;
             if let Ok(result) = &result {
                 previous = result.output.clone();
             }
@@ -1636,29 +1912,33 @@ async fn run_subagents_with_context(
 async fn run_subagent_task(
     config: AgentConfig,
     task: String,
-    api_key: String,
-    account_id: Option<String>,
-    parent_model: String,
-    work_dir: PathBuf,
-    extensions: Arc<WasiExtensionManager>,
-    parent_event_tx: broadcast::Sender<AgentEvent>,
-    _scheduler_observer: Option<Arc<std::sync::Mutex<Vec<AgentWork>>>>,
+    context: SubagentRunContext,
+    run_id: u64,
+    task_index: usize,
 ) -> Result<SubagentResult, String> {
-    let model = config.model.clone().unwrap_or(parent_model);
+    let model = config
+        .model
+        .clone()
+        .unwrap_or_else(|| context.parent_model.clone());
     #[cfg(test)]
-    if let Some(observer) = _scheduler_observer.as_ref() {
+    if let Some(observer) = context.scheduler_observer.as_ref() {
         let scheduler = AgentWorkScheduler::default();
         scheduler.set_test_observer(observer.clone());
         scheduler.schedule(AgentWork::QueueMessage("test subagent follow-up".into()));
         let observed_model = model.clone();
-        let mut agent = Agent::new(api_key, account_id, model);
+        let mut agent = Agent::new(context.api_key.clone(), context.account_id.clone(), model);
         let _ = scheduler.run(&mut agent).await;
         return Ok(SubagentResult {
             output: format!("test subagent result ({observed_model})"),
             thinking: Vec::new(),
+            inner_tools: Vec::new(),
         });
     }
-    let mut agent = Agent::new(api_key, account_id, model);
+    let mut agent = Agent::new(
+        context.api_key.clone(),
+        context.account_id.clone(),
+        model.clone(),
+    );
     if let Some(tools) = config.tools.clone() {
         agent
             .loop_engine
@@ -1667,10 +1947,10 @@ async fn run_subagent_task(
     let system_prompt = format!(
         "{}\n\nYou are an isolated subagent working in {}. Complete only the assigned task and return a concise final report to your parent agent.",
         config.system_prompt,
-        work_dir.display(),
+        context.work_dir.display(),
     );
     agent.set_system_prompt(system_prompt).await;
-    agent.loop_engine.work_dir = Some(work_dir.clone());
+    agent.loop_engine.work_dir = Some(context.work_dir.clone());
 
     let policy = Arc::new(tokio::sync::Mutex::new(
         if config.tools.as_ref().is_some_and(|tools| {
@@ -1686,20 +1966,20 @@ async fn run_subagent_task(
     let agent_work = AgentWorkScheduler::default();
     let broker_dispatcher = build_broker_dispatcher(
         policy.clone(),
-        extensions.clone(),
+        context.extensions.clone(),
         false,
-        work_dir.clone(),
+        context.work_dir.clone(),
         agent.loop_engine.event_tx.clone(),
         agent_work.clone(),
         None,
     );
     agent.loop_engine.before_tool_call_hook = Some(Arc::new(ExtensionBeforeToolHook {
         tool_policy: policy,
-        extensions: extensions.clone(),
+        extensions: context.extensions.clone(),
         broker_dispatcher: broker_dispatcher.clone(),
     }));
     agent.loop_engine.after_tool_call_hook = Some(Arc::new(ExtensionAfterToolHook {
-        extensions,
+        extensions: context.extensions.clone(),
         broker_dispatcher,
     }));
 
@@ -1707,14 +1987,12 @@ async fn run_subagent_task(
     // reasoning, and tool events so users can see subagent progress live.
     // Assistant text stays local and is returned below as one labelled result.
     let mut ui_events = agent.subscribe();
-    let ui_event_prefix = format!(
-        "subagent-{}:",
-        NEXT_SUBAGENT_UI_ID.fetch_add(1, Ordering::Relaxed)
-    );
+    let ui_event_prefix = format!("subagent-{run_id}:{task_index}:",);
+    let event_tx_clone = context.parent_event_tx.clone();
     tokio::spawn(async move {
         while let Ok(event) = ui_events.recv().await {
             if let Some(event) = subagent_ui_event(event, &ui_event_prefix) {
-                let _ = parent_event_tx.send(event);
+                let _ = event_tx_clone.send(event);
             }
         }
     });
@@ -1731,6 +2009,18 @@ async fn run_subagent_task(
         }
     }
     if let Some(error) = error {
+        if config.model.is_some() && model != context.parent_model {
+            let mut fallback_config = config.clone();
+            fallback_config.model = None;
+            return Box::pin(run_subagent_task(
+                fallback_config,
+                task,
+                context,
+                run_id,
+                task_index,
+            ))
+            .await;
+        }
         return Err(format!("Subagent '{}' failed: {error}", config.name));
     }
 
@@ -1752,12 +2042,48 @@ async fn run_subagent_task(
                 config.name
             )
         })?;
-    let thinking = state
+    let thinking: Vec<AgentMessage> = state
         .messages
-        .into_iter()
+        .iter()
         .filter(|message| matches!(message, AgentMessage::Custom { custom_type, .. } if custom_type == "thinking"))
+        .cloned()
         .collect();
-    Ok(SubagentResult { output, thinking })
+    let mut inner_tools = Vec::new();
+    for message in &state.messages {
+        match message {
+            AgentMessage::Assistant {
+                tool_calls: Some(calls),
+                ..
+            } => {
+                for call in calls {
+                    inner_tools.push(SubagentInnerTool {
+                        id: call.id.clone(),
+                        name: call.function.name.clone(),
+                        arguments: call.function.arguments.clone(),
+                        output: String::new(),
+                        is_error: false,
+                    });
+                }
+            }
+            AgentMessage::Tool {
+                tool_call_id,
+                content,
+                is_error,
+                ..
+            } => {
+                if let Some(tool) = inner_tools.iter_mut().find(|t| &t.id == tool_call_id) {
+                    tool.output = content.clone();
+                    tool.is_error = *is_error;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(SubagentResult {
+        output,
+        thinking,
+        inner_tools,
+    })
 }
 
 fn subagent_ui_event(event: AgentEvent, tool_call_prefix: &str) -> Option<AgentEvent> {
@@ -1770,17 +2096,8 @@ fn subagent_ui_event(event: AgentEvent, tool_call_prefix: &str) -> Option<AgentE
         | AgentEvent::AgentError { .. }
         | AgentEvent::TurnStart { .. }
         | AgentEvent::TurnEnd { .. } => None,
-        // Keep internal child prose out of the transcript: the labelled tool or
-        // command result is the child’s final report. Reasoning remains visible.
-        AgentEvent::MessageUpdate {
-            reasoning_delta: Some(reasoning_delta),
-            tool_call_name,
-            ..
-        } => Some(AgentEvent::MessageUpdate {
-            text_delta: None,
-            reasoning_delta: Some(reasoning_delta),
-            tool_call_name,
-        }),
+        // Keep child prose and reasoning inside the child session. The final
+        // labelled result renders it under the matching task after completion.
         AgentEvent::MessageUpdate { .. } => None,
         AgentEvent::ToolExecutionStart {
             tool_call_id,
@@ -1811,35 +2128,114 @@ fn subagent_ui_event(event: AgentEvent, tool_call_prefix: &str) -> Option<AgentE
     }
 }
 
+#[derive(Clone, Debug)]
+struct SubagentInnerTool {
+    id: String,
+    name: String,
+    arguments: String,
+    output: String,
+    is_error: bool,
+}
+
+#[derive(Clone, Debug)]
 struct SubagentResult {
     output: String,
     thinking: Vec<AgentMessage>,
+    inner_tools: Vec<SubagentInnerTool>,
+}
+
+fn tool_target_preview(name: &str, arguments: &str) -> String {
+    let parsed: Option<serde_json::Value> = serde_json::from_str(arguments).ok();
+    let get_str = |key: &str| {
+        parsed
+            .as_ref()
+            .and_then(|v| v.get(key))
+            .and_then(serde_json::Value::as_str)
+    };
+    let target = match name {
+        "read_file" | "write_file" | "edit_file" | "edit_file_hashline" => get_str("path")
+            .or_else(|| get_str("file_path"))
+            .unwrap_or(arguments),
+        "list_dir" => get_str("path").unwrap_or(arguments),
+        "run_command" => get_str("command").unwrap_or(arguments),
+        _ => arguments,
+    };
+    if target.chars().count() > 60 {
+        target.chars().take(60).collect::<String>()
+    } else {
+        target.to_string()
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct SubagentSessionData {
+    pub task: String,
+    pub agent: String,
+    pub status: String,
+    pub thinking: String,
+    pub inner_tools: Vec<SubagentInnerToolData>,
+    pub output: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct SubagentInnerToolData {
+    pub name: String,
+    pub target_preview: String,
+    pub is_error: bool,
 }
 
 fn format_subagent_results(
     tasks: Vec<AgentRunTask>,
     results: Vec<Result<SubagentResult, String>>,
 ) -> String {
-    tasks
+    let sessions: Vec<SubagentSessionData> = tasks
         .into_iter()
         .zip(results)
-        .enumerate()
-        .map(|(index, (task, result))| match result {
-            Ok(result) => format!(
-                "## Subagent {}: {}\n\n{}",
-                index + 1,
-                task.agent,
-                result.output
-            ),
-            Err(error) => format!(
-                "## Subagent {}: {} (failed)\n\n{}",
-                index + 1,
-                task.agent,
-                error
-            ),
+        .map(|(task, result)| match result {
+            Ok(res) => {
+                let mut thinking = String::new();
+                for think_msg in &res.thinking {
+                    if let AgentMessage::Custom { payload, .. } = think_msg {
+                        if let Some(text) = payload.get("text").and_then(serde_json::Value::as_str)
+                        {
+                            thinking.push_str(text);
+                            thinking.push_str("\n\n");
+                        }
+                    }
+                }
+
+                let inner_tools = res
+                    .inner_tools
+                    .into_iter()
+                    .map(|tool| SubagentInnerToolData {
+                        name: tool.name.clone(),
+                        target_preview: tool_target_preview(&tool.name, &tool.arguments),
+                        is_error: tool.is_error,
+                    })
+                    .collect();
+
+                SubagentSessionData {
+                    task: task.task,
+                    agent: task.agent,
+                    status: "Done".to_string(),
+                    thinking: thinking.trim().to_string(),
+                    inner_tools,
+                    output: res.output,
+                }
+            }
+            Err(error) => SubagentSessionData {
+                task: task.task,
+                agent: task.agent,
+                status: "Failed".to_string(),
+                thinking: String::new(),
+                inner_tools: Vec::new(),
+                output: error,
+            },
         })
-        .collect::<Vec<_>>()
-        .join("\n\n")
+        .collect();
+
+    serde_json::to_string(&sessions)
+        .unwrap_or_else(|e| format!("Failed to serialize subagent results: {}", e))
 }
 
 #[cfg(test)]
@@ -2034,14 +2430,7 @@ mod tests {
             },
             "child:",
         );
-        assert!(matches!(
-            reasoning,
-            Some(AgentEvent::MessageUpdate {
-                text_delta: None,
-                reasoning_delta: Some(text),
-                ..
-            }) if text == "visible progress"
-        ));
+        assert!(reasoning.is_none());
 
         let tool = subagent_ui_event(
             AgentEvent::ToolExecutionStart {
@@ -2457,11 +2846,6 @@ mod tests {
             "---\nname: scout\ndescription: deterministic test scout\n---\nTest scout.",
         )
         .unwrap();
-        let extension_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../.threadlane/extensions/subagent_ext.wasm");
-        let extension_dir = dir.path().join(".threadlane/extensions/subagent_ext");
-        std::fs::create_dir_all(&extension_dir).unwrap();
-        std::fs::copy(extension_path, extension_dir.join("extension.wasm")).unwrap();
 
         let coding_agent = CodingAgent::new(coding_agent_options(dir.path().to_path_buf()));
         coding_agent.set_subagent_work_observer(Arc::new(Mutex::new(Vec::new())));
@@ -2500,11 +2884,6 @@ mod tests {
     #[tokio::test]
     async fn malformed_model_subagent_tool_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
-        let extension_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../.threadlane/extensions/subagent_ext.wasm");
-        let extension_dir = dir.path().join(".threadlane/extensions/subagent_ext");
-        std::fs::create_dir_all(&extension_dir).unwrap();
-        std::fs::copy(extension_path, extension_dir.join("extension.wasm")).unwrap();
         let coding_agent = CodingAgent::new(coding_agent_options(dir.path().to_path_buf()));
 
         let results = coding_agent
@@ -2521,7 +2900,6 @@ mod tests {
             .await;
         assert_eq!(results.len(), 1);
         assert!(results[0].is_error);
-        assert!(results[0].content.contains("Usage: /subagent"));
     }
 
     #[tokio::test]
@@ -2555,11 +2933,6 @@ mod tests {
             "---\nname: scout\ndescription: deterministic test scout\n---\nTest scout.",
         )
         .unwrap();
-        let extension_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../.threadlane/extensions/subagent_ext.wasm");
-        let extension_dir = dir.path().join(".threadlane/extensions/subagent_ext");
-        std::fs::create_dir_all(&extension_dir).unwrap();
-        std::fs::copy(extension_path, extension_dir.join("extension.wasm")).unwrap();
         let mut coding_agent = CodingAgent::new(coding_agent_options(dir.path().to_path_buf()));
         let observed = Arc::new(Mutex::new(Vec::new()));
         coding_agent.set_subagent_work_observer(observed.clone());
@@ -2579,39 +2952,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subagent_command_delivers_agent_run_result_to_same_extension_next_invocation() {
+    async fn dynamic_subagent_spawns_without_predefined_agent_file() {
         let dir = tempfile::tempdir().unwrap();
-        let agents_dir = dir.path().join(".threadlane/agents");
-        std::fs::create_dir_all(&agents_dir).unwrap();
-        std::fs::write(
-            agents_dir.join("scout.md"),
-            "---\nname: scout\ndescription: deterministic test scout\n---\nTest scout.",
-        )
-        .unwrap();
-        let extension_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../.threadlane/extensions/subagent_ext.wasm");
-        let extension_dir = dir.path().join(".threadlane/extensions/subagent_ext");
-        std::fs::create_dir_all(&extension_dir).unwrap();
-        std::fs::copy(extension_path, extension_dir.join("extension.wasm")).unwrap();
-        let mut coding_agent = CodingAgent::new(coding_agent_options(dir.path().to_path_buf()));
+        let coding_agent = CodingAgent::new(coding_agent_options(dir.path().to_path_buf()));
         coding_agent.set_subagent_work_observer(Arc::new(Mutex::new(Vec::new())));
 
-        let output = coding_agent
-            .handle_input("/subagent inspect the project")
-            .await
-            .unwrap();
-        assert!(output.contains("test subagent result"));
-
-        let next = coding_agent
-            .wasi_extensions
-            .execute_command_with_effects("subagent", "inspect the project")
-            .unwrap()
-            .unwrap();
-        assert!(next.events.iter().any(|event| {
-            event.topic == "broker_response"
-                && event.payload["capability"] == "agent"
-                && event.payload["operation"] == "run"
-        }));
+        let results = coding_agent
+            .agent
+            .loop_engine
+            .execute_tools(&[provider_tool_call(
+                "dynamic-subagent-call",
+                "subagent",
+                serde_json::json!({
+                    "tasks": [{
+                        "agent": "custom_architect",
+                        "task": "design architecture",
+                        "instructions": "You are a custom architect.",
+                        "tools": ["read_file"]
+                    }],
+                    "parallel": false
+                }),
+            )])
+            .await;
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].is_error, "{}", results[0].content);
+        assert!(results[0].content.contains("test subagent result"));
     }
 
     #[test]

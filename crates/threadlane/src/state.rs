@@ -4,18 +4,15 @@
 
 use std::path::PathBuf;
 use threadlane_agent::AgentEvent;
-use threadlane_coding_agent::TaskAgentEvent;
 
 pub use crate::panels::chat::*;
 pub use crate::panels::command_palette::*;
 
 pub use crate::panels::sessions::*;
-pub use crate::path_utils::{canonicalize_path, compact_workspace_path, truncate_chars};
+pub use crate::path_utils::truncate_chars;
 
 /// Events sent from background tokio tasks to the UI thread.
 pub enum GuiAgentEvent {
-    TaskEvent(TaskAgentEvent),
-    Agent(AgentEvent),
     GenerationAgent {
         generation_id: u64,
         work_dir: PathBuf,
@@ -28,10 +25,7 @@ pub enum GuiAgentEvent {
     },
     DeviceLoginSuccess,
     DeviceLoginError(String),
-    SessionTitleGenerated {
-        work_dir: PathBuf,
-        session_id: String,
-    },
+    SessionTitleGenerated,
     AvailableModelsLoaded(Vec<String>),
     ProjectFolderPicked(Result<Option<PathBuf>, String>),
     CommandOutput {

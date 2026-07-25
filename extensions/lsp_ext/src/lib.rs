@@ -392,7 +392,7 @@ extern "C" {
     ) -> i32;
 }
 
-static mut OUTPUT_BUF: Vec<u8> = Vec::new();
+static OUTPUT_BUF: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
 
 #[no_mangle]
 pub extern "C" fn alloc(size: i32) -> i32 {
@@ -564,12 +564,11 @@ fn write_output<T: Serialize>(value: &T) -> u64 {
         Ok(bytes) => bytes,
         Err(_) => b"{\"error\":\"Failed to serialize response\"}".to_vec(),
     };
-    unsafe {
-        OUTPUT_BUF = json;
-        let ptr = OUTPUT_BUF.as_ptr() as u64;
-        let len = OUTPUT_BUF.len() as u64;
-        (ptr << 32) | len
-    }
+    let mut buffer = OUTPUT_BUF.lock().expect("output buffer lock poisoned");
+    *buffer = json;
+    let ptr = buffer.as_ptr() as u64;
+    let len = buffer.len() as u64;
+    (ptr << 32) | len
 }
 
 #[cfg(test)]

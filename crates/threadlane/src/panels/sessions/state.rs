@@ -3,7 +3,7 @@
 use crate::path_utils::{canonicalize_path, truncate_chars};
 use threadlane_agent::{AgentMessage, SessionTree};
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -34,17 +34,24 @@ pub enum SessionListRow {
         project_idx: usize,
         session_idx: usize,
     },
+    Overflow {
+        project_idx: usize,
+        hidden_count: usize,
+        showing_all: bool,
+    },
     EmptyProject,
 }
 
 pub struct SessionsData {
     pub projects: Vec<ProjectGroup>,
     /// O(1) lookup for spinner visibility per row in draw_walk.
-    pub working_sessions: HashSet<(PathBuf, String)>,
+    pub working_sessions: HashMap<PathBuf, HashSet<String>>,
     pub active_session_id: Option<String>,
     pub active_work_dir: PathBuf,
     pub context_session_id: Option<String>,
     pub context_work_dir: PathBuf,
+    pub collapsed_projects: HashSet<PathBuf>,
+    pub show_all_projects: HashSet<PathBuf>,
     pub rows: Vec<SessionListRow>,
 }
 
@@ -55,6 +62,51 @@ impl SessionsData {
 
     pub fn is_context_target(&self, work_dir: &Path, session_id: &str) -> bool {
         self.context_session_id.as_deref() == Some(session_id) && self.context_work_dir == work_dir
+    }
+
+    fn rebuild_rows(&self) -> Vec<SessionListRow> {
+        let mut rows = Vec::new();
+        for (project_idx, project) in self.projects.iter().enumerate() {
+            rows.push(SessionListRow::ProjectHeader { project_idx });
+            if self.collapsed_projects.contains(&project.work_dir) {
+                continue;
+            }
+            if project.sessions.is_empty() {
+                rows.push(SessionListRow::EmptyProject);
+                continue;
+            }
+
+            let showing_all = self.show_all_projects.contains(&project.work_dir);
+            let session_indices = if showing_all {
+                (0..project.sessions.len()).collect()
+            } else {
+                preview_session_indices(
+                    project,
+                    &self.active_work_dir,
+                    self.active_session_id.as_deref(),
+                )
+            };
+            for session_idx in session_indices {
+                rows.push(SessionListRow::Session {
+                    project_idx,
+                    session_idx,
+                });
+            }
+            if project.sessions.len() > SESSION_PREVIEW_LIMIT {
+                rows.push(SessionListRow::Overflow {
+                    project_idx,
+                    hidden_count: (!showing_all)
+                        .then_some(project.sessions.len() - SESSION_PREVIEW_LIMIT)
+                        .unwrap_or_default(),
+                    showing_all,
+                });
+            }
+        }
+        rows
+    }
+
+    fn refresh_rows(&mut self) {
+        self.rows = self.rebuild_rows();
     }
 }
 
@@ -157,11 +209,13 @@ pub fn end_title_generation(_work_dir: &Path, _session_id: &str) {
 pub static SESSIONS_DATA: LazyLock<RwLock<SessionsData>> = LazyLock::new(|| {
     RwLock::new(SessionsData {
         projects: Vec::new(),
-        working_sessions: HashSet::new(),
+        working_sessions: HashMap::new(),
         active_session_id: None,
         active_work_dir: PathBuf::new(),
         context_session_id: None,
         context_work_dir: PathBuf::new(),
+        collapsed_projects: HashSet::new(),
+        show_all_projects: HashSet::new(),
         rows: Vec::new(),
     })
 });
@@ -223,6 +277,7 @@ fn discover_sessions_in_project(work_dir: &Path) -> Vec<SessionEntry> {
     let Ok(entries) = std::fs::read_dir(&sessions_dir) else {
         return Vec::new();
     };
+    let canonical_work_dir = canonicalize_path(work_dir);
 
     let mut sessions = Vec::new();
     for entry in entries.flatten() {
@@ -243,7 +298,7 @@ fn discover_sessions_in_project(work_dir: &Path) -> Vec<SessionEntry> {
             id: id.clone(),
             title: session_title_from_tree(&tree, &id),
             // Store the canonical path once so draw_walk never needs a syscall.
-            work_dir: canonicalize_path(work_dir),
+            work_dir: canonical_work_dir.clone(),
             session_file: path.clone(),
             updated_at: session_updated_at(&tree, &path),
         });
@@ -252,22 +307,24 @@ fn discover_sessions_in_project(work_dir: &Path) -> Vec<SessionEntry> {
     sessions
 }
 
-fn rebuild_session_rows(projects: &[ProjectGroup]) -> Vec<SessionListRow> {
-    let mut rows = Vec::new();
-    for (project_idx, project) in projects.iter().enumerate() {
-        rows.push(SessionListRow::ProjectHeader { project_idx });
-        if project.sessions.is_empty() {
-            rows.push(SessionListRow::EmptyProject);
-        } else {
-            for session_idx in 0..project.sessions.len() {
-                rows.push(SessionListRow::Session {
-                    project_idx,
-                    session_idx,
-                });
-            }
+const SESSION_PREVIEW_LIMIT: usize = 4;
+
+fn preview_session_indices(
+    project: &ProjectGroup,
+    active_work_dir: &Path,
+    active_session_id: Option<&str>,
+) -> Vec<usize> {
+    let mut indices = (0..project.sessions.len().min(SESSION_PREVIEW_LIMIT)).collect::<Vec<_>>();
+    if project.work_dir == active_work_dir {
+        if let Some(active_idx) = active_session_id
+            .and_then(|id| project.sessions.iter().position(|session| session.id == id))
+            .filter(|index| *index >= SESSION_PREVIEW_LIMIT)
+        {
+            indices.pop();
+            indices.push(active_idx);
         }
     }
-    rows
+    indices
 }
 
 pub fn refresh_sessions(project_dirs: &[PathBuf]) -> Vec<SessionListRow> {
@@ -287,7 +344,6 @@ pub fn refresh_sessions(project_dirs: &[PathBuf]) -> Vec<SessionListRow> {
         });
     }
 
-    let rows = rebuild_session_rows(&projects);
     let mut data = SESSIONS_DATA.write().unwrap();
     let prev_id = data.active_session_id.clone();
     let prev_dir = data.active_work_dir.clone();
@@ -310,18 +366,38 @@ pub fn refresh_sessions(project_dirs: &[PathBuf]) -> Vec<SessionListRow> {
     }
 
     data.projects = projects;
-    data.rows = rows;
+    let attached = data
+        .projects
+        .iter()
+        .map(|project| project.work_dir.clone())
+        .collect::<HashSet<_>>();
+    data.collapsed_projects
+        .retain(|work_dir| attached.contains(work_dir));
+    data.show_all_projects
+        .retain(|work_dir| attached.contains(work_dir));
+    data.refresh_rows();
     data.rows.clone()
 }
 
 pub fn set_session_working(work_dir: &Path, session_id: &str, is_working: bool) {
     let mut data = SESSIONS_DATA.write().unwrap();
     let normalized_dir = canonicalize_path(work_dir);
-    let key = (normalized_dir, session_id.to_string());
     if is_working {
-        data.working_sessions.insert(key);
+        data.working_sessions
+            .entry(normalized_dir)
+            .or_default()
+            .insert(session_id.to_string());
     } else {
-        data.working_sessions.remove(&key);
+        let remove_project =
+            data.working_sessions
+                .get_mut(&normalized_dir)
+                .is_some_and(|sessions| {
+                    sessions.remove(session_id);
+                    sessions.is_empty()
+                });
+        if remove_project {
+            data.working_sessions.remove(&normalized_dir);
+        }
     }
 }
 
@@ -331,7 +407,8 @@ pub fn is_session_working(work_dir: &Path, session_id: &str) -> bool {
         .read()
         .unwrap()
         .working_sessions
-        .contains(&(normalized_dir, session_id.to_string()))
+        .get(&normalized_dir)
+        .is_some_and(|sessions| sessions.contains(session_id))
 }
 
 pub fn set_session_context_target(entry: Option<&SessionEntry>) {
@@ -349,12 +426,33 @@ pub fn set_active_session(work_dir: &Path, session_id: &str) {
     let mut data = SESSIONS_DATA.write().unwrap();
     data.active_work_dir = canonicalize_path(work_dir);
     data.active_session_id = Some(session_id.to_string());
+    data.refresh_rows();
 }
 
 pub fn set_active_project(work_dir: &Path) {
     let mut data = SESSIONS_DATA.write().unwrap();
     data.active_work_dir = canonicalize_path(work_dir);
     data.active_session_id = None;
+    data.refresh_rows();
+}
+
+pub fn toggle_project_collapsed(work_dir: &Path) {
+    let mut data = SESSIONS_DATA.write().unwrap();
+    let work_dir = canonicalize_path(work_dir);
+    if !data.collapsed_projects.remove(&work_dir) {
+        data.collapsed_projects.insert(work_dir.clone());
+        data.show_all_projects.remove(&work_dir);
+    }
+    data.refresh_rows();
+}
+
+pub fn toggle_project_show_all(work_dir: &Path) {
+    let mut data = SESSIONS_DATA.write().unwrap();
+    let work_dir = canonicalize_path(work_dir);
+    if !data.show_all_projects.remove(&work_dir) {
+        data.show_all_projects.insert(work_dir);
+    }
+    data.refresh_rows();
 }
 
 pub fn is_project_working(work_dir: &Path) -> bool {
@@ -363,8 +461,7 @@ pub fn is_project_working(work_dir: &Path) -> bool {
         .read()
         .unwrap()
         .working_sessions
-        .iter()
-        .any(|(dir, _)| dir == &normalized_dir)
+        .contains_key(&normalized_dir)
 }
 
 pub fn active_session_entry() -> Option<SessionEntry> {
@@ -389,6 +486,21 @@ pub fn project_work_dir_at_row(row_idx: usize) -> Option<PathBuf> {
     data.projects
         .get(*project_idx)
         .map(|project| project.work_dir.clone())
+}
+
+pub fn session_overflow_at_row(row_idx: usize) -> Option<(PathBuf, bool)> {
+    let data = SESSIONS_DATA.read().unwrap();
+    let SessionListRow::Overflow {
+        project_idx,
+        showing_all,
+        ..
+    } = data.rows.get(row_idx)?
+    else {
+        return None;
+    };
+    data.projects
+        .get(*project_idx)
+        .map(|project| (project.work_dir.clone(), *showing_all))
 }
 
 pub fn session_entry_at_row(row_idx: usize) -> Option<SessionEntry> {
@@ -472,6 +584,99 @@ pub fn relative_time_label(updated_at: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_project(session_count: usize) -> ProjectGroup {
+        let work_dir = PathBuf::from("/project");
+        ProjectGroup {
+            name: "project".to_string(),
+            work_dir: work_dir.clone(),
+            sessions: (0..session_count)
+                .map(|index| SessionEntry {
+                    id: format!("session-{index}"),
+                    title: format!("Session {index}"),
+                    work_dir: work_dir.clone(),
+                    session_file: work_dir.join(format!("session-{index}.json")),
+                    updated_at: session_count.saturating_sub(index) as u64,
+                })
+                .collect(),
+            available: true,
+        }
+    }
+
+    #[test]
+    fn preview_caps_sessions_at_four() {
+        let project = test_project(6);
+        assert_eq!(
+            preview_session_indices(&project, Path::new("/other"), None),
+            vec![0, 1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn preview_keeps_an_older_active_session_visible() {
+        let project = test_project(6);
+        assert_eq!(
+            preview_session_indices(&project, &project.work_dir, Some("session-5")),
+            vec![0, 1, 2, 5]
+        );
+    }
+
+    fn test_sessions_data(session_count: usize) -> SessionsData {
+        SessionsData {
+            projects: vec![test_project(session_count)],
+            working_sessions: HashMap::new(),
+            active_session_id: None,
+            active_work_dir: PathBuf::from("/project"),
+            context_session_id: None,
+            context_work_dir: PathBuf::new(),
+            collapsed_projects: HashSet::new(),
+            show_all_projects: HashSet::new(),
+            rows: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn collapsed_project_emits_only_its_header() {
+        let mut data = test_sessions_data(6);
+        data.collapsed_projects
+            .insert(data.projects[0].work_dir.clone());
+        assert!(matches!(
+            data.rebuild_rows().as_slice(),
+            [SessionListRow::ProjectHeader { .. }]
+        ));
+    }
+
+    #[test]
+    fn expanded_project_emits_preview_and_overflow() {
+        let data = test_sessions_data(6);
+        let rows = data.rebuild_rows();
+        assert_eq!(rows.len(), 6);
+        assert!(matches!(
+            rows.last(),
+            Some(SessionListRow::Overflow {
+                hidden_count: 2,
+                showing_all: false,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn show_all_emits_every_session_and_show_less() {
+        let mut data = test_sessions_data(6);
+        data.show_all_projects
+            .insert(data.projects[0].work_dir.clone());
+        let rows = data.rebuild_rows();
+        assert_eq!(rows.len(), 8);
+        assert!(matches!(
+            rows.last(),
+            Some(SessionListRow::Overflow {
+                hidden_count: 0,
+                showing_all: true,
+                ..
+            })
+        ));
+    }
 
     fn unique_test_dir(name: &str) -> PathBuf {
         let nonce = SystemTime::now()
