@@ -39,6 +39,7 @@
 **Files:**
 - Modify: `crates/threadlane-coding-agent/src/packages.rs`
 - Modify: `crates/threadlane-coding-agent/tests/supervisor_tests.rs`
+- Modify: `crates/threadlane-coding-agent/tests/wasi_tests.rs`
 
 **Interfaces:**
 - Produces stateless `PackageManager::new() -> Self`.
@@ -46,6 +47,7 @@
 - Produces `PackageManager::remove_package(package_id: &str, project_root: &Path) -> Result<(), String>`.
 - Produces `PackageManager::list_packages(project_root: &Path) -> Vec<PackageRecord>` for the catalog.
 - `PackageRecord` exposes `id()`, `name()`, `module_path()`, and `is_enabled()`.
+- Installed output is consumed unchanged by `WasiExtensionManager::discover_and_load(project_root)`.
 
 - [ ] **Step 1: Replace the package lifecycle fixture with a WASI package fixture**
 
@@ -88,18 +90,32 @@ Each call must return `Err` and create nothing below
 valid bytes, attempts an invalid replacement of the same ID, and asserts the
 original installed `extension.wasm` bytes remain unchanged.
 
-- [ ] **Step 3: Run the tests and verify RED**
+- [ ] **Step 3: Add the package-to-WASI-loader integration test**
+
+Use the existing minimal WASM fixture bytes and a valid package manifest.
+Install the package, then:
+
+```rust
+let mut extensions = WasiExtensionManager::for_project(project.path());
+assert_eq!(extensions.discover_and_load(project.path()), 1);
+assert!(extensions.get_extensions().contains_key("test_extension"));
+```
+
+Use the manifest name encoded by the WASM fixture for the final assertion.
+
+- [ ] **Step 4: Run the tests and verify RED**
 
 Run:
 
 ```bash
 cargo test -p threadlane-coding-agent --test supervisor_tests package
+cargo test -p threadlane-coding-agent --test wasi_tests installed_package
 ```
 
 Expected: compilation fails because the current API takes `PackageScope` and
 the current manifest has no required `extension` field.
 
-- [ ] **Step 4: Implement the strict manifest and project-only paths**
+- [ ] **Step 5: Implement the strict manifest and project-only paths**
 
 Use a strict manifest:
 
@@ -129,71 +145,20 @@ staged directory into place, restore the backup if that rename fails, and
 remove the backup only after success. Normalize the installed module name to
 `extension.wasm`.
 
-- [ ] **Step 5: Run the package tests and verify GREEN**
+- [ ] **Step 6: Run the package and loader tests and verify GREEN**
 
 Run:
 
 ```bash
 cargo test -p threadlane-coding-agent --test supervisor_tests package
+cargo test -p threadlane-coding-agent --test wasi_tests installed_package
 ```
 
 Expected: all package lifecycle, validation, and preservation cases pass.
 
 ---
 
-### Task 2: Prove installed packages load through WASI
-
-**Files:**
-- Modify: `crates/threadlane-coding-agent/tests/wasi_tests.rs`
-- Modify: `crates/threadlane-coding-agent/src/packages.rs` only if the test exposes an installation-path defect
-
-**Interfaces:**
-- Consumes `PackageManager::install_from_local`.
-- Consumes the unchanged `WasiExtensionManager::discover_and_load(project_root)`.
-- Produces an integration check that package installation feeds the canonical WASI loader.
-
-- [ ] **Step 1: Add the failing package-to-loader test**
-
-Use the existing minimal WASM fixture bytes and a valid package manifest.
-Install the package, then:
-
-```rust
-let mut extensions = WasiExtensionManager::for_project(project.path());
-assert_eq!(extensions.discover_and_load(project.path()), 1);
-assert!(extensions.get_extensions().contains_key("test_extension"));
-```
-
-Use the manifest name encoded by the WASM fixture for the final assertion.
-
-- [ ] **Step 2: Run the focused test and verify RED**
-
-Run:
-
-```bash
-cargo test -p threadlane-coding-agent --test wasi_tests installed_package
-```
-
-Expected: FAIL before Task 1 is complete or if installation does not use
-`.threadlane/extensions/<id>/extension.wasm`.
-
-- [ ] **Step 3: Make only the path correction required by the test**
-
-Do not add another discovery path. Keep `WasiExtensionManager` as the single
-loader and correct `PackageManager` output if needed.
-
-- [ ] **Step 4: Re-run the focused test**
-
-Run:
-
-```bash
-cargo test -p threadlane-coding-agent --test wasi_tests installed_package
-```
-
-Expected: PASS.
-
----
-
-### Task 3: Delete native execution and trust
+### Task 2: Delete native execution and trust
 
 **Files:**
 - Delete: `crates/threadlane-coding-agent/src/full_trust_extension.rs`
@@ -246,7 +211,7 @@ Expected: PASS with no references to full trust or native executables.
 
 ---
 
-### Task 4: Simplify the desktop screen to WASI packages
+### Task 3: Simplify the desktop screen to WASI packages
 
 **Files:**
 - Modify: `crates/threadlane/src/state.rs`
@@ -318,7 +283,7 @@ Expected: PASS with no workspace-owned warnings.
 
 ---
 
-### Task 5: Remove stale guidance and validate
+### Task 4: Remove stale guidance and validate
 
 **Files:**
 - Modify: `AGENTS.md`
