@@ -4,6 +4,7 @@
 
 use crate::components::model_dropdown::IconDropDownWidgetRefExt;
 use crate::components::session_row::ProjectHeaderAction;
+use crate::components::terminal_panel::ProjectTerminalWidgetRefExt;
 use crate::panels::chat::{
     accepts_generation_event, concise_status, draft_for_cancellation, submitted_draft, ChatList,
     ChatListWidgetRefExt, ComposerState, ComposerStatus, GenerationEvent, StarterPromptAction,
@@ -38,9 +39,22 @@ use threadlane_provider::auth;
 use threadlane_provider::openai::{fetch_available_models, OpenAIClient};
 
 use std::collections::HashMap;
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
+
+struct ProjectTerminalSession {
+    _child: Child,
+    stdin: ChildStdin,
+    output: String,
+}
+
+struct ProjectTerminalOutput {
+    work_dir: PathBuf,
+    bytes: Vec<u8>,
+}
 
 const ANTIGRAVITY_MODELS: &[&str] = &[
     "antigravity/gemini-3.6-flash",
@@ -2061,6 +2075,8 @@ script_mod! {
                                     }
                                 }
                             }
+
+                            project_terminal := mod.components.ProjectTerminal {}
                             }
 
 
@@ -2411,12 +2427,21 @@ pub struct App {
     update_rx: Option<Arc<Mutex<Receiver<UpdateStatus>>>>,
     #[rust]
     starter_prompt_focus_pending: bool,
+    #[rust]
+    project_terminals: HashMap<PathBuf, ProjectTerminalSession>,
+    #[rust]
+    terminal_tx: Option<Sender<ProjectTerminalOutput>>,
+    #[rust]
+    terminal_rx: Option<Receiver<ProjectTerminalOutput>>,
 }
 
 impl ScriptHook for App {}
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
+        let (terminal_tx, terminal_rx) = channel();
+        self.terminal_tx = Some(terminal_tx);
+        self.terminal_rx = Some(terminal_rx);
         let (tx, rx) = channel::<GuiAgentEvent>();
         self.tx = Some(tx);
         self.rx = Some(Arc::new(Mutex::new(rx)));
@@ -2649,6 +2674,13 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        if let Some(command) = self
+            .ui
+            .project_terminal(cx, ids!(project_terminal))
+            .command(actions)
+        {
+            self.run_terminal_command(cx, command);
+        }
         for action in actions {
             if let Some(ImagePickerAction::Loaded { key, attachment }) =
                 action.downcast_ref::<ImagePickerAction>()
@@ -3053,6 +3085,7 @@ impl AppMain for App {
         self.match_event(cx, event);
         self.poll_agent_events(cx);
         self.poll_update_status(cx);
+        self.poll_terminal_output(cx);
         {
             let mut scope = Scope::with_data(&mut self.workspace_state);
             self.ui.handle_event(cx, event, &mut scope);
@@ -3872,6 +3905,139 @@ impl App {
         (api_key, account_id)
     }
 
+    fn sync_terminal_project(&mut self, cx: &mut Cx) {
+        let Some(key) = self.workspace_state.active_key() else {
+            return;
+        };
+        let project = project_name(&key.work_dir);
+        let output = self
+            .project_terminals
+            .get(&key.work_dir)
+            .map(|terminal| terminal.output.as_str())
+            .unwrap_or("Terminal ready. Run a command to start the project shell.\n");
+        let terminal = self.ui.project_terminal(cx, ids!(project_terminal));
+        terminal.set_project(cx, &project);
+        terminal.set_output(cx, output);
+    }
+
+    fn start_project_terminal(&mut self, work_dir: &Path) -> Result<(), String> {
+        if self.project_terminals.contains_key(work_dir) {
+            return Ok(());
+        }
+        let mut command = if cfg!(windows) {
+            Command::new("cmd.exe")
+        } else {
+            let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into());
+            Command::new(shell)
+        };
+        let mut child = command
+            .current_dir(work_dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("Could not start terminal: {error}"))?;
+        let stdin = child.stdin.take().ok_or("Terminal stdin was unavailable")?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or("Terminal stdout was unavailable")?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or("Terminal stderr was unavailable")?;
+        let tx = self
+            .terminal_tx
+            .clone()
+            .ok_or("Terminal channel was unavailable")?;
+        for reader in [Box::new(stdout) as Box<dyn Read + Send>, Box::new(stderr)] {
+            let tx = tx.clone();
+            let work_dir = work_dir.to_path_buf();
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(reader);
+                let mut buffer = [0_u8; 4096];
+                loop {
+                    match reader.read(&mut buffer) {
+                        Ok(0) | Err(_) => break,
+                        Ok(count) => {
+                            let _ = tx.send(ProjectTerminalOutput {
+                                work_dir: work_dir.clone(),
+                                bytes: buffer[..count].to_vec(),
+                            });
+                            SignalToUI::set_ui_signal();
+                        }
+                    }
+                }
+            });
+        }
+        self.project_terminals.insert(
+            work_dir.to_path_buf(),
+            ProjectTerminalSession {
+                _child: child,
+                stdin,
+                output: String::new(),
+            },
+        );
+        Ok(())
+    }
+
+    fn run_terminal_command(&mut self, cx: &mut Cx, command: String) {
+        let Some(work_dir) = self
+            .workspace_state
+            .active_key()
+            .map(|key| key.work_dir.clone())
+        else {
+            return;
+        };
+        if let Err(error) = self.start_project_terminal(&work_dir) {
+            self.ui
+                .project_terminal(cx, ids!(project_terminal))
+                .set_output(cx, &format!("{error}\n"));
+            return;
+        }
+        let terminal = self.project_terminals.get_mut(&work_dir).unwrap();
+        terminal.output.push_str(&format!("$ {command}\n"));
+        let mut bytes = command.into_bytes();
+        bytes.push(b'\n');
+        if let Err(error) = terminal
+            .stdin
+            .write_all(&bytes)
+            .and_then(|_| terminal.stdin.flush())
+        {
+            terminal
+                .output
+                .push_str(&format!("Terminal write failed: {error}\n"));
+        }
+        self.sync_terminal_project(cx);
+    }
+
+    fn poll_terminal_output(&mut self, cx: &mut Cx) {
+        let Some(rx) = self.terminal_rx.as_ref() else {
+            return;
+        };
+        let events: Vec<_> = rx.try_iter().collect();
+        if events.is_empty() {
+            return;
+        }
+        for event in events {
+            if let Some(terminal) = self.project_terminals.get_mut(&event.work_dir) {
+                terminal
+                    .output
+                    .push_str(&String::from_utf8_lossy(&event.bytes));
+                const MAX_TERMINAL_OUTPUT: usize = 256 * 1024;
+                if terminal.output.len() > MAX_TERMINAL_OUTPUT {
+                    let cutoff = terminal.output.len() - MAX_TERMINAL_OUTPUT;
+                    let cutoff = terminal.output[cutoff..]
+                        .char_indices()
+                        .find_map(|(offset, ch)| (ch == '\n').then_some(cutoff + offset + 1))
+                        .unwrap_or(cutoff);
+                    terminal.output.drain(..cutoff);
+                }
+            }
+        }
+        self.sync_terminal_project(cx);
+    }
+
     fn select_workspace(&mut self, work_dir: PathBuf, session_id: impl Into<String>) {
         self.workspace_state
             .select(SessionKey::new(work_dir, session_id));
@@ -4027,6 +4193,7 @@ impl App {
             .text_input_ref(cx)
             .set_text(cx, &draft);
         self.refresh_attachment_ui(cx);
+        self.sync_terminal_project(cx);
     }
 
     fn push_chat(&mut self, role: MsgRole, text: impl Into<String>) {

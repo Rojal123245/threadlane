@@ -220,6 +220,8 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 
 ## Session and Context-Menu Behavior
 
+- Project terminal processes are keyed by canonical project work directory, not by session ID. Switching sessions in one project must retain the same shell process and output; switching projects selects that project's independent terminal.
+
 - The project attach button appears while hovering the `PROJECTS` header. It is the only sidebar action synchronized from `App::sync_sidebar_action_visibility` and the retained app-level pointer.
 - `ProjectHeader` locally owns project-row hover hit-testing, action-button paint/redraw, and typed select/new/detach actions for both fixed and portal-list headers. Keep its controls laid out inside the fixed-width action slot; do not restore app-level project-row geometry synchronization.
 - Compute `ProjectHeader` hover from `MouseMove` against the header's clipped rectangle. Parent `FingerHoverOut` can fire when the pointer enters a nested button, which must not hide the action group.
