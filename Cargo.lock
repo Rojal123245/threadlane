@@ -1565,6 +1565,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "makepad-terminal-core"
+version = "1.0.0"
+source = "git+https://github.com/makepad/makepad.git?branch=dev#b41e7404b6bb893d32f7d2924cd7b1c28983547f"
+dependencies = [
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "makepad-tsdf"
 version = "0.1.0"
 source = "git+https://github.com/makepad/makepad.git?branch=dev#b41e7404b6bb893d32f7d2924cd7b1c28983547f"
@@ -3029,6 +3037,7 @@ dependencies = [
  "base64",
  "cargo-packager-updater",
  "directories",
+ "makepad-terminal-core",
  "makepad-widgets",
  "png",
  "rfd",
