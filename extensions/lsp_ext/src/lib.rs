@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::path::{Component, Path};
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 struct WasiToolDefinition {
@@ -24,6 +25,8 @@ struct Invocation {
     name: String,
     #[serde(default)]
     arguments: serde_json::Value,
+    #[serde(default)]
+    state: serde_json::Value,
     #[serde(default)]
     events: Vec<ExtensionEvent>,
 }
@@ -79,6 +82,8 @@ struct Response {
     error: Option<String>,
     #[serde(skip_serializing_if = "is_false")]
     continue_after_broker: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<serde_json::Value>,
 }
 
 impl Response {
@@ -87,6 +92,7 @@ impl Response {
             message: message.into(),
             error: None,
             continue_after_broker: false,
+            state: None,
         }
     }
 
@@ -96,6 +102,7 @@ impl Response {
             message: msg.clone(),
             error: Some(msg),
             continue_after_broker: false,
+            state: None,
         }
     }
 
@@ -104,6 +111,7 @@ impl Response {
             message: message.into(),
             error: None,
             continue_after_broker: true,
+            state: None,
         }
     }
 }
@@ -365,6 +373,549 @@ fn handle_diagnostics(invocation: &Invocation, file_path: &str) -> Response {
     response
 }
 
+fn lsp_state_response(message: impl Into<String>, state: serde_json::Value) -> Response {
+    let mut response = Response::continue_after_broker(message);
+    response.state = Some(state);
+    response
+}
+
+fn lsp_request(id: u64, method: &str, params: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+}
+
+fn lsp_notification(method: &str, params: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({"jsonrpc": "2.0", "method": method, "params": params})
+}
+
+fn frame_jsonrpc(payload: &serde_json::Value) -> String {
+    let body = serde_json::to_string(payload).expect("JSON-RPC payload must serialize");
+    format!("Content-Length: {}\r\n\r\n{body}", body.len())
+}
+
+fn process_request(operation: &str, arguments: serde_json::Value) -> BrokerRequest {
+    BrokerRequest {
+        api_version: 2,
+        capability: "process".into(),
+        operation: operation.into(),
+        arguments,
+    }
+}
+
+fn fs_request(operation: &str, arguments: serde_json::Value) -> BrokerRequest {
+    BrokerRequest {
+        api_version: 2,
+        capability: "fs".into(),
+        operation: operation.into(),
+        arguments,
+    }
+}
+
+fn fs_message(event: &ExtensionEvent, operation: &str) -> Option<Result<String, String>> {
+    if event.topic != "broker_response"
+        || event.payload.get("capability").and_then(|value| value.as_str()) != Some("fs")
+        || event.payload.get("operation").and_then(|value| value.as_str()) != Some(operation)
+    {
+        return None;
+    }
+    let payload: BrokerResponsePayload = match serde_json::from_value(event.payload.clone()) {
+        Ok(payload) => payload,
+        Err(error) => return Some(Err(format!("Invalid fs/{operation} broker response: {error}"))),
+    };
+    if !payload.ok {
+        return Some(Err(payload.error.map_or_else(
+            || format!("fs/{operation} failed"),
+            |error| format!("fs/{operation} broker error {}: {}", error.code, error.message),
+        )));
+    }
+    let Some(value) = payload.value else {
+        return Some(Err(format!("fs/{operation} broker response is missing value")));
+    };
+    Some(Ok(value.message.as_str().unwrap_or_default().to_owned()))
+}
+
+fn broker_message(event: &ExtensionEvent, operation: &str) -> Option<Result<serde_json::Value, String>> {
+    if event.topic != "broker_response"
+        || event.payload.get("capability").and_then(|value| value.as_str()) != Some("process")
+        || event.payload.get("operation").and_then(|value| value.as_str()) != Some(operation)
+    {
+        return None;
+    }
+    let payload: BrokerResponsePayload = match serde_json::from_value(event.payload.clone()) {
+        Ok(payload) => payload,
+        Err(error) => return Some(Err(format!("Invalid process/{operation} broker response: {error}"))),
+    };
+    if !payload.ok {
+        return Some(Err(payload.error.map_or_else(
+            || format!("process/{operation} failed"),
+            |error| format!("process/{operation} broker error {}: {}", error.code, error.message),
+        )));
+    }
+    let Some(value) = payload.value else {
+        return Some(Err(format!("process/{operation} broker response is missing value")));
+    };
+    let message = match value.message {
+        serde_json::Value::String(message) => serde_json::from_str(&message).unwrap_or(serde_json::Value::String(message)),
+        value => value,
+    };
+    if operation != "recv" { return Some(Ok(message)); }
+    let data = message.get("data").and_then(serde_json::Value::as_str).filter(|data| !data.is_empty())
+        .ok_or_else(|| if message.get("eof").and_then(serde_json::Value::as_bool) == Some(true) { "process/recv reached EOF before a JSON-RPC response".into() } else { "process/recv timed out without a JSON-RPC response".into() });
+    Some(data.and_then(|data| serde_json::from_str(data).map_err(|error| format!("Invalid process/recv JSON-RPC payload: {error}"))))
+}
+
+fn lsp_language_id(path: &str) -> &'static str {
+    match detect_lsp_server(path) { "rust-analyzer" => "rust", "typescript-language-server" => "typescript", "gopls" => "go", "pyright" => "python", _ => "plaintext" }
+}
+
+fn workspace_root(absolute_path: &str, path: &str) -> Result<String, Response> {
+    let components = Path::new(path).components().filter(|component| matches!(component, Component::Normal(_))).count();
+    let mut root = Path::new(absolute_path).to_path_buf();
+    for _ in 0..components { root.pop(); }
+    root.to_str().filter(|root| !root.is_empty()).map(|root| root.trim_end_matches('/').to_owned()).ok_or_else(|| Response::error("Could not determine workspace root."))
+}
+
+fn file_uri(path: &str) -> String {
+    format!("file:///{}", path.trim_start_matches('/'))
+}
+
+fn lsp_position(arguments: &serde_json::Value) -> Result<serde_json::Value, Response> {
+    let line = arguments.get("line").and_then(|value| value.as_u64())
+        .ok_or_else(|| Response::error("'line' parameter is required."))?;
+    let character = arguments.get("character").and_then(|value| value.as_u64())
+        .ok_or_else(|| Response::error("'character' parameter is required."))?;
+    if line == 0 || character == 0 {
+        return Err(Response::error("'line' and 'character' are 1-indexed positive integers."));
+    }
+    Ok(serde_json::json!({"line": line - 1, "character": character - 1}))
+}
+
+fn lsp_offset(text: &str, line: u64, character: u64) -> Result<usize, String> {
+    let line = usize::try_from(line).map_err(|_| "line is too large")?;
+    let character = usize::try_from(character).map_err(|_| "character is too large")?;
+    let start = text
+        .split_inclusive('\n')
+        .take(line)
+        .map(str::len)
+        .sum::<usize>();
+    let current = text.get(start..).ok_or("line is outside the document")?;
+    let mut units = 0;
+    for (offset, ch) in current.char_indices() {
+        if ch == '\n' || units == character {
+            return Ok(start + offset);
+        }
+        units += ch.len_utf16();
+        if units > character {
+            return Err("character splits a UTF-16 code point".into());
+        }
+    }
+    if units == character {
+        Ok(text.len())
+    } else {
+        Err("character is outside the line".into())
+    }
+}
+
+fn apply_text_edits(text: &str, edits: &serde_json::Value) -> Result<String, String> {
+    let edits = edits.as_array().ok_or("LSP edits must be an array")?;
+    let mut edits = edits
+        .iter()
+        .map(|edit| {
+            let range = edit.get("range").ok_or("LSP edit is missing range")?;
+            let start = range.get("start").ok_or("LSP edit is missing range.start")?;
+            let end = range.get("end").ok_or("LSP edit is missing range.end")?;
+            let start = lsp_offset(
+                text,
+                start.get("line").and_then(serde_json::Value::as_u64).ok_or("LSP edit start line is missing")?,
+                start.get("character").and_then(serde_json::Value::as_u64).ok_or("LSP edit start character is missing")?,
+            )?;
+            let end = lsp_offset(
+                text,
+                end.get("line").and_then(serde_json::Value::as_u64).ok_or("LSP edit end line is missing")?,
+                end.get("character").and_then(serde_json::Value::as_u64).ok_or("LSP edit end character is missing")?,
+            )?;
+            if start > end {
+                return Err("LSP edit range is reversed".into());
+            }
+            Ok((start, end, edit.get("newText").and_then(serde_json::Value::as_str).unwrap_or("").to_owned()))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    edits.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
+    let mut output = text.to_owned();
+    for (start, end, replacement) in edits {
+        output.replace_range(start..end, &replacement);
+    }
+    Ok(output)
+}
+
+fn workspace_relative_path(state: &serde_json::Value, uri: &str) -> Result<String, String> {
+    let absolute = uri.strip_prefix("file://").ok_or("LSP edit URI is not a file URI")?;
+    let root = state["workspace_root"].as_str().ok_or("Missing workspace root")?;
+    absolute
+        .strip_prefix(root)
+        .and_then(|path| path.strip_prefix('/').or(Some(path)))
+        .filter(|path| !path.is_empty() && !path.starts_with("../"))
+        .map(str::to_owned)
+        .ok_or_else(|| "LSP edit escapes workspace".into())
+}
+
+fn path_matches_uri(path: &str, uri: &str, workspace_path: &str) -> bool {
+    path == workspace_path || uri.strip_prefix("file://") == Some(path)
+}
+
+fn workspace_edit_changes(edit: &serde_json::Value) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    if let Some(changes) = edit.get("changes").and_then(serde_json::Value::as_object) {
+        return Ok(changes.clone());
+    }
+    let mut changes = serde_json::Map::new();
+    for change in edit.get("documentChanges").and_then(serde_json::Value::as_array).ok_or("LSP workspace edit has no changes")? {
+        let uri = change.get("textDocument").and_then(|document| document.get("uri"))
+            .and_then(serde_json::Value::as_str).ok_or("LSP document change is missing URI")?;
+        let edits = change.get("edits").cloned().ok_or("LSP document change is missing edits")?;
+        changes.insert(uri.to_owned(), edits);
+    }
+    Ok(changes)
+}
+
+fn prepare_lsp(invocation: &Invocation) -> Result<(Response, Vec<BrokerRequest>), Response> {
+    let path = invocation.arguments.get("path").and_then(|value| value.as_str())
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| Response::error("'path' parameter is required."))?;
+    let mut state = invocation.state.clone();
+    let phase = state.get("phase").and_then(|value| value.as_str()).unwrap_or("");
+    let server = detect_lsp_server(path);
+    let process_name = format!("lsp-{server}");
+
+    match phase {
+        "" => {
+            state = serde_json::json!({
+                "phase": "spawning",
+                "server": server,
+                "process_name": process_name,
+                "next_request_id": 1u64,
+            });
+            Ok((
+                lsp_state_response(format!("Starting {server}."), state),
+                vec![
+                    process_request("spawn", serde_json::json!({
+                        "name": process_name, "program": server, "args": [],
+                    })),
+                    fs_request("read_text", serde_json::json!({"path": path})),
+                    fs_request("absolute_path", serde_json::json!({"path": path})),
+                ],
+            ))
+        }
+        "spawning" => {
+            match invocation.events.iter().find_map(|event| broker_message(event, "spawn")) {
+                Some(Ok(_)) => {}
+                Some(Err(error)) => return Err(Response::error(error)),
+                None => return Err(Response::error("Missing process/spawn broker response.")),
+            }
+            let text = match invocation.events.iter().find_map(|event| fs_message(event, "read_text")) {
+                Some(Ok(text)) => text,
+                Some(Err(error)) => return Err(Response::error(error)),
+                None => return Err(Response::error("Missing fs/read_text broker response.")),
+            };
+            let absolute_path = match invocation.events.iter().find_map(|event| fs_message(event, "absolute_path")) {
+                Some(Ok(path)) => path,
+                Some(Err(error)) => return Err(Response::error(error)),
+                None => return Err(Response::error("Missing fs/absolute_path broker response.")),
+            };
+            state["document_text"] = serde_json::Value::String(text);
+            state["uri"] = serde_json::Value::String(file_uri(&absolute_path));
+            state["path"] = serde_json::Value::String(path.to_owned());
+            state["workspace_root"] = serde_json::Value::String(workspace_root(&absolute_path, path)?);
+            state["phase"] = serde_json::Value::String("initializing".into());
+            let request_id = state["next_request_id"].as_u64().unwrap_or(1);
+            state["next_request_id"] = serde_json::json!(request_id + 1);
+            state["pending_request_id"] = serde_json::json!(request_id);
+            let initialize = lsp_request(request_id, "initialize", serde_json::json!({
+                "processId": null, "rootUri": null, "capabilities": {},
+            }));
+            let name = state["process_name"].as_str().unwrap_or(&process_name).to_owned();
+            Ok((
+                lsp_state_response(format!("Initializing {server}."), state),
+                vec![
+                    process_request("send", serde_json::json!({"name": name, "data": frame_jsonrpc(&initialize)})),
+                    process_request("recv", serde_json::json!({"name": name, "framing": "content-length", "timeout_ms": 30_000})),
+                ],
+            ))
+        }
+        "initializing" => {
+            let message = match invocation.events.iter().find_map(|event| broker_message(event, "recv")) {
+                Some(Ok(message)) => message,
+                Some(Err(error)) => return Err(Response::error(error)),
+                None => return Err(Response::error("Missing initialize response from language server.")),
+            };
+            if message.get("id").and_then(|value| value.as_u64()) != state["pending_request_id"].as_u64() {
+                return Err(Response::error(format!("Unexpected initialize response: {message}")));
+            }
+            state["phase"] = serde_json::Value::String("requesting".into());
+            let request_id = state["next_request_id"].as_u64().unwrap_or(2);
+            state["next_request_id"] = serde_json::json!(request_id + 1);
+            state["pending_request_id"] = serde_json::json!(request_id);
+            let method = match invocation.name.as_str() {
+                "lsp_definition" => "textDocument/definition",
+                "lsp_type_definition" => "textDocument/typeDefinition",
+                "lsp_implementation" => "textDocument/implementation",
+                "lsp_references" => "textDocument/references",
+                "lsp_hover" => "textDocument/hover",
+                "lsp_code_actions" => "textDocument/codeAction",
+                "lsp_symbols" => "textDocument/documentSymbol",
+                "lsp_format" => "textDocument/formatting",
+                "lsp_rename" => "textDocument/rename",
+                "lsp_rename_file" => "workspace/willRenameFiles",
+                _ => return Err(Response::error(format!("Unsupported LSP request {}", invocation.name))),
+            };
+            let uri = state["uri"].as_str().map(str::to_owned).unwrap_or_else(|| file_uri(path));
+            let position = if matches!(method, "textDocument/documentSymbol" | "textDocument/formatting" | "workspace/willRenameFiles") {
+                None
+            } else {
+                Some(lsp_position(&invocation.arguments)?)
+            };
+            let params = if method == "workspace/willRenameFiles" {
+                let root = state["workspace_root"].as_str().unwrap_or("");
+                let from = invocation.arguments["old_path"].as_str().ok_or_else(|| Response::error("'old_path' parameter is required."))?;
+                let to = invocation.arguments["new_path"].as_str().ok_or_else(|| Response::error("'new_path' parameter is required."))?;
+                serde_json::json!({"files": [{"oldUri": file_uri(&format!("{root}/{from}")), "newUri": file_uri(&format!("{root}/{to}"))}]})
+            } else if method == "textDocument/documentSymbol" {
+                serde_json::json!({"textDocument": {"uri": uri}})
+            } else if method == "textDocument/formatting" {
+                serde_json::json!({"textDocument": {"uri": uri}, "options": {"tabSize": 4, "insertSpaces": true}})
+            } else if method == "textDocument/rename" {
+                serde_json::json!({"textDocument": {"uri": uri}, "position": position.clone().unwrap(), "newName": invocation.arguments["new_name"]})
+            } else if method == "textDocument/references" {
+                serde_json::json!({"textDocument": {"uri": uri}, "position": position.clone().unwrap(), "context": {"includeDeclaration": true}})
+            } else if method == "textDocument/codeAction" {
+                serde_json::json!({"textDocument": {"uri": uri}, "range": {"start": position.clone().unwrap(), "end": position.unwrap()}, "context": {"diagnostics": []}})
+            } else {
+                serde_json::json!({"textDocument": {"uri": uri}, "position": position.unwrap()})
+            };
+            let request = lsp_request(request_id, method, params);
+            let did_open = lsp_notification("textDocument/didOpen", serde_json::json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": lsp_language_id(path),
+                    "version": 1,
+                    "text": state["document_text"].as_str().unwrap_or("")
+                }
+            }));
+            let name = state["process_name"].as_str().unwrap_or(&process_name).to_owned();
+            Ok((
+                lsp_state_response(format!("Querying {server}."), state),
+                vec![
+                    process_request("send", serde_json::json!({"name": name, "data": frame_jsonrpc(&lsp_notification("initialized", serde_json::json!({})))})),
+                    process_request("send", serde_json::json!({"name": name, "data": frame_jsonrpc(&did_open)})),
+                    process_request("send", serde_json::json!({"name": name, "data": frame_jsonrpc(&request)})),
+                    process_request("recv", serde_json::json!({"name": name, "framing": "content-length", "timeout_ms": 30_000})),
+                ],
+            ))
+        }
+        "requesting" => {
+            let message = match invocation.events.iter().find_map(|event| broker_message(event, "recv")) {
+                Some(Ok(message)) => message,
+                Some(Err(error)) => return Err(Response::error(error)),
+                None => return Err(Response::error("Missing LSP response from language server.")),
+            };
+            if message.get("id").and_then(|value| value.as_u64()) != state["pending_request_id"].as_u64() { return Err(Response::error(format!("Unexpected LSP response: {message}"))); }
+            let result = message.get("result").cloned().unwrap_or(serde_json::Value::Null);
+            if invocation.name == "lsp_format" {
+                let formatted = apply_text_edits(
+                    state["document_text"].as_str().unwrap_or(""),
+                    &result,
+                )
+                .map_err(Response::error)?;
+                state["document_text"] = serde_json::Value::String(formatted.clone());
+                state["phase"] = serde_json::Value::String("writing".into());
+                let path = state["path"].as_str().ok_or_else(|| Response::error("Missing LSP document path."))?.to_owned();
+                return Ok((
+                    lsp_state_response("Applying LSP formatting edits.", state),
+                    vec![fs_request("write_text", serde_json::json!({"path": path, "content": formatted}))],
+                ));
+            }
+            if invocation.name == "lsp_rename_file" {
+                let from = invocation.arguments["old_path"].as_str().ok_or_else(|| Response::error("'old_path' parameter is required."))?;
+                let to = invocation.arguments["new_path"].as_str().ok_or_else(|| Response::error("'new_path' parameter is required."))?;
+                if let Ok(changes) = workspace_edit_changes(&result) {
+                    let mut pending = serde_json::Map::new();
+                    for (uri, edits) in &changes {
+                        pending.insert(workspace_relative_path(&state, uri).map_err(Response::error)?, edits.clone());
+                    }
+                    state["pending_edits"] = serde_json::Value::Object(pending);
+                    state["phase"] = serde_json::Value::String("reading_file_rename".into());
+                    let requests = state["pending_edits"].as_object().unwrap().keys()
+                        .map(|path| fs_request("read_text", serde_json::json!({"path": path})))
+                        .collect();
+                    return Ok((lsp_state_response("Reading files for willRenameFiles edits.", state), requests));
+                }
+                state["phase"] = serde_json::Value::String("moving_file".into());
+                return Ok((
+                    lsp_state_response("Moving file after LSP willRenameFiles.", state),
+                    vec![fs_request("rename", serde_json::json!({"from": from, "to": to}))],
+                ));
+            }
+            if invocation.name == "lsp_rename" {
+                let changes = workspace_edit_changes(&result).map_err(Response::error)?;
+                let mut pending = serde_json::Map::new();
+                for (uri, edits) in changes {
+                    pending.insert(workspace_relative_path(&state, &uri).map_err(Response::error)?, edits);
+                }
+                state["pending_edits"] = serde_json::Value::Object(pending);
+                state["phase"] = serde_json::Value::String("reading_workspace_rename".into());
+                let requests = state["pending_edits"].as_object().unwrap().keys()
+                    .map(|path| fs_request("read_text", serde_json::json!({"path": path})))
+                    .collect();
+                return Ok((lsp_state_response("Reading files for LSP workspace rename.", state), requests));
+            }
+            state["phase"] = serde_json::Value::String("ready".into());
+            let mut response = Response::ok(format!("{} result:\n{}", invocation.name, result));
+            response.state = Some(state);
+            Ok((response, vec![]))
+        }
+        "writing" => {
+            state["phase"] = serde_json::Value::String("ready".into());
+            let mut response = Response::ok("Applied LSP formatting edits.");
+            response.state = Some(state);
+            Ok((response, vec![]))
+        }
+        "moving_file" => {
+            let root = state["workspace_root"].as_str().unwrap_or("");
+            let from = invocation.arguments["old_path"].as_str().ok_or_else(|| Response::error("'old_path' parameter is required."))?;
+            let to = invocation.arguments["new_path"].as_str().ok_or_else(|| Response::error("'new_path' parameter is required."))?;
+            let name = state["process_name"].as_str().unwrap_or(&process_name).to_owned();
+            let notification = lsp_notification("workspace/didRenameFiles", serde_json::json!({
+                "files": [{"oldUri": file_uri(&format!("{root}/{from}")), "newUri": file_uri(&format!("{root}/{to}"))}]
+            }));
+            state["phase"] = serde_json::Value::String("notifying_file_move".into());
+            Ok((
+                lsp_state_response("Notifying LSP server of file move.", state),
+                vec![process_request("send", serde_json::json!({"name": name, "data": frame_jsonrpc(&notification)}))],
+            ))
+        }
+        "reading_file_rename" => {
+            let pending = state["pending_edits"].as_object().ok_or_else(|| Response::error("Missing willRenameFiles edits."))?;
+            let mut writes = Vec::new();
+            for event in &invocation.events {
+                let Some(Ok(text)) = fs_message(event, "read_text") else { continue };
+                let Some(path) = event.payload.get("arguments").and_then(|value| value.get("path")).and_then(serde_json::Value::as_str) else { continue };
+                let edits = pending.get(path).ok_or_else(|| Response::error("Unexpected willRenameFiles read."))?;
+                writes.push(fs_request("write_text", serde_json::json!({
+                    "path": path,
+                    "content": apply_text_edits(&text, edits).map_err(Response::error)?,
+                })));
+            }
+            if writes.len() != pending.len() {
+                return Err(Response::error("willRenameFiles did not read every edited file."));
+            }
+            state["phase"] = serde_json::Value::String("ready_to_move_file".into());
+            Ok((lsp_state_response("Applying willRenameFiles edits.", state), writes))
+        }
+        "reading_workspace_rename" => {
+            let pending = state["pending_edits"].as_object().ok_or_else(|| Response::error("Missing LSP rename edits."))?;
+            let mut writes = Vec::new();
+            for event in &invocation.events {
+                let Some(Ok(text)) = fs_message(event, "read_text") else { continue };
+                let Some(path) = event.payload.get("arguments").and_then(|value| value.get("path")).and_then(serde_json::Value::as_str) else { continue };
+                let edits = pending.get(path).ok_or_else(|| Response::error("Unexpected LSP rename read."))?;
+                writes.push(fs_request("write_text", serde_json::json!({
+                    "path": path,
+                    "content": apply_text_edits(&text, edits).map_err(Response::error)?,
+                })));
+            }
+            if writes.len() != pending.len() {
+                return Err(Response::error("LSP rename did not read every edited file."));
+            }
+            state["phase"] = serde_json::Value::String("writing_workspace_rename".into());
+            Ok((lsp_state_response("Applying LSP workspace rename edits.", state), writes))
+        }
+        "writing_workspace_rename" => {
+            state.as_object_mut().map(|state| state.remove("pending_edits"));
+            state["phase"] = serde_json::Value::String("ready".into());
+            let mut response = Response::ok("Applied LSP workspace rename edits.");
+            response.state = Some(state);
+            Ok((response, vec![]))
+        }
+        "ready_to_move_file" => {
+            state.as_object_mut().map(|state| state.remove("pending_edits"));
+            let from = invocation.arguments["old_path"].as_str().ok_or_else(|| Response::error("'old_path' parameter is required."))?;
+            let to = invocation.arguments["new_path"].as_str().ok_or_else(|| Response::error("'new_path' parameter is required."))?;
+            state["phase"] = serde_json::Value::String("moving_file".into());
+            Ok((lsp_state_response("Moving file after willRenameFiles edits.", state), vec![
+                fs_request("rename", serde_json::json!({"from": from, "to": to})),
+            ]))
+        }
+        "notifying_file_move" => {
+            state["phase"] = serde_json::Value::String("ready".into());
+            let mut response = Response::ok("Applied LSP file rename and notified the language server.");
+            response.state = Some(state);
+            Ok((response, vec![]))
+        }
+        "ready" => {
+            if invocation.name == "lsp_format" {
+                state["phase"] = serde_json::Value::String("refreshing_format".into());
+                let path = state["path"].as_str().ok_or_else(|| Response::error("Missing LSP document path."))?.to_owned();
+                return Ok((lsp_state_response("Refreshing document before formatting.", state), vec![fs_request("read_text", serde_json::json!({"path": path}))]));
+            }
+            state["phase"] = serde_json::Value::String("requesting".into());
+            let request_id = state["next_request_id"].as_u64().unwrap_or(2);
+            state["next_request_id"] = serde_json::json!(request_id + 1);
+            state["pending_request_id"] = serde_json::json!(request_id);
+            let method = match invocation.name.as_str() {
+                "lsp_definition" => "textDocument/definition",
+                "lsp_type_definition" => "textDocument/typeDefinition",
+                "lsp_implementation" => "textDocument/implementation",
+                "lsp_references" => "textDocument/references",
+                "lsp_hover" => "textDocument/hover",
+                "lsp_code_actions" => "textDocument/codeAction",
+                "lsp_symbols" => "textDocument/documentSymbol",
+                "lsp_format" => "textDocument/formatting",
+                "lsp_rename" => "textDocument/rename",
+                "lsp_rename_file" => "workspace/willRenameFiles",
+                _ => return Err(Response::error(format!("Unsupported LSP request {}", invocation.name))),
+            };
+            let uri = state["uri"].as_str().map(str::to_owned).unwrap_or_else(|| file_uri(path));
+            let position = if matches!(method, "textDocument/documentSymbol" | "textDocument/formatting" | "workspace/willRenameFiles") {
+                None
+            } else {
+                Some(lsp_position(&invocation.arguments)?)
+            };
+            let params = if method == "workspace/willRenameFiles" {
+                let root = state["workspace_root"].as_str().unwrap_or("");
+                let from = invocation.arguments["old_path"].as_str().ok_or_else(|| Response::error("'old_path' parameter is required."))?;
+                let to = invocation.arguments["new_path"].as_str().ok_or_else(|| Response::error("'new_path' parameter is required."))?;
+                serde_json::json!({"files": [{"oldUri": file_uri(&format!("{root}/{from}")), "newUri": file_uri(&format!("{root}/{to}"))}]})
+            } else if method == "textDocument/documentSymbol" {
+                serde_json::json!({"textDocument": {"uri": uri}})
+            } else if method == "textDocument/formatting" {
+                serde_json::json!({"textDocument": {"uri": uri}, "options": {"tabSize": 4, "insertSpaces": true}})
+            } else if method == "textDocument/rename" {
+                serde_json::json!({"textDocument": {"uri": uri}, "position": position.clone().unwrap(), "newName": invocation.arguments["new_name"]})
+            } else if method == "textDocument/references" {
+                serde_json::json!({"textDocument": {"uri": uri}, "position": position.clone().unwrap(), "context": {"includeDeclaration": true}})
+            } else if method == "textDocument/codeAction" {
+                serde_json::json!({"textDocument": {"uri": uri}, "range": {"start": position.clone().unwrap(), "end": position.unwrap()}, "context": {"diagnostics": []}})
+            } else {
+                serde_json::json!({"textDocument": {"uri": uri}, "position": position.unwrap()})
+            };
+            let request = lsp_request(request_id, method, params);
+            let name = state["process_name"].as_str().unwrap_or(&process_name).to_owned();
+            Ok((
+                lsp_state_response(format!("Querying {server}."), state),
+                vec![
+                    process_request("send", serde_json::json!({"name": name, "data": frame_jsonrpc(&request)})),
+                    process_request("recv", serde_json::json!({"name": name, "framing": "content-length", "timeout_ms": 30_000})),
+                ],
+            ))
+        }
+        "refreshing_format" => {
+            let text = match invocation.events.iter().find_map(|event| fs_message(event, "read_text")) { Some(Ok(text)) => text, Some(Err(error)) => return Err(Response::error(error)), None => return Err(Response::error("Missing fs/read_text broker response.")) };
+            state["document_text"] = serde_json::Value::String(text);
+            state["phase"] = serde_json::Value::String("ready".into());
+            prepare_lsp(&Invocation { name: invocation.name.clone(), arguments: invocation.arguments.clone(), state, events: vec![] })
+        }
+        _ => Err(Response::error(format!("Unknown LSP state phase {phase}"))),
+    }
+}
+
 fn send_broker_request(request: &BrokerRequest) {
     #[cfg(target_arch = "wasm32")]
     {
@@ -442,6 +993,58 @@ fn extension_manifest() -> WasiExtensionManifest {
                 }),
             },
             WasiToolDefinition {
+                name: "lsp_type_definition".into(),
+                description: "Locate the type definition of a symbol using LSP.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "line": { "type": "integer" },
+                        "character": { "type": "integer" }
+                    },
+                    "required": ["path", "line", "character"]
+                }),
+            },
+            WasiToolDefinition {
+                name: "lsp_implementation".into(),
+                description: "Locate implementations of a symbol using LSP.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "line": { "type": "integer" },
+                        "character": { "type": "integer" }
+                    },
+                    "required": ["path", "line", "character"]
+                }),
+            },
+            WasiToolDefinition {
+                name: "lsp_hover".into(),
+                description: "Show hover documentation and type information using LSP.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "line": { "type": "integer" },
+                        "character": { "type": "integer" }
+                    },
+                    "required": ["path", "line", "character"]
+                }),
+            },
+            WasiToolDefinition {
+                name: "lsp_code_actions".into(),
+                description: "List fixes and refactorings available at a location using LSP.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "line": { "type": "integer" },
+                        "character": { "type": "integer" }
+                    },
+                    "required": ["path", "line", "character"]
+                }),
+            },
+            WasiToolDefinition {
                 name: "lsp_rename".into(),
                 description: "Safely compute and apply workspace-wide edits to rename a symbol at target location using LSP.".into(),
                 parameters: serde_json::json!({
@@ -466,9 +1069,29 @@ fn extension_manifest() -> WasiExtensionManifest {
                     "required": ["path"]
                 }),
             },
+            WasiToolDefinition {
+                name: "lsp_status".into(),
+                description: "Report the active LSP server and protocol state.".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            },
+            WasiToolDefinition {
+                name: "lsp_symbols".into(),
+                description: "List document symbols using LSP.".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}),
+            },
+            WasiToolDefinition {
+                name: "lsp_format".into(),
+                description: "Format a document using LSP and return its edits.".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}),
+            },
+            WasiToolDefinition {
+                name: "lsp_rename_file".into(),
+                description: "Apply LSP workspace rename edits before moving a file, then notify the server.".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {"old_path": {"type": "string"}, "new_path": {"type": "string"}}, "required": ["old_path", "new_path"]}),
+            },
         ],
         commands: vec![],
-        hooks: vec![],
+        hooks: vec!["after_tool_call".into()],
     }
 }
 
@@ -515,46 +1138,77 @@ pub extern "C" fn execute_command(ptr: i32, len: i32) -> u64 {
 }
 
 #[no_mangle]
-pub extern "C" fn handle_hook(_ptr: i32, _len: i32) -> u64 {
+pub extern "C" fn handle_hook(ptr: i32, len: i32) -> u64 {
+    let payload = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    let invocation: Invocation = match serde_json::from_slice(payload) {
+        Ok(invocation) => invocation,
+        Err(error) => return write_output(&Response::error(format!("Invalid hook JSON: {error}"))),
+    };
+    let tool = invocation.arguments.get("tool_name").and_then(serde_json::Value::as_str);
+    let path = invocation.arguments.get("tool_arguments")
+        .and_then(|arguments| arguments.get("path"))
+        .and_then(serde_json::Value::as_str);
+    let state_path = invocation.state.get("path").and_then(serde_json::Value::as_str).unwrap_or("");
+    let state_uri = invocation.state.get("uri").and_then(serde_json::Value::as_str).unwrap_or("");
+    if !matches!(tool, Some("write_file" | "edit_file" | "edit_file_hashline"))
+        || invocation.arguments.get("is_error").and_then(serde_json::Value::as_bool) == Some(true)
+        || !path.is_some_and(|path| path_matches_uri(path, state_uri, state_path))
+    {
+        return write_output(&Response::ok(String::new()));
+    }
+    let Some(name) = invocation.state.get("process_name").and_then(serde_json::Value::as_str) else {
+        return write_output(&Response::ok(String::new()));
+    };
+    let Some(uri) = invocation.state.get("uri").and_then(serde_json::Value::as_str) else {
+        return write_output(&Response::ok(String::new()));
+    };
+    send_broker_request(&process_request("send", serde_json::json!({
+        "name": name,
+        "data": frame_jsonrpc(&lsp_notification("textDocument/didSave", serde_json::json!({
+            "textDocument": {"uri": uri}
+        }))),
+    })));
+    send_broker_request(&process_request("recv", serde_json::json!({
+        "name": name,
+        "framing": "content-length",
+        "timeout_ms": 250,
+    })));
     write_output(&Response::ok(String::new()))
 }
 
 fn handle_invocation(invocation: &Invocation) -> Response {
-    let args = &invocation.arguments;
-    let file_path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-    if file_path.is_empty() {
-        return Response::error("'path' parameter is required.");
-    }
-
-    let server_binary = detect_lsp_server(file_path);
-
     match invocation.name.as_str() {
-        "lsp_definition" => {
-            let line = args.get("line").and_then(|v| v.as_u64()).unwrap_or(1);
-            let char_offset = args.get("character").and_then(|v| v.as_u64()).unwrap_or(1);
-            Response::ok(format!(
-                "LSP Definition [{server_binary}]: Definition of symbol at '{file_path}:{line}:{char_offset}' located in '{file_path}' (Line {line}, Col {char_offset})."
-            ))
+        "lsp_definition"
+        | "lsp_type_definition"
+        | "lsp_implementation"
+        | "lsp_references"
+        | "lsp_hover"
+        | "lsp_code_actions"
+        | "lsp_symbols"
+        | "lsp_format"
+        | "lsp_rename"
+        | "lsp_rename_file" => match prepare_lsp(invocation) {
+            Ok((response, requests)) => {
+                for request in &requests {
+                    send_broker_request(request);
+                }
+                response
+            }
+            Err(response) => response,
+        },
+        "lsp_diagnostics" => {
+            let file_path = invocation.arguments.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            if file_path.is_empty() {
+                Response::error("'path' parameter is required.")
+            } else {
+                handle_diagnostics(invocation, file_path)
+            }
         }
-        "lsp_references" => {
-            let line = args.get("line").and_then(|v| v.as_u64()).unwrap_or(1);
-            let char_offset = args.get("character").and_then(|v| v.as_u64()).unwrap_or(1);
-            Response::ok(format!(
-                "LSP References [{server_binary}]: Found 1 reference for symbol at '{file_path}:{line}:{char_offset}':\n- {file_path}:{line}:{char_offset}"
-            ))
+        "lsp_status" => {
+            let server = invocation.state.get("server").and_then(|value| value.as_str()).unwrap_or("none");
+            let phase = invocation.state.get("phase").and_then(|value| value.as_str()).unwrap_or("idle");
+            Response::ok(format!("LSP status: {server} ({phase})"))
         }
-        "lsp_rename" => {
-            let line = args.get("line").and_then(|v| v.as_u64()).unwrap_or(1);
-            let char_offset = args.get("character").and_then(|v| v.as_u64()).unwrap_or(1);
-            let new_name = match args.get("new_name").and_then(|v| v.as_str()) {
-                Some(n) => n,
-                None => return Response::error("'new_name' parameter is required for lsp_rename."),
-            };
-            Response::ok(format!(
-                "LSP Rename [{server_binary}]: Applied symbol rename to '{new_name}' across 1 file at '{file_path}:{line}:{char_offset}'."
-            ))
-        }
-        "lsp_diagnostics" => handle_diagnostics(invocation, file_path),
         unknown => Response::error(format!("Unknown tool '{unknown}'")),
     }
 }
@@ -602,15 +1256,39 @@ mod tests {
         Invocation {
             name: "lsp_diagnostics".into(),
             arguments: serde_json::json!({"path": path}),
+            state: serde_json::json!({}),
             events,
         }
+    }
+
+    fn process_recv_event(message: serde_json::Value) -> ExtensionEvent {
+        ExtensionEvent { topic: "broker_response".into(), payload: serde_json::json!({"api_version": 2, "capability": "process", "operation": "recv", "ok": true, "value": {"message": {"data": message.to_string(), "eof": false}}}) }
+    }
+
+    #[test]
+    fn process_recv_unwraps_the_jsonrpc_data_envelope() {
+        let event = process_recv_event(serde_json::json!({"jsonrpc": "2.0", "id": 42, "result": {}}));
+        assert_eq!(broker_message(&event, "recv").unwrap().unwrap(), serde_json::json!({"jsonrpc": "2.0", "id": 42, "result": {}}));
+    }
+
+    #[test]
+    fn initializing_accepts_its_persisted_request_id() {
+        let invocation = Invocation {
+            name: "lsp_definition".into(), arguments: serde_json::json!({"path": "src/app.ts", "line": 1, "character": 1}),
+            state: serde_json::json!({"phase": "initializing", "server": "typescript-language-server", "process_name": "lsp-typescript-language-server", "uri": "file:///workspace/src/app.ts", "document_text": "const x = 1;\n", "next_request_id": 43, "pending_request_id": 42}),
+            events: vec![process_recv_event(serde_json::json!({"jsonrpc": "2.0", "id": 42, "result": {}}))],
+        };
+        let (response, requests) = prepare_lsp(&invocation).unwrap();
+        assert_eq!(response.state.as_ref().unwrap()["phase"], "requesting");
+        assert!(requests[1].arguments["data"].as_str().unwrap().contains("languageId\":\"typescript"));
+        assert!(requests[2].arguments["data"].as_str().unwrap().contains("\"id\":43"));
     }
 
     #[test]
     fn test_manifest_structure() {
         let manifest = extension_manifest();
         assert_eq!(manifest.name, "lsp_ext");
-        assert_eq!(manifest.tools.len(), 4);
+        assert_eq!(manifest.tools.len(), 12);
     }
 
     #[test]
@@ -630,12 +1308,79 @@ mod tests {
                 "line": 10,
                 "character": 5
             }),
+            state: serde_json::json!({}),
             events: vec![],
         };
         let resp = handle_invocation(&inv);
         assert!(resp.error.is_none());
-        assert!(resp.message.contains("rust-analyzer"));
-        assert!(resp.message.contains("src/main.rs:10:5"));
+        assert!(resp.continue_after_broker);
+        assert_eq!(resp.state.unwrap()["phase"], "spawning");
+    }
+
+    #[test]
+    fn first_lsp_request_spawns_the_detected_server() {
+        let invocation = Invocation {
+            name: "lsp_definition".into(),
+            arguments: serde_json::json!({
+                "path": "src/main.rs",
+                "line": 10,
+                "character": 5
+            }),
+            state: serde_json::json!({}),
+            events: vec![],
+        };
+
+        let (response, requests) = prepare_lsp(&invocation).unwrap();
+
+        assert!(response.continue_after_broker);
+        assert_eq!(response.state.unwrap()["phase"], "spawning");
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].operation, "spawn");
+        assert_eq!(requests[0].arguments["program"], "rust-analyzer");
+        assert_eq!(requests[1].capability, "fs");
+        assert_eq!(requests[2].operation, "absolute_path");
+    }
+
+    #[test]
+    fn lsp_status_reports_persisted_server_state() {
+        let response = handle_invocation(&Invocation {
+            name: "lsp_status".into(),
+            arguments: serde_json::json!({}),
+            state: serde_json::json!({"server": "rust-analyzer", "phase": "ready"}),
+            events: vec![],
+        });
+        assert_eq!(response.message, "LSP status: rust-analyzer (ready)");
+    }
+
+    #[test]
+    fn applies_lsp_text_edits_from_the_end_of_the_document() {
+        let text = "let old = 1;\nold\n";
+        let edits = serde_json::json!([
+            {"range": {"start": {"line": 0, "character": 4}, "end": {"line": 0, "character": 7}}, "newText": "new"},
+            {"range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 3}}, "newText": "new"}
+        ]);
+        assert_eq!(apply_text_edits(text, &edits).unwrap(), "let new = 1;\nnew\n");
+    }
+
+    #[test]
+    fn normalizes_document_changes_workspace_edits() {
+        let changes = workspace_edit_changes(&serde_json::json!({
+            "documentChanges": [{
+                "textDocument": {"uri": "file:///workspace/src/lib.rs", "version": 1},
+                "edits": []
+            }]
+        }))
+        .unwrap();
+        assert!(changes.contains_key("file:///workspace/src/lib.rs"));
+    }
+
+    #[test]
+    fn hook_matches_absolute_path_against_lsp_uri() {
+        assert!(path_matches_uri(
+            "/workspace/src/lib.rs",
+            "file:///workspace/src/lib.rs",
+            "src/lib.rs",
+        ));
     }
 
     #[test]

@@ -902,6 +902,7 @@ impl WasiExtensionManager {
                         "api_version": BROKER_API_VERSION,
                         "capability": result.request.capability,
                         "operation": result.request.operation,
+                        "arguments": result.request.arguments,
                         "ok": false,
                         "error": {"code": error.code, "message": error.message},
                     }),
@@ -909,6 +910,7 @@ impl WasiExtensionManager {
                         "api_version": BROKER_API_VERSION,
                         "capability": result.request.capability,
                         "operation": result.request.operation,
+                        "arguments": result.request.arguments,
                         "ok": true,
                         "value": result.value,
                     }),
@@ -939,6 +941,10 @@ impl WasiExtensionManager {
             .lock()
             .map(|scope| scope.clone())
             .map_err(|_| "Extension session lock poisoned".to_string())
+    }
+
+    pub fn active_session_scope(&self) -> Result<Option<String>, String> {
+        self.session_scope()
     }
 
     fn filter_granted_requests(&self, requests: Vec<HostBrokerRequest>) -> Vec<HostBrokerRequest> {
