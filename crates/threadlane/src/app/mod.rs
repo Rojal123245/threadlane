@@ -66,6 +66,13 @@ fn include_connected_provider_models(mut models: Vec<String>) -> Vec<String> {
     models
 }
 
+/// Whether the user can talk to at least one LLM right now, via any
+/// supported provider (not just OpenAI/ChatGPT specifically).
+fn has_connected_provider() -> bool {
+    auth::load_credentials().is_some()
+        || threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some()
+}
+
 fn ordered_model_options(
     models: Vec<String>,
     selected_model: &str,
@@ -2463,6 +2470,8 @@ impl MatchEvent for App {
             );
             key_opt = Some(creds.access_token.clone());
             account_id_opt = creds.account_id.clone();
+        }
+        if has_connected_provider() {
             self.ui.widget(cx, ids!(auth_row)).set_visible(cx, false);
             self.set_status(cx, UiStatus::Ready, "Ready");
         } else {
@@ -2611,31 +2620,7 @@ impl MatchEvent for App {
 
         if self.ui.button(cx, ids!(settings_btn)).clicked(actions) {
             self.open_providers_modal(cx);
-            if let Some(creds) =
-                threadlane_provider::antigravity_auth::load_antigravity_credentials()
-            {
-                let status_text = match creds.account_email {
-                    Some(ref email) => format!("✓ Connected ({email})"),
-                    None => "✓ Connected".to_string(),
-                };
-                self.ui
-                    .label(cx, ids!(antigravity_status_lbl))
-                    .set_text(cx, &status_text);
-            } else {
-                self.ui
-                    .label(cx, ids!(antigravity_status_lbl))
-                    .set_text(cx, "Not Connected");
-            }
-            if auth::load_credentials().is_some() {
-                self.ui
-                    .label(cx, ids!(openai_status_lbl))
-                    .set_text(cx, "✓ Connected");
-            } else {
-                self.ui
-                    .label(cx, ids!(openai_status_lbl))
-                    .set_text(cx, "Not Connected");
-            }
-            cx.redraw_all();
+            self.refresh_provider_connection_ui(cx);
         }
 
         if self.ui.button(cx, ids!(close_modal_btn)).clicked(actions) {
@@ -2647,8 +2632,19 @@ impl MatchEvent for App {
             .button(cx, ids!(antigravity_login_btn))
             .clicked(actions)
         {
-            self.dismiss_providers_modal(cx);
-            self.start_antigravity_login(cx);
+            if threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some() {
+                match threadlane_provider::antigravity_auth::clear_antigravity_credentials() {
+                    Ok(()) => self.push_chat(MsgRole::System, "Disconnected Google Antigravity."),
+                    Err(e) => self.push_chat(
+                        MsgRole::System,
+                        format!("Failed to disconnect Google Antigravity: {e}"),
+                    ),
+                }
+                self.refresh_provider_connection_ui(cx);
+            } else {
+                self.dismiss_providers_modal(cx);
+                self.start_antigravity_login(cx);
+            }
         }
 
         if self
@@ -2668,11 +2664,25 @@ impl MatchEvent for App {
         }
 
         let openai_login_clicked = self.ui.button(cx, ids!(openai_login_btn)).clicked(actions);
-        if openai_login_clicked {
-            self.dismiss_providers_modal(cx);
+        let openai_creds = auth::load_credentials();
+        let openai_own_connected = openai_creds
+            .as_ref()
+            .is_some_and(|c| auth::is_own_source(&c.source));
+        if openai_login_clicked && openai_own_connected {
+            match auth::remove_credentials() {
+                Ok(()) => self.push_chat(MsgRole::System, "Disconnected ChatGPT."),
+                Err(e) => self.push_chat(
+                    MsgRole::System,
+                    format!("Failed to disconnect ChatGPT: {e}"),
+                ),
+            }
+            self.refresh_provider_connection_ui(cx);
         }
 
-        if openai_login_clicked || self.ui.button(cx, ids!(login_btn)).clicked(actions) {
+        let start_openai_login = (openai_login_clicked && openai_creds.is_none())
+            || self.ui.button(cx, ids!(login_btn)).clicked(actions);
+        if start_openai_login {
+            self.dismiss_providers_modal(cx);
             self.auth_workspace = self.workspace_state.active_key().cloned();
             self.push_chat(MsgRole::System, "Initiating ChatGPT device code login...");
             self.apply_status_ui(cx, UiStatus::Working, "Connecting to ChatGPT...");
@@ -3112,6 +3122,71 @@ impl App {
         {
             modal.close(cx);
         }
+    }
+
+    fn refresh_provider_connection_ui(&mut self, cx: &mut Cx) {
+        if let Some(creds) = threadlane_provider::antigravity_auth::load_antigravity_credentials()
+        {
+            let status_text = match creds.account_email {
+                Some(ref email) => format!("✓ Connected ({email})"),
+                None => "✓ Connected".to_string(),
+            };
+            self.ui
+                .label(cx, ids!(antigravity_status_lbl))
+                .set_text(cx, &status_text);
+            self.ui
+                .button(cx, ids!(antigravity_login_btn))
+                .set_text(cx, "Disconnect");
+        } else {
+            self.ui
+                .label(cx, ids!(antigravity_status_lbl))
+                .set_text(cx, "Not Connected");
+            self.ui
+                .button(cx, ids!(antigravity_login_btn))
+                .set_text(cx, "Sign in with Google");
+        }
+        match auth::load_credentials() {
+            Some(creds) if auth::is_own_source(&creds.source) => {
+                self.ui
+                    .label(cx, ids!(openai_status_lbl))
+                    .set_text(cx, "✓ Connected");
+                self.ui
+                    .button(cx, ids!(openai_login_btn))
+                    .set_text(cx, "Disconnect");
+                self.ui
+                    .button(cx, ids!(openai_login_btn))
+                    .set_enabled(cx, true);
+            }
+            Some(creds) => {
+                self.ui
+                    .label(cx, ids!(openai_status_lbl))
+                    .set_text(cx, &format!("✓ Connected (via {})", creds.source));
+                self.ui
+                    .button(cx, ids!(openai_login_btn))
+                    .set_text(cx, "Managed Externally");
+                self.ui
+                    .button(cx, ids!(openai_login_btn))
+                    .set_enabled(cx, false);
+            }
+            None => {
+                self.ui
+                    .label(cx, ids!(openai_status_lbl))
+                    .set_text(cx, "Not Connected");
+                self.ui
+                    .button(cx, ids!(openai_login_btn))
+                    .set_text(cx, "Sign in with ChatGPT");
+                self.ui
+                    .button(cx, ids!(openai_login_btn))
+                    .set_enabled(cx, true);
+            }
+        }
+        if has_connected_provider() {
+            self.ui.widget(cx, ids!(auth_row)).set_visible(cx, false);
+        } else {
+            self.ui.widget(cx, ids!(auth_row)).set_visible(cx, true);
+            self.set_status(cx, UiStatus::Error, "Not signed in");
+        }
+        cx.redraw_all();
     }
 
     fn start_antigravity_login(&mut self, cx: &mut Cx) {
@@ -4903,6 +4978,8 @@ impl App {
                         None => "✓ Successfully authenticated with Google Antigravity.".to_string(),
                     };
                     self.push_chat(MsgRole::System, msg);
+                    self.ui.widget(cx, ids!(auth_row)).set_visible(cx, false);
+                    self.set_status(cx, UiStatus::Ready, "Ready");
                     let selected_model = self
                         .ui
                         .icon_drop_down(cx, ids!(model_drop))
