@@ -6,6 +6,7 @@ pub mod context;
 pub mod extension_broker;
 pub mod frontmatter;
 pub mod packages;
+mod plan;
 pub mod policy;
 pub mod prompt_templates;
 pub mod skills;

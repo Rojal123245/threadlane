@@ -13,6 +13,28 @@ pub struct AgentToolDefinition {
     pub strict: Option<bool>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanItemStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanItem {
+    pub step: String,
+    pub status: PlanItemStatus,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionPlan {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<String>,
+    #[serde(default)]
+    pub items: Vec<PlanItem>,
+}
+
 impl AgentToolDefinition {
     pub fn new(name: impl Into<String>, description: impl Into<String>, parameters: Value) -> Self {
         Self {

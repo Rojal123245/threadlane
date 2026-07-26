@@ -3,6 +3,7 @@
 use makepad_widgets::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use threadlane_agent::{PlanItemStatus, SessionPlan};
 use threadlane_coding_agent::TaskStatus;
 
 script_mod! {
@@ -88,6 +89,34 @@ script_mod! {
         }
     }
 
+    mod.components.PlanSidebarRowBase = View {
+        width: Fill
+        height: 40
+        flow: Right
+        spacing: 9
+        align: Align{y: 0.5}
+        padding: Inset{left: 14 right: 12}
+
+        status_dot := RoundedView {
+            width: 7
+            height: 7
+            draw_bg +: {
+                color: #x7b8796
+                border_radius: 3.5
+            }
+        }
+        step_lbl := mod.components.ClippedLabel {
+            width: Fill
+            height: 20
+            padding: 0
+            align: Align{y: 0.5}
+            draw_text +: {
+                color: #xb6c0cd
+                text_style +: { font_size: 9.0 }
+            }
+        }
+    }
+
     mod.components.TaskSidebar = set_type_default() do mod.components.TaskSidebarBase {
         width: 280
         height: Fill
@@ -134,6 +163,44 @@ script_mod! {
             height: Fill
             flow: Down
             drag_scrolling: true
+
+            PlanHeader := View {
+                width: Fill
+                height: 36
+                flow: Right
+                align: Align{y: 0.5}
+                padding: Inset{left: 12 top: 5 right: 12}
+                plan_lbl := Label {
+                    width: Fill
+                    height: 18
+                    padding: 0
+                    align: Align{y: 0.5}
+                    text: "CURRENT PLAN"
+                    draw_text +: {
+                        color: #x77869a
+                        text_style: theme.font_bold { font_size: 7.5 }
+                    }
+                }
+                progress_lbl := Label {
+                    width: Fit
+                    height: 18
+                    padding: 0
+                    align: Align{y: 0.5}
+                    draw_text +: {
+                        color: #x8fa0b5
+                        text_style: theme.font_code { font_size: 8.0 }
+                    }
+                }
+            }
+            PlanPending := mod.components.PlanSidebarRowBase {}
+            PlanInProgress := mod.components.PlanSidebarRowBase {
+                status_dot +: { draw_bg +: { color: #x78aef0 } }
+                step_lbl +: { draw_text +: { color: #xd6e5f8 } }
+            }
+            PlanCompleted := mod.components.PlanSidebarRowBase {
+                status_dot +: { draw_bg +: { color: #x67c58b } }
+                step_lbl +: { draw_text +: { color: #x8794a4 } }
+            }
 
             SessionHeader := View {
                 width: Fill
@@ -196,6 +263,8 @@ pub enum TaskSidebarAction {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum TaskSidebarRow {
+    PlanHeader,
+    PlanItem(usize),
     SessionHeader {
         session_id: String,
         label: String,
@@ -214,7 +283,8 @@ fn status_rank(status: TaskStatus) -> u8 {
     }
 }
 
-fn task_sidebar_rows(
+fn sidebar_rows(
+    plan: &SessionPlan,
     items: &[TaskSidebarItem],
     current_session_id: Option<&str>,
 ) -> Vec<TaskSidebarRow> {
@@ -251,7 +321,13 @@ fn task_sidebar_rows(
             .then_with(|| left.0.cmp(right.0))
     });
 
-    let mut rows = Vec::with_capacity(items.len() + sessions.len());
+    let mut rows = Vec::with_capacity(
+        items.len() + sessions.len() + plan.items.len() + usize::from(!plan.items.is_empty()),
+    );
+    if !plan.items.is_empty() {
+        rows.push(TaskSidebarRow::PlanHeader);
+        rows.extend((0..plan.items.len()).map(TaskSidebarRow::PlanItem));
+    }
     for (session_id, current, _, indices) in sessions {
         let label = if current {
             "CURRENT CHAT".to_owned()
@@ -272,8 +348,18 @@ fn task_sidebar_row(rows: &[TaskSidebarRow], index: usize) -> Option<&TaskSideba
     rows.get(index)
 }
 
-pub fn task_header_state(items: &[TaskSidebarItem]) -> (bool, String) {
-    if items.is_empty() {
+fn plan_progress(plan: &SessionPlan) -> (usize, usize) {
+    (
+        plan.items
+            .iter()
+            .filter(|item| item.status == PlanItemStatus::Completed)
+            .count(),
+        plan.items.len(),
+    )
+}
+
+pub fn task_header_state(plan: &SessionPlan, items: &[TaskSidebarItem]) -> (bool, String) {
+    if plan.items.is_empty() && items.is_empty() {
         return (false, String::new());
     }
     let active = items
@@ -291,6 +377,14 @@ pub fn task_header_state(items: &[TaskSidebarItem]) -> (bool, String) {
         _ => "99+".to_owned(),
     };
     (true, count)
+}
+
+fn plan_template(status: PlanItemStatus) -> LiveId {
+    match status {
+        PlanItemStatus::Pending => id!(PlanPending),
+        PlanItemStatus::InProgress => id!(PlanInProgress),
+        PlanItemStatus::Completed => id!(PlanCompleted),
+    }
 }
 
 fn task_template(status: TaskStatus) -> LiveId {
@@ -322,6 +416,8 @@ pub struct TaskSidebar {
     #[deref]
     view: View,
     #[rust]
+    plan: SessionPlan,
+    #[rust]
     items: Vec<TaskSidebarItem>,
     #[rust]
     rows: Vec<TaskSidebarRow>,
@@ -330,16 +426,19 @@ pub struct TaskSidebar {
 }
 
 impl TaskSidebar {
-    pub fn set_items(
+    pub fn set_content(
         &mut self,
         cx: &mut Cx,
+        plan: SessionPlan,
         items: Vec<TaskSidebarItem>,
         current_session_id: Option<String>,
     ) {
-        if self.items == items && self.current_session_id == current_session_id {
+        if self.plan == plan && self.items == items && self.current_session_id == current_session_id
+        {
             return;
         }
-        self.rows = task_sidebar_rows(&items, current_session_id.as_deref());
+        self.rows = sidebar_rows(&plan, &items, current_session_id.as_deref());
+        self.plan = plan;
         self.items = items;
         self.current_session_id = current_session_id;
         self.view.redraw(cx);
@@ -356,6 +455,21 @@ impl Widget for TaskSidebar {
                         continue;
                     };
                     match sidebar_row {
+                        TaskSidebarRow::PlanHeader => {
+                            let row = list.item(cx, row_index, id!(PlanHeader));
+                            let (completed, total) = plan_progress(&self.plan);
+                            row.label(cx, ids!(progress_lbl))
+                                .set_text(cx, &format!("{completed}/{total}"));
+                            row.draw_all_unscoped(cx);
+                        }
+                        TaskSidebarRow::PlanItem(item_index) => {
+                            let Some(plan_item) = self.plan.items.get(*item_index) else {
+                                continue;
+                            };
+                            let row = list.item(cx, row_index, plan_template(plan_item.status));
+                            row.label(cx, ids!(step_lbl)).set_text(cx, &plan_item.step);
+                            row.draw_all_unscoped(cx);
+                        }
                         TaskSidebarRow::SessionHeader { label, .. } => {
                             let row = list.item(cx, row_index, id!(SessionHeader));
                             row.label(cx, ids!(session_lbl)).set_text(cx, label);
@@ -366,10 +480,8 @@ impl Widget for TaskSidebar {
                                 continue;
                             };
                             let row = list.item(cx, row_index, task_template(task.status));
-                            row.label(cx, ids!(summary_lbl))
-                                .set_text(cx, &task.summary);
-                            row.label(cx, ids!(agent_lbl))
-                                .set_text(cx, &task.agent);
+                            row.label(cx, ids!(summary_lbl)).set_text(cx, &task.summary);
+                            row.label(cx, ids!(agent_lbl)).set_text(cx, &task.agent);
                             let activity = if task.activity.is_empty() {
                                 status_label(task.status)
                             } else {
@@ -429,6 +541,7 @@ impl Widget for TaskSidebar {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use threadlane_agent::{PlanItem, PlanItemStatus, SessionPlan};
 
     fn item(
         id: &str,
@@ -457,7 +570,7 @@ mod tests {
             item("running", "chat-a", TaskStatus::Running, 20),
             item("older", "chat-a", TaskStatus::Completed, 5),
         ];
-        let rows = task_sidebar_rows(&items, Some("chat-a"));
+        let rows = sidebar_rows(&SessionPlan::default(), &items, Some("chat-a"));
         assert!(matches!(
             &rows[0],
             TaskSidebarRow::SessionHeader { current: true, .. }
@@ -474,18 +587,55 @@ mod tests {
 
     #[test]
     fn header_is_hidden_only_when_project_has_no_tasks() {
-        assert_eq!(task_header_state(&[]), (false, String::new()));
         assert_eq!(
-            task_header_state(&[
-                item("a", "chat-a", TaskStatus::Running, 1),
-                item("b", "chat-a", TaskStatus::Completed, 2),
-            ]),
+            task_header_state(&SessionPlan::default(), &[]),
+            (false, String::new())
+        );
+        assert_eq!(
+            task_header_state(
+                &SessionPlan::default(),
+                &[
+                    item("a", "chat-a", TaskStatus::Running, 1),
+                    item("b", "chat-a", TaskStatus::Completed, 2),
+                ]
+            ),
             (true, "1".into())
         );
         assert_eq!(
-            task_header_state(&[item("done", "chat-a", TaskStatus::Completed, 1)]),
+            task_header_state(
+                &SessionPlan::default(),
+                &[item("done", "chat-a", TaskStatus::Completed, 1)]
+            ),
             (true, String::new())
         );
+    }
+
+    #[test]
+    fn plan_rows_precede_project_tasks_and_report_progress() {
+        let plan = SessionPlan {
+            explanation: None,
+            items: vec![
+                PlanItem {
+                    step: "Inspect".into(),
+                    status: PlanItemStatus::Completed,
+                },
+                PlanItem {
+                    step: "Implement".into(),
+                    status: PlanItemStatus::InProgress,
+                },
+                PlanItem {
+                    step: "Verify".into(),
+                    status: PlanItemStatus::Pending,
+                },
+            ],
+        };
+        let items = vec![item("task", "chat-a", TaskStatus::Running, 1)];
+        let rows = sidebar_rows(&plan, &items, Some("chat-a"));
+
+        assert!(matches!(rows[0], TaskSidebarRow::PlanHeader));
+        assert!(matches!(rows[1], TaskSidebarRow::PlanItem(0)));
+        assert_eq!(plan_progress(&plan), (1, 3));
+        assert_eq!(task_header_state(&plan, &[]), (true, String::new()));
     }
 
     #[test]

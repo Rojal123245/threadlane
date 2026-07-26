@@ -5,6 +5,7 @@ use crate::extension_broker::{
     BrokerError, BrokerRequest, CapabilityDispatcher, CapabilityHandler, BROKER_API_VERSION,
 };
 use crate::packages::default_global_threadlane_dir;
+use crate::plan::{SessionPlanStore, UpdatePlanToolExecutor};
 use crate::skills::{LoadSkillToolExecutor, SkillManager, SkillRegistry};
 use crate::system_prompt::{build_system_prompt, SystemPromptBuildOptions, SystemPromptConfig};
 use crate::wasi_extension::{WasiExtensionManager, WasiLegacyEffect};
@@ -1334,6 +1335,7 @@ pub struct CodingAgent {
     broker_dispatcher: Arc<CapabilityDispatcher>,
     managed_processes: ManagedProcessRegistry,
     agent_work: AgentWorkScheduler,
+    plan_store: SessionPlanStore,
     prompt_templates: Option<Vec<crate::prompt_templates::PromptTemplate>>,
     #[cfg(test)]
     subagent_work_observer: SubagentObserverState,
@@ -1658,6 +1660,8 @@ impl CodingAgent {
         session_tree
             .model
             .get_or_insert_with(|| effective_model.clone());
+        let plan_store =
+            SessionPlanStore::new(session_tree.plan().clone(), session_tree.file_path.clone());
         let mut agent = Agent::new(&options.api_key, options.account_id, &effective_model);
 
         agent.set_prompt_cache_key(Some(session_tree.session_id.clone()));
@@ -1741,6 +1745,13 @@ impl CodingAgent {
             .loop_engine
             .register_tool_executor(Arc::new(SubagentToolExecutor::new(agent_runner.clone())))
             .expect("reserved subagent tool must register");
+        agent
+            .loop_engine
+            .register_tool_executor(Arc::new(UpdatePlanToolExecutor::new(
+                plan_store.clone(),
+                agent.loop_engine.event_tx.clone(),
+            )))
+            .expect("reserved update_plan tool must register");
         if let Err(error) =
             agent
                 .loop_engine
@@ -1810,6 +1821,7 @@ impl CodingAgent {
             broker_dispatcher,
             managed_processes,
             agent_work,
+            plan_store,
             prompt_templates: None,
             #[cfg(test)]
             subagent_work_observer,
@@ -1824,6 +1836,10 @@ impl CodingAgent {
 
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
         self.agent.subscribe()
+    }
+
+    pub fn current_plan(&self) -> threadlane_agent::SessionPlan {
+        self.plan_store.current()
     }
 
     async fn dispatch_assistant_hook(&self, message: &AgentMessage) {
@@ -3230,6 +3246,11 @@ mod tests {
             .unwrap()
             .iter()
             .any(|tool| { tool["name"] == crate::skills::LOAD_SKILL_TOOL_NAME }));
+        assert!(codex["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| { tool["name"] == crate::plan::UPDATE_PLAN_TOOL_NAME }));
 
         let results = coding_agent
             .agent
@@ -3243,6 +3264,34 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert!(!results[0].is_error);
         assert!(results[0].content.contains("BODY_SENTINEL"));
+    }
+
+    #[tokio::test]
+    async fn coding_agent_restores_the_session_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("session.jsonl");
+        let mut options = coding_agent_options(dir.path().to_path_buf());
+        options.session_file = Some(session_file.clone());
+        let coding_agent = CodingAgent::new(options);
+
+        let results = coding_agent
+            .agent
+            .loop_engine
+            .execute_tools(&[provider_tool_call(
+                "plan-call",
+                crate::plan::UPDATE_PLAN_TOOL_NAME,
+                serde_json::json!({
+                    "plan": [{"step": "Verify", "status": "in_progress"}]
+                }),
+            )])
+            .await;
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].is_error);
+
+        let mut restored_options = coding_agent_options(dir.path().to_path_buf());
+        restored_options.session_file = Some(session_file);
+        let restored = CodingAgent::new(restored_options);
+        assert_eq!(restored.current_plan().items[0].step, "Verify");
     }
 
     #[tokio::test]

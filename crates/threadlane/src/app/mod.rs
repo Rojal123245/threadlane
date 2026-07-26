@@ -33,7 +33,7 @@ use base64::Engine as _;
 use makepad_widgets::text::selection::Cursor;
 use makepad_widgets::*;
 use robius_file_picker::FileDialog;
-use threadlane_agent::{get_runtime, AgentEvent, ImageAttachment, ReasoningEffort};
+use threadlane_agent::{get_runtime, AgentEvent, ImageAttachment, ReasoningEffort, SessionPlan};
 use threadlane_coding_agent::{
     default_global_threadlane_dir, discover_agents, AgentConfig, AgentScope, CapabilityCatalog,
     CodingAgent, CodingAgentOptions, ExtensionManager, ExtensionScope, HarnessSupervisor,
@@ -3321,6 +3321,7 @@ struct SessionRuntime {
     status_text: String,
     model: String,
     reasoning_effort: ReasoningEffort,
+    plan: SessionPlan,
 }
 
 #[derive(Clone)]
@@ -3333,6 +3334,7 @@ struct ProjectCapabilities {
 impl SessionRuntime {
     fn new(agent: CodingAgent, model: String, reasoning_effort: ReasoningEffort) -> Self {
         let session_file = agent.session_tree.file_path.clone();
+        let plan = agent.current_plan();
         Self {
             agent: Arc::new(tokio::sync::Mutex::new(agent)),
             session_file,
@@ -3344,6 +3346,7 @@ impl SessionRuntime {
             status_text: String::new(),
             model,
             reasoning_effort,
+            plan,
         }
     }
 }
@@ -3658,6 +3661,7 @@ impl MatchEvent for App {
         self.spawn_model_fetch(api_key, account_id_opt);
         self.trigger_update_check(cx);
         self.sync_terminal_project(cx);
+        self.sync_task_sidebar(cx);
 
         cx.redraw_all();
     }
@@ -5116,7 +5120,12 @@ impl App {
                 })
             })
             .unwrap_or_default();
-        let (visible, count) = task_header_state(&items);
+        let plan = active_key
+            .as_ref()
+            .and_then(|key| self.session_runtimes.get(key))
+            .map(|runtime| runtime.plan.clone())
+            .unwrap_or_default();
+        let (visible, count) = task_header_state(&plan, &items);
         self.ui
             .button(cx, ids!(task_sidebar_btn))
             .set_visible(cx, visible);
@@ -5134,8 +5143,9 @@ impl App {
             .widget(cx, ids!(task_sidebar))
             .borrow_mut::<TaskSidebar>()
         {
-            sidebar.set_items(
+            sidebar.set_content(
                 cx,
+                plan,
                 items,
                 active_key.as_ref().map(|key| key.session_id.clone()),
             );
@@ -6051,6 +6061,7 @@ impl App {
 
         self.refresh_project_capabilities(cx, &entry.work_dir);
         self.restore_active_status(cx);
+        self.sync_task_sidebar(cx);
         cx.redraw_all();
     }
 
@@ -6653,6 +6664,15 @@ impl App {
                     MsgRole::System,
                     format!("⚠ Injected stream rule '{rule_name}' after matching '{matched_text}': {reminder}"),
                 );
+            }
+            AgentEvent::PlanUpdated { plan } => {
+                let Some(key) = target_key else { return };
+                if let Some(runtime) = self.session_runtimes.get_mut(&key) {
+                    runtime.plan = plan;
+                }
+                if self.workspace_state.is_active(&key) {
+                    self.sync_task_sidebar(cx);
+                }
             }
             AgentEvent::TurnStart { .. }
             | AgentEvent::MessageStart { .. }

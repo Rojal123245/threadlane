@@ -1,4 +1,4 @@
-use crate::types::{AgentMessage, AgentToolResult, TokenUsage};
+use crate::types::{AgentMessage, AgentToolResult, SessionPlan, TokenUsage};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +59,9 @@ pub enum AgentEvent {
         succeeded: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+    },
+    PlanUpdated {
+        plan: SessionPlan,
     },
     AgentError {
         error: String,
