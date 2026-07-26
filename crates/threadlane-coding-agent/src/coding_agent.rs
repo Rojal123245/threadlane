@@ -2184,6 +2184,16 @@ async fn run_subagents_with_context(
     context: SubagentRunContext,
 ) -> Result<(String, Vec<AgentMessage>), String> {
     let run_id = NEXT_SUBAGENT_UI_RUN_ID.fetch_add(1, Ordering::Relaxed);
+    for (task_index, task) in tasks.iter().enumerate() {
+        let _ = context
+            .parent_event_tx
+            .send(AgentEvent::SubagentQueued {
+                run_id,
+                task_index,
+                agent: task.agent.clone(),
+                task: task.task.clone(),
+            });
+    }
     let candidates = discover_agents(&context.work_dir, AgentScope::Both).agents;
     let run_one = |task_index: usize, task: AgentRunTask| {
         let candidate = candidates
@@ -2222,6 +2232,7 @@ async fn run_subagents_with_context(
         }
 
         let context = context.clone();
+        let event_tx = context.parent_event_tx.clone();
         async move {
             let _permit = context
                 .semaphore
@@ -2229,12 +2240,27 @@ async fn run_subagents_with_context(
                 .acquire_owned()
                 .await
                 .map_err(|_| "Subagent concurrency limiter closed".to_string())?;
-            timeout(
+            let _ = event_tx.send(AgentEvent::SubagentStarted {
+                run_id,
+                task_index,
+            });
+            let result = timeout(
                 SUBAGENT_TIMEOUT,
                 run_subagent_task(config, task.task, context, run_id, task_index),
             )
             .await
-            .map_err(|_| "Subagent timed out".to_string())?
+            .map_err(|_| "Subagent timed out".to_string())?;
+            let (succeeded, error) = match &result {
+                Ok(_) => (true, None),
+                Err(error) => (false, Some(error.clone())),
+            };
+            let _ = event_tx.send(AgentEvent::SubagentFinished {
+                run_id,
+                task_index,
+                succeeded,
+                error,
+            });
+            result
         }
     };
     let results = if parallel {
@@ -2460,7 +2486,10 @@ fn subagent_ui_event(event: AgentEvent, tool_call_prefix: &str) -> Option<AgentE
         | AgentEvent::AgentEnd { .. }
         | AgentEvent::AgentError { .. }
         | AgentEvent::TurnStart { .. }
-        | AgentEvent::TurnEnd { .. } => None,
+        | AgentEvent::TurnEnd { .. }
+        | AgentEvent::SubagentQueued { .. }
+        | AgentEvent::SubagentStarted { .. }
+        | AgentEvent::SubagentFinished { .. } => None,
         // Keep child prose and reasoning inside the child session. The final
         // labelled result renders it under the matching task after completion.
         AgentEvent::MessageUpdate { .. } => None,
@@ -2787,6 +2816,16 @@ mod tests {
         assert!(subagent_ui_event(
             AgentEvent::AgentError {
                 error: "child failed".into()
+            },
+            "child:"
+        )
+        .is_none());
+        assert!(subagent_ui_event(
+            AgentEvent::SubagentQueued {
+                run_id: 1,
+                task_index: 0,
+                agent: "nested".into(),
+                task: "nested task".into(),
             },
             "child:"
         )
@@ -3219,6 +3258,7 @@ mod tests {
 
         let coding_agent = CodingAgent::new(coding_agent_options(dir.path().to_path_buf()));
         coding_agent.set_subagent_work_observer(Arc::new(Mutex::new(Vec::new())));
+        let mut lifecycle_events = coding_agent.subscribe();
         let (chat, codex) = coding_agent.agent.loop_engine.build_api_payloads().await;
         assert!(chat["tools"]
             .as_array()
@@ -3238,11 +3278,41 @@ mod tests {
                 "subagent-call",
                 "subagent",
                 serde_json::json!({
-                    "tasks": [{"agent": "scout", "task": "inspect the project"}],
-                    "parallel": false
+                    "tasks": [
+                        {"agent": "scout", "task": "inspect the project"},
+                        {"agent": "reviewer", "task": "review the project"}
+                    ],
+                    "parallel": true
                 }),
             )])
             .await;
+        let events = std::iter::from_fn(|| lifecycle_events.try_recv().ok()).collect::<Vec<_>>();
+        let queued = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::SubagentQueued {
+                    run_id,
+                    task_index,
+                    agent,
+                    task,
+                } => Some((*run_id, *task_index, agent.clone(), task.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let started = events
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::SubagentStarted { .. }))
+            .count();
+        let finished = events
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::SubagentFinished { .. }))
+            .count();
+        assert_eq!(queued.len(), 2);
+        assert_eq!(queued[0].0, queued[1].0);
+        assert_eq!(queued[0].1, 0);
+        assert_eq!(queued[1].1, 1);
+        assert_eq!(started, 2);
+        assert_eq!(finished, 2);
         assert_eq!(results.len(), 1);
         assert!(!results[0].is_error, "{}", results[0].content);
         assert!(results[0]

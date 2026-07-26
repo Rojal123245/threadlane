@@ -186,8 +186,10 @@ Drawing in an overlay does not automatically stop widgets underneath from receiv
 - `SubagentRail` manually draws dynamic `ToolFoldHeader` rows but does not keep per-row draw state. Consume each row with `draw_all_unscoped`; propagating a row's intermediate `DrawStep` restarts the rail loop at the first header and prevents expanded bodies from drawing.
 - Custom containers that manually draw dynamic children need their own valid hit area. Prefer an instance-backed transparent draw primitive for that area; retaining a raw turtle `Area::Rect` across recycled `PortalList` redraws can leave a stale `rect_id` and panic during pointer movement.
 - The chat `PortalList` range is based on display rows, not raw message count. If changing grouping, preserve stable ordering, auto-tail behavior, and non-reused fold widget state.
+- A `PortalList` can yield a stale visible item ID for one draw after its range shrinks. Resolve dynamic backing rows with `.get(item_id)` and skip missing entries instead of indexing directly.
 - Avoid calling `markdown.set_text(cx, text)` unconditionally inside `draw_walk` when text is unchanged; `set_text` forces Makepad to discard its AST and re-parse Markdown/syntax highlighting on every frame draw. Check `widget.text() != text` before updating.
 - Precalculate tool details, activity summaries, and JSON presentations in `DisplayRow` state when building display items rather than invoking `serde_json::from_str` or string line-splitting during `draw_walk`.
+- Cross-session task UI reads the canonical `HarnessSupervisor` registry. Keep detached `/task` work and foreground model-subagent lifecycle there rather than adding another GUI-only counter; model subagents remain synchronous and emit lifecycle events only for observation.
 
 ### Composer Drop-Ups
 

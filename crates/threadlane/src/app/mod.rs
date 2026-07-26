@@ -4,6 +4,9 @@
 
 use crate::components::model_dropdown::IconDropDownWidgetRefExt;
 use crate::components::session_row::ProjectHeaderAction;
+use crate::components::task_sidebar::{
+    task_header_state, TaskSidebar, TaskSidebarAction, TaskSidebarItem,
+};
 use crate::components::terminal_panel::ProjectTerminalWidgetRefExt;
 use crate::panels::chat::{
     accepts_generation_event, concise_status, draft_for_cancellation, submitted_draft, ChatList,
@@ -20,10 +23,9 @@ use crate::state::{
     create_new_session, delete_session, end_title_generation, is_project_working,
     is_session_working, normalize_session_title, project_work_dir_at_row, refresh_sessions,
     session_entry_at_row, session_overflow_at_row, session_title_eligible, set_active_project,
-    set_active_session, set_session_context_target, set_session_working,
+    session_entry_for_file, set_active_session, set_session_context_target, set_session_working,
     title_prompt_for_submission, toggle_project_collapsed, toggle_project_show_all, truncate_chars,
-    BackgroundTaskState, CapabilityState, CommandInfo, GuiAgentEvent, MsgRole, SessionEntry,
-    ToolStatus,
+    CapabilityState, CommandInfo, GuiAgentEvent, MsgRole, SessionEntry, ToolStatus,
 };
 use crate::updater::UpdateStatus;
 use crate::workspace::{AppState, SessionKey, WorkspaceUiState};
@@ -35,7 +37,7 @@ use threadlane_agent::{get_runtime, AgentEvent, ImageAttachment, ReasoningEffort
 use threadlane_coding_agent::{
     default_global_threadlane_dir, discover_agents, AgentConfig, AgentScope, CapabilityCatalog,
     CodingAgent, CodingAgentOptions, ExtensionManager, ExtensionScope, HarnessSupervisor,
-    ProjectContext, SkillMetadata,
+    ProjectContext, SkillMetadata, TaskRecord,
 };
 use threadlane_provider::auth;
 use threadlane_provider::openai::{fetch_available_models, OpenAIClient};
@@ -2302,12 +2304,21 @@ script_mod! {
                                 }
                             }
 
-                            tasks_btn := Button {
+                            task_sidebar_btn := Button {
                                 width: Fit
                                 height: 28
+                                visible: false
                                 padding: Inset{left: 9 right: 9 top: 4 bottom: 4}
-                                spacing: 0
-                                text: "0 tasks"
+                                spacing: 5
+                                text: ""
+                                icon_walk: Walk{width: 13 height: 13}
+                                draw_icon +: {
+                                    svg: crate_resource("self:resources/icons/subagent.svg")
+                                    color: #x8fb9e8
+                                    color_hover: #xb9d7fa
+                                    color_focus: #xb9d7fa
+                                    color_down: #xffffff
+                                }
                                 draw_bg +: {
                                     color: #x232830
                                     color_hover: #x2d3642
@@ -2655,6 +2666,15 @@ script_mod! {
                             project_terminal := mod.components.ProjectTerminal {}
                             }
 
+                            task_sidebar_wrap := View {
+                                width: 280
+                                height: Fill
+                                visible: false
+                                task_sidebar := mod.components.TaskSidebar {
+                                    width: Fill
+                                    height: Fill
+                                }
+                            }
 
                         }
                     }
@@ -3254,6 +3274,37 @@ fn extension_reload_status(reloaded: usize, failures: &[String]) -> String {
     }
 }
 
+fn task_sidebar_items(
+    records: Vec<TaskRecord>,
+    mut session_label: impl FnMut(&TaskRecord) -> Option<String>,
+) -> Vec<TaskSidebarItem> {
+    records
+        .into_iter()
+        .map(|record| {
+            let cancellable = record.cancellable();
+            let label = session_label(&record).unwrap_or_else(|| {
+                if record.session_id == "draft" {
+                    "Project draft".to_owned()
+                } else {
+                    record.session_id.clone()
+                }
+            });
+            TaskSidebarItem {
+                id: record.id,
+                session_id: record.session_id,
+                session_label: label,
+                session_file: record.session_file,
+                agent: record.agent,
+                summary: truncate_chars(&record.summary, 120),
+                activity: record.current_activity.unwrap_or_default(),
+                status: record.status,
+                cancellable,
+                started_at_ms: record.started_at_ms,
+            }
+        })
+        .collect()
+}
+
 struct GenerationRun {
     id: u64,
     handle: tokio::task::JoinHandle<()>,
@@ -3261,6 +3312,7 @@ struct GenerationRun {
 
 struct SessionRuntime {
     agent: Arc<tokio::sync::Mutex<CodingAgent>>,
+    session_file: Option<PathBuf>,
     generation: Option<GenerationRun>,
     terminal_generation_id: Option<u64>,
     submitted_draft: Option<(u64, String)>,
@@ -3280,8 +3332,10 @@ struct ProjectCapabilities {
 
 impl SessionRuntime {
     fn new(agent: CodingAgent, model: String, reasoning_effort: ReasoningEffort) -> Self {
+        let session_file = agent.session_tree.file_path.clone();
         Self {
             agent: Arc::new(tokio::sync::Mutex::new(agent)),
+            session_file,
             generation: None,
             terminal_generation_id: None,
             submitted_draft: None,
@@ -3337,7 +3391,7 @@ pub struct App {
     #[rust]
     supervisor_projects: HashMap<PathBuf, String>,
     #[rust]
-    background_tasks: BackgroundTaskState,
+    task_sidebar_open: bool,
     #[rust]
     update_status: UpdateStatus,
     #[rust]
@@ -3394,8 +3448,9 @@ impl MatchEvent for App {
         if let Some(registry) = &self.project_registry {
             for project in registry.projects() {
                 if let Ok(record) = supervisor.register_project(&project.path) {
-                    self.supervisor_projects
-                        .insert(project.path.clone(), record.id);
+                    let path = std::fs::canonicalize(&project.path)
+                        .unwrap_or_else(|_| project.path.clone());
+                    self.supervisor_projects.insert(path, record.id);
                 }
             }
         }
@@ -3804,9 +3859,55 @@ impl MatchEvent for App {
             }
         }
 
-        if self.ui.button(cx, ids!(tasks_btn)).clicked(actions) {
-            self.push_chat(MsgRole::System, self.background_tasks.summary());
-            self.ui.widget(cx, ids!(chat_list)).redraw(cx);
+        if self
+            .ui
+            .button(cx, ids!(task_sidebar_btn))
+            .clicked(actions)
+        {
+            self.task_sidebar_open = !self.task_sidebar_open;
+            self.sync_task_sidebar(cx);
+        }
+
+        let task_sidebar_uid = self.ui.widget(cx, ids!(task_sidebar)).widget_uid();
+        if let Some(action) = actions.find_widget_action(task_sidebar_uid) {
+            match action.cast::<TaskSidebarAction>() {
+                TaskSidebarAction::Close => {
+                    self.task_sidebar_open = false;
+                    self.sync_task_sidebar(cx);
+                }
+                TaskSidebarAction::OpenSession {
+                    session_id,
+                    session_file,
+                } => {
+                    let Some(work_dir) = self.active_work_dir().map(Path::to_path_buf) else {
+                        return;
+                    };
+                    self.refresh_registered_sessions();
+                    if let Some(entry) = session_file
+                        .as_deref()
+                        .and_then(|path| session_entry_for_file(&work_dir, path))
+                    {
+                        self.activate_session(cx, entry);
+                    } else if session_id == "draft" {
+                        self.select_project_draft(cx, work_dir);
+                    } else {
+                        self.push_chat(
+                            MsgRole::System,
+                            "That task session is not available yet.",
+                        );
+                        self.ui.widget(cx, ids!(chat_list)).redraw(cx);
+                    }
+                }
+                TaskSidebarAction::Cancel(task_id) => {
+                    if let Some(supervisor) = &self.supervisor {
+                        if let Err(error) = supervisor.cancel_task(&task_id) {
+                            self.push_chat(MsgRole::System, error);
+                        }
+                    }
+                    self.sync_task_sidebar(cx);
+                }
+                TaskSidebarAction::None => {}
+            }
         }
 
         if self.ui.button(cx, ids!(update_btn)).clicked(actions) {
@@ -3865,6 +3966,9 @@ impl MatchEvent for App {
                     .workspace_mut(key.clone())
                     .chat
                     .mark_generation_stopped();
+                if self.finish_session_tasks(&key.work_dir, &key.session_id) {
+                    self.sync_task_sidebar(cx);
+                }
                 self.set_session_status(cx, &key, UiStatus::Ready, "Stopped");
                 self.push_chat(MsgRole::System, "Generation stopped.");
                 self.ui.widget(cx, ids!(chat_list)).redraw(cx);
@@ -4988,6 +5092,84 @@ impl App {
             .map(|key| key.work_dir.as_path())
     }
 
+    fn sync_task_sidebar(&mut self, cx: &mut Cx) {
+        let active_key = self.workspace_state.active_key().cloned();
+        let records = active_key
+            .as_ref()
+            .and_then(|key| {
+                let work_dir = std::fs::canonicalize(&key.work_dir)
+                    .unwrap_or_else(|_| key.work_dir.clone());
+                let project_id = self.supervisor_projects.get(&work_dir)?;
+                Some((
+                    work_dir,
+                    self.supervisor.as_ref()?.list_tasks_for_project(project_id),
+                ))
+            });
+        let items = records
+            .map(|(work_dir, records)| {
+                task_sidebar_items(records, |record| {
+                    record
+                        .session_file
+                        .as_deref()
+                        .and_then(|path| session_entry_for_file(&work_dir, path))
+                        .map(|entry| entry.title)
+                })
+            })
+            .unwrap_or_default();
+        let (visible, count) = task_header_state(&items);
+        self.ui
+            .button(cx, ids!(task_sidebar_btn))
+            .set_visible(cx, visible);
+        self.ui
+            .button(cx, ids!(task_sidebar_btn))
+            .set_text(cx, &count);
+        if !visible {
+            self.task_sidebar_open = false;
+        }
+        self.ui
+            .view(cx, ids!(task_sidebar_wrap))
+            .set_visible(cx, visible && self.task_sidebar_open);
+        if let Some(mut sidebar) = self
+            .ui
+            .widget(cx, ids!(task_sidebar))
+            .borrow_mut::<TaskSidebar>()
+        {
+            sidebar.set_items(
+                cx,
+                items,
+                active_key.as_ref().map(|key| key.session_id.clone()),
+            );
+        }
+    }
+
+    fn observe_session_task_event(
+        &self,
+        work_dir: &Path,
+        session_id: &str,
+        session_file: Option<&Path>,
+        event: &AgentEvent,
+    ) -> bool {
+        let canonical =
+            std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+        let Some(project_id) = self.supervisor_projects.get(&canonical) else {
+            return false;
+        };
+        self.supervisor.as_ref().is_some_and(|supervisor| {
+            supervisor.observe_session_event(project_id, session_id, session_file, event)
+        })
+    }
+
+    fn finish_session_tasks(&self, work_dir: &Path, session_id: &str) -> bool {
+        let canonical =
+            std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+        let Some(project_id) = self.supervisor_projects.get(&canonical) else {
+            return false;
+        };
+        self.supervisor
+            .as_ref()
+            .is_some_and(|supervisor| supervisor.finish_session_tasks(project_id, session_id))
+    }
+
     fn is_attached_project(&self, work_dir: &Path) -> bool {
         if let Some(registry) = self.project_registry.as_ref() {
             return registry
@@ -5036,8 +5218,9 @@ impl App {
             Ok(project) => {
                 if let Some(supervisor) = &self.supervisor {
                     if let Ok(record) = supervisor.register_project(&project.path) {
-                        self.supervisor_projects
-                            .insert(project.path.clone(), record.id);
+                        let path = std::fs::canonicalize(&project.path)
+                            .unwrap_or_else(|_| project.path.clone());
+                        self.supervisor_projects.insert(path, record.id);
                     }
                 }
                 self.refresh_registered_sessions();
@@ -5520,8 +5703,6 @@ impl App {
                 return;
             }
         };
-        self.background_tasks
-            .started(task_id.clone(), canonical);
         if let Err(error) = supervisor.submit_input(&task_id, prompt) {
             let _ = supervisor.cancel_task(&task_id);
             self.push_chat(
@@ -5531,9 +5712,7 @@ impl App {
         } else {
             self.push_chat(MsgRole::System, format!("Started background task {task_id}."));
         }
-        self.ui
-            .button(cx, ids!(tasks_btn))
-            .set_text(cx, &self.background_tasks.summary());
+        self.sync_task_sidebar(cx);
         cx.redraw_all();
     }
 
@@ -5625,6 +5804,7 @@ impl App {
             .set_text(cx, &draft);
         self.refresh_attachment_ui(cx);
         self.sync_terminal_project(cx);
+        self.sync_task_sidebar(cx);
     }
 
     fn push_chat(&mut self, role: MsgRole, text: impl Into<String>) {
@@ -6474,7 +6654,11 @@ impl App {
                     format!("⚠ Injected stream rule '{rule_name}' after matching '{matched_text}': {reminder}"),
                 );
             }
-            AgentEvent::TurnStart { .. } | AgentEvent::MessageStart { .. } => {}
+            AgentEvent::TurnStart { .. }
+            | AgentEvent::MessageStart { .. }
+            | AgentEvent::SubagentQueued { .. }
+            | AgentEvent::SubagentStarted { .. }
+            | AgentEvent::SubagentFinished { .. } => {}
         }
     }
 
@@ -6522,7 +6706,7 @@ impl App {
                     work_dir,
                     session_id,
                 } => {
-                    let key = SessionKey::new(work_dir, session_id);
+                    let key = SessionKey::new(work_dir.clone(), session_id.clone());
                     let is_current = self
                         .session_runtimes
                         .get(&key)
@@ -6543,6 +6727,9 @@ impl App {
                         .flush_streaming();
                     self.set_session_status(cx, &key, UiStatus::Ready, "Ready");
 
+                    if self.finish_session_tasks(&work_dir, &session_id) {
+                        self.sync_task_sidebar(cx);
+                    }
                     self.refresh_registered_sessions();
                 }
 
@@ -6679,12 +6866,9 @@ impl App {
                     cx.redraw_all();
                 }
                 GuiAgentEvent::BackgroundTask(event) => {
-                    let (task_id, _, agent_event) = event.into_parts();
-                    self.background_tasks
-                        .apply_agent_event(&task_id, &agent_event);
-                    self.ui
-                        .button(cx, ids!(tasks_btn))
-                        .set_text(cx, &self.background_tasks.summary());
+                    let _ = event.into_parts();
+                    self.refresh_registered_sessions();
+                    self.sync_task_sidebar(cx);
                 }
                 GuiAgentEvent::GenerationAgent {
                     generation_id,
@@ -6692,7 +6876,7 @@ impl App {
                     session_id,
                     event: agent_event,
                 } => {
-                    let key = SessionKey::new(work_dir, session_id);
+                    let key = SessionKey::new(work_dir.clone(), session_id.clone());
                     let is_current = self
                         .session_runtimes
                         .get(&key)
@@ -6700,6 +6884,18 @@ impl App {
                         .is_some_and(|generation| generation.id == generation_id);
                     if !is_current {
                         continue;
+                    }
+                    let session_file = self
+                        .session_runtimes
+                        .get(&key)
+                        .and_then(|runtime| runtime.session_file.as_deref());
+                    if self.observe_session_task_event(
+                        &work_dir,
+                        &session_id,
+                        session_file,
+                        &agent_event,
+                    ) {
+                        self.sync_task_sidebar(cx);
                     }
                     self.handle_agent_event(cx, agent_event, Some((key, generation_id)))
                 }
@@ -6716,13 +6912,39 @@ mod workspace_header_tests {
         aggregate_extension_reload_results, append_antigravity_models,
         clear_composer_for_dispatch, compact_workspace_path, extension_reload_matches,
         extension_reload_status, model_credential_error, ordered_model_options, project_name,
-        session_reload_count, truncate_terminal_output, InputOrigin, ANTIGRAVITY_MODELS,
-        MAX_TERMINAL_OUTPUT,
+        session_reload_count, task_sidebar_items, truncate_terminal_output, InputOrigin,
+        ANTIGRAVITY_MODELS, MAX_TERMINAL_OUTPUT,
     };
     use crate::workspace::WorkspaceUiState;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use threadlane_agent::ImageAttachment;
-    use threadlane_coding_agent::ExtensionScope;
+    use threadlane_coding_agent::{ExtensionScope, TaskKind, TaskRecord, TaskStatus};
+
+    #[test]
+    fn task_sidebar_items_preserve_session_navigation_and_cancel_policy() {
+        let session_file = PathBuf::from("/project/.threadlane/sessions/chat.jsonl");
+        let items = task_sidebar_items(
+            vec![TaskRecord {
+                id: "task-1".into(),
+                project_id: "project-1".into(),
+                session_id: "chat".into(),
+                session_file: Some(session_file.clone()),
+                parent_task_id: None,
+                kind: TaskKind::Background,
+                agent: "task".into(),
+                summary: "Inspect the workspace".into(),
+                current_activity: Some("read_file".into()),
+                status: TaskStatus::Running,
+                started_at_ms: 1,
+                finished_at_ms: None,
+            }],
+            |_| Some("Architecture review".into()),
+        );
+
+        assert_eq!(items[0].session_label, "Architecture review");
+        assert_eq!(items[0].session_file.as_ref(), Some(&session_file));
+        assert!(items[0].cancellable);
+    }
 
     #[test]
     fn extension_reload_results_preserve_successes_and_labeled_failures() {

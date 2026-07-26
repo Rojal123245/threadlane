@@ -480,6 +480,22 @@ pub fn active_session_entry() -> Option<SessionEntry> {
     None
 }
 
+pub fn session_entry_for_file(work_dir: &Path, session_file: &Path) -> Option<SessionEntry> {
+    let work_dir = canonicalize_path(work_dir);
+    let session_file = canonicalize_path(session_file);
+    let data = SESSIONS_DATA.read().unwrap();
+    data.projects
+        .iter()
+        .find(|project| project.work_dir == work_dir)
+        .and_then(|project| {
+            project
+                .sessions
+                .iter()
+                .find(|session| canonicalize_path(&session.session_file) == session_file)
+        })
+        .cloned()
+}
+
 pub fn project_work_dir_at_row(row_idx: usize) -> Option<PathBuf> {
     let data = SESSIONS_DATA.read().unwrap();
     let SessionListRow::ProjectHeader { project_idx } = data.rows.get(row_idx)? else {
@@ -878,6 +894,23 @@ mod tests {
         );
         assert!(data.active_session_id.is_none());
         drop(data);
+        let _ = std::fs::remove_dir_all(work_dir);
+    }
+
+    #[test]
+    fn session_entry_for_file_resolves_a_discovered_session() {
+        let work_dir = unique_test_dir("session-by-file");
+        std::fs::create_dir_all(&work_dir).unwrap();
+        let created = create_new_session(&work_dir).unwrap();
+        refresh_sessions(std::slice::from_ref(&work_dir));
+
+        let found = session_entry_for_file(&work_dir, &created.session_file).unwrap();
+        assert_eq!(found.id, created.id);
+        assert_eq!(
+            canonicalize_path(&found.session_file),
+            canonicalize_path(&created.session_file)
+        );
+
         let _ = std::fs::remove_dir_all(work_dir);
     }
 }

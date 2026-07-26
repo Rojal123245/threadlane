@@ -119,7 +119,6 @@ Type `/` in the composer to open searchable command completion. Use Up/Down to n
 | `/fork` | Fork the active session-tree branch. |
 | `/clone` | Clone the active session tree. |
 | `/skill` | Load a discovered skill by ID. |
-| `/clear-plan` | Clear active plan items. |
 | `/quit` | Quit the agent. |
 
 Discovered skills and WASI extension commands are added to completion automatically.

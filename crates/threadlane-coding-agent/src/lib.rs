@@ -36,7 +36,9 @@ pub use skills::{
     SkillDiscoveryWarning, SkillDiscoveryWarningKind, SkillManager, SkillMetadata, SkillRegistry,
     SkillScope, LOAD_SKILL_TOOL_NAME,
 };
-pub use supervisor::{HarnessSupervisor, ProjectRecord, TaskAgentEvent, TaskRecord, TaskStatus};
+pub use supervisor::{
+    HarnessSupervisor, ProjectRecord, TaskAgentEvent, TaskKind, TaskRecord, TaskStatus,
+};
 pub use system_prompt::SystemPromptConfig;
 pub use wasi_extension::{
     WasiCommandDefinition, WasiExtension, WasiExtensionCommandResult, WasiExtensionEvent,

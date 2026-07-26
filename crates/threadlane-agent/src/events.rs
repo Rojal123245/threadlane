@@ -43,6 +43,23 @@ pub enum AgentEvent {
         name: String,
         result: AgentToolResult,
     },
+    SubagentQueued {
+        run_id: u64,
+        task_index: usize,
+        agent: String,
+        task: String,
+    },
+    SubagentStarted {
+        run_id: u64,
+        task_index: usize,
+    },
+    SubagentFinished {
+        run_id: u64,
+        task_index: usize,
+        succeeded: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     AgentError {
         error: String,
     },
