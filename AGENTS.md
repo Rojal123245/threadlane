@@ -254,10 +254,12 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 
 - `HarnessSupervisor` owns only explicit background tasks (currently `/task <prompt>`). Ordinary chat sessions continue to use the existing `SessionRuntime` path and must not be mirrored into supervisor tasks.
 - Forward supervisor events through `GuiAgentEvent`; update `BackgroundTaskState` and widgets only on the Makepad event thread.
-- Threadlane extensions are WASI modules. Extension packages install one declared
-  module under `.threadlane/extensions/<package-id>/extension.wasm`; native
-  extension executables and trust approvals are unsupported. LSP remains a WASI
-  extension and launches language servers through brokered process capability.
+- Threadlane extensions are compiled WASI modules with an exported
+  `extension_info` manifest. The settings picker installs a `.wasm` into either
+  `~/.threadlane/extensions/` or `<project>/.threadlane/extensions/`; it never
+  runs Cargo or extension build scripts. Native extension executables and trust
+  approvals are unsupported. LSP remains a WASI extension and launches language
+  servers through brokered process capability.
 
 ## Updater Behavior
 
@@ -273,12 +275,18 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 ## WASI Extensions
 
 - Extension crates live under `extensions/` and target `wasm32-wasip1`.
-- Package install and removal must canonicalize the project root, reject
-  symlinked destination components, and keep every mutation inside the resolved
-  `.threadlane/extensions` directory. Validate the staged package record before
-  swapping it into place so installation cannot report failure after commit.
+- Extension install, toggle, and removal must reject symlinked destination
+  components and keep every mutation inside the selected global or project
+  `.threadlane/extensions` root. Validate staged WASM and its embedded manifest
+  before swapping it into place so installation cannot report failure after
+  commit.
+- Inventory and runtime loading share one scoped discovery path. Enabled project
+  modules override enabled global modules with the same manifest name, while
+  both rows remain visible in settings. Disabling a project override reveals an
+  enabled global module.
 - Use `./scripts/build_extensions.sh` to compile and deploy them.
-- The script intentionally treats missing binaries and copy failures as fatal.
+- The script treats missing binaries and copy failures as fatal and must not
+  clear user-installed modules or disabled markers from the extension root.
 - Bundled agent definitions and prompts are part of a valid extension deployment; do not update only the `.wasm` artifact when associated metadata also changes.
 
 ## Security and Sensitive Files

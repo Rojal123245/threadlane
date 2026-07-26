@@ -6,9 +6,9 @@ use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 use threadlane_agent::{AgentState, AgentToolCall, BeforeToolCallHook};
 use threadlane_coding_agent::{
-    BrokerError, BrokerOperationResult, BrokerRequest, CapabilityDispatcher, CapabilityHandler,
-    CapabilityCatalog, CapabilityPolicy, ExtensionBeforeToolHook, HostBrokerRequest,
-    HostCapabilityGrantPolicy, PackageManager, ToolPolicy, WasiExtension, WasiExtensionEvent,
+    BrokerError, BrokerOperationResult, BrokerRequest, CapabilityCatalog, CapabilityDispatcher,
+    CapabilityHandler, CapabilityPolicy, ExtensionBeforeToolHook, ExtensionManager, ExtensionScope,
+    HostBrokerRequest, HostCapabilityGrantPolicy, ToolPolicy, WasiExtension, WasiExtensionEvent,
     WasiExtensionManager, WasiExtensionManifest, WasiToolDefinition,
 };
 
@@ -68,10 +68,8 @@ fn broker_smoke_manifest_matches_v2_documentation() {
 #[test]
 fn broker_import_queues_accepted_requests_and_returns_denials_to_the_extension() {
     let extension = WasiExtension::load_from_file(&build_broker_smoke_extension(false)).unwrap();
-    let mut manager = WasiExtensionManager::new();
-    manager
-        .extensions
-        .insert(extension.manifest.name.clone(), extension);
+    let manager = WasiExtensionManager::new();
+    manager.register_extension(extension).unwrap();
 
     let result = manager
         .execute_command_with_effects("broker-smoke", "")
@@ -97,10 +95,8 @@ fn broker_import_queues_accepted_requests_and_returns_denials_to_the_extension()
     assert_eq!(too_small.broker_requests.len(), 1);
 
     let denied = WasiExtension::load_from_file(&build_broker_smoke_extension(true)).unwrap();
-    let mut manager = WasiExtensionManager::new();
-    manager
-        .extensions
-        .insert(denied.manifest.name.clone(), denied);
+    let manager = WasiExtensionManager::new();
+    manager.register_extension(denied).unwrap();
     let result = manager
         .execute_command_with_effects("broker-smoke", "")
         .unwrap()
@@ -112,9 +108,8 @@ fn broker_import_queues_accepted_requests_and_returns_denials_to_the_extension()
 #[tokio::test]
 async fn wasm_extension_receives_broker_response_on_next_invocation() {
     let extension = WasiExtension::load_from_file(&build_broker_smoke_extension(false)).unwrap();
-    let name = extension.manifest.name.clone();
-    let mut manager = WasiExtensionManager::new();
-    manager.extensions.insert(name, extension);
+    let manager = WasiExtensionManager::new();
+    manager.register_extension(extension).unwrap();
 
     let initial = manager
         .execute_command_with_effects("broker-smoke", r#"{"mode":"result-event"}"#)
@@ -143,11 +138,10 @@ async fn wasm_extension_receives_broker_response_on_next_invocation() {
 #[test]
 fn restrictive_host_grant_denies_declared_capability() {
     let extension = WasiExtension::load_from_file(&build_broker_smoke_extension(false)).unwrap();
-    let name = extension.manifest.name.clone();
-    let mut manager = WasiExtensionManager::with_capability_grant_policy(
+    let manager = WasiExtensionManager::with_capability_grant_policy(
         HostCapabilityGrantPolicy::restrict_to(["agent"]),
     );
-    manager.extensions.insert(name, extension);
+    manager.register_extension(extension).unwrap();
 
     let result = manager
         .execute_command_with_effects("broker-smoke", "")
@@ -267,54 +261,142 @@ fn manifest_wasm(json: &str) -> Vec<u8> {
 }
 
 #[test]
-fn installed_package_is_discovered_by_wasi_loader() {
+fn scoped_wasi_inventory_runtime_and_catalog_share_precedence() {
+    let global_threadlane = tempdir().unwrap();
     let project = tempdir().unwrap();
-    let source = tempdir().unwrap();
+    let global_extensions = global_threadlane.path().join("extensions");
+    let project_extensions = project.path().join(".threadlane/extensions");
+    std::fs::create_dir_all(global_extensions.join("managed-global")).unwrap();
+    std::fs::create_dir_all(project_extensions.join("managed-project")).unwrap();
     std::fs::write(
-        source.path().join("threadlane-package.json"),
-        r#"{
-            "id": "test-extension",
-            "name": "Test Extension",
-            "version": "1.0.0",
-            "description": "test fixture",
-            "extension": "extension.wasm"
-        }"#,
-    )
-    .unwrap();
-    std::fs::write(
-        source.path().join("extension.wasm"),
+        global_extensions.join("shared_ext.wasm"),
         manifest_wasm(
-            r#"{"api_version":1,"name":"test_extension","version":"1.0.0","description":"test fixture"}"#,
+            r#"{"api_version":1,"name":"shared_ext","version":"1.0.0","description":"global"}"#,
         ),
     )
     .unwrap();
+    std::fs::write(
+        global_extensions.join("managed-global/extension.wasm"),
+        manifest_wasm(
+            r#"{"api_version":1,"name":"global_only","version":"1.0.0","description":"global"}"#,
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        project_extensions.join("managed-project/extension.wasm"),
+        manifest_wasm(
+            r#"{"api_version":1,"name":"shared_ext","version":"2.0.0","description":"project"}"#,
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        project_extensions.join("disabled_ext.wasm"),
+        manifest_wasm(
+            r#"{"api_version":1,"name":"disabled_ext","version":"1.0.0","description":"disabled"}"#,
+        ),
+    )
+    .unwrap();
+    std::fs::write(project_extensions.join("disabled_ext.wasm.disabled"), []).unwrap();
 
-    PackageManager::new()
-        .install_from_local(source.path(), project.path())
+    let lifecycle = ExtensionManager::new(
+        Some(global_threadlane.path().to_path_buf()),
+        Some(project.path().to_path_buf()),
+    );
+    let inventory = lifecycle.discover();
+    assert_eq!(inventory.len(), 4);
+    assert!(inventory.iter().any(|record| {
+        record.name() == "shared_ext"
+            && record.scope() == ExtensionScope::Global
+            && !record.is_effective()
+    }));
+    assert!(inventory.iter().any(|record| {
+        record.name() == "shared_ext"
+            && record.scope() == ExtensionScope::Project
+            && record.is_effective()
+    }));
+    assert!(inventory.iter().any(|record| {
+        record.name() == "disabled_ext" && !record.is_enabled() && !record.is_effective()
+    }));
+
+    let runtime = WasiExtensionManager::for_project(project.path());
+    assert_eq!(
+        runtime
+            .reload_from_roots(Some(global_threadlane.path()), Some(project.path()))
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        runtime.extension_manifest("shared_ext").unwrap().version,
+        "2.0.0"
+    );
+    assert!(runtime.extension_manifest("global_only").is_some());
+    assert!(runtime.extension_manifest("disabled_ext").is_none());
+
+    let catalog = CapabilityCatalog::discover_with_roots(
+        Some(global_threadlane.path()),
+        Some(project.path()),
+    );
+    assert_eq!(catalog.extensions().len(), inventory.len());
+    assert_eq!(
+        catalog
+            .extensions()
+            .iter()
+            .filter(|record| record.is_effective())
+            .count(),
+        2
+    );
+
+    let project_override = inventory
+        .iter()
+        .find(|record| record.name() == "shared_ext" && record.scope() == ExtensionScope::Project)
         .unwrap();
-    let extensions_dir = project.path().join(".threadlane/extensions");
-    let backup_dir = extensions_dir.join(".test-extension.backup-test");
-    std::fs::create_dir(&backup_dir).unwrap();
-    std::fs::copy(
-        extensions_dir.join("test-extension/threadlane-package.json"),
-        backup_dir.join("threadlane-package.json"),
+    lifecycle.set_enabled(project_override, false).unwrap();
+    std::fs::write(project_override.module_path(), b"disabled invalid wasm").unwrap();
+    assert_eq!(
+        runtime
+            .reload_from_roots(Some(global_threadlane.path()), Some(project.path()))
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        runtime.extension_manifest("shared_ext").unwrap().version,
+        "1.0.0"
+    );
+}
+
+#[test]
+fn scoped_wasi_failed_reload_keeps_previous_registry() {
+    let global_threadlane = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let module = project
+        .path()
+        .join(".threadlane/extensions/reload_ext.wasm");
+    std::fs::create_dir_all(module.parent().unwrap()).unwrap();
+    std::fs::write(
+        &module,
+        manifest_wasm(
+            r#"{"api_version":1,"name":"reload_ext","version":"1.0.0","description":"initial"}"#,
+        ),
     )
     .unwrap();
-    std::fs::copy(
-        extensions_dir.join("test-extension/extension.wasm"),
-        backup_dir.join("extension.wasm"),
-    )
-    .unwrap();
+    let runtime = Arc::new(WasiExtensionManager::for_project(project.path()));
+    runtime
+        .reload_from_roots(Some(global_threadlane.path()), Some(project.path()))
+        .unwrap();
+    let consumer = runtime.clone();
+    assert_eq!(
+        consumer.extension_manifest("reload_ext").unwrap().version,
+        "1.0.0"
+    );
 
-    let mut extensions = WasiExtensionManager::for_project(project.path());
-    assert_eq!(extensions.discover_and_load(project.path()), 1);
-    assert!(extensions.get_extensions().contains_key("test_extension"));
-
-    let catalog = CapabilityCatalog::discover(Some(project.path()));
-    assert_eq!(catalog.extensions().len(), 1);
-    assert_eq!(catalog.extensions()[0].id(), "test_extension");
-    assert_eq!(catalog.extensions()[0].name(), "test_extension");
-    assert!(catalog.extensions()[0].is_enabled());
+    std::fs::write(&module, b"invalid wasm").unwrap();
+    assert!(runtime
+        .reload_from_roots(Some(global_threadlane.path()), Some(project.path()))
+        .is_err());
+    assert_eq!(
+        consumer.extension_manifest("reload_ext").unwrap().version,
+        "1.0.0"
+    );
 }
 
 fn hook_wasm(api_version: u32, response: &str) -> Vec<u8> {
@@ -390,10 +472,8 @@ fn hook_wasm(api_version: u32, response: &str) -> Vec<u8> {
 #[test]
 fn broker_import_rejects_out_of_bounds_huge_request_without_allocating() {
     let extension = WasiExtension::load_from_file(&build_broker_smoke_extension(false)).unwrap();
-    let mut manager = WasiExtensionManager::new();
-    manager
-        .extensions
-        .insert(extension.manifest.name.clone(), extension);
+    let manager = WasiExtensionManager::new();
+    manager.register_extension(extension).unwrap();
 
     let result = manager
         .execute_command_with_effects("broker-smoke", r#"{"mode":"huge-length"}"#)
@@ -591,8 +671,8 @@ fn events_are_topic_filtered_and_queued_for_next_invocation() {
 fn actual_extension_invocation_receives_queued_subscribed_events() {
     let extension = WasiExtension::load_from_file(&build_broker_smoke_extension(false)).unwrap();
     let extension_name = extension.manifest.name.clone();
-    let mut manager = WasiExtensionManager::new();
-    manager.extensions.insert(extension_name.clone(), extension);
+    let manager = WasiExtensionManager::new();
+    manager.register_extension(extension).unwrap();
     manager
         .subscribe_event(&extension_name, "updates".into())
         .unwrap();
@@ -642,7 +722,7 @@ fn test_wasi_extension_manager_discovery() {
     let ext_dir = dir.path().join("extensions");
     std::fs::create_dir_all(&ext_dir).unwrap();
 
-    let mut manager = WasiExtensionManager::new();
+    let manager = WasiExtensionManager::new();
     let count = manager.discover_and_load(dir.path());
     assert_eq!(count, 0);
 }
@@ -734,10 +814,8 @@ async fn structured_hook_middleware_blocks_without_message_matching() {
     let response =
         r#"{"message":"","state":{},"middleware":{"block":true,"reason":"Protected path"}}"#;
     let extension = WasiExtension::load_from_bytes(hook_wasm(2, response)).unwrap();
-    let mut manager = WasiExtensionManager::new();
-    manager
-        .extensions
-        .insert(extension.manifest.name.clone(), extension);
+    let manager = WasiExtensionManager::new();
+    manager.register_extension(extension).unwrap();
     let hook = ExtensionBeforeToolHook {
         tool_policy: Arc::new(tokio::sync::Mutex::new(ToolPolicy::FullAccess)),
         extensions: Arc::new(manager),
@@ -774,10 +852,8 @@ async fn structured_hook_v2_message_does_not_block() {
         r#"{"message":"blocked prose from v2","state":{},"middleware":{"block":false}}"#,
     ))
     .unwrap();
-    let mut manager = WasiExtensionManager::new();
-    manager
-        .extensions
-        .insert(extension.manifest.name.clone(), extension);
+    let manager = WasiExtensionManager::new();
+    manager.register_extension(extension).unwrap();
     let hook = ExtensionBeforeToolHook {
         tool_policy: Arc::new(tokio::sync::Mutex::new(ToolPolicy::FullAccess)),
         extensions: Arc::new(manager),
@@ -811,10 +887,8 @@ async fn structured_hook_v1_message_behavior_is_preserved() {
     let extension =
         WasiExtension::load_from_bytes(hook_wasm(1, r#"{"message":"blocked by v1","state":{}}"#))
             .unwrap();
-    let mut manager = WasiExtensionManager::new();
-    manager
-        .extensions
-        .insert(extension.manifest.name.clone(), extension);
+    let manager = WasiExtensionManager::new();
+    manager.register_extension(extension).unwrap();
     let hook = ExtensionBeforeToolHook {
         tool_policy: Arc::new(tokio::sync::Mutex::new(ToolPolicy::FullAccess)),
         extensions: Arc::new(manager),
@@ -859,4 +933,31 @@ fn test_session_state_paths_are_isolated_and_filesystem_safe() {
             .path()
             .join(".threadlane/state/extensions/sessions/73657373696f6e2f6f6e65/example_ext.json")
     );
+}
+
+#[test]
+fn extension_state_write_contains_unsafe_extension_name() {
+    let project = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    let outside_stem = outside.path().join("escaped");
+    let unsafe_name = outside_stem.to_string_lossy().into_owned();
+    let outside_file = outside_stem.with_extension("json");
+    let manager = WasiExtensionManager::for_project(project.path());
+
+    manager
+        .set_extension_state(&unsafe_name, serde_json::json!({"value": 7}))
+        .unwrap();
+
+    assert!(!outside_file.exists());
+    let state_dir = project.path().join(".threadlane/state/extensions");
+    let files = std::fs::read_dir(&state_dir)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].path().parent(), Some(state_dir.as_path()));
+    assert!(files[0]
+        .file_name()
+        .to_string_lossy()
+        .starts_with(".encoded-"));
 }

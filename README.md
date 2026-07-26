@@ -132,7 +132,7 @@ Threadlane keeps application state local:
 - Provider credentials: `~/.threadlane/auth.json`
 - Project sessions: `<project>/.threadlane/sessions/`
 - Project extensions, agents, prompts, and skills: `<project>/.threadlane/`
-- Global agents and skills: `~/.threadlane/` and `~/.agents/skills/`
+- Global extensions, agents, and skills: `~/.threadlane/` and `~/.agents/skills/`
 
 Treat these directories as user data. Back them up before manually migrating or removing state.
 
@@ -176,6 +176,19 @@ The script:
 5. Fails if an expected module or associated resource cannot be deployed.
 
 Extensions import `threadlane_host.request` and receive only the capabilities exposed through Threadlane's broker. Skill and agent discovery supports project-local and global scopes.
+
+The WASI Extensions settings page shows modules from both
+`~/.threadlane/extensions/` and `<project>/.threadlane/extensions/`. To install
+one, build it first and select the compiled `.wasm` file:
+
+```bash
+cargo build --target wasm32-wasip1 --release
+```
+
+Threadlane reads identity and version information from the module's exported
+`extension_info` manifest; it does not run Cargo or extension build scripts.
+An enabled project module overrides an enabled global module with the same
+manifest name. Each scope can be enabled, disabled, or removed independently.
 
 ## Development
 

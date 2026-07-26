@@ -1,10 +1,11 @@
 use crate::coding_agent::{CodingAgent, CodingAgentOptions};
-use threadlane_agent::AgentEvent;
+use crate::packages::ExtensionScope;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use threadlane_agent::AgentEvent;
 use tokio::sync::broadcast;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -244,6 +245,72 @@ impl HarnessSupervisor {
         });
 
         Ok(task_id)
+    }
+
+    pub async fn reload_extensions(
+        &self,
+        scope: ExtensionScope,
+        project_root: Option<&Path>,
+    ) -> Result<usize, String> {
+        let target_project_id = if scope == ExtensionScope::Project {
+            let project_root = project_root
+                .ok_or_else(|| "Project extension reload requires a project".to_owned())?;
+            let canonical = project_root
+                .canonicalize()
+                .unwrap_or_else(|_| project_root.to_path_buf());
+            self.projects
+                .lock()
+                .unwrap()
+                .values()
+                .find(|project| project.path == canonical)
+                .map(|project| project.id.clone())
+        } else {
+            None
+        };
+
+        let task_projects: HashMap<String, String> = self
+            .tasks
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(task_id, task)| (task_id.clone(), task.project_id.clone()))
+            .collect();
+        let targets: Vec<_> = self
+            .runtimes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(task_id, _)| {
+                scope == ExtensionScope::Global
+                    || target_project_id
+                        .as_ref()
+                        .is_some_and(|project_id| task_projects.get(*task_id) == Some(project_id))
+            })
+            .map(|(task_id, runtime)| {
+                (
+                    task_id.clone(),
+                    runtime.prompt_lock.clone(),
+                    runtime.agent.clone(),
+                )
+            })
+            .collect();
+
+        let mut reloaded = 0;
+        let mut failures = Vec::new();
+        for (task_id, prompt_lock, agent) in targets {
+            let _prompt_guard = prompt_lock.lock().await;
+            let mut agent = agent.lock().await;
+            match agent.reload_extensions().await {
+                Ok(_) => reloaded += 1,
+                Err(error) => failures.push(format!("{task_id}: {error}")),
+            }
+        }
+
+        if failures.is_empty() {
+            Ok(reloaded)
+        } else {
+            Err(failures.join("; "))
+        }
     }
 
     pub fn submit_input(&self, task_id: &str, prompt: String) -> Result<(), String> {

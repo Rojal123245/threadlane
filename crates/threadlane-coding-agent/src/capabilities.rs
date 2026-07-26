@@ -1,80 +1,31 @@
-use crate::agents::{discover_agents, AgentConfig, AgentScope};
-use crate::packages::{PackageManager, PackageRecord};
-use crate::skills::{SkillManager, SkillMetadata};
-use crate::wasi_extension::WasiExtensionManager;
-use serde::{Deserialize, Serialize};
+use crate::packages::{default_global_threadlane_dir, ExtensionManager, ExtensionRecord};
 use std::path::Path;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExtensionMetadata {
-    id: String,
-    name: String,
-    enabled: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct CapabilityCatalog {
-    skills: Vec<SkillMetadata>,
-    extensions: Vec<ExtensionMetadata>,
-    packages: Vec<PackageRecord>,
-    agents: Vec<AgentConfig>,
+    extensions: Vec<ExtensionRecord>,
 }
 
 impl CapabilityCatalog {
     pub fn discover(project_root: Option<&Path>) -> Self {
-        let mut skill_mgr = SkillManager::new();
-        skill_mgr.discover_skills(project_root);
-        let skills = skill_mgr.list_skills();
-
-        let packages = project_root
-            .map(|project_root| PackageManager::new().list_packages(project_root))
-            .unwrap_or_default();
-
-        let agents = project_root
-            .map(|project_root| discover_agents(project_root, AgentScope::Both).agents)
-            .unwrap_or_default();
-
-        let mut extensions = Vec::new();
-
-        if let Some(proj) = project_root {
-            let mut wasi_mgr = WasiExtensionManager::for_project(proj);
-            wasi_mgr.discover_and_load(proj);
-            for (id, ext) in wasi_mgr.get_extensions() {
-                extensions.push(ExtensionMetadata {
-                    id: id.clone(),
-                    name: ext.manifest.name.clone(),
-                    enabled: true,
-                });
-            }
-        }
-
-        Self {
-            skills,
-            extensions,
-            packages,
-            agents,
-        }
+        let global_threadlane_dir = default_global_threadlane_dir();
+        Self::discover_with_roots(global_threadlane_dir.as_deref(), project_root)
     }
 
-    pub fn packages(&self) -> &[PackageRecord] {
-        &self.packages
+    pub fn discover_with_roots(
+        global_threadlane_dir: Option<&Path>,
+        project_root: Option<&Path>,
+    ) -> Self {
+        let extensions = ExtensionManager::new(
+            global_threadlane_dir.map(Path::to_path_buf),
+            project_root.map(Path::to_path_buf),
+        )
+        .discover();
+
+        Self { extensions }
     }
 
-    pub fn extensions(&self) -> &[ExtensionMetadata] {
+    pub fn extensions(&self) -> &[ExtensionRecord] {
         &self.extensions
-    }
-}
-
-impl ExtensionMetadata {
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn is_enabled(&self) -> bool {
-        self.enabled
     }
 }

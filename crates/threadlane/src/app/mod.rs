@@ -33,8 +33,9 @@ use makepad_widgets::*;
 use robius_file_picker::FileDialog;
 use threadlane_agent::{get_runtime, AgentEvent, ImageAttachment, ReasoningEffort};
 use threadlane_coding_agent::{
-    discover_agents, AgentConfig, AgentScope, CapabilityCatalog, CodingAgent, CodingAgentOptions,
-    HarnessSupervisor, PackageManager, ProjectContext, SkillMetadata,
+    default_global_threadlane_dir, discover_agents, AgentConfig, AgentScope, CapabilityCatalog,
+    CodingAgent, CodingAgentOptions, ExtensionManager, ExtensionScope, HarnessSupervisor,
+    ProjectContext, SkillMetadata,
 };
 use threadlane_provider::auth;
 use threadlane_provider::openai::{fetch_available_models, OpenAIClient};
@@ -1755,62 +1756,186 @@ script_mod! {
                     spacing: 12
                     visible: false
 
-                    capability_page_title := Label {
+                    capability_header := View {
                         width: Fill
-                        height: Fit
-                        text: "WASI Extensions"
-                        draw_text +: {
-                            color: #xe7ebf0
-                            text_style: theme.font_bold { font_size: 18.0 }
+                        height: 28
+                        flow: Right
+                        spacing: 6
+                        align: Align{y: 0.5}
+
+                        capability_page_title := Label {
+                            width: Fill
+                            height: 28
+                            padding: 0
+                            align: Align{y: 0.5}
+                            text: "WASI Extensions"
+                            draw_text +: {
+                                color: #xe7ebf0
+                                text_style: theme.font_bold { font_size: 18.0 }
+                            }
+                        }
+
+                        capability_install_scope_lbl := Label {
+                            width: Fit
+                            height: Fit
+                            padding: 0
+                            text: "Install to"
+                            draw_text +: {
+                                color: #x7f8c9d
+                                text_style +: { font_size: 8.75 }
+                            }
+                        }
+                        capability_scope_global_btn := SettingsActionButton {
+                            height: 24
+                            padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
+                            text: "Global"
+                        }
+                        capability_scope_project_btn := SettingsActionButton {
+                            height: 24
+                            padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
+                            text: "Project"
+                            draw_bg +: {
+                                color: #x2d405a
+                                border_color: #x4b719f
+                            }
+                        }
+                        capability_add_btn := mod.components.IconButton {
+                            draw_icon +: {
+                                svg: crate_resource("self:resources/icons/plus.svg")
+                            }
+                        }
+                        capability_refresh_btn := mod.components.IconButton {
+                            draw_icon +: {
+                                svg: crate_resource("self:resources/icons/refresh.svg")
+                            }
                         }
                     }
 
                     capability_page_desc := Label {
                         width: Fill
                         height: Fit
-                        text: "Install and manage sandboxed WASI extension packages for this project."
+                        padding: 0
+                        text: "Choose a compiled .wasm file. Threadlane never runs Cargo or build scripts."
                         draw_text +: {
                             color: #x7f8c9d
                             text_style +: { font_size: 10.0 }
                         }
                     }
 
-                    capability_summary_lbl := Label {
-                        width: Fill
-                        height: 210
-                        text: "No packages discovered."
-                        draw_text +: {
-                            color: #xc4cedc
-                            text_style +: { font_size: 10.0 }
-                        }
+                    capability_build_command := mod.components.CodeLabel {
+                        padding: 0
+                        text: "cargo build --target wasm32-wasip1 --release"
                     }
 
-                    capability_package_input := TextInput {
+                    capability_list := PortalList {
                         width: Fill
-                        height: 36
-                        empty_text: "Package ID"
-                    }
-
-                    capability_actions := View {
-                        width: Fill
-                        height: Fit
-                        flow: Right
+                        height: Fill
+                        flow: Down
                         spacing: 8
 
-                        capability_install_btn := SettingsActionButton {
-                            text: "Install folder…"
+                        ExtensionRow := RoundedView {
+                            width: Fill
+                            height: 72
+                            flow: Right
+                            spacing: 10
+                            padding: Inset{left: 12 top: 9 right: 8 bottom: 9}
+                            align: Align{y: 0.5}
+                            draw_bg +: {
+                                color: #x20242d
+                                border_color: #x303846
+                                border_size: 1.0
+                                border_radius: 7.0
+                            }
+
+                            extension_text := View {
+                                width: Fill
+                                height: Fill
+                                flow: Down
+                                spacing: 3
+
+                                extension_name_version_lbl := mod.components.ClippedLabel {
+                                    height: 17
+                                    padding: 0
+                                    align: Align{y: 0.5}
+                                    draw_text +: {
+                                        color: #xdce3ed
+                                        text_style: theme.font_bold { font_size: 10.5 }
+                                    }
+                                }
+                                extension_scope_status_lbl := mod.components.ClippedLabel {
+                                    height: 15
+                                    padding: 0
+                                    align: Align{y: 0.5}
+                                    draw_text +: {
+                                        color: #x8fb9e8
+                                        text_style +: { font_size: 9.0 }
+                                    }
+                                }
+                                extension_path_lbl := mod.components.ClippedLabel {
+                                    height: 15
+                                    padding: 0
+                                    align: Align{y: 0.5}
+                                    draw_text +: {
+                                        color: #x687587
+                                        text_style: theme.font_code { font_size: 8.0 }
+                                    }
+                                }
+                            }
+
+                            extension_enabled_toggle := Toggle {
+                                width: 34
+                                height: 24
+                                padding: 0
+                                text: ""
+                                label_walk: Walk{width: 0 height: 0}
+                                draw_bg +: {
+                                    color_active: #x3b669e
+                                    border_color_active: #x4b719f
+                                    mark_color_active: #xffffff
+                                    mark_color_active_hover: #xffffff
+                                }
+                                animator +: {
+                                    hover: {
+                                        on: AnimatorState {
+                                            from: {all: Snap}
+                                            apply: {
+                                                draw_bg: {down: snap(0.0), hover: 0.0}
+                                                draw_text: {down: snap(0.0), hover: 1.0}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            extension_remove_btn := mod.components.IconButton {
+                                draw_icon +: {
+                                    svg: crate_resource("self:resources/icons/trash.svg")
+                                    color_hover: #xe58b91
+                                    color_focus: #xe58b91
+                                    color_down: #xffffff
+                                }
+                            }
                         }
-                        capability_remove_btn := SettingsActionButton {
-                            text: "Remove"
-                        }
-                        capability_refresh_btn := SettingsActionButton {
-                            text: "Refresh"
+
+                        EmptyRow := View {
+                            width: Fill
+                            height: 72
+                            align: Align{x: 0.5 y: 0.5}
+                            capability_empty_lbl := Label {
+                                width: Fit
+                                height: Fit
+                                text: "No WASI extensions found."
+                                draw_text +: {
+                                    color: #x687587
+                                    text_style +: { font_size: 10.0 }
+                                }
+                            }
                         }
                     }
 
                     capability_status_lbl := Label {
                         width: Fill
                         height: Fit
+                        padding: 0
                         text: ""
                         draw_text +: {
                             color: #x9ba8ba
@@ -2552,6 +2677,17 @@ enum SettingsPage {
     About,
 }
 
+#[derive(Clone, Debug, Default)]
+enum ProviderSettingsModalAction {
+    ShowExtensions,
+    Add(ExtensionScope),
+    Refresh,
+    SetEnabled { row: usize, enabled: bool },
+    Remove(usize),
+    #[default]
+    None,
+}
+
 #[derive(Script, Widget)]
 struct ProviderSettingsModal {
     #[source]
@@ -2564,6 +2700,10 @@ struct ProviderSettingsModal {
     opened: bool,
     #[rust]
     page: SettingsPage,
+    #[rust]
+    extension_rows: Vec<crate::state::CapabilityExtensionRow>,
+    #[rust]
+    install_scope_global: bool,
 }
 
 impl ScriptHook for ProviderSettingsModal {
@@ -2599,6 +2739,7 @@ impl Widget for ProviderSettingsModal {
 
         self.view.handle_event(cx, event, scope);
         if let Event::Actions(actions) = event {
+            let uid = self.widget_uid();
             if self
                 .view
                 .button(cx, ids!(settings_nav_google_btn))
@@ -2619,6 +2760,7 @@ impl Widget for ProviderSettingsModal {
                 .clicked(actions)
             {
                 self.set_page(cx, SettingsPage::Capabilities);
+                cx.widget_action(uid, ProviderSettingsModalAction::ShowExtensions);
             }
             if self
                 .view
@@ -2626,6 +2768,57 @@ impl Widget for ProviderSettingsModal {
                 .clicked(actions)
             {
                 self.set_page(cx, SettingsPage::About);
+            }
+            if self
+                .view
+                .button(cx, ids!(capability_scope_global_btn))
+                .clicked(actions)
+            {
+                self.install_scope_global = true;
+                self.sync_install_scope(cx);
+            }
+            if self
+                .view
+                .button(cx, ids!(capability_scope_project_btn))
+                .clicked(actions)
+            {
+                self.install_scope_global = false;
+                self.sync_install_scope(cx);
+            }
+            if self
+                .view
+                .button(cx, ids!(capability_add_btn))
+                .clicked(actions)
+            {
+                cx.widget_action(
+                    uid,
+                    ProviderSettingsModalAction::Add(self.install_scope()),
+                );
+            }
+            if self
+                .view
+                .button(cx, ids!(capability_refresh_btn))
+                .clicked(actions)
+            {
+                cx.widget_action(uid, ProviderSettingsModalAction::Refresh);
+            }
+            let list = self.view.portal_list(cx, ids!(capability_list));
+            for (row, item) in list.items_with_actions(actions) {
+                if let Some(enabled) = item
+                    .check_box(cx, ids!(extension_enabled_toggle))
+                    .changed(actions)
+                {
+                    cx.widget_action(
+                        uid,
+                        ProviderSettingsModalAction::SetEnabled { row, enabled },
+                    );
+                }
+                if item
+                    .button(cx, ids!(extension_remove_btn))
+                    .clicked(actions)
+                {
+                    cx.widget_action(uid, ProviderSettingsModalAction::Remove(row));
+                }
             }
         }
         let modal_rect = self.view.widget(cx, ids!(modal_card)).area().rect(cx);
@@ -2647,15 +2840,38 @@ impl Widget for ProviderSettingsModal {
         let pass_size = cx.current_pass_size();
         cx.begin_root_turtle(pass_size, Layout::flow_overlay());
         if self.opened {
-            self.view.draw_walk_all(
-                cx,
-                scope,
-                Walk {
-                    width: Size::Fixed(pass_size.x),
-                    height: Size::Fixed(pass_size.y),
-                    ..Default::default()
-                },
-            );
+            let walk = Walk {
+                width: Size::Fixed(pass_size.x),
+                height: Size::Fixed(pass_size.y),
+                ..Default::default()
+            };
+            while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
+                if let Some(mut list) = item.as_portal_list().borrow_mut() {
+                    list.set_item_range(cx, 0, self.extension_rows.len().max(1));
+                    while let Some(row_index) = list.next_visible_item(cx) {
+                        if self.extension_rows.is_empty() {
+                            if row_index == 0 {
+                                list.item(cx, row_index, id!(EmptyRow))
+                                    .draw_all_unscoped(cx);
+                            }
+                            continue;
+                        }
+                        let Some(row) = self.extension_rows.get(row_index) else {
+                            continue;
+                        };
+                        let item = list.item(cx, row_index, id!(ExtensionRow));
+                        item.label(cx, ids!(extension_name_version_lbl))
+                            .set_text(cx, &format!("{} · v{}", row.name, row.version));
+                        item.label(cx, ids!(extension_scope_status_lbl))
+                            .set_text(cx, &row.scope_status());
+                        item.label(cx, ids!(extension_path_lbl))
+                            .set_text(cx, &row.module_path.display().to_string());
+                        item.check_box(cx, ids!(extension_enabled_toggle))
+                            .set_active(cx, row.enabled, Animate::No);
+                        item.draw_all_unscoped(cx);
+                    }
+                }
+            }
         }
         cx.end_pass_sized_turtle();
         draw_list.end(cx);
@@ -2663,6 +2879,84 @@ impl Widget for ProviderSettingsModal {
     }
 }
 impl ProviderSettingsModal {
+    fn install_scope(&self) -> ExtensionScope {
+        if self.install_scope_global {
+            ExtensionScope::Global
+        } else {
+            ExtensionScope::Project
+        }
+    }
+
+    fn set_extension_rows(
+        &mut self,
+        cx: &mut Cx,
+        rows: Vec<crate::state::CapabilityExtensionRow>,
+    ) {
+        self.extension_rows = rows;
+        self.view.widget(cx, ids!(capability_list)).redraw(cx);
+    }
+
+    fn set_extension_status(&mut self, cx: &mut Cx, status: &str) {
+        self.view
+            .label(cx, ids!(capability_status_lbl))
+            .set_text(cx, status);
+    }
+
+    fn sync_install_scope(&mut self, cx: &mut Cx) {
+        let normal_color = Vec4f {
+            x: 0x2b as f32 / 255.0,
+            y: 0x31 as f32 / 255.0,
+            z: 0x3d as f32 / 255.0,
+            w: 1.0,
+        };
+        let selected_color = Vec4f {
+            x: 0x2d as f32 / 255.0,
+            y: 0x40 as f32 / 255.0,
+            z: 0x5a as f32 / 255.0,
+            w: 1.0,
+        };
+        let normal_border = Vec4f {
+            x: 0x3a as f32 / 255.0,
+            y: 0x43 as f32 / 255.0,
+            z: 0x54 as f32 / 255.0,
+            w: 1.0,
+        };
+        let selected_border = Vec4f {
+            x: 0x4b as f32 / 255.0,
+            y: 0x71 as f32 / 255.0,
+            z: 0x9f as f32 / 255.0,
+            w: 1.0,
+        };
+        for (button_id, selected) in [
+            (
+                ids!(capability_scope_global_btn),
+                self.install_scope_global,
+            ),
+            (
+                ids!(capability_scope_project_btn),
+                !self.install_scope_global,
+            ),
+        ] {
+            let mut button = self.view.button(cx, button_id);
+            let color = if selected {
+                selected_color
+            } else {
+                normal_color
+            };
+            let border_color = if selected {
+                selected_border
+            } else {
+                normal_border
+            };
+            script_apply_eval!(cx, button, {
+                draw_bg +: {
+                    color: #(color)
+                    border_color: #(border_color)
+                }
+            });
+            button.redraw(cx);
+        }
+    }
 
     fn set_page(&mut self, cx: &mut Cx, page: SettingsPage) {
         self.page = page;
@@ -2721,6 +3015,7 @@ impl ProviderSettingsModal {
         self.view
             .widget(cx, ids!(about_page))
             .set_visible(cx, about_selected);
+        self.sync_install_scope(cx);
     }
 
     fn open(&mut self, cx: &mut Cx) {
@@ -2909,6 +3204,56 @@ fn clear_composer_for_dispatch(origin: InputOrigin, composer: &mut WorkspaceUiSt
     }
 }
 
+fn extension_reload_matches(
+    scope: ExtensionScope,
+    changed_project: &Path,
+    runtime_project: &Path,
+) -> bool {
+    scope == ExtensionScope::Global || changed_project == runtime_project
+}
+
+struct ExtensionReloadOutcome {
+    reloaded: usize,
+    failures: Vec<String>,
+}
+
+fn session_reload_count(result: Result<usize, String>) -> Result<usize, String> {
+    result.map(|_| 1)
+}
+
+fn aggregate_extension_reload_results(
+    results: impl IntoIterator<Item = (String, Result<usize, String>)>,
+) -> ExtensionReloadOutcome {
+    let mut outcome = ExtensionReloadOutcome {
+        reloaded: 0,
+        failures: Vec::new(),
+    };
+    for (label, result) in results {
+        match result {
+            Ok(reloaded) => outcome.reloaded += reloaded,
+            Err(error) => outcome.failures.push(format!("{label}: {error}")),
+        }
+    }
+    outcome
+}
+
+fn extension_reload_status(reloaded: usize, failures: &[String]) -> String {
+    if failures.is_empty() {
+        return match reloaded {
+            0 => "Extension updated on disk; no live sessions were open.".to_owned(),
+            1 => "Reloaded extensions in 1 live session.".to_owned(),
+            count => format!("Reloaded extensions in {count} live sessions."),
+        };
+    }
+
+    let failures = truncate_chars(&failures.join("; "), 180);
+    match reloaded {
+        0 => format!("Live reload failed for {failures}"),
+        1 => format!("Reloaded 1 live session; failed for {failures}"),
+        count => format!("Reloaded {count} live sessions; failed for {failures}"),
+    }
+}
+
 struct GenerationRun {
     id: u64,
     handle: tokio::task::JoinHandle<()>,
@@ -2961,6 +3306,8 @@ pub struct App {
     session_runtimes: HashMap<SessionKey, SessionRuntime>,
     #[rust]
     next_generation_id: u64,
+    #[rust]
+    next_extension_reload_id: u64,
     #[rust]
     busy: bool,
     #[rust]
@@ -3211,31 +3558,24 @@ impl MatchEvent for App {
                     truncate_chars(&normalize_catalog_text(&skill.description), 120)
                 ),
             }));
-        if coding_agent.wasi_extensions.extensions.is_empty() {
+        for manifest in coding_agent.wasi_extensions.extension_manifests() {
+            let mut cmd_names = Vec::new();
+            for cmd in &manifest.commands {
+                cmd_names.push(format!("/{}", cmd.name));
+                self.commands.push(CommandInfo {
+                    name: cmd.name.clone(),
+                    description: cmd.description.clone(),
+                });
+            }
             self.push_chat(
                 MsgRole::System,
-                "No WASI extensions loaded (place packages in ./.threadlane/extensions/<id>/)",
+                format!(
+                    "Loaded WASI extension `{}` ({}) — commands: {}",
+                    manifest.name,
+                    manifest.description,
+                    cmd_names.join(", ")
+                ),
             );
-        } else {
-            for (ext_name, ext) in &coding_agent.wasi_extensions.extensions {
-                let mut cmd_names = Vec::new();
-                for cmd in &ext.manifest.commands {
-                    cmd_names.push(format!("/{}", cmd.name));
-                    self.commands.push(CommandInfo {
-                        name: cmd.name.clone(),
-                        description: cmd.description.clone(),
-                    });
-                }
-                self.push_chat(
-                    MsgRole::System,
-                    format!(
-                        "Loaded WASI extension `{}` ({}) — commands: {}",
-                        ext_name,
-                        ext.manifest.description,
-                        cmd_names.join(", ")
-                    ),
-                );
-            }
         }
         self.push_chat(
             MsgRole::System,
@@ -3446,26 +3786,22 @@ impl MatchEvent for App {
             self.open_capabilities_modal(cx);
         }
 
-        if self
-            .ui
-            .button(cx, ids!(capability_install_btn))
-            .clicked(actions)
-        {
-            self.open_package_picker();
-        }
-        if self
-            .ui
-            .button(cx, ids!(capability_remove_btn))
-            .clicked(actions)
-        {
-            self.remove_selected_package(cx);
-        }
-        if self
-            .ui
-            .button(cx, ids!(capability_refresh_btn))
-            .clicked(actions)
-        {
-            self.refresh_capability_state(cx);
+        let providers_modal_uid = self.ui.widget(cx, ids!(providers_modal)).widget_uid();
+        if let Some(action) = actions.find_widget_action(providers_modal_uid) {
+            match action.cast::<ProviderSettingsModalAction>() {
+                ProviderSettingsModalAction::ShowExtensions
+                | ProviderSettingsModalAction::Refresh => self.refresh_capability_state(cx),
+                ProviderSettingsModalAction::Add(scope) => {
+                    self.open_extension_picker(scope);
+                }
+                ProviderSettingsModalAction::SetEnabled { row, enabled } => {
+                    self.set_extension_enabled(cx, row, enabled);
+                }
+                ProviderSettingsModalAction::Remove(row) => {
+                    self.remove_extension(cx, row);
+                }
+                ProviderSettingsModalAction::None => {}
+            }
         }
 
         if self.ui.button(cx, ids!(tasks_btn)).clicked(actions) {
@@ -3831,12 +4167,17 @@ fn format_capabilities_summary(skills: &[SkillMetadata], agents: &[AgentConfig])
 
 impl App {
     fn open_providers_modal(&mut self, cx: &mut Cx) {
+        let mut show_extensions = false;
         if let Some(mut modal) = self
             .ui
             .widget(cx, ids!(providers_modal))
             .borrow_mut::<ProviderSettingsModal>()
         {
+            show_extensions = modal.page == SettingsPage::Capabilities;
             modal.open(cx);
+        }
+        if show_extensions {
+            self.refresh_capability_state(cx);
         }
     }
 
@@ -3862,100 +4203,190 @@ impl App {
     }
 
     fn refresh_capability_state(&mut self, cx: &mut Cx) {
-        let Some(work_dir) = self.active_work_dir().map(Path::to_path_buf) else {
-            return;
-        };
         self.capability_state
-            .refresh(&CapabilityCatalog::discover(Some(&work_dir)));
-        let mut summary = String::new();
-        for extension in self
-            .capability_state
-            .extensions
-            .iter()
-            .filter(|extension| extension.enabled)
+            .refresh(&CapabilityCatalog::discover(self.active_work_dir()));
+        if let Some(mut modal) = self
+            .ui
+            .widget(cx, ids!(providers_modal))
+            .borrow_mut::<ProviderSettingsModal>()
         {
-            summary.push_str(&format!("{} · project · WASI\n", extension.name));
+            modal.set_extension_rows(cx, self.capability_state.extensions.clone());
+            modal.set_extension_status(cx, "");
         }
-        if summary.is_empty() {
-            summary.push_str("No packages discovered.");
-        }
-        self.ui
-            .label(cx, ids!(capability_summary_lbl))
-            .set_text(cx, &summary);
-        self.ui
-            .label(cx, ids!(capability_status_lbl))
-            .set_text(cx, "");
-        self.capability_cache.remove(&work_dir);
+        self.capability_cache.clear();
     }
 
-    fn selected_capability_package_id(&self, cx: &Cx) -> String {
-        self.ui
-            .text_input(cx, ids!(capability_package_input))
-            .text()
-            .trim()
-            .to_string()
-    }
-
-    fn open_package_picker(&self) {
+    fn open_extension_picker(&self, scope: ExtensionScope) {
         let picked = rfd::FileDialog::new()
-            .set_title("Install a Threadlane package folder")
-            .pick_folder();
+            .set_title("Install a compiled WASI extension")
+            .add_filter("WebAssembly", &["wasm"])
+            .pick_file();
         if let Some(tx) = self.tx.as_ref() {
-            let _ = tx.send(GuiAgentEvent::PackageFolderPicked(picked));
+            let _ = tx.send(GuiAgentEvent::ExtensionFilePicked {
+                path: picked,
+                scope,
+            });
             SignalToUI::set_ui_signal();
         }
     }
 
-    fn install_package(&mut self, cx: &mut Cx, source: PathBuf) {
-        let Some(work_dir) = self.active_work_dir().map(Path::to_path_buf) else {
-            return;
-        };
-        let manager = PackageManager::new();
-        match manager.install_from_local(&source, &work_dir) {
-            Ok(package) => {
-                self.ui
-                    .text_input(cx, ids!(capability_package_input))
-                    .set_text(cx, package.id());
-                self.refresh_capability_state(cx);
-                self.ui
-                    .label(cx, ids!(capability_status_lbl))
-                    .set_text(cx, "Package installed for this project.");
-            }
-            Err(error) => self
-                .ui
-                .label(cx, ids!(capability_status_lbl))
-                .set_text(cx, &error),
+    fn extension_manager(&self) -> ExtensionManager {
+        ExtensionManager::new(
+            default_global_threadlane_dir(),
+            self.active_work_dir().map(Path::to_path_buf),
+        )
+    }
+
+    fn set_capability_status(&mut self, cx: &mut Cx, status: &str) {
+        if let Some(mut modal) = self
+            .ui
+            .widget(cx, ids!(providers_modal))
+            .borrow_mut::<ProviderSettingsModal>()
+        {
+            modal.set_extension_status(cx, status);
         }
     }
 
-    fn remove_selected_package(&mut self, cx: &mut Cx) {
-        let package_id = self.selected_capability_package_id(cx);
-        if !self
-            .capability_state
-            .packages
+    fn reload_extension_runtimes(&mut self, scope: ExtensionScope) {
+        self.next_extension_reload_id = self.next_extension_reload_id.wrapping_add(1);
+        let reload_id = self.next_extension_reload_id;
+        let changed_project = self.active_work_dir().map(Path::to_path_buf);
+        let session_targets = self
+            .session_runtimes
             .iter()
-            .any(|package| package.id == package_id)
-        {
-            self.ui
-                .label(cx, ids!(capability_status_lbl))
-                .set_text(cx, "Enter an installed package ID.");
-            return;
+            .filter(|(key, _)| {
+                changed_project
+                    .as_deref()
+                    .is_some_and(|project| extension_reload_matches(scope, project, &key.work_dir))
+                    || scope == ExtensionScope::Global
+            })
+            .map(|(key, runtime)| (key.clone(), runtime.agent.clone()))
+            .collect::<Vec<_>>();
+        let supervisor = self.supervisor.clone();
+        let tx = self.tx.clone();
+
+        get_runtime().spawn(async move {
+            let mut results = Vec::new();
+            for (key, agent) in session_targets {
+                let result = session_reload_count(agent.lock().await.reload_extensions().await);
+                results.push((
+                    format!("session '{}' in '{}'", key.session_id, key.work_dir.display()),
+                    result,
+                ));
+            }
+            if let Some(supervisor) = supervisor {
+                results.push((
+                    "background tasks".to_owned(),
+                    supervisor
+                        .reload_extensions(scope, changed_project.as_deref())
+                        .await,
+                ));
+            }
+
+            let outcome = aggregate_extension_reload_results(results);
+            if let Some(tx) = tx {
+                let _ = tx.send(GuiAgentEvent::ExtensionReloadCompleted {
+                    reload_id,
+                    reloaded: outcome.reloaded,
+                    failures: outcome.failures,
+                });
+                SignalToUI::set_ui_signal();
+            }
+        });
+    }
+
+    fn install_extension(&mut self, cx: &mut Cx, source: PathBuf, scope: ExtensionScope) {
+        let manager = self.extension_manager();
+        let (status, reload_scope) = match manager.install_from_wasm(&source, scope) {
+            Ok(record) => (
+                format!(
+                    "Installed {} on disk. Reloading live sessions…",
+                    record.name()
+                ),
+                Some(record.scope()),
+            ),
+            Err(error) => (error, None),
+        };
+        if let Some(scope) = reload_scope {
+            self.reload_extension_runtimes(scope);
         }
-        let Some(work_dir) = self.active_work_dir().map(Path::to_path_buf) else {
+        self.refresh_capability_state(cx);
+        self.set_capability_status(cx, &status);
+    }
+
+    fn set_extension_enabled(&mut self, cx: &mut Cx, row: usize, enabled: bool) {
+        let Some(selected) = self.capability_state.extensions.get(row).cloned() else {
+            self.refresh_capability_state(cx);
+            self.set_capability_status(cx, "Extension inventory changed. Please try again.");
             return;
         };
-        match PackageManager::new().remove_package(&package_id, &work_dir) {
-            Ok(()) => {
-                self.refresh_capability_state(cx);
-                self.ui
-                    .label(cx, ids!(capability_status_lbl))
-                    .set_text(cx, "Package removed.");
-            }
-            Err(error) => self
-                .ui
-                .label(cx, ids!(capability_status_lbl))
-                .set_text(cx, &error),
+        let manager = self.extension_manager();
+        let record = manager
+            .discover()
+            .into_iter()
+            .find(|record| selected.matches_record(record));
+        let (status, reload_scope) = match record {
+            Some(record) => match manager.set_enabled(&record, enabled) {
+                Ok(()) if enabled => (
+                    format!(
+                        "Enabled {} on disk. Reloading live sessions…",
+                        record.name()
+                    ),
+                    Some(record.scope()),
+                ),
+                Ok(()) => (
+                    format!(
+                        "Disabled {} on disk. Reloading live sessions…",
+                        record.name()
+                    ),
+                    Some(record.scope()),
+                ),
+                Err(error) => (error, None),
+            },
+            None => (
+                "Extension inventory changed. Please try again.".to_owned(),
+                None,
+            ),
+        };
+        if let Some(scope) = reload_scope {
+            self.reload_extension_runtimes(scope);
         }
+        self.refresh_capability_state(cx);
+        self.set_capability_status(cx, &status);
+    }
+
+    fn remove_extension(&mut self, cx: &mut Cx, row: usize) {
+        let Some(selected) = self.capability_state.extensions.get(row).cloned() else {
+            self.refresh_capability_state(cx);
+            self.set_capability_status(cx, "Extension inventory changed. Please try again.");
+            return;
+        };
+        let manager = self.extension_manager();
+        let record = manager
+            .discover()
+            .into_iter()
+            .find(|record| selected.matches_record(record));
+        let (status, reload_scope) = match record {
+            Some(record) => match manager.remove(&record) {
+                Ok(()) => (
+                    format!(
+                        "Removed {} from disk. Reloading live sessions…",
+                        record.name()
+                    ),
+                    Some(record.scope()),
+                ),
+                Err(error) => (error, None),
+            },
+            None => (
+                "Extension inventory changed. Please try again.".to_owned(),
+                None,
+            ),
+        };
+        if let Some(scope) = reload_scope {
+            self.reload_extension_runtimes(scope);
+        }
+        self.refresh_capability_state(cx);
+        self.set_capability_status(cx, &status);
     }
 
     fn refresh_provider_connection_ui(&mut self, cx: &mut Cx) {
@@ -5137,12 +5568,10 @@ impl App {
                         truncate_chars(&normalize_catalog_text(&skill.description), 120)
                     ),
                 }));
-                for extension in agent.wasi_extensions.extensions.values() {
-                    commands.extend(extension.manifest.commands.iter().map(|command| {
-                        CommandInfo {
-                            name: command.name.clone(),
-                            description: command.description.clone(),
-                        }
+                for manifest in agent.wasi_extensions.extension_manifests() {
+                    commands.extend(manifest.commands.into_iter().map(|command| CommandInfo {
+                        name: command.name,
+                        description: command.description,
                     }));
                 }
                 let capabilities = ProjectCapabilities {
@@ -6135,10 +6564,32 @@ impl App {
                 GuiAgentEvent::ProjectFolderPicked(result) => {
                     self.apply_project_folder_result(cx, result);
                 }
-                GuiAgentEvent::PackageFolderPicked(Some(path)) => {
-                    self.install_package(cx, path);
+                GuiAgentEvent::ExtensionFilePicked {
+                    path: Some(path),
+                    scope,
+                } => {
+                    self.install_extension(cx, path, scope);
                 }
-                GuiAgentEvent::PackageFolderPicked(None) => {}
+                GuiAgentEvent::ExtensionFilePicked { path: None, .. } => {}
+                GuiAgentEvent::ExtensionReloadCompleted {
+                    reload_id,
+                    reloaded,
+                    failures,
+                } => {
+                    if reload_id != self.next_extension_reload_id {
+                        continue;
+                    }
+                    self.refresh_capability_state(cx);
+                    if let Some(work_dir) = self.active_work_dir().map(Path::to_path_buf) {
+                        self.refresh_project_capabilities(cx, &work_dir);
+                    } else {
+                        self.commands = builtin_commands();
+                    }
+                    self.set_capability_status(
+                        cx,
+                        &extension_reload_status(reloaded, &failures),
+                    );
+                }
                 GuiAgentEvent::DeviceCodePrompt { user_code, url } => {
                     if let Some(key) = self.auth_workspace.clone() {
                         self.push_chat_to(
@@ -6262,13 +6713,84 @@ impl App {
 #[cfg(test)]
 mod workspace_header_tests {
     use super::{
-        append_antigravity_models, clear_composer_for_dispatch, compact_workspace_path,
-        model_credential_error, ordered_model_options, project_name, InputOrigin,
-        truncate_terminal_output, ANTIGRAVITY_MODELS, MAX_TERMINAL_OUTPUT,
+        aggregate_extension_reload_results, append_antigravity_models,
+        clear_composer_for_dispatch, compact_workspace_path, extension_reload_matches,
+        extension_reload_status, model_credential_error, ordered_model_options, project_name,
+        session_reload_count, truncate_terminal_output, InputOrigin, ANTIGRAVITY_MODELS,
+        MAX_TERMINAL_OUTPUT,
     };
     use crate::workspace::WorkspaceUiState;
     use std::path::Path;
     use threadlane_agent::ImageAttachment;
+    use threadlane_coding_agent::ExtensionScope;
+
+    #[test]
+    fn extension_reload_results_preserve_successes_and_labeled_failures() {
+        let outcome = aggregate_extension_reload_results([
+            ("session alpha".to_owned(), Ok(1)),
+            ("session beta".to_owned(), Err("invalid module".to_owned())),
+            ("background tasks".to_owned(), Ok(2)),
+        ]);
+
+        assert_eq!(outcome.reloaded, 3);
+        assert_eq!(
+            outcome.failures,
+            ["session beta: invalid module".to_owned()]
+        );
+    }
+
+    #[test]
+    fn session_reload_counts_one_session_not_loaded_extensions() {
+        assert_eq!(session_reload_count(Ok(7)), Ok(1));
+        assert_eq!(
+            session_reload_count(Err("invalid module".to_owned())),
+            Err("invalid module".to_owned())
+        );
+    }
+
+    #[test]
+    fn extension_reload_status_surfaces_success() {
+        assert_eq!(
+            extension_reload_status(2, &[]),
+            "Reloaded extensions in 2 live sessions."
+        );
+    }
+
+    #[test]
+    fn extension_reload_status_surfaces_failures() {
+        let failures = vec!["session beta: invalid module".to_owned()];
+
+        assert_eq!(
+            extension_reload_status(1, &failures),
+            "Reloaded 1 live session; failed for session beta: invalid module"
+        );
+    }
+
+    #[test]
+    fn extension_reload_scope_selects_matching_session_runtimes() {
+        let changed_project = Path::new("/projects/alpha");
+
+        assert!(extension_reload_matches(
+            ExtensionScope::Global,
+            changed_project,
+            Path::new("/projects/alpha"),
+        ));
+        assert!(extension_reload_matches(
+            ExtensionScope::Global,
+            changed_project,
+            Path::new("/projects/beta"),
+        ));
+        assert!(extension_reload_matches(
+            ExtensionScope::Project,
+            changed_project,
+            Path::new("/projects/alpha"),
+        ));
+        assert!(!extension_reload_matches(
+            ExtensionScope::Project,
+            changed_project,
+            Path::new("/projects/beta"),
+        ));
+    }
 
     #[test]
     fn internal_model_switch_preserves_composer_draft_and_attachments() {

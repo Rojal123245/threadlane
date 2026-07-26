@@ -17,9 +17,6 @@ for ext in "$ROOT_DIR/extensions"/*; do
     fi
 done
 
-echo "Cleaning previous runtime binaries in $THREADLANE_EXT_DIR..."
-rm -rf "$THREADLANE_EXT_DIR"/*
-
 echo "Deploying compiled .wasm binaries to $THREADLANE_EXT_DIR..."
 for ext in "$ROOT_DIR"/extensions/*; do
     if [ -f "$ext/Cargo.toml" ]; then
