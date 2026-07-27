@@ -10,18 +10,18 @@ script_mod! {
         height: 24
         padding: Inset{left: 9 right: 9 top: 2 bottom: 2}
         draw_bg +: {
-            color: #x232830
-            color_hover: #x2a313c
-            color_down: #x354153
-            border_color: #x3a424e
-            border_color_hover: #x4a5564
+            color: theme.color_secondary
+            color_hover: theme.color_secondary
+            color_down: theme.color_input
+            border_color: theme.color_border
+            border_color_hover: theme.color_input
             border_size: 1.0
             border_radius: 6.0
         }
         draw_text +: {
-            color: #xc7cdd6
-            color_hover: #xdde3ea
-            color_down: #xffffff
+            color: theme.color_card_foreground
+            color_hover: theme.color_foreground
+            color_down: theme.color_primary_foreground
             text_style +: { font_size: 9.0 }
         }
     }
@@ -32,9 +32,9 @@ script_mod! {
         icon_walk: Walk{width: 12 height: 12 margin: Inset{right: 5}}
         draw_icon +: {
             svg: crate_resource("self:resources/icons/image.svg")
-            color: #x8eb7ef
-            color_hover: #xb8d5ff
-            color_down: #xffffff
+            color: theme.color_primary
+            color_hover: theme.color_primary
+            color_down: theme.color_primary_foreground
         }
     }
 
@@ -43,13 +43,13 @@ script_mod! {
         height: 28
         padding: Inset{left: 11 right: 11 top: 2 bottom: 2}
         draw_bg +: {
-            color: #x4f78aa
-            color_hover: #x6092cc
-            color_down: #x70a7ff
+            color: theme.color_primary
+            color_hover: theme.color_primary
+            color_down: theme.color_primary
             border_radius: 7.0
         }
         draw_text +: {
-            color: #xffffff
+            color: theme.color_primary_foreground
             text_style: theme.font_bold { font_size: 9.5 }
         }
     }

@@ -90,6 +90,12 @@ A normal `cargo run` may be unsuitable for testing installation: update installa
 
 ## Makepad Component Conventions
 
+### Theme Colors
+
+- All UI colors in crates/threadlane/src must reference role-based `theme.*` tokens (`background`, `foreground`, `card`, `primary`, `secondary`, `muted`, `accent`, `destructive`, `success`, `warning`, `border`, `input`, `ring`); new color literals belong only in crates/threadlane/src/theme/mod.rs.
+- Do not add one-off hue or component tokens when an existing semantic role fits; add a role only when it represents a reusable UI meaning.
+- Preserve explicit hover, focus, pressed, border, transparency, and alpha variants when migrating or adding theme tokens.
+
 ### Registration and Namespaces
 
 Reusable script components are registered through `crates/threadlane/src/components/mod.rs`.

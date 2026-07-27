@@ -157,22 +157,22 @@ script_mod! {
         align: Align{x: 0.0 y: 0.5}
         padding: Inset{left: 11 right: 10}
         draw_bg +: {
-            color: #x00000000
-            color_hover: #x2c3541
-            color_focus: #x2c3541
-            color_down: #x344150
-            border_color: #x00000000
-            border_color_hover: #x00000000
-            border_color_focus: #x00000000
-            border_color_down: #x00000000
+            color: theme.color_transparent
+            color_hover: theme.color_card
+            color_focus: theme.color_card
+            color_down: theme.color_secondary
+            border_color: theme.color_transparent
+            border_color_hover: theme.color_transparent
+            border_color_focus: theme.color_transparent
+            border_color_down: theme.color_transparent
             border_size: 0.0
             border_radius: 5.0
         }
         draw_text +: {
-            color: #xd6dce5
-            color_hover: #xf4f7fb
-            color_focus: #xf4f7fb
-            color_down: #xffffff
+            color: theme.color_foreground
+            color_hover: theme.color_primary_foreground
+            color_focus: theme.color_primary_foreground
+            color_down: theme.color_primary_foreground
             text_style +: { font_size: 9.5 }
         }
     }
@@ -189,8 +189,8 @@ script_mod! {
             new_batch: true
             padding: Inset{left: 4 top: 4 right: 4 bottom: 4}
             draw_bg +: {
-                color: #x20252d
-                border_color: #x3c4654
+                color: theme.color_background
+                border_color: theme.color_secondary
                 border_size: 1.0
                 border_radius: 9.0
             }
@@ -202,14 +202,14 @@ script_mod! {
             delete_session_btn := mod.components.ContextMenuItem {
                 text: "Delete Session"
                 draw_bg +: {
-                    color_hover: #x3b2b31
-                    color_focus: #x3b2b31
-                    color_down: #x4a2e36
+                    color_hover: theme.color_card
+                    color_focus: theme.color_card
+                    color_down: theme.color_card
                 }
                 draw_text +: {
-                    color: #xe67f87
-                    color_hover: #xffa0a7
-                    color_focus: #xffa0a7
+                    color: theme.color_destructive
+                    color_hover: theme.color_destructive
+                    color_focus: theme.color_destructive
                 }
             }
         }

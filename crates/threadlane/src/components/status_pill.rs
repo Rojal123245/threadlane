@@ -17,16 +17,16 @@ script_mod! {
         }
         progress_dot_2 := mod.components.ProgressDot {
             visible: false
-            draw_bg +: { color: #xaeb6c2 }
+            draw_bg +: { color: theme.color_card_foreground }
         }
         progress_dot_3 := mod.components.ProgressDot {
             visible: false
-            draw_bg +: { color: #x6f7a88 }
+            draw_bg +: { color: theme.color_muted_foreground }
         }
         error_dot := mod.components.StatusDot {
             width: 5
             height: 5
-            draw_bg +: { color: #xe5534b, border_radius: 2.5 }
+            draw_bg +: { color: theme.color_destructive, border_radius: 2.5 }
         }
     }
 }

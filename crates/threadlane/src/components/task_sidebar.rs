@@ -22,9 +22,9 @@ script_mod! {
         margin: Inset{left: 8 right: 8 bottom: 4}
         cursor: MouseCursor.Hand
         draw_bg +: {
-            color: #x20252d
-            border_color: #x303945
-            border_color_hover: #x435266
+            color: theme.color_background
+            border_color: theme.color_card
+            border_color_hover: theme.color_primary
             border_size: 1.0
             border_radius: 8.0
         }
@@ -33,7 +33,7 @@ script_mod! {
             width: 7
             height: 7
             draw_bg +: {
-                color: #xd2a85d
+                color: theme.color_warning
                 border_radius: 3.5
             }
         }
@@ -49,7 +49,7 @@ script_mod! {
                 padding: 0
                 align: Align{y: 0.5}
                 draw_text +: {
-                    color: #xe0e6ef
+                    color: theme.color_primary_foreground
                     text_style: theme.font_bold { font_size: 9.5 }
                 }
             }
@@ -59,7 +59,7 @@ script_mod! {
                 padding: 0
                 align: Align{y: 0.5}
                 draw_text +: {
-                    color: #x8fa0b5
+                    color: theme.color_primary
                     text_style +: { font_size: 8.5 }
                 }
             }
@@ -69,7 +69,7 @@ script_mod! {
                 padding: 0
                 align: Align{y: 0.5}
                 draw_text +: {
-                    color: #x6f7d8e
+                    color: theme.color_primary
                     text_style: theme.font_code { font_size: 8.0 }
                 }
             }
@@ -82,9 +82,9 @@ script_mod! {
             icon_walk: Walk{width: 9 height: 9}
             draw_icon +: {
                 svg: crate_resource("self:resources/icons/close.svg")
-                color: #x8794a4
-                color_hover: #xf09a94
-                color_down: #xffffff
+                color: theme.color_muted_foreground
+                color_hover: theme.color_destructive
+                color_down: theme.color_primary_foreground
             }
         }
     }
@@ -101,7 +101,7 @@ script_mod! {
             width: 7
             height: 7
             draw_bg +: {
-                color: #x7b8796
+                color: theme.color_muted_foreground
                 border_radius: 3.5
             }
         }
@@ -111,7 +111,7 @@ script_mod! {
             padding: 0
             align: Align{y: 0.5}
             draw_text +: {
-                color: #xb6c0cd
+                color: theme.color_card_foreground
                 text_style +: { font_size: 9.0 }
             }
         }
@@ -123,8 +123,8 @@ script_mod! {
         flow: Down
         spacing: 0
         draw_bg +: {
-            color: #x1b1f26
-            border_color: #x303945
+            color: theme.color_background
+            border_color: theme.color_card
             border_size: 1.0
             border_radius: 10.0
         }
@@ -142,7 +142,7 @@ script_mod! {
                 align: Align{y: 0.5}
                 text: "Tasks"
                 draw_text +: {
-                    color: #xe7ebf0
+                    color: theme.color_foreground
                     text_style: theme.font_bold { font_size: 11.0 }
                 }
             }
@@ -155,7 +155,7 @@ script_mod! {
             width: Fill
             height: 1
             show_bg: true
-            draw_bg +: { color: #x2b323c }
+            draw_bg +: { color: theme.color_card }
         }
 
         list := PortalList {
@@ -177,7 +177,7 @@ script_mod! {
                     align: Align{y: 0.5}
                     text: "CURRENT PLAN"
                     draw_text +: {
-                        color: #x77869a
+                        color: theme.color_primary
                         text_style: theme.font_bold { font_size: 7.5 }
                     }
                 }
@@ -187,19 +187,19 @@ script_mod! {
                     padding: 0
                     align: Align{y: 0.5}
                     draw_text +: {
-                        color: #x8fa0b5
+                        color: theme.color_primary
                         text_style: theme.font_code { font_size: 8.0 }
                     }
                 }
             }
             PlanPending := mod.components.PlanSidebarRowBase {}
             PlanInProgress := mod.components.PlanSidebarRowBase {
-                status_dot +: { draw_bg +: { color: #x78aef0 } }
-                step_lbl +: { draw_text +: { color: #xd6e5f8 } }
+                status_dot +: { draw_bg +: { color: theme.color_primary } }
+                step_lbl +: { draw_text +: { color: theme.color_primary } }
             }
             PlanCompleted := mod.components.PlanSidebarRowBase {
-                status_dot +: { draw_bg +: { color: #x67c58b } }
-                step_lbl +: { draw_text +: { color: #x8794a4 } }
+                status_dot +: { draw_bg +: { color: theme.color_success } }
+                step_lbl +: { draw_text +: { color: theme.color_muted_foreground } }
             }
 
             SessionHeader := View {
@@ -212,7 +212,7 @@ script_mod! {
                     padding: 0
                     align: Align{y: 0.5}
                     draw_text +: {
-                        color: #x77869a
+                        color: theme.color_primary
                         text_style: theme.font_bold { font_size: 7.5 }
                     }
                 }
@@ -220,16 +220,16 @@ script_mod! {
 
             TaskQueued := mod.components.TaskSidebarRowBase {}
             TaskRunning := mod.components.TaskSidebarRowBase {
-                status_dot +: { draw_bg +: { color: #x78aef0 } }
+                status_dot +: { draw_bg +: { color: theme.color_primary } }
             }
             TaskCompleted := mod.components.TaskSidebarRowBase {
-                status_dot +: { draw_bg +: { color: #x67c58b } }
+                status_dot +: { draw_bg +: { color: theme.color_success } }
             }
             TaskFailed := mod.components.TaskSidebarRowBase {
-                status_dot +: { draw_bg +: { color: #xe86a64 } }
+                status_dot +: { draw_bg +: { color: theme.color_destructive } }
             }
             TaskCancelled := mod.components.TaskSidebarRowBase {
-                status_dot +: { draw_bg +: { color: #x8a94a3 } }
+                status_dot +: { draw_bg +: { color: theme.color_muted_foreground } }
             }
         }
     }

@@ -101,27 +101,29 @@ impl SessionList {
         let mut list = self.view.widget(cx, ids!(list));
         if revealed {
             script_apply_eval!(cx, list, {
+                use mod.prelude.widgets.*
                 scroll_bar +: {
                     draw_bg +: {
-                        color: #x4b5666b8
-                        color_hover: #x68778bcf
-                        color_drag: #x8496abe8
-                        border_color: #x00000000
-                        border_color_hover: #x00000000
-                        border_color_drag: #x00000000
+                        color: theme.color_input
+                        color_hover: theme.color_primary
+                        color_drag: theme.color_primary
+                        border_color: theme.color_transparent
+                        border_color_hover: theme.color_transparent
+                        border_color_drag: theme.color_transparent
                     }
                 }
             });
         } else {
             script_apply_eval!(cx, list, {
+                use mod.prelude.widgets.*
                 scroll_bar +: {
                     draw_bg +: {
-                        color: #x00000000
-                        color_hover: #x00000000
-                        color_drag: #x00000000
-                        border_color: #x00000000
-                        border_color_hover: #x00000000
-                        border_color_drag: #x00000000
+                        color: theme.color_transparent
+                        color_hover: theme.color_transparent
+                        color_drag: theme.color_transparent
+                        border_color: theme.color_transparent
+                        border_color_hover: theme.color_transparent
+                        border_color_drag: theme.color_transparent
                     }
                 }
             });

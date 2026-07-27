@@ -243,8 +243,8 @@ script_mod! {
                 margin: Inset{bottom: 22}
                 align: Align{x: 0.5 y: 0.5}
                 draw_bg +: {
-                    color: #x20252d
-                    border_color: #x2d3745
+                    color: theme.color_background
+                    border_color: theme.color_card
                     border_size: 1.0
                     border_radius: 14.0
                 }
@@ -254,7 +254,7 @@ script_mod! {
                     icon_walk: Walk{width: 28 height: 28}
                     draw_icon +: {
                         svg: crate_resource("self:resources/icons/logo.svg")
-                        color: #x6b7a8e
+                        color: theme.color_primary
                     }
                 }
             }
@@ -272,7 +272,7 @@ script_mod! {
                     height: Fit
                     text: "What should we build in "
                     draw_text +: {
-                        color: #xd0d8e4
+                        color: theme.color_card_foreground
                         text_style: theme.font_bold { font_size: 20.0 }
                     }
                 }
@@ -281,7 +281,7 @@ script_mod! {
                     height: Fit
                     text: ""
                     draw_text +: {
-                        color: #xe7ebf0
+                        color: theme.color_foreground
                         text_style: theme.font_bold { font_size: 20.0 }
                     }
                 }
@@ -290,7 +290,7 @@ script_mod! {
                     height: Fit
                     text: "?"
                     draw_text +: {
-                        color: #xd0d8e4
+                        color: theme.color_card_foreground
                         text_style: theme.font_bold { font_size: 20.0 }
                     }
                 }
@@ -303,7 +303,7 @@ script_mod! {
                 text: ""
                 margin: Inset{bottom: 28}
                 draw_text +: {
-                    color: #x5e6a7a
+                    color: theme.color_muted_foreground
                     text_style +: { font_size: 10.5 }
                 }
             }
@@ -320,8 +320,8 @@ script_mod! {
                     height: 108
                     flow: Overlay
                     draw_bg +: {
-                        color: #x1d232c
-                        border_color: #x2a3441
+                        color: theme.color_card
+                        border_color: theme.color_input
                         border_size: 1.0
                         border_radius: 10.0
                     }
@@ -342,8 +342,8 @@ script_mod! {
                                 height: 26
                                 align: Align{x: 0.5 y: 0.5}
                                 draw_bg +: {
-                                    color: #x5fa0de18
-                                    border_color: #x5fa0de35
+                                    color: theme.color_primary_tint
+                                    border_color: theme.color_primary_tint
                                     border_size: 1.0
                                     border_radius: 7.0
                                 }
@@ -353,7 +353,7 @@ script_mod! {
                                     icon_walk: Walk{width: 14 height: 14}
                                     draw_icon +: {
                                         svg: crate_resource("self:resources/icons/read-file.svg")
-                                        color: #x68b5f4
+                                        color: theme.color_primary
                                     }
                                 }
                             }
@@ -362,7 +362,7 @@ script_mod! {
                                 height: Fit
                                 text: "Explore code"
                                 draw_text +: {
-                                    color: #xe0e6ef
+                                    color: theme.color_primary_foreground
                                     text_style: theme.font_bold { font_size: 11.0 }
                                 }
                             }
@@ -372,7 +372,7 @@ script_mod! {
                             height: Fit
                             text: "Understand the structure and key files"
                             draw_text +: {
-                                color: #x8592a4
+                                color: theme.color_primary
                                 text_style +: { font_size: 9.5 }
                             }
                         }
@@ -385,22 +385,22 @@ script_mod! {
                         spacing: 0
                         icon_walk: Walk{width: 0 height: 0}
                         draw_bg +: {
-                            color: #x00000000
-                            color_hover: #x5fa0de10
-                            color_focus: #x5fa0de10
-                            color_down: #x5fa0de22
-                            border_color: #x00000000
-                            border_color_hover: #x00000000
-                            border_color_focus: #x00000000
-                            border_color_down: #x00000000
+                            color: theme.color_transparent
+                            color_hover: theme.color_primary_tint
+                            color_focus: theme.color_primary_tint
+                            color_down: theme.color_primary_tint
+                            border_color: theme.color_transparent
+                            border_color_hover: theme.color_transparent
+                            border_color_focus: theme.color_transparent
+                            border_color_down: theme.color_transparent
                             border_size: 0.0
                             border_radius: 10.0
                         }
                         draw_text +: {
-                            color: #x00000000
-                            color_hover: #x00000000
-                            color_focus: #x00000000
-                            color_down: #x00000000
+                            color: theme.color_transparent
+                            color_hover: theme.color_transparent
+                            color_focus: theme.color_transparent
+                            color_down: theme.color_transparent
                         }
                     }
                 }
@@ -410,8 +410,8 @@ script_mod! {
                     height: 108
                     flow: Overlay
                     draw_bg +: {
-                        color: #x1d232c
-                        border_color: #x2a3441
+                        color: theme.color_card
+                        border_color: theme.color_input
                         border_size: 1.0
                         border_radius: 10.0
                     }
@@ -432,8 +432,8 @@ script_mod! {
                                 height: 26
                                 align: Align{x: 0.5 y: 0.5}
                                 draw_bg +: {
-                                    color: #x9a75d518
-                                    border_color: #x9a75d535
+                                    color: theme.color_accent_tint
+                                    border_color: theme.color_accent_tint
                                     border_size: 1.0
                                     border_radius: 7.0
                                 }
@@ -443,7 +443,7 @@ script_mod! {
                                     icon_walk: Walk{width: 14 height: 14}
                                     draw_icon +: {
                                         svg: crate_resource("self:resources/icons/write-file.svg")
-                                        color: #xb18ae8
+                                        color: theme.color_primary
                                     }
                                 }
                             }
@@ -452,7 +452,7 @@ script_mod! {
                                 height: Fit
                                 text: "Build something"
                                 draw_text +: {
-                                    color: #xe0e6ef
+                                    color: theme.color_primary_foreground
                                     text_style: theme.font_bold { font_size: 11.0 }
                                 }
                             }
@@ -462,7 +462,7 @@ script_mod! {
                             height: Fit
                             text: "Start a feature, app, or tool"
                             draw_text +: {
-                                color: #x8592a4
+                                color: theme.color_primary
                                 text_style +: { font_size: 9.5 }
                             }
                         }
@@ -475,22 +475,22 @@ script_mod! {
                         spacing: 0
                         icon_walk: Walk{width: 0 height: 0}
                         draw_bg +: {
-                            color: #x00000000
-                            color_hover: #x9370c810
-                            color_focus: #x9370c810
-                            color_down: #x9370c822
-                            border_color: #x00000000
-                            border_color_hover: #x00000000
-                            border_color_focus: #x00000000
-                            border_color_down: #x00000000
+                            color: theme.color_transparent
+                            color_hover: theme.color_accent_tint
+                            color_focus: theme.color_accent_tint
+                            color_down: theme.color_accent_tint
+                            border_color: theme.color_transparent
+                            border_color_hover: theme.color_transparent
+                            border_color_focus: theme.color_transparent
+                            border_color_down: theme.color_transparent
                             border_size: 0.0
                             border_radius: 10.0
                         }
                         draw_text +: {
-                            color: #x00000000
-                            color_hover: #x00000000
-                            color_focus: #x00000000
-                            color_down: #x00000000
+                            color: theme.color_transparent
+                            color_hover: theme.color_transparent
+                            color_focus: theme.color_transparent
+                            color_down: theme.color_transparent
                         }
                     }
                 }
@@ -500,8 +500,8 @@ script_mod! {
                     height: 108
                     flow: Overlay
                     draw_bg +: {
-                        color: #x1d232c
-                        border_color: #x2a3441
+                        color: theme.color_card
+                        border_color: theme.color_input
                         border_size: 1.0
                         border_radius: 10.0
                     }
@@ -522,8 +522,8 @@ script_mod! {
                                 height: 26
                                 align: Align{x: 0.5 y: 0.5}
                                 draw_bg +: {
-                                    color: #x3aaa7818
-                                    border_color: #x3aaa7835
+                                    color: theme.color_success_tint
+                                    border_color: theme.color_success_tint
                                     border_size: 1.0
                                     border_radius: 7.0
                                 }
@@ -533,7 +533,7 @@ script_mod! {
                                     icon_walk: Walk{width: 14 height: 14}
                                     draw_icon +: {
                                         svg: crate_resource("self:resources/icons/edit-file.svg")
-                                        color: #x4bc98d
+                                        color: theme.color_success
                                     }
                                 }
                             }
@@ -542,7 +542,7 @@ script_mod! {
                                 height: Fit
                                 text: "Review code"
                                 draw_text +: {
-                                    color: #xe0e6ef
+                                    color: theme.color_primary_foreground
                                     text_style: theme.font_bold { font_size: 11.0 }
                                 }
                             }
@@ -552,7 +552,7 @@ script_mod! {
                             height: Fit
                             text: "Find bugs and simplify changes"
                             draw_text +: {
-                                color: #x8592a4
+                                color: theme.color_primary
                                 text_style +: { font_size: 9.5 }
                             }
                         }
@@ -565,22 +565,22 @@ script_mod! {
                         spacing: 0
                         icon_walk: Walk{width: 0 height: 0}
                         draw_bg +: {
-                            color: #x00000000
-                            color_hover: #x3aaa7810
-                            color_focus: #x3aaa7810
-                            color_down: #x3aaa7822
-                            border_color: #x00000000
-                            border_color_hover: #x00000000
-                            border_color_focus: #x00000000
-                            border_color_down: #x00000000
+                            color: theme.color_transparent
+                            color_hover: theme.color_success_tint
+                            color_focus: theme.color_success_tint
+                            color_down: theme.color_success_tint
+                            border_color: theme.color_transparent
+                            border_color_hover: theme.color_transparent
+                            border_color_focus: theme.color_transparent
+                            border_color_down: theme.color_transparent
                             border_size: 0.0
                             border_radius: 10.0
                         }
                         draw_text +: {
-                            color: #x00000000
-                            color_hover: #x00000000
-                            color_focus: #x00000000
-                            color_down: #x00000000
+                            color: theme.color_transparent
+                            color_hover: theme.color_transparent
+                            color_focus: theme.color_transparent
+                            color_down: theme.color_transparent
                         }
                     }
                 }
@@ -590,8 +590,8 @@ script_mod! {
                     height: 108
                     flow: Overlay
                     draw_bg +: {
-                        color: #x1d232c
-                        border_color: #x2a3441
+                        color: theme.color_card
+                        border_color: theme.color_input
                         border_size: 1.0
                         border_radius: 10.0
                     }
@@ -612,8 +612,8 @@ script_mod! {
                                 height: 26
                                 align: Align{x: 0.5 y: 0.5}
                                 draw_bg +: {
-                                    color: #xc0703018
-                                    border_color: #xc0703035
+                                    color: theme.color_destructive_tint
+                                    border_color: theme.color_destructive_tint
                                     border_size: 1.0
                                     border_radius: 7.0
                                 }
@@ -623,7 +623,7 @@ script_mod! {
                                     icon_walk: Walk{width: 14 height: 14}
                                     draw_icon +: {
                                         svg: crate_resource("self:resources/icons/tool.svg")
-                                        color: #xe08a43
+                                        color: theme.color_warning
                                     }
                                 }
                             }
@@ -632,7 +632,7 @@ script_mod! {
                                 height: Fit
                                 text: "Fix an issue"
                                 draw_text +: {
-                                    color: #xe0e6ef
+                                    color: theme.color_primary_foreground
                                     text_style: theme.font_bold { font_size: 11.0 }
                                 }
                             }
@@ -642,7 +642,7 @@ script_mod! {
                             height: Fit
                             text: "Diagnose errors and failures"
                             draw_text +: {
-                                color: #x8592a4
+                                color: theme.color_primary
                                 text_style +: { font_size: 9.5 }
                             }
                         }
@@ -655,22 +655,22 @@ script_mod! {
                         spacing: 0
                         icon_walk: Walk{width: 0 height: 0}
                         draw_bg +: {
-                            color: #x00000000
-                            color_hover: #xc0703010
-                            color_focus: #xc0703010
-                            color_down: #xc0703022
-                            border_color: #x00000000
-                            border_color_hover: #x00000000
-                            border_color_focus: #x00000000
-                            border_color_down: #x00000000
+                            color: theme.color_transparent
+                            color_hover: theme.color_destructive_tint
+                            color_focus: theme.color_destructive_tint
+                            color_down: theme.color_destructive_tint
+                            border_color: theme.color_transparent
+                            border_color_hover: theme.color_transparent
+                            border_color_focus: theme.color_transparent
+                            border_color_down: theme.color_transparent
                             border_size: 0.0
                             border_radius: 10.0
                         }
                         draw_text +: {
-                            color: #x00000000
-                            color_hover: #x00000000
-                            color_focus: #x00000000
-                            color_down: #x00000000
+                            color: theme.color_transparent
+                            color_hover: theme.color_transparent
+                            color_focus: theme.color_transparent
+                            color_down: theme.color_transparent
                         }
                     }
                 }
@@ -700,7 +700,7 @@ script_mod! {
                         width: Fit{max: FitBound.Abs(654)}
                     }
                     draw_bg +: {
-                        color: #x2a3547
+                        color: theme.color_card
                         border_radius: 9.0
                     }
                 }
@@ -717,7 +717,7 @@ script_mod! {
                     padding: Inset{left: 13 top: 8 right: 13 bottom: 8}
                     md +: { width: Fill }
                     draw_bg +: {
-                        color: #x2a3547
+                        color: theme.color_card
                         border_radius: 9.0
                     }
                 }
@@ -743,7 +743,7 @@ script_mod! {
                     height: Fit
                     text: ""
                     draw_text +: {
-                        color: #x8b93a0
+                        color: theme.color_muted_foreground
                         text_style +: { font_size: 10.0 }
                     }
                 }
@@ -774,7 +774,7 @@ script_mod! {
                         align: Align{y: 0.5}
                         clip_x: true
                         preview_lbl := mod.components.ClippedLabel {
-                            draw_text +: { color: #x9ba7b6 }
+                            draw_text +: { color: theme.color_muted_foreground }
                         }
                         status_indicator := ActivityStatusIndicator {}
                     }
@@ -784,7 +784,7 @@ script_mod! {
                     height: Fit
                     padding: Inset{left: 30 top: 3 right: 18 bottom: 7}
                     draw_bg +: {
-                        color: #x00000000
+                        color: theme.color_transparent
                         border_size: 0.0
                     }
                     md := mod.components.ChatMarkdown {}
@@ -807,14 +807,14 @@ script_mod! {
                             icon_generic +: { visible: false }
                             icon_thinking +: {
                                 visible: true
-                                icon +: { draw_icon +: { color: #x8d8aa3 } }
+                                icon +: { draw_icon +: { color: theme.color_muted_foreground } }
                             }
                         }
                     }
                     title_lbl +: {
                         width: 70
                         text: "Thinking"
-                        draw_text +: { color: #xbcb8cf }
+                        draw_text +: { color: theme.color_card_foreground }
                     }
                     summary := View {
                         width: Fill
@@ -822,7 +822,7 @@ script_mod! {
                         align: Align{y: 0.5}
                         clip_x: true
                         preview_lbl := mod.components.ClippedLabel {
-                            draw_text +: { color: #x8f98a6 }
+                            draw_text +: { color: theme.color_muted_foreground }
                         }
                     }
                 }
@@ -831,7 +831,7 @@ script_mod! {
                     height: Fit
                     padding: Inset{left: 30 top: 5 right: 24 bottom: 8}
                     draw_bg +: {
-                        color: #x00000000
+                        color: theme.color_transparent
                         border_size: 0.0
                     }
                     md := mod.components.ChatMarkdown {}
@@ -867,7 +867,7 @@ script_mod! {
                         clip_x: true
                         preview_lbl := mod.components.ClippedLabel {
                             width: Fit
-                            draw_text +: { color: #x8794a3 }
+                            draw_text +: { color: theme.color_muted_foreground }
                         }
                         status_indicator := ActivityStatusIndicator {}
                     }
@@ -879,7 +879,7 @@ script_mod! {
                     flow: Down
                     spacing: 6
                     draw_bg +: {
-                        color: #x00000000
+                        color: theme.color_transparent
                         border_size: 0.0
                     }
                     rail := #(SubagentRail::register_widget(vm)) {
@@ -887,7 +887,7 @@ script_mod! {
                         height: Fit
                         flow: Down
                         spacing: 7
-                        draw_bg +: { color: #x00000000 }
+                        draw_bg +: { color: theme.color_transparent }
                         row_template: #(ToolFoldHeader::register_widget(vm)) {
                             width: Fill
                             height: Fit
@@ -907,7 +907,7 @@ script_mod! {
                                     padding: 0
                                     align: Align{y: 0.5}
                                     draw_text +: {
-                                        color: #xd5dbe4
+                                        color: theme.color_foreground
                                         text_style: theme.font_regular { font_size: 12.0 }
                                     }
                                 }
@@ -923,7 +923,7 @@ script_mod! {
                                         height: 20
                                         padding: 0
                                         align: Align{y: 0.5}
-                                        draw_text +: { color: #x8794a3 }
+                                        draw_text +: { color: theme.color_muted_foreground }
                                     }
                                     status_lbl := Label {
                                         width: Fit
@@ -931,7 +931,7 @@ script_mod! {
                                         align: Align{y: 0.5}
                                         padding: 0
                                         draw_text +: {
-                                            color: #x8794a3
+                                            color: theme.color_muted_foreground
                                             text_style +: { font_size: 9.0 }
                                         }
                                     }
@@ -959,11 +959,11 @@ script_mod! {
                                     }
                                     working_lbl := Label {
                                         text: "Working..."
-                                        draw_text +: { color: #x8794a3 text_style +: { font_size: 9.0 } }
+                                        draw_text +: { color: theme.color_muted_foreground text_style +: { font_size: 9.0 } }
                                     }
                                 }
                                 draw_bg +: {
-                                    color: #x00000000
+                                    color: theme.color_transparent
                                     border_size: 0.0
                                 }
                                 detail_md := mod.components.ChatMarkdown {}
@@ -999,7 +999,7 @@ script_mod! {
                             max_lines: 1
                             text_overflow: Ellipsis
                             draw_text +: {
-                                color: #xc7d0dc
+                                color: theme.color_foreground
                                 text_style +: { font_size: 9.0 }
                             }
                         }
@@ -1008,13 +1008,13 @@ script_mod! {
                             visible: false
                             max_lines: 1
                             text_overflow: Ellipsis
-                            draw_text +: { color: #x8794a3 }
+                            draw_text +: { color: theme.color_muted_foreground }
                         }
                         result_meta_header_lbl := mod.components.ClippedLabel {
                             width: Fit
                             visible: false
                             draw_text +: {
-                                color: #x708197
+                                color: theme.color_primary
                                 text_style +: { font_size: 8.0 }
                             }
                         }
@@ -1029,7 +1029,7 @@ script_mod! {
                     flow: Down
                     spacing: 4
                     draw_bg +: {
-                        color: #x00000000
+                        color: theme.color_transparent
                         border_size: 0.0
                     }
                     details_row := View {
@@ -1038,10 +1038,10 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         meta_lbl := mod.components.CodeLabel {
-                            draw_text +: { color: #x8494a8 }
+                            draw_text +: { color: theme.color_primary }
                         }
                         result_meta_lbl := mod.components.CodeLabel {
-                            draw_text +: { color: #x768292 }
+                            draw_text +: { color: theme.color_muted_foreground }
                         }
                     }
                     args_section := ToolSection {
@@ -1049,7 +1049,7 @@ script_mod! {
                     }
                     result_section := ToolSection {
                         section_label +: { text: "OUTPUT" }
-                        content_lbl +: { draw_text +: { color: #xaeb8c5 } }
+                        content_lbl +: { draw_text +: { color: theme.color_card_foreground } }
                     }
                 }
             }
@@ -1076,14 +1076,14 @@ script_mod! {
             fixed_project_header_active := mod.components.ProjectHeaderBase {
                 visible: false
                 draw_bg +: {
-                    color: #x222c38
-                    color_hover: #x283543
-                    border_color: #x34465a
+                    color: theme.color_background
+                    color_hover: theme.color_card
+                    border_color: theme.color_primary
                     border_size: 1.0
                 }
                 project_toggle_surface +: {
-                    folder_icon +: { draw_icon +: { color: #x8fb9e8 } }
-                    name_lbl +: { draw_text +: { color: #xe0e7ef } }
+                    folder_icon +: { draw_icon +: { color: theme.color_primary } }
+                    name_lbl +: { draw_text +: { color: theme.color_primary_foreground } }
                 }
             }
         }
@@ -1100,12 +1100,12 @@ script_mod! {
                 draw_bg +: {
                     size: 5.0
                     border_size: 0.0
-                    color: #x00000000
-                    color_hover: #x00000000
-                    color_drag: #x00000000
-                    border_color: #x00000000
-                    border_color_hover: #x00000000
-                    border_color_drag: #x00000000
+                    color: theme.color_transparent
+                    color_hover: theme.color_transparent
+                    color_drag: theme.color_transparent
+                    border_color: theme.color_transparent
+                    border_color_hover: theme.color_transparent
+                    border_color_drag: theme.color_transparent
                 }
             }
 
@@ -1113,21 +1113,21 @@ script_mod! {
                 width: Fill
                 height: 1
                 show_bg: true
-                draw_bg +: { color: #x00000000 }
+                draw_bg +: { color: theme.color_transparent }
             }
 
             ProjectHeader := mod.components.ProjectHeaderBase {}
 
             ProjectHeaderActive := mod.components.ProjectHeaderBase {
                 draw_bg +: {
-                    color: #x222c38
-                    color_hover: #x283543
-                    border_color: #x34465a
+                    color: theme.color_background
+                    color_hover: theme.color_card
+                    border_color: theme.color_primary
                     border_size: 1.0
                 }
                 project_toggle_surface +: {
-                    folder_icon +: { draw_icon +: { color: #x8fb9e8 } }
-                    name_lbl +: { draw_text +: { color: #xe0e7ef } }
+                    folder_icon +: { draw_icon +: { color: theme.color_primary } }
+                    name_lbl +: { draw_text +: { color: theme.color_primary_foreground } }
                 }
             }
 
@@ -1140,20 +1140,20 @@ script_mod! {
             SessionRowActive := SessionRowBase {
                 draw_bg +: {
                     is_active: 1.0
-                    color: #x1a2535
-                    color_hover: #x1e2a3a
-                    border_color: #x00000000
+                    color: theme.color_background
+                    color_hover: theme.color_background
+                    border_color: theme.color_transparent
                     border_size: 0.0
                     border_radius: 7.0
                 }
                 title_surface +: {
                     title_lbl +: {
-                        draw_text +: { color: #xe8edf4 }
+                        draw_text +: { color: theme.color_primary_foreground }
                     }
                 }
                 time_lbl +: {
                     draw_text +: {
-                        color: #xaeb6c2
+                        color: theme.color_card_foreground
                     }
                 }
             }
@@ -1162,40 +1162,40 @@ script_mod! {
                 draw_bg +: {
                     tree_last: 1.0
                     is_active: 1.0
-                    color: #x1a2535
-                    color_hover: #x1e2a3a
-                    border_color: #x00000000
+                    color: theme.color_background
+                    color_hover: theme.color_background
+                    border_color: theme.color_transparent
                     border_size: 0.0
                     border_radius: 7.0
                 }
                 title_surface +: {
                     title_lbl +: {
-                        draw_text +: { color: #xe8edf4 }
+                        draw_text +: { color: theme.color_primary_foreground }
                     }
                 }
                 time_lbl +: {
                     draw_text +: {
-                        color: #xaeb6c2
+                        color: theme.color_card_foreground
                     }
                 }
             }
 
             SessionRowContext := SessionRowBase {
                 draw_bg +: {
-                    color: #x273344
-                    color_hover: #x30425a
-                    border_color: #x4f82bd
+                    color: theme.color_card
+                    color_hover: theme.color_primary
+                    border_color: theme.color_primary
                     border_size: 1.0
                     border_radius: 6.0
                 }
                 title_surface +: {
                     title_lbl +: {
-                        draw_text +: { color: #xf0f4fa }
+                        draw_text +: { color: theme.color_primary_foreground }
                     }
                 }
                 time_lbl +: {
                     draw_text +: {
-                        color: #xb7c5d8
+                        color: theme.color_primary
                     }
                 }
             }
@@ -1203,20 +1203,20 @@ script_mod! {
             SessionRowContextLast := SessionRowBase {
                 draw_bg +: {
                     tree_last: 1.0
-                    color: #x273344
-                    color_hover: #x30425a
-                    border_color: #x4f82bd
+                    color: theme.color_card
+                    color_hover: theme.color_primary
+                    border_color: theme.color_primary
                     border_size: 1.0
                     border_radius: 6.0
                 }
                 title_surface +: {
                     title_lbl +: {
-                        draw_text +: { color: #xf0f4fa }
+                        draw_text +: { color: theme.color_primary_foreground }
                     }
                 }
                 time_lbl +: {
                     draw_text +: {
-                        color: #xb7c5d8
+                        color: theme.color_primary
                     }
                 }
             }
@@ -1234,21 +1234,21 @@ script_mod! {
                     text: "Show more"
                     align: Align{x: 0.0 y: 0.5}
                     draw_bg +: {
-                        color: #x00000000
-                        color_hover: #x00000000
-                        color_focus: #x00000000
-                        color_down: #x00000000
-                        border_color: #x00000000
-                        border_color_hover: #x00000000
-                        border_color_focus: #x00000000
-                        border_color_down: #x00000000
+                        color: theme.color_transparent
+                        color_hover: theme.color_transparent
+                        color_focus: theme.color_transparent
+                        color_down: theme.color_transparent
+                        border_color: theme.color_transparent
+                        border_color_hover: theme.color_transparent
+                        border_color_focus: theme.color_transparent
+                        border_color_down: theme.color_transparent
                         border_size: 0.0
                     }
                     draw_text +: {
-                        color: #x788596
-                        color_hover: #xaebdce
-                        color_focus: #xaebdce
-                        color_down: #xd7e2ee
+                        color: theme.color_muted_foreground
+                        color_hover: theme.color_primary
+                        color_focus: theme.color_primary
+                        color_down: theme.color_foreground
                         text_style +: { font_size: 9.5 }
                     }
                 }
@@ -1258,7 +1258,7 @@ script_mod! {
                 padding: Inset{left: 43 top: 4 right: 10 bottom: 8}
                 lbl +: {
                     text: "No sessions yet"
-                    draw_text +: { color: #x596474 text_style +: { font_size: 9.5 } }
+                    draw_text +: { color: theme.color_muted_foreground text_style +: { font_size: 9.5 } }
                 }
             }
         }
@@ -1269,22 +1269,22 @@ script_mod! {
         height: 28
         padding: Inset{left: 10 right: 10 top: 4 bottom: 4}
         draw_bg +: {
-            color: #x2b313d
-            color_hover: #x363e4d
-            color_focus: #x3b4658
-            color_down: #x444f62
-            border_color: #x3a4354
-            border_color_hover: #x536176
-            border_color_focus: #x60718a
-            border_color_down: #x71839e
+            color: theme.color_card
+            color_hover: theme.color_secondary
+            color_focus: theme.color_secondary
+            color_down: theme.color_input
+            border_color: theme.color_secondary
+            border_color_hover: theme.color_primary
+            border_color_focus: theme.color_primary
+            border_color_down: theme.color_primary
             border_size: 1.0
             border_radius: 6.0
         }
         draw_text +: {
-            color: #xa4b0c2
-            color_hover: #xd8e0ec
-            color_focus: #xe7eef7
-            color_down: #xffffff
+            color: theme.color_card_foreground
+            color_hover: theme.color_foreground
+            color_focus: theme.color_primary_foreground
+            color_down: theme.color_primary_foreground
             text_style +: { font_size: 9.0 }
         }
     }
@@ -1302,10 +1302,10 @@ script_mod! {
                 blur_level: 5.2
                 corner_radius: 0.0
                 border_width: 0.0
-                tint_color: #x181a1f
+                tint_color: theme.color_background
                 tint_alpha: 0.16
                 surface_alpha: 0.62
-                fallback_color: #x181a1f
+                fallback_color: theme.color_background
                 shadow_radius: 0.0
                 shadow_offset: vec2(0.0 0.0)
             }
@@ -1318,10 +1318,10 @@ script_mod! {
             padding: 0
             spacing: 0
             draw_bg +: {
-                color: #x1a1d24
+                color: theme.color_background
                 border_radius: 12.0
                 border_size: 1.0
-                border_color: #x323a48
+                border_color: theme.color_card
             }
 
             settings_nav := View {
@@ -1331,8 +1331,8 @@ script_mod! {
                 padding: Inset{left: 16 top: 24 right: 12 bottom: 20}
                 spacing: 8
                 draw_bg +: {
-                    color: #x171a20
-                    border_color: #x2d3440
+                    color: theme.color_background
+                    border_color: theme.color_card
                     border_size: 1.0
                 }
 
@@ -1342,7 +1342,7 @@ script_mod! {
                     margin: Inset{bottom: 4}
                     text: "PROVIDERS"
                     draw_text +: {
-                        color: #x697587
+                        color: theme.color_muted_foreground
                         text_style: theme.font_bold { font_size: 9.0 }
                     }
                 }
@@ -1355,22 +1355,22 @@ script_mod! {
                     align: Align{x: 0.0 y: 0.5}
                     text: "Google Antigravity"
                     draw_bg +: {
-                        color: #x2d405a
-                        color_hover: #x354b69
-                        color_focus: #x3a5272
-                        color_down: #x46638a
-                        border_color: #x4b719f
-                        border_color_hover: #x5a84b8
-                        border_color_focus: #x6b96c8
-                        border_color_down: #x7ba9dc
+                        color: theme.color_primary
+                        color_hover: theme.color_primary
+                        color_focus: theme.color_primary
+                        color_down: theme.color_primary
+                        border_color: theme.color_primary
+                        border_color_hover: theme.color_primary
+                        border_color_focus: theme.color_primary
+                        border_color_down: theme.color_primary
                         border_size: 1.0
                         border_radius: 6.0
                     }
                     draw_text +: {
-                        color: #xe4edf8
-                        color_hover: #xffffff
-                        color_focus: #xffffff
-                        color_down: #xffffff
+                        color: theme.color_primary_foreground
+                        color_hover: theme.color_primary_foreground
+                        color_focus: theme.color_primary_foreground
+                        color_down: theme.color_primary_foreground
                         text_style +: { font_size: 9.5 }
                     }
                 }
@@ -1383,22 +1383,22 @@ script_mod! {
                     align: Align{x: 0.0 y: 0.5}
                     text: "OpenAI / ChatGPT"
                     draw_bg +: {
-                        color: #x20252e
-                        color_hover: #x2b3442
-                        color_focus: #x303b4b
-                        color_down: #x39485b
-                        border_color: #x20252e
-                        border_color_hover: #x3b4b60
-                        border_color_focus: #x4b5e76
-                        border_color_down: #x5c718d
+                        color: theme.color_background
+                        color_hover: theme.color_card
+                        color_focus: theme.color_secondary
+                        color_down: theme.color_primary
+                        border_color: theme.color_background
+                        border_color_hover: theme.color_primary
+                        border_color_focus: theme.color_primary
+                        border_color_down: theme.color_primary
                         border_size: 1.0
                         border_radius: 6.0
                     }
                     draw_text +: {
-                        color: #x9ba8ba
-                        color_hover: #xd8e2ef
-                        color_focus: #xe7eef7
-                        color_down: #xffffff
+                        color: theme.color_primary
+                        color_hover: theme.color_foreground
+                        color_focus: theme.color_primary_foreground
+                        color_down: theme.color_primary_foreground
                         text_style +: { font_size: 9.5 }
                     }
                 }
@@ -1409,7 +1409,7 @@ script_mod! {
                     margin: Inset{top: 18 bottom: 4}
                     text: "ADVANCED"
                     draw_text +: {
-                        color: #x697587
+                        color: theme.color_muted_foreground
                         text_style: theme.font_bold { font_size: 9.0 }
                     }
                 }
@@ -1422,22 +1422,22 @@ script_mod! {
                     align: Align{x: 0.0 y: 0.5}
                     text: "WASI Extensions"
                     draw_bg +: {
-                        color: #x20252e
-                        color_hover: #x2b3442
-                        color_focus: #x303b4b
-                        color_down: #x39485b
-                        border_color: #x20252e
-                        border_color_hover: #x3b4b60
-                        border_color_focus: #x4b5e76
-                        border_color_down: #x5c718d
+                        color: theme.color_background
+                        color_hover: theme.color_card
+                        color_focus: theme.color_secondary
+                        color_down: theme.color_primary
+                        border_color: theme.color_background
+                        border_color_hover: theme.color_primary
+                        border_color_focus: theme.color_primary
+                        border_color_down: theme.color_primary
                         border_size: 1.0
                         border_radius: 6.0
                     }
                     draw_text +: {
-                        color: #x9ba8ba
-                        color_hover: #xd8e2ef
-                        color_focus: #xe7eef7
-                        color_down: #xffffff
+                        color: theme.color_primary
+                        color_hover: theme.color_foreground
+                        color_focus: theme.color_primary_foreground
+                        color_down: theme.color_primary_foreground
                         text_style +: { font_size: 9.5 }
                     }
                 }
@@ -1450,22 +1450,22 @@ script_mod! {
                     align: Align{x: 0.0 y: 0.5}
                     text: "Skills"
                     draw_bg +: {
-                        color: #x20252e
-                        color_hover: #x2b3442
-                        color_focus: #x303b4b
-                        color_down: #x39485b
-                        border_color: #x20252e
-                        border_color_hover: #x3b4b60
-                        border_color_focus: #x4b5e76
-                        border_color_down: #x5c718d
+                        color: theme.color_background
+                        color_hover: theme.color_card
+                        color_focus: theme.color_secondary
+                        color_down: theme.color_primary
+                        border_color: theme.color_background
+                        border_color_hover: theme.color_primary
+                        border_color_focus: theme.color_primary
+                        border_color_down: theme.color_primary
                         border_size: 1.0
                         border_radius: 6.0
                     }
                     draw_text +: {
-                        color: #x9ba8ba
-                        color_hover: #xd8e2ef
-                        color_focus: #xe7eef7
-                        color_down: #xffffff
+                        color: theme.color_primary
+                        color_hover: theme.color_foreground
+                        color_focus: theme.color_primary_foreground
+                        color_down: theme.color_primary_foreground
                         text_style +: { font_size: 9.5 }
                     }
                 }
@@ -1478,22 +1478,22 @@ script_mod! {
                     align: Align{x: 0.0 y: 0.5}
                     text: "About"
                     draw_bg +: {
-                        color: #x20252e
-                        color_hover: #x2b3442
-                        color_focus: #x303b4b
-                        color_down: #x39485b
-                        border_color: #x20252e
-                        border_color_hover: #x3b4b60
-                        border_color_focus: #x4b5e76
-                        border_color_down: #x5c718d
+                        color: theme.color_background
+                        color_hover: theme.color_card
+                        color_focus: theme.color_secondary
+                        color_down: theme.color_primary
+                        border_color: theme.color_background
+                        border_color_hover: theme.color_primary
+                        border_color_focus: theme.color_primary
+                        border_color_down: theme.color_primary
                         border_size: 1.0
                         border_radius: 6.0
                     }
                     draw_text +: {
-                        color: #x9ba8ba
-                        color_hover: #xd8e2ef
-                        color_focus: #xe7eef7
-                        color_down: #xffffff
+                        color: theme.color_primary
+                        color_hover: theme.color_foreground
+                        color_focus: theme.color_primary_foreground
+                        color_down: theme.color_primary_foreground
                         text_style +: { font_size: 9.5 }
                     }
                 }
@@ -1517,7 +1517,7 @@ script_mod! {
                         height: Fit
                         text: "Provider Settings"
                         draw_text +: {
-                            color: #xe7ebf0
+                            color: theme.color_foreground
                             text_style: theme.font_bold { font_size: 14.0 }
                         }
                     }
@@ -1531,23 +1531,23 @@ script_mod! {
                         align: Align{x: 0.5 y: 0.5}
                         icon_walk: Walk{width: 12 height: 12}
                         draw_bg +: {
-                            color: #x00000000
-                            color_hover: #x2e3543
-                            color_focus: #x2e3543
-                            color_down: #x3e485a
-                            border_color: #x00000000
-                            border_color_hover: #x00000000
-                            border_color_focus: #x00000000
-                            border_color_down: #x00000000
+                            color: theme.color_transparent
+                            color_hover: theme.color_card
+                            color_focus: theme.color_card
+                            color_down: theme.color_secondary
+                            border_color: theme.color_transparent
+                            border_color_hover: theme.color_transparent
+                            border_color_focus: theme.color_transparent
+                            border_color_down: theme.color_transparent
                             border_size: 0.0
                             border_radius: 6.0
                         }
                         draw_icon +: {
                             svg: crate_resource("self:resources/icons/close.svg")
-                            color: #x8b93a0
-                            color_hover: #xffffff
-                            color_focus: #xffffff
-                            color_down: #xffffff
+                            color: theme.color_muted_foreground
+                            color_hover: theme.color_primary_foreground
+                            color_focus: theme.color_primary_foreground
+                            color_down: theme.color_primary_foreground
                         }
                     }
                 }
@@ -1563,7 +1563,7 @@ script_mod! {
                         height: Fit
                         text: "Google Antigravity"
                         draw_text +: {
-                            color: #xe7ebf0
+                            color: theme.color_foreground
                             text_style: theme.font_bold { font_size: 18.0 }
                         }
                     }
@@ -1573,7 +1573,7 @@ script_mod! {
                         height: Fit
                         text: "Connect your AI model providers to use them in Threadlane."
                         draw_text +: {
-                            color: #x7f8c9d
+                            color: theme.color_muted_foreground
                             text_style +: { font_size: 10.0 }
                         }
                     }
@@ -1585,10 +1585,10 @@ script_mod! {
                         padding: Inset{left: 16 top: 14 right: 16 bottom: 14}
                         spacing: 10
                         draw_bg +: {
-                            color: #x222631
+                            color: theme.color_background
                             border_radius: 8.0
                             border_size: 1.0
-                            border_color: #x323a48
+                            border_color: theme.color_card
                         }
 
                         ag_header := View {
@@ -1602,7 +1602,7 @@ script_mod! {
                                 height: Fit
                                 text: "Google Antigravity"
                                 draw_text +: {
-                                    color: #xe7ebf0
+                                    color: theme.color_foreground
                                     text_style: theme.font_bold { font_size: 11.5 }
                                 }
                             }
@@ -1612,7 +1612,7 @@ script_mod! {
                                 height: Fit
                                 text: "Not Connected"
                                 draw_text +: {
-                                    color: #xe06c75
+                                    color: theme.color_destructive
                                     text_style: theme.font_bold { font_size: 10.0 }
                                 }
                             }
@@ -1623,7 +1623,7 @@ script_mod! {
                             height: Fit
                             text: "Cloud Code Assist, Gemini 3.6 Flash / Pro via Google OAuth PKCE"
                             draw_text +: {
-                                color: #x7f8c9d
+                                color: theme.color_muted_foreground
                                 text_style +: { font_size: 9.25 }
                             }
                         }
@@ -1641,13 +1641,13 @@ script_mod! {
                                 padding: Inset{left: 12 right: 12 top: 4 bottom: 4}
                                 text: "Sign in with Google"
                                 draw_bg +: {
-                                    color: #x3b669e
-                                    color_hover: #x4a7bc0
-                                    color_down: #x5a8de0
+                                    color: theme.color_primary
+                                    color_hover: theme.color_primary
+                                    color_down: theme.color_primary
                                     border_radius: 6.0
                                 }
                                 draw_text +: {
-                                    color: #xffffff
+                                    color: theme.color_primary_foreground
                                     text_style: theme.font_bold { font_size: 9.5 }
                                 }
                             }
@@ -1658,16 +1658,16 @@ script_mod! {
                                 padding: Inset{left: 10 right: 10 top: 4 bottom: 4}
                                 text: "Run Health Check"
                                 draw_bg +: {
-                                    color: #x2b313d
-                                    color_hover: #x363e4d
-                                    color_down: #x444f62
-                                    border_color: #x3a4354
+                                    color: theme.color_card
+                                    color_hover: theme.color_secondary
+                                    color_down: theme.color_input
+                                    border_color: theme.color_secondary
                                     border_size: 1.0
                                     border_radius: 6.0
                                 }
                                 draw_text +: {
-                                    color: #xa4b0c2
-                                    color_hover: #xd8e0ec
+                                    color: theme.color_card_foreground
+                                    color_hover: theme.color_foreground
                                     text_style +: { font_size: 9.0 }
                                 }
                             }
@@ -1687,7 +1687,7 @@ script_mod! {
                         height: Fit
                         text: "OpenAI / ChatGPT"
                         draw_text +: {
-                            color: #xe7ebf0
+                            color: theme.color_foreground
                             text_style: theme.font_bold { font_size: 18.0 }
                         }
                     }
@@ -1697,7 +1697,7 @@ script_mod! {
                         height: Fit
                         text: "Connect your AI model providers to use them in Threadlane."
                         draw_text +: {
-                            color: #x7f8c9d
+                            color: theme.color_muted_foreground
                             text_style +: { font_size: 10.0 }
                         }
                     }
@@ -1709,10 +1709,10 @@ script_mod! {
                         padding: Inset{left: 16 top: 14 right: 16 bottom: 14}
                         spacing: 10
                         draw_bg +: {
-                            color: #x222631
+                            color: theme.color_background
                             border_radius: 8.0
                             border_size: 1.0
-                            border_color: #x323a48
+                            border_color: theme.color_card
                         }
 
                         oa_header := View {
@@ -1726,7 +1726,7 @@ script_mod! {
                                 height: Fit
                                 text: "OpenAI / ChatGPT"
                                 draw_text +: {
-                                    color: #xe7ebf0
+                                    color: theme.color_foreground
                                     text_style: theme.font_bold { font_size: 11.5 }
                                 }
                             }
@@ -1736,7 +1736,7 @@ script_mod! {
                                 height: Fit
                                 text: "Not Connected"
                                 draw_text +: {
-                                    color: #xe06c75
+                                    color: theme.color_destructive
                                     text_style: theme.font_bold { font_size: 10.0 }
                                 }
                             }
@@ -1747,7 +1747,7 @@ script_mod! {
                             height: Fit
                             text: "GPT-4o, Codex, and OpenAI models via ChatGPT OAuth or API key"
                             draw_text +: {
-                                color: #x7f8c9d
+                                color: theme.color_muted_foreground
                                 text_style +: { font_size: 9.25 }
                             }
                         }
@@ -1765,13 +1765,13 @@ script_mod! {
                                 padding: Inset{left: 12 right: 12 top: 4 bottom: 4}
                                 text: "Sign in with ChatGPT"
                                 draw_bg +: {
-                                    color: #x2c6e49
-                                    color_hover: #x358759
-                                    color_down: #x3ea36c
+                                    color: theme.color_success
+                                    color_hover: theme.color_success
+                                    color_down: theme.color_success
                                     border_radius: 6.0
                                 }
                                 draw_text +: {
-                                    color: #xffffff
+                                    color: theme.color_primary_foreground
                                     text_style: theme.font_bold { font_size: 9.5 }
                                 }
                             }
@@ -1800,7 +1800,7 @@ script_mod! {
                             align: Align{y: 0.5}
                             text: "WASI Extensions"
                             draw_text +: {
-                                color: #xe7ebf0
+                                color: theme.color_foreground
                                 text_style: theme.font_bold { font_size: 18.0 }
                             }
                         }
@@ -1811,7 +1811,7 @@ script_mod! {
                             padding: 0
                             text: "Install to"
                             draw_text +: {
-                                color: #x7f8c9d
+                                color: theme.color_muted_foreground
                                 text_style +: { font_size: 8.75 }
                             }
                         }
@@ -1825,8 +1825,8 @@ script_mod! {
                             padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
                             text: "Project"
                             draw_bg +: {
-                                color: #x2d405a
-                                border_color: #x4b719f
+                                color: theme.color_primary
+                                border_color: theme.color_primary
                             }
                         }
                         capability_add_btn := mod.components.IconButton {
@@ -1847,7 +1847,7 @@ script_mod! {
                         padding: 0
                         text: "Choose a compiled .wasm file. Threadlane never runs Cargo or build scripts."
                         draw_text +: {
-                            color: #x7f8c9d
+                            color: theme.color_muted_foreground
                             text_style +: { font_size: 10.0 }
                         }
                     }
@@ -1871,8 +1871,8 @@ script_mod! {
                             padding: Inset{left: 12 top: 9 right: 8 bottom: 9}
                             align: Align{y: 0.5}
                             draw_bg +: {
-                                color: #x20242d
-                                border_color: #x303846
+                                color: theme.color_background
+                                border_color: theme.color_card
                                 border_size: 1.0
                                 border_radius: 7.0
                             }
@@ -1888,7 +1888,7 @@ script_mod! {
                                     padding: 0
                                     align: Align{y: 0.5}
                                     draw_text +: {
-                                        color: #xdce3ed
+                                        color: theme.color_foreground
                                         text_style: theme.font_bold { font_size: 10.5 }
                                     }
                                 }
@@ -1897,7 +1897,7 @@ script_mod! {
                                     padding: 0
                                     align: Align{y: 0.5}
                                     draw_text +: {
-                                        color: #x8fb9e8
+                                        color: theme.color_primary
                                         text_style +: { font_size: 9.0 }
                                     }
                                 }
@@ -1906,7 +1906,7 @@ script_mod! {
                                     padding: 0
                                     align: Align{y: 0.5}
                                     draw_text +: {
-                                        color: #x687587
+                                        color: theme.color_muted_foreground
                                         text_style: theme.font_code { font_size: 8.0 }
                                     }
                                 }
@@ -1919,10 +1919,10 @@ script_mod! {
                                 text: ""
                                 label_walk: Walk{width: 0 height: 0}
                                 draw_bg +: {
-                                    color_active: #x3b669e
-                                    border_color_active: #x4b719f
-                                    mark_color_active: #xffffff
-                                    mark_color_active_hover: #xffffff
+                                    color_active: theme.color_primary
+                                    border_color_active: theme.color_primary
+                                    mark_color_active: theme.color_primary_foreground
+                                    mark_color_active_hover: theme.color_primary_foreground
                                 }
                                 animator +: {
                                     hover: {
@@ -1939,9 +1939,9 @@ script_mod! {
                             extension_remove_btn := mod.components.IconButton {
                                 draw_icon +: {
                                     svg: crate_resource("self:resources/icons/trash.svg")
-                                    color_hover: #xe58b91
-                                    color_focus: #xe58b91
-                                    color_down: #xffffff
+                                    color_hover: theme.color_destructive
+                                    color_focus: theme.color_destructive
+                                    color_down: theme.color_primary_foreground
                                 }
                             }
                         }
@@ -1955,7 +1955,7 @@ script_mod! {
                                 height: Fit
                                 text: "No WASI extensions found."
                                 draw_text +: {
-                                    color: #x687587
+                                    color: theme.color_muted_foreground
                                     text_style +: { font_size: 10.0 }
                                 }
                             }
@@ -1968,7 +1968,7 @@ script_mod! {
                         padding: 0
                         text: ""
                         draw_text +: {
-                            color: #x9ba8ba
+                            color: theme.color_primary
                             text_style +: { font_size: 9.5 }
                         }
                     }
@@ -1995,7 +1995,7 @@ script_mod! {
                             align: Align{y: 0.5}
                             text: "Skills"
                             draw_text +: {
-                                color: #xe7ebf0
+                                color: theme.color_foreground
                                 text_style: theme.font_bold { font_size: 18.0 }
                             }
                         }
@@ -2013,7 +2013,7 @@ script_mod! {
                         padding: 0
                         text: "Enable or disable discovered skills for this project. Disabled skills are hidden from the composer and the model."
                         draw_text +: {
-                            color: #x7f8c9d
+                            color: theme.color_muted_foreground
                             text_style +: { font_size: 10.0 }
                         }
                     }
@@ -2032,8 +2032,8 @@ script_mod! {
                             padding: Inset{left: 12 top: 9 right: 8 bottom: 9}
                             align: Align{y: 0.5}
                             draw_bg +: {
-                                color: #x20242d
-                                border_color: #x303846
+                                color: theme.color_background
+                                border_color: theme.color_card
                                 border_size: 1.0
                                 border_radius: 7.0
                             }
@@ -2049,7 +2049,7 @@ script_mod! {
                                     padding: 0
                                     align: Align{y: 0.5}
                                     draw_text +: {
-                                        color: #xdce3ed
+                                        color: theme.color_foreground
                                         text_style: theme.font_bold { font_size: 10.5 }
                                     }
                                 }
@@ -2058,7 +2058,7 @@ script_mod! {
                                     padding: 0
                                     align: Align{y: 0.5}
                                     draw_text +: {
-                                        color: #x8fb9e8
+                                        color: theme.color_primary
                                         text_style +: { font_size: 9.0 }
                                     }
                                 }
@@ -2067,7 +2067,7 @@ script_mod! {
                                     padding: 0
                                     align: Align{y: 0.5}
                                     draw_text +: {
-                                        color: #x687587
+                                        color: theme.color_muted_foreground
                                         text_style: theme.font_code { font_size: 8.0 }
                                     }
                                 }
@@ -2080,10 +2080,10 @@ script_mod! {
                                 text: ""
                                 label_walk: Walk{width: 0 height: 0}
                                 draw_bg +: {
-                                    color_active: #x3b669e
-                                    border_color_active: #x4b719f
-                                    mark_color_active: #xffffff
-                                    mark_color_active_hover: #xffffff
+                                    color_active: theme.color_primary
+                                    border_color_active: theme.color_primary
+                                    mark_color_active: theme.color_primary_foreground
+                                    mark_color_active_hover: theme.color_primary_foreground
                                 }
                                 animator +: {
                                     hover: {
@@ -2108,7 +2108,7 @@ script_mod! {
                                 height: Fit
                                 text: "No skills found."
                                 draw_text +: {
-                                    color: #x687587
+                                    color: theme.color_muted_foreground
                                     text_style +: { font_size: 10.0 }
                                 }
                             }
@@ -2121,7 +2121,7 @@ script_mod! {
                         padding: 0
                         text: ""
                         draw_text +: {
-                            color: #x9ba8ba
+                            color: theme.color_primary
                             text_style +: { font_size: 9.5 }
                         }
                     }
@@ -2147,7 +2147,7 @@ script_mod! {
                             icon_walk: Walk{width: 28 height: 28}
                             draw_icon +: {
                                 svg: crate_resource("self:resources/icons/logo.svg")
-                                color: #xe7ebf0
+                                color: theme.color_foreground
                             }
                         }
 
@@ -2156,7 +2156,7 @@ script_mod! {
                             height: Fit
                             text: "Threadlane"
                             draw_text +: {
-                                color: #xe7ebf0
+                                color: theme.color_foreground
                                 text_style: theme.font_bold { font_size: 18.0 }
                             }
                         }
@@ -2167,7 +2167,7 @@ script_mod! {
                         height: Fit
                         text: "Version"
                         draw_text +: {
-                            color: #x9ba8ba
+                            color: theme.color_primary
                             text_style: theme.font_bold { font_size: 10.0 }
                         }
                     }
@@ -2177,7 +2177,7 @@ script_mod! {
                         height: Fit
                         text: "Threadlane is a focused workspace for building software with AI coding agents."
                         draw_text +: {
-                            color: #xc4cedc
+                            color: theme.color_foreground
                             text_style +: { font_size: 11.0 }
                         }
                     }
@@ -2187,7 +2187,7 @@ script_mod! {
                         height: Fit
                         text: "Keep projects, sessions, and provider connections together in one calm, native desktop app."
                         draw_text +: {
-                            color: #x7f8c9d
+                            color: theme.color_muted_foreground
                             text_style +: { font_size: 10.0 }
                         }
                     }
@@ -2201,7 +2201,7 @@ script_mod! {
             main_window := Window {
                 window.inner_size: vec2(1280, 768)
                 window.title: "Threadlane"
-                pass.clear_color: #x181a1f
+                pass.clear_color: theme.color_background
                 body +: {
                     window_body := View {
                         width: Fill
@@ -2220,13 +2220,13 @@ script_mod! {
                         splitter: Splitter {
                             size: 6.0
                             draw_bg +: {
-                                color: uniform(#x303946)
-                                color_hover: uniform(#x4b5d70)
-                                color_drag: uniform(#x6a7b91)
+                                color: uniform(theme.color_card)
+                                color_hover: uniform(theme.color_primary)
+                                color_drag: uniform(theme.color_primary)
 
                                 pixel: fn() {
                                     let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                                    sdf.clear(#x00000000)
+                                    sdf.clear(theme.color_transparent)
                                     let line_color = mix(
                                         self.color
                                         mix(self.color_hover, self.color_drag, self.drag)
@@ -2284,10 +2284,10 @@ script_mod! {
                             padding: Inset{left: 8 top: 8 right: 8 bottom: 10}
                             show_bg: true
                             draw_bg +: {
-                                color: #x2d3744
+                                color: theme.color_secondary
                                 pixel: fn() {
                                     let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                                    sdf.clear(#x00000000)
+                                    sdf.clear(theme.color_transparent)
                                     sdf.rect(self.rect_size.x - 1.0, 0.0, 1.0, self.rect_size.y)
                                     return sdf.fill(self.color)
                                 }
@@ -2306,7 +2306,7 @@ script_mod! {
                                     icon_walk: Walk{width: 16 height: 16}
                                     draw_icon +: {
                                         svg: crate_resource("self:resources/icons/logo.svg")
-                                        color: #xe7ebf0
+                                        color: theme.color_foreground
                                     }
                                 }
                                 sidebar_brand_label := Label {
@@ -2314,7 +2314,7 @@ script_mod! {
                                     height: Fit
                                     text: "Threadlane"
                                     draw_text +: {
-                                        color: #xe7ebf0
+                                        color: theme.color_foreground
                                         text_style: theme.font_bold { font_size: 14.0 }
                                     }
                                 }
@@ -2328,16 +2328,16 @@ script_mod! {
                                     align: Align{x: 0.5 y: 0.5}
                                     icon_walk: Walk{width: 14 height: 14}
                                     draw_bg +: {
-                                        color: #x00000000
-                                        color_hover: #x252a32
-                                        color_down: #x323844
+                                        color: theme.color_transparent
+                                        color_hover: theme.color_background
+                                        color_down: theme.color_card
                                         border_radius: 6.0
                                     }
                                     draw_icon +: {
                                         svg: crate_resource("self:resources/icons/settings.svg")
-                                        color: #x9ba7b6
-                                        color_hover: #xe7ebf0
-                                        color_down: #xffffff
+                                        color: theme.color_muted_foreground
+                                        color_hover: theme.color_foreground
+                                        color_down: theme.color_primary_foreground
                                     }
                                 }
                             }
@@ -2346,7 +2346,7 @@ script_mod! {
                                 height: 1
                                 margin: Inset{left: 6 right: 6 bottom: 4}
                                 show_bg: true
-                                draw_bg +: { color: #x2a303a }
+                                draw_bg +: { color: theme.color_input }
                             }
 
                             projects_header := mod.components.SectionHeader {
@@ -2368,22 +2368,22 @@ script_mod! {
                                     padding: Inset{left: 10 right: 10 top: 6 bottom: 6}
                                     text: "Update Threadlane"
                                     draw_bg +: {
-                                        color: #x1d2822
-                                        color_hover: #x25342b
-                                        color_focus: #x25342b
-                                        color_down: #x2c4034
-                                        border_color: #x344b3c
-                                        border_color_hover: #x466853
-                                        border_color_focus: #x466853
-                                        border_color_down: #x5c8b6d
+                                        color: theme.color_background
+                                        color_hover: theme.color_background
+                                        color_focus: theme.color_background
+                                        color_down: theme.color_card
+                                        border_color: theme.color_secondary
+                                        border_color_hover: theme.color_success
+                                        border_color_focus: theme.color_success
+                                        border_color_down: theme.color_success
                                         border_radius: 8.0
                                         border_size: 1.0
                                     }
                                     draw_text +: {
-                                        color: #x8eb89d
-                                        color_hover: #xb5d4be
-                                        color_focus: #xb5d4be
-                                        color_down: #xe7f5eb
+                                        color: theme.color_success
+                                        color_hover: theme.color_success
+                                        color_focus: theme.color_success
+                                        color_down: theme.color_primary_foreground
                                         text_style: theme.font_bold { font_size: 9.0 }
                                     }
                                 }
@@ -2421,7 +2421,7 @@ script_mod! {
                                         icon_walk: Walk{width: 12 height: 12}
                                         draw_icon +: {
                                             svg: crate_resource("self:resources/icons/folder.svg")
-                                            color: #x8fb9e8
+                                            color: theme.color_primary
                                         }
                                     }
                                     project_name_label := mod.components.ClippedLabel {
@@ -2429,7 +2429,7 @@ script_mod! {
                                         padding: 0
                                         align: Align{y: 0.6}
                                         draw_text +: {
-                                            color: #xf0f4fa
+                                            color: theme.color_primary_foreground
                                             text_style: theme.font_bold { font_size: 12.0 }
                                         }
                                     }
@@ -2439,7 +2439,7 @@ script_mod! {
                                     padding: 0
                                     align: Align{y: 0.5}
                                     draw_text +: {
-                                        color: #x737f8e
+                                        color: theme.color_muted_foreground
                                         text_style +: { font_size: 9.0 }
                                     }
                                 }
@@ -2460,27 +2460,27 @@ script_mod! {
                                 icon_walk: Walk{width: 13 height: 13 margin: Inset{right: 2}}
                                 draw_icon +: {
                                     svg: crate_resource("self:resources/icons/skill.svg")
-                                    color: #x8fb9e8
-                                    color_hover: #xb9d7fa
-                                    color_down: #xffffff
+                                    color: theme.color_primary
+                                    color_hover: theme.color_primary
+                                    color_down: theme.color_primary_foreground
                                 }
                                 draw_bg +: {
-                                    color: #x232830
-                                    color_hover: #x2d3642
-                                    color_focus: #x2d3642
-                                    color_down: #x36475c
-                                    border_color: #x3f4a59
-                                    border_color_hover: #x6184ac
-                                    border_color_focus: #x6184ac
-                                    border_color_down: #x7eb4f2
+                                    color: theme.color_secondary
+                                    color_hover: theme.color_card
+                                    color_focus: theme.color_card
+                                    color_down: theme.color_primary
+                                    border_color: theme.color_secondary
+                                    border_color_hover: theme.color_primary
+                                    border_color_focus: theme.color_primary
+                                    border_color_down: theme.color_primary
                                     border_radius: 7.0
                                     border_size: 1.0
                                 }
                                 draw_text +: {
-                                    color: #xcbd3dd
-                                    color_hover: #xe8edf4
-                                    color_focus: #xe8edf4
-                                    color_down: #xffffff
+                                    color: theme.color_foreground
+                                    color_hover: theme.color_primary_foreground
+                                    color_focus: theme.color_primary_foreground
+                                    color_down: theme.color_primary_foreground
                                     text_style: theme.font_bold { font_size: 9.5 }
                                 }
                             }
@@ -2495,28 +2495,28 @@ script_mod! {
                                 icon_walk: Walk{width: 13 height: 13}
                                 draw_icon +: {
                                     svg: crate_resource("self:resources/icons/subagent.svg")
-                                    color: #x8fb9e8
-                                    color_hover: #xb9d7fa
-                                    color_focus: #xb9d7fa
-                                    color_down: #xffffff
+                                    color: theme.color_primary
+                                    color_hover: theme.color_primary
+                                    color_focus: theme.color_primary
+                                    color_down: theme.color_primary_foreground
                                 }
                                 draw_bg +: {
-                                    color: #x232830
-                                    color_hover: #x2d3642
-                                    color_focus: #x2d3642
-                                    color_down: #x36475c
-                                    border_color: #x3f4a59
-                                    border_color_hover: #x6184ac
-                                    border_color_focus: #x6184ac
-                                    border_color_down: #x7eb4f2
+                                    color: theme.color_secondary
+                                    color_hover: theme.color_card
+                                    color_focus: theme.color_card
+                                    color_down: theme.color_primary
+                                    border_color: theme.color_secondary
+                                    border_color_hover: theme.color_primary
+                                    border_color_focus: theme.color_primary
+                                    border_color_down: theme.color_primary
                                     border_radius: 7.0
                                     border_size: 1.0
                                 }
                                 draw_text +: {
-                                    color: #xcbd3dd
-                                    color_hover: #xe8edf4
-                                    color_focus: #xe8edf4
-                                    color_down: #xffffff
+                                    color: theme.color_foreground
+                                    color_hover: theme.color_primary_foreground
+                                    color_focus: theme.color_primary_foreground
+                                    color_down: theme.color_primary_foreground
                                     text_style: theme.font_bold { font_size: 9.5 }
                                 }
                             }
@@ -2536,13 +2536,13 @@ script_mod! {
                                     draw_bg +: { dot_radius: 1.05 speed: 3.0 }
                                 }
                                 update_notice_available_dot := mod.components.StatusDot {
-                                    draw_bg +: { color: #x78aef0 }
+                                    draw_bg +: { color: theme.color_primary }
                                 }
                                 update_notice_ready_dot := mod.components.StatusDot {
-                                    draw_bg +: { color: #x67c58b }
+                                    draw_bg +: { color: theme.color_success }
                                 }
                                 update_notice_error_dot := mod.components.StatusDot {
-                                    draw_bg +: { color: #xe86a64 }
+                                    draw_bg +: { color: theme.color_destructive }
                                 }
                             }
 
@@ -2551,13 +2551,13 @@ script_mod! {
                                 height: Fit
                                 text: ""
                                 draw_text +: {
-                                    color: #xdce6f2
+                                    color: theme.color_primary_foreground
                                     text_style: theme.font_bold { font_size: 9.5 }
                                 }
                             }
                             update_notice_detail := mod.components.ClippedLabel {
                                 draw_text +: {
-                                    color: #x8493a5
+                                    color: theme.color_primary
                                     text_style +: { font_size: 8.5 }
                                 }
                             }
@@ -2583,7 +2583,7 @@ script_mod! {
                                 flow: Down
                                 padding: Inset{left: 4 top: 6 right: 4 bottom: 6}
                                 draw_bg +: {
-                                    color: #x1c1f26
+                                    color: theme.color_background
                                     border_radius: 10.0
                                 }
                                 chat_list := ChatList {
@@ -2616,13 +2616,13 @@ script_mod! {
                                 padding: Inset{left: 9 top: 7 right: 7 bottom: 7}
                                 new_batch: true
                                 draw_bg +: {
-                                    color: #x1f232b
-                                    color_hover: #x232830
-                                    color_focus: #x252b35
-                                    border_color: #x3a424e
-                                    border_color_focus: #x4a6f9e
-                                    border_color_down: #x6fa8ff
-                                    border_color_error: #xb85c55
+                                    color: theme.color_card
+                                    color_hover: theme.color_secondary
+                                    color_focus: theme.color_background
+                                    border_color: theme.color_border
+                                    border_color_focus: theme.color_primary
+                                    border_color_down: theme.color_primary
+                                    border_color_error: theme.color_destructive
                                     border_size: 1.0
                                     border_radius: 11.0
                                 }
@@ -2646,8 +2646,8 @@ script_mod! {
                                     height: Fit
                                     trigger: "/"
                                     inline_search: true
-                                    color_focus: #x252b35
-                                    color_hover: #x232830
+                                    color_focus: theme.color_background
+                                    color_hover: theme.color_secondary
 
                                     persistent +: {
                                         width: Fill
@@ -2664,25 +2664,25 @@ script_mod! {
                                                 submit_on_enter: true
                                                 empty_text: "Ask threadlane anything…"
                                                 draw_bg +: {
-                                                    color: #x00000000
-                                                    color_empty: #x00000000
-                                                    color_hover: #x00000000
-                                                    color_focus: #x00000000
-                                                    color_down: #x00000000
-                                                    border_color: #x00000000
-                                                    border_color_empty: #x00000000
-                                                    border_color_hover: #x00000000
-                                                    border_color_focus: #x00000000
-                                                    border_color_down: #x00000000
+                                                    color: theme.color_transparent
+                                                    color_empty: theme.color_transparent
+                                                    color_hover: theme.color_transparent
+                                                    color_focus: theme.color_transparent
+                                                    color_down: theme.color_transparent
+                                                    border_color: theme.color_transparent
+                                                    border_color_empty: theme.color_transparent
+                                                    border_color_hover: theme.color_transparent
+                                                    border_color_focus: theme.color_transparent
+                                                    border_color_down: theme.color_transparent
                                                     border_size: 0.0
                                                 }
                                                 draw_text +: {
-                                                    color: #xdde3ea
-                                                    color_hover: #xffffff
-                                                    color_focus: #xffffff
-                                                    color_empty: #x7f8b9a
-                                                    color_empty_hover: #x9aa5b3
-                                                    color_empty_focus: #x9aa5b3
+                                                    color: theme.color_foreground
+                                                    color_hover: theme.color_primary_foreground
+                                                    color_focus: theme.color_primary_foreground
+                                                    color_empty: theme.color_muted_foreground
+                                                    color_empty_hover: theme.color_muted_foreground
+                                                    color_empty_focus: theme.color_muted_foreground
                                                     text_style +: {
                                                         font_size: 10.5
                                                         line_spacing: 1.35
@@ -2705,7 +2705,7 @@ script_mod! {
                                         width: Fit
                                         visible: false
                                         draw_text +: {
-                                            color: #x9aa5b3
+                                            color: theme.color_muted_foreground
                                             text_style +: { font_size: 8.5 }
                                         }
                                     }
@@ -2718,16 +2718,16 @@ script_mod! {
                                         icon_walk: Walk{width: 14 height: 14}
                                         draw_icon +: {
                                             svg: crate_resource("self:resources/icons/attach.svg")
-                                            color: #x9aa5b3
-                                            color_hover: #xdde3ea
-                                            color_down: #xffffff
+                                            color: theme.color_muted_foreground
+                                            color_hover: theme.color_foreground
+                                            color_down: theme.color_primary_foreground
                                         }
                                         draw_bg +: {
-                                            color: #x232830
-                                            color_hover: #x2a313c
-                                            color_down: #x354153
-                                            border_color: #x3a424e
-                                            border_color_hover: #x4a5564
+                                            color: theme.color_secondary
+                                            color_hover: theme.color_secondary
+                                            color_down: theme.color_input
+                                            border_color: theme.color_border
+                                            border_color_hover: theme.color_input
                                             border_size: 1.0
                                             border_radius: 6.0
                                         }
@@ -2736,7 +2736,7 @@ script_mod! {
                                     composer_hint := mod.components.ClippedLabel {
                                         text: "Enter sends · Shift+Enter adds a line"
                                         draw_text +: {
-                                            color: #x7f8b9a
+                                            color: theme.color_muted_foreground
                                             text_style +: { font_size: 8.5 }
                                         }
                                     }
@@ -2807,7 +2807,7 @@ script_mod! {
                                             icon_walk: Walk{width: 15 height: 15}
                                             draw_icon +: {
                                                 svg: crate_resource("self:resources/icons/send.svg")
-                                                color: #xffffff
+                                                color: theme.color_primary_foreground
                                             }
                                         }
 
@@ -2822,22 +2822,22 @@ script_mod! {
                                             align: Align{x: 0.5 y: 0.5}
                                             icon_walk: Walk{width: 12 height: 12}
                                             draw_bg +: {
-                                                color: #xb85c55
-                                                color_hover: #xd4775f
-                                                color_focus: #xd4775f
-                                                color_down: #xe39a5d
-                                                border_color: #x00000000
-                                                border_color_hover: #x00000000
-                                                border_color_focus: #x00000000
-                                                border_color_down: #x00000000
+                                                color: theme.color_destructive
+                                                color_hover: theme.color_destructive
+                                                color_focus: theme.color_destructive
+                                                color_down: theme.color_destructive
+                                                border_color: theme.color_transparent
+                                                border_color_hover: theme.color_transparent
+                                                border_color_focus: theme.color_transparent
+                                                border_color_down: theme.color_transparent
                                                 border_size: 0.0
                                             }
                                             draw_icon +: {
                                                 svg: crate_resource("self:resources/icons/stop.svg")
-                                                color: #xffffff
-                                                color_hover: #xffffff
-                                                color_focus: #xffffff
-                                                color_down: #xffffff
+                                                color: theme.color_primary_foreground
+                                                color_hover: theme.color_primary_foreground
+                                                color_focus: theme.color_primary_foreground
+                                                color_down: theme.color_primary_foreground
                                             }
                                         }
                                     }
@@ -4429,7 +4429,9 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
-        crate::makepad_widgets::script_mod(vm);
+        crate::makepad_widgets::theme_mod(vm);
+        crate::theme::install(vm);
+        crate::makepad_widgets::widgets_mod(vm);
         crate::components::script_mod(vm);
         self::script_mod(vm)
     }

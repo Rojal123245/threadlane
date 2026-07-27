@@ -37,10 +37,10 @@ script_mod! {
             visible: false
 
             draw_bg +: {
-                color: #x1f232b
+                color: theme.color_card
                 border_size: 1.0
-                border_color: #x3a424e
-                border_color_focus: #x6fa8ff
+                border_color: theme.color_border
+                border_color_focus: theme.color_primary
                 border_radius: 9.0
 
                 pixel: fn() {
@@ -134,7 +134,7 @@ script_mod! {
                     cursor: MouseCursor.Hand
                     show_bg: true
                     draw_bg +: {
-                        color: #x00000000
+                        color: theme.color_transparent
                         border_size: 0.0
                         border_radius: 5.0
                     }
@@ -151,7 +151,7 @@ script_mod! {
                             padding: 0
                             text: ""
                             draw_text +: {
-                                color: #x6fa8ff
+                                color: theme.color_primary
                                 text_style: theme.font_code { font_size: 10.0 }
                             }
                         }
@@ -160,13 +160,13 @@ script_mod! {
                             max_lines: 1
                             text_overflow: Ellipsis
                             draw_text +: {
-                                color: #xdde3ea
+                                color: theme.color_foreground
                                 text_style +: { font_size: 10.0 }
                             }
                         }
                         cmd_desc := mod.components.ClippedLabel {
                             draw_text +: {
-                                color: #x7f8b9a
+                                color: theme.color_muted_foreground
                                 text_style +: { font_size: 9.0 }
                             }
                         }
