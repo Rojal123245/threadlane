@@ -22,8 +22,8 @@ use crate::state::{
     active_session_entry, archive_session, begin_title_generation, builtin_commands,
     create_new_session, delete_session, end_title_generation, is_project_working,
     is_session_working, normalize_session_title, project_work_dir_at_row, refresh_sessions,
-    session_entry_at_row, session_overflow_at_row, session_title_eligible, set_active_project,
-    session_entry_for_file, set_active_session, set_session_context_target, set_session_working,
+    session_entry_at_row, session_entry_for_file, session_overflow_at_row, session_title_eligible,
+    set_active_project, set_active_session, set_session_context_target, set_session_working,
     title_prompt_for_submission, toggle_project_collapsed, toggle_project_show_all, truncate_chars,
     CapabilityState, CommandInfo, GuiAgentEvent, MsgRole, SessionEntry, ToolStatus,
 };
@@ -2702,7 +2702,10 @@ enum ProviderSettingsModalAction {
     ShowExtensions,
     Add(ExtensionScope),
     Refresh,
-    SetEnabled { row: usize, enabled: bool },
+    SetEnabled {
+        row: usize,
+        enabled: bool,
+    },
     Remove(usize),
     #[default]
     None,
@@ -2810,10 +2813,7 @@ impl Widget for ProviderSettingsModal {
                 .button(cx, ids!(capability_add_btn))
                 .clicked(actions)
             {
-                cx.widget_action(
-                    uid,
-                    ProviderSettingsModalAction::Add(self.install_scope()),
-                );
+                cx.widget_action(uid, ProviderSettingsModalAction::Add(self.install_scope()));
             }
             if self
                 .view
@@ -2833,10 +2833,7 @@ impl Widget for ProviderSettingsModal {
                         ProviderSettingsModalAction::SetEnabled { row, enabled },
                     );
                 }
-                if item
-                    .button(cx, ids!(extension_remove_btn))
-                    .clicked(actions)
-                {
+                if item.button(cx, ids!(extension_remove_btn)).clicked(actions) {
                     cx.widget_action(uid, ProviderSettingsModalAction::Remove(row));
                 }
             }
@@ -2907,11 +2904,7 @@ impl ProviderSettingsModal {
         }
     }
 
-    fn set_extension_rows(
-        &mut self,
-        cx: &mut Cx,
-        rows: Vec<crate::state::CapabilityExtensionRow>,
-    ) {
+    fn set_extension_rows(&mut self, cx: &mut Cx, rows: Vec<crate::state::CapabilityExtensionRow>) {
         self.extension_rows = rows;
         self.view.widget(cx, ids!(capability_list)).redraw(cx);
     }
@@ -2948,10 +2941,7 @@ impl ProviderSettingsModal {
             w: 1.0,
         };
         for (button_id, selected) in [
-            (
-                ids!(capability_scope_global_btn),
-                self.install_scope_global,
-            ),
+            (ids!(capability_scope_global_btn), self.install_scope_global),
             (
                 ids!(capability_scope_project_btn),
                 !self.install_scope_global,
@@ -2990,19 +2980,30 @@ impl ProviderSettingsModal {
         let capabilities_selected = self.page == SettingsPage::Capabilities;
         let about_selected = self.page == SettingsPage::About;
 
-        let normal_color = Vec4f { x: 0x20 as f32 / 255.0, y: 0x25 as f32 / 255.0, z: 0x2e as f32 / 255.0, w: 1.0 };
-        let selected_color = Vec4f { x: 0x2d as f32 / 255.0, y: 0x40 as f32 / 255.0, z: 0x5a as f32 / 255.0, w: 1.0 };
+        let normal_color = Vec4f {
+            x: 0x20 as f32 / 255.0,
+            y: 0x25 as f32 / 255.0,
+            z: 0x2e as f32 / 255.0,
+            w: 1.0,
+        };
+        let selected_color = Vec4f {
+            x: 0x2d as f32 / 255.0,
+            y: 0x40 as f32 / 255.0,
+            z: 0x5a as f32 / 255.0,
+            w: 1.0,
+        };
         for (button_id, selected) in [
             (ids!(settings_nav_google_btn), google_selected),
             (ids!(settings_nav_openai_btn), openai_selected),
-            (
-                ids!(settings_nav_capabilities_btn),
-                capabilities_selected,
-            ),
+            (ids!(settings_nav_capabilities_btn), capabilities_selected),
             (ids!(settings_nav_about_btn), about_selected),
         ] {
             let mut button = self.view.button(cx, button_id);
-            let color = if selected { selected_color } else { normal_color };
+            let color = if selected {
+                selected_color
+            } else {
+                normal_color
+            };
             script_apply_eval!(cx, button, {
                 draw_bg +: { color: #(color) }
             });
@@ -3599,11 +3600,7 @@ impl MatchEvent for App {
             format_capabilities_summary(&discovered_skills, &discovered_agents);
         self.ui.button(cx, ids!(caps_btn)).set_text(
             cx,
-            &format!(
-                "{} skills · {} agents",
-                discovered_skills.len(),
-                discovered_agents.len()
-            ),
+            &format_capabilities_button_text(discovered_skills.len(), discovered_agents.len()),
         );
 
         self.commands = builtin_commands();
@@ -3715,7 +3712,11 @@ impl MatchEvent for App {
             }
         }
 
-        if self.ui.button(cx, ids!(terminal_header_btn)).clicked(actions) {
+        if self
+            .ui
+            .button(cx, ids!(terminal_header_btn))
+            .clicked(actions)
+        {
             self.ui
                 .project_terminal(cx, ids!(project_terminal))
                 .toggle(cx);
@@ -3863,11 +3864,7 @@ impl MatchEvent for App {
             }
         }
 
-        if self
-            .ui
-            .button(cx, ids!(task_sidebar_btn))
-            .clicked(actions)
-        {
+        if self.ui.button(cx, ids!(task_sidebar_btn)).clicked(actions) {
             self.task_sidebar_open = !self.task_sidebar_open;
             self.sync_task_sidebar(cx);
         }
@@ -3895,10 +3892,7 @@ impl MatchEvent for App {
                     } else if session_id == "draft" {
                         self.select_project_draft(cx, work_dir);
                     } else {
-                        self.push_chat(
-                            MsgRole::System,
-                            "That task session is not available yet.",
-                        );
+                        self.push_chat(MsgRole::System, "That task session is not available yet.");
                         self.ui.widget(cx, ids!(chat_list)).redraw(cx);
                     }
                 }
@@ -4218,6 +4212,15 @@ fn normalize_catalog_text(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn format_capabilities_button_text(skills_count: usize, agents_count: usize) -> String {
+    match (skills_count, agents_count) {
+        (0, 0) => "Capabilities".to_string(),
+        (s, 0) => format!("{s} skills"),
+        (0, a) => format!("{a} agents"),
+        (s, a) => format!("{s} skills · {a} agents"),
+    }
+}
+
 fn format_capabilities_summary(skills: &[SkillMetadata], agents: &[AgentConfig]) -> String {
     let mut summary = format!(
         "Capabilities\n\nSkills ({}) — use /skill <id> or let the model load one automatically.",
@@ -4359,17 +4362,16 @@ impl App {
         self.next_extension_reload_id = self.next_extension_reload_id.wrapping_add(1);
         let reload_id = self.next_extension_reload_id;
         let changed_project = self.active_work_dir().map(Path::to_path_buf);
-        let session_targets = self
-            .session_runtimes
-            .iter()
-            .filter(|(key, _)| {
-                changed_project
-                    .as_deref()
-                    .is_some_and(|project| extension_reload_matches(scope, project, &key.work_dir))
-                    || scope == ExtensionScope::Global
-            })
-            .map(|(key, runtime)| (key.clone(), runtime.agent.clone()))
-            .collect::<Vec<_>>();
+        let session_targets =
+            self.session_runtimes
+                .iter()
+                .filter(|(key, _)| {
+                    changed_project.as_deref().is_some_and(|project| {
+                        extension_reload_matches(scope, project, &key.work_dir)
+                    }) || scope == ExtensionScope::Global
+                })
+                .map(|(key, runtime)| (key.clone(), runtime.agent.clone()))
+                .collect::<Vec<_>>();
         let supervisor = self.supervisor.clone();
         let tx = self.tx.clone();
 
@@ -4378,7 +4380,11 @@ impl App {
             for (key, agent) in session_targets {
                 let result = session_reload_count(agent.lock().await.reload_extensions().await);
                 results.push((
-                    format!("session '{}' in '{}'", key.session_id, key.work_dir.display()),
+                    format!(
+                        "session '{}' in '{}'",
+                        key.session_id,
+                        key.work_dir.display()
+                    ),
                     result,
                 ));
             }
@@ -5098,17 +5104,15 @@ impl App {
 
     fn sync_task_sidebar(&mut self, cx: &mut Cx) {
         let active_key = self.workspace_state.active_key().cloned();
-        let records = active_key
-            .as_ref()
-            .and_then(|key| {
-                let work_dir = std::fs::canonicalize(&key.work_dir)
-                    .unwrap_or_else(|_| key.work_dir.clone());
-                let project_id = self.supervisor_projects.get(&work_dir)?;
-                Some((
-                    work_dir,
-                    self.supervisor.as_ref()?.list_tasks_for_project(project_id),
-                ))
-            });
+        let records = active_key.as_ref().and_then(|key| {
+            let work_dir =
+                std::fs::canonicalize(&key.work_dir).unwrap_or_else(|_| key.work_dir.clone());
+            let project_id = self.supervisor_projects.get(&work_dir)?;
+            Some((
+                work_dir,
+                self.supervisor.as_ref()?.list_tasks_for_project(project_id),
+            ))
+        });
         let items = records
             .map(|(work_dir, records)| {
                 task_sidebar_items(records, |record| {
@@ -5159,8 +5163,7 @@ impl App {
         session_file: Option<&Path>,
         event: &AgentEvent,
     ) -> bool {
-        let canonical =
-            std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+        let canonical = std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
         let Some(project_id) = self.supervisor_projects.get(&canonical) else {
             return false;
         };
@@ -5170,8 +5173,7 @@ impl App {
     }
 
     fn finish_session_tasks(&self, work_dir: &Path, session_id: &str) -> bool {
-        let canonical =
-            std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+        let canonical = std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
         let Some(project_id) = self.supervisor_projects.get(&canonical) else {
             return false;
         };
@@ -5372,14 +5374,9 @@ impl App {
         let Some(work_dir) = self.active_terminal_project() else {
             return;
         };
-        if self
-            .project_terminals
-            .get(&work_dir)
-            .is_some_and(|group| {
-                group.sessions.len()
-                    >= crate::components::terminal_panel::MAX_VISIBLE_TERMINALS
-            })
-        {
+        if self.project_terminals.get(&work_dir).is_some_and(|group| {
+            group.sessions.len() >= crate::components::terminal_panel::MAX_VISIBLE_TERMINALS
+        }) {
             return;
         }
         let (cols, rows) = self
@@ -5673,8 +5670,7 @@ impl App {
             self.push_chat(MsgRole::System, "Background task service is unavailable.");
             return;
         };
-        let canonical =
-            std::fs::canonicalize(&work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+        let canonical = std::fs::canonicalize(&work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
         let project_id = match self.supervisor_projects.get(&canonical) {
             Some(project_id) => project_id.clone(),
             None => match supervisor.register_project(&canonical) {
@@ -5720,7 +5716,10 @@ impl App {
                 format!("Could not start background task: {error}"),
             );
         } else {
-            self.push_chat(MsgRole::System, format!("Started background task {task_id}."));
+            self.push_chat(
+                MsgRole::System,
+                format!("Started background task {task_id}."),
+            );
         }
         self.sync_task_sidebar(cx);
         cx.redraw_all();
@@ -5728,50 +5727,49 @@ impl App {
 
     fn refresh_project_capabilities(&mut self, cx: &mut Cx, work_dir: &Path) {
         let canonical = std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
-        let capabilities =
-            if let Some(cached) = self.capability_cache.get(&canonical) {
-                cached.clone()
-            } else {
-                let (api_key, account_id) = self.current_credentials(cx);
-                let agent = CodingAgent::new(CodingAgentOptions {
-                    api_key,
-                    account_id,
-                    model: "gpt-5.6-luna".to_string(),
-                    work_dir: canonical.clone(),
-                    session_file: None,
-                    system_prompt: Default::default(),
-                });
-                let skills = agent
-                    .skills
-                    .list_skills()
-                    .into_iter()
-                    .filter(|skill| skill.enabled && skill.is_valid)
-                    .collect::<Vec<_>>();
-                let agents = discover_agents(&canonical, AgentScope::Both).agents;
-                let mut commands = builtin_commands();
-                commands.extend(skills.iter().map(|skill| CommandInfo {
-                    name: format!("skill {}", skill.id),
-                    description: format!(
-                        "{} · {}",
-                        skill.scope.display_name(),
-                        truncate_chars(&normalize_catalog_text(&skill.description), 120)
-                    ),
+        let capabilities = if let Some(cached) = self.capability_cache.get(&canonical) {
+            cached.clone()
+        } else {
+            let (api_key, account_id) = self.current_credentials(cx);
+            let agent = CodingAgent::new(CodingAgentOptions {
+                api_key,
+                account_id,
+                model: "gpt-5.6-luna".to_string(),
+                work_dir: canonical.clone(),
+                session_file: None,
+                system_prompt: Default::default(),
+            });
+            let skills = agent
+                .skills
+                .list_skills()
+                .into_iter()
+                .filter(|skill| skill.enabled && skill.is_valid)
+                .collect::<Vec<_>>();
+            let agents = discover_agents(&canonical, AgentScope::Both).agents;
+            let mut commands = builtin_commands();
+            commands.extend(skills.iter().map(|skill| CommandInfo {
+                name: format!("skill {}", skill.id),
+                description: format!(
+                    "{} · {}",
+                    skill.scope.display_name(),
+                    truncate_chars(&normalize_catalog_text(&skill.description), 120)
+                ),
+            }));
+            for manifest in agent.wasi_extensions.extension_manifests() {
+                commands.extend(manifest.commands.into_iter().map(|command| CommandInfo {
+                    name: command.name,
+                    description: command.description,
                 }));
-                for manifest in agent.wasi_extensions.extension_manifests() {
-                    commands.extend(manifest.commands.into_iter().map(|command| CommandInfo {
-                        name: command.name,
-                        description: command.description,
-                    }));
-                }
-                let capabilities = ProjectCapabilities {
-                    summary: format_capabilities_summary(&skills, &agents),
-                    button_text: format!("{} skills · {} agents", skills.len(), agents.len()),
-                    commands,
-                };
-                self.capability_cache
-                    .insert(canonical.clone(), capabilities.clone());
-                capabilities
+            }
+            let capabilities = ProjectCapabilities {
+                summary: format_capabilities_summary(&skills, &agents),
+                button_text: format_capabilities_button_text(skills.len(), agents.len()),
+                commands,
             };
+            self.capability_cache
+                .insert(canonical.clone(), capabilities.clone());
+            capabilities
+        };
         self.capabilities_summary = capabilities.summary;
         self.commands = capabilities.commands;
         self.ui
@@ -6792,10 +6790,7 @@ impl App {
                     } else {
                         self.commands = builtin_commands();
                     }
-                    self.set_capability_status(
-                        cx,
-                        &extension_reload_status(reloaded, &failures),
-                    );
+                    self.set_capability_status(cx, &extension_reload_status(reloaded, &failures));
                 }
                 GuiAgentEvent::DeviceCodePrompt { user_code, url } => {
                     if let Some(key) = self.auth_workspace.clone() {
@@ -6929,11 +6924,11 @@ impl App {
 #[cfg(test)]
 mod workspace_header_tests {
     use super::{
-        aggregate_extension_reload_results, append_antigravity_models,
-        clear_composer_for_dispatch, compact_workspace_path, extension_reload_matches,
-        extension_reload_status, model_credential_error, ordered_model_options, project_name,
-        session_reload_count, task_sidebar_items, truncate_terminal_output, InputOrigin,
-        ANTIGRAVITY_MODELS, MAX_TERMINAL_OUTPUT,
+        aggregate_extension_reload_results, append_antigravity_models, clear_composer_for_dispatch,
+        compact_workspace_path, extension_reload_matches, extension_reload_status,
+        model_credential_error, ordered_model_options, project_name, session_reload_count,
+        task_sidebar_items, truncate_terminal_output, InputOrigin, ANTIGRAVITY_MODELS,
+        MAX_TERMINAL_OUTPUT,
     };
     use crate::workspace::WorkspaceUiState;
     use std::path::{Path, PathBuf};
