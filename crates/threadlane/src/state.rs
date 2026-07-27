@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use threadlane_agent::AgentEvent;
 use threadlane_coding_agent::{
-    CapabilityCatalog, ExtensionRecord, ExtensionScope, TaskAgentEvent,
+    CapabilityCatalog, ExtensionRecord, ExtensionScope, SkillManager, TaskAgentEvent,
 };
 
 pub use crate::panels::chat::*;
@@ -13,6 +13,29 @@ pub use crate::panels::command_palette::*;
 
 pub use crate::panels::sessions::*;
 pub use crate::path_utils::truncate_chars;
+
+#[derive(Clone)]
+pub struct CapabilitySkillRow {
+    pub id: String,
+    pub description: String,
+    pub scope_label: String,
+    pub file_path: PathBuf,
+    pub enabled: bool,
+    pub is_valid: bool,
+}
+
+impl CapabilitySkillRow {
+    pub fn scope_status(&self) -> String {
+        let status = if !self.is_valid {
+            "Invalid"
+        } else if self.enabled {
+            "Enabled"
+        } else {
+            "Disabled"
+        };
+        format!("{} · {status}", self.scope_label)
+    }
+}
 
 #[derive(Clone)]
 pub struct CapabilityExtensionRow {
@@ -53,11 +76,29 @@ impl CapabilityExtensionRow {
 #[derive(Default)]
 pub struct CapabilityState {
     pub extensions: Vec<CapabilityExtensionRow>,
+    pub skills: Vec<CapabilitySkillRow>,
 }
 
 impl CapabilityState {
     pub fn refresh(&mut self, catalog: &CapabilityCatalog) {
         self.refresh_records(catalog.extensions());
+    }
+
+    pub fn refresh_skills(&mut self, project_root: Option<&std::path::Path>) {
+        let mut manager = SkillManager::new();
+        manager.discover_skills(project_root);
+        self.skills = manager
+            .list_skills()
+            .into_iter()
+            .map(|skill| CapabilitySkillRow {
+                id: skill.id.clone(),
+                description: skill.description.clone(),
+                scope_label: skill.scope.display_name().to_owned(),
+                file_path: skill.file_path().to_path_buf(),
+                enabled: skill.enabled,
+                is_valid: skill.is_valid,
+            })
+            .collect();
     }
 
     fn refresh_records(&mut self, extensions: &[ExtensionRecord]) {
@@ -146,8 +187,7 @@ mod tests {
         loop {
             let byte = (value as u8) & 0x7f;
             value >>= 7;
-            let done = (value == 0 && byte & 0x40 == 0)
-                || (value == -1 && byte & 0x40 != 0);
+            let done = (value == 0 && byte & 0x40 == 0) || (value == -1 && byte & 0x40 != 0);
             bytes.push(if done { byte } else { byte | 0x80 });
             if done {
                 break;
@@ -212,8 +252,7 @@ mod tests {
         fs::write(&global_source, manifest_wasm("shared_ext", "1.0.0")).unwrap();
         fs::write(&project_source, manifest_wasm("shared_ext", "2.0.0")).unwrap();
 
-        let manager =
-            ExtensionManager::new(Some(global_threadlane.clone()), Some(project.clone()));
+        let manager = ExtensionManager::new(Some(global_threadlane.clone()), Some(project.clone()));
         manager
             .install_from_wasm(&global_source, ExtensionScope::Global)
             .unwrap();
@@ -320,5 +359,4 @@ mod tests {
 
         fs::remove_dir_all(root).unwrap();
     }
-
 }

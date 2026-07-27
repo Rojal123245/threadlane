@@ -37,7 +37,7 @@ use threadlane_agent::{get_runtime, AgentEvent, ImageAttachment, ReasoningEffort
 use threadlane_coding_agent::{
     default_global_threadlane_dir, discover_agents, AgentConfig, AgentScope, CapabilityCatalog,
     CodingAgent, CodingAgentOptions, ExtensionManager, ExtensionScope, HarnessSupervisor,
-    ProjectContext, SkillMetadata, TaskRecord,
+    ProjectContext, SkillMetadata, SkillSettings, TaskRecord,
 };
 use threadlane_provider::auth;
 use threadlane_provider::openai::{fetch_available_models, OpenAIClient};
@@ -1442,6 +1442,34 @@ script_mod! {
                     }
                 }
 
+                settings_nav_skills_btn := Button {
+                    width: Fill
+                    height: 34
+                    padding: Inset{left: 10 right: 8 top: 6 bottom: 6}
+                    spacing: 0
+                    align: Align{x: 0.0 y: 0.5}
+                    text: "Skills"
+                    draw_bg +: {
+                        color: #x20252e
+                        color_hover: #x2b3442
+                        color_focus: #x303b4b
+                        color_down: #x39485b
+                        border_color: #x20252e
+                        border_color_hover: #x3b4b60
+                        border_color_focus: #x4b5e76
+                        border_color_down: #x5c718d
+                        border_size: 1.0
+                        border_radius: 6.0
+                    }
+                    draw_text +: {
+                        color: #x9ba8ba
+                        color_hover: #xd8e2ef
+                        color_focus: #xe7eef7
+                        color_down: #xffffff
+                        text_style +: { font_size: 9.5 }
+                    }
+                }
+
                 settings_nav_about_btn := Button {
                     width: Fill
                     height: 34
@@ -1935,6 +1963,159 @@ script_mod! {
                     }
 
                     capability_status_lbl := Label {
+                        width: Fill
+                        height: Fit
+                        padding: 0
+                        text: ""
+                        draw_text +: {
+                            color: #x9ba8ba
+                            text_style +: { font_size: 9.5 }
+                        }
+                    }
+                }
+
+                skills_page := View {
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    spacing: 12
+                    visible: false
+
+                    skill_header := View {
+                        width: Fill
+                        height: 28
+                        flow: Right
+                        spacing: 6
+                        align: Align{y: 0.5}
+
+                        skill_page_title := Label {
+                            width: Fill
+                            height: 28
+                            padding: 0
+                            align: Align{y: 0.5}
+                            text: "Skills"
+                            draw_text +: {
+                                color: #xe7ebf0
+                                text_style: theme.font_bold { font_size: 18.0 }
+                            }
+                        }
+
+                        skill_refresh_btn := mod.components.IconButton {
+                            draw_icon +: {
+                                svg: crate_resource("self:resources/icons/refresh.svg")
+                            }
+                        }
+                    }
+
+                    skill_page_desc := Label {
+                        width: Fill
+                        height: Fit
+                        padding: 0
+                        text: "Enable or disable discovered skills for this project. Disabled skills are hidden from the composer and the model."
+                        draw_text +: {
+                            color: #x7f8c9d
+                            text_style +: { font_size: 10.0 }
+                        }
+                    }
+
+                    skill_list := PortalList {
+                        width: Fill
+                        height: Fill
+                        flow: Down
+                        spacing: 8
+
+                        SkillRow := RoundedView {
+                            width: Fill
+                            height: 72
+                            flow: Right
+                            spacing: 10
+                            padding: Inset{left: 12 top: 9 right: 8 bottom: 9}
+                            align: Align{y: 0.5}
+                            draw_bg +: {
+                                color: #x20242d
+                                border_color: #x303846
+                                border_size: 1.0
+                                border_radius: 7.0
+                            }
+
+                            skill_text := View {
+                                width: Fill
+                                height: Fill
+                                flow: Down
+                                spacing: 3
+
+                                skill_name_lbl := mod.components.ClippedLabel {
+                                    height: 17
+                                    padding: 0
+                                    align: Align{y: 0.5}
+                                    draw_text +: {
+                                        color: #xdce3ed
+                                        text_style: theme.font_bold { font_size: 10.5 }
+                                    }
+                                }
+                                skill_scope_status_lbl := mod.components.ClippedLabel {
+                                    height: 15
+                                    padding: 0
+                                    align: Align{y: 0.5}
+                                    draw_text +: {
+                                        color: #x8fb9e8
+                                        text_style +: { font_size: 9.0 }
+                                    }
+                                }
+                                skill_path_lbl := mod.components.ClippedLabel {
+                                    height: 15
+                                    padding: 0
+                                    align: Align{y: 0.5}
+                                    draw_text +: {
+                                        color: #x687587
+                                        text_style: theme.font_code { font_size: 8.0 }
+                                    }
+                                }
+                            }
+
+                            skill_enabled_toggle := Toggle {
+                                width: 34
+                                height: 24
+                                padding: 0
+                                text: ""
+                                label_walk: Walk{width: 0 height: 0}
+                                draw_bg +: {
+                                    color_active: #x3b669e
+                                    border_color_active: #x4b719f
+                                    mark_color_active: #xffffff
+                                    mark_color_active_hover: #xffffff
+                                }
+                                animator +: {
+                                    hover: {
+                                        on: AnimatorState {
+                                            from: {all: Snap}
+                                            apply: {
+                                                draw_bg: {down: snap(0.0), hover: 0.0}
+                                                draw_text: {down: snap(0.0), hover: 1.0}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        SkillEmptyRow := View {
+                            width: Fill
+                            height: 72
+                            align: Align{x: 0.5 y: 0.5}
+                            skill_empty_lbl := Label {
+                                width: Fit
+                                height: Fit
+                                text: "No skills found."
+                                draw_text +: {
+                                    color: #x687587
+                                    text_style +: { font_size: 10.0 }
+                                }
+                            }
+                        }
+                    }
+
+                    skill_status_lbl := Label {
                         width: Fill
                         height: Fit
                         padding: 0
@@ -2694,12 +2875,14 @@ enum SettingsPage {
     GoogleAntigravity,
     OpenAi,
     Capabilities,
+    Skills,
     About,
 }
 
 #[derive(Clone, Debug, Default)]
 enum ProviderSettingsModalAction {
     ShowExtensions,
+    ShowSkills,
     Add(ExtensionScope),
     Refresh,
     SetEnabled {
@@ -2707,6 +2890,11 @@ enum ProviderSettingsModalAction {
         enabled: bool,
     },
     Remove(usize),
+    SetSkillEnabled {
+        row: usize,
+        enabled: bool,
+    },
+    RefreshSkills,
     #[default]
     None,
 }
@@ -2725,6 +2913,8 @@ struct ProviderSettingsModal {
     page: SettingsPage,
     #[rust]
     extension_rows: Vec<crate::state::CapabilityExtensionRow>,
+    #[rust]
+    skill_rows: Vec<crate::state::CapabilitySkillRow>,
     #[rust]
     install_scope_global: bool,
 }
@@ -2787,6 +2977,14 @@ impl Widget for ProviderSettingsModal {
             }
             if self
                 .view
+                .button(cx, ids!(settings_nav_skills_btn))
+                .clicked(actions)
+            {
+                self.set_page(cx, SettingsPage::Skills);
+                cx.widget_action(uid, ProviderSettingsModalAction::ShowSkills);
+            }
+            if self
+                .view
                 .button(cx, ids!(settings_nav_about_btn))
                 .clicked(actions)
             {
@@ -2822,6 +3020,13 @@ impl Widget for ProviderSettingsModal {
             {
                 cx.widget_action(uid, ProviderSettingsModalAction::Refresh);
             }
+            if self
+                .view
+                .button(cx, ids!(skill_refresh_btn))
+                .clicked(actions)
+            {
+                cx.widget_action(uid, ProviderSettingsModalAction::RefreshSkills);
+            }
             let list = self.view.portal_list(cx, ids!(capability_list));
             for (row, item) in list.items_with_actions(actions) {
                 if let Some(enabled) = item
@@ -2835,6 +3040,18 @@ impl Widget for ProviderSettingsModal {
                 }
                 if item.button(cx, ids!(extension_remove_btn)).clicked(actions) {
                     cx.widget_action(uid, ProviderSettingsModalAction::Remove(row));
+                }
+            }
+            let skill_list = self.view.portal_list(cx, ids!(skill_list));
+            for (row, item) in skill_list.items_with_actions(actions) {
+                if let Some(enabled) = item
+                    .check_box(cx, ids!(skill_enabled_toggle))
+                    .changed(actions)
+                {
+                    cx.widget_action(
+                        uid,
+                        ProviderSettingsModalAction::SetSkillEnabled { row, enabled },
+                    );
                 }
             }
         }
@@ -2864,28 +3081,58 @@ impl Widget for ProviderSettingsModal {
             };
             while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
                 if let Some(mut list) = item.as_portal_list().borrow_mut() {
-                    list.set_item_range(cx, 0, self.extension_rows.len().max(1));
-                    while let Some(row_index) = list.next_visible_item(cx) {
-                        if self.extension_rows.is_empty() {
-                            if row_index == 0 {
-                                list.item(cx, row_index, id!(EmptyRow))
-                                    .draw_all_unscoped(cx);
+                    // Only one settings page is visible at a time, so the single
+                    // PortalList encountered in the walk belongs to the active page.
+                    if self.page == SettingsPage::Skills {
+                        list.set_item_range(cx, 0, self.skill_rows.len().max(1));
+                        while let Some(row_index) = list.next_visible_item(cx) {
+                            if self.skill_rows.is_empty() {
+                                if row_index == 0 {
+                                    list.item(cx, row_index, id!(SkillEmptyRow))
+                                        .draw_all_unscoped(cx);
+                                }
+                                continue;
                             }
-                            continue;
+                            let Some(row) = self.skill_rows.get(row_index) else {
+                                continue;
+                            };
+                            let item = list.item(cx, row_index, id!(SkillRow));
+                            item.label(cx, ids!(skill_name_lbl)).set_text(cx, &row.id);
+                            item.label(cx, ids!(skill_scope_status_lbl))
+                                .set_text(cx, &row.scope_status());
+                            item.label(cx, ids!(skill_path_lbl))
+                                .set_text(cx, &row.file_path.display().to_string());
+                            item.check_box(cx, ids!(skill_enabled_toggle)).set_active(
+                                cx,
+                                row.enabled && row.is_valid,
+                                Animate::No,
+                            );
+                            item.draw_all_unscoped(cx);
                         }
-                        let Some(row) = self.extension_rows.get(row_index) else {
-                            continue;
-                        };
-                        let item = list.item(cx, row_index, id!(ExtensionRow));
-                        item.label(cx, ids!(extension_name_version_lbl))
-                            .set_text(cx, &format!("{} · v{}", row.name, row.version));
-                        item.label(cx, ids!(extension_scope_status_lbl))
-                            .set_text(cx, &row.scope_status());
-                        item.label(cx, ids!(extension_path_lbl))
-                            .set_text(cx, &row.module_path.display().to_string());
-                        item.check_box(cx, ids!(extension_enabled_toggle))
-                            .set_active(cx, row.enabled, Animate::No);
-                        item.draw_all_unscoped(cx);
+                    } else {
+                        list.set_item_range(cx, 0, self.extension_rows.len().max(1));
+                        while let Some(row_index) = list.next_visible_item(cx) {
+                            if self.extension_rows.is_empty() {
+                                if row_index == 0 {
+                                    list.item(cx, row_index, id!(EmptyRow))
+                                        .draw_all_unscoped(cx);
+                                }
+                                continue;
+                            }
+                            let Some(row) = self.extension_rows.get(row_index) else {
+                                continue;
+                            };
+                            let item = list.item(cx, row_index, id!(ExtensionRow));
+                            item.label(cx, ids!(extension_name_version_lbl))
+                                .set_text(cx, &format!("{} · v{}", row.name, row.version));
+                            item.label(cx, ids!(extension_scope_status_lbl))
+                                .set_text(cx, &row.scope_status());
+                            item.label(cx, ids!(extension_path_lbl))
+                                .set_text(cx, &row.module_path.display().to_string());
+                            item.check_box(cx, ids!(extension_enabled_toggle))
+                                .set_active(cx, row.enabled, Animate::No);
+                            item.draw_all_unscoped(cx);
+                        }
                     }
                 }
             }
@@ -2907,6 +3154,17 @@ impl ProviderSettingsModal {
     fn set_extension_rows(&mut self, cx: &mut Cx, rows: Vec<crate::state::CapabilityExtensionRow>) {
         self.extension_rows = rows;
         self.view.widget(cx, ids!(capability_list)).redraw(cx);
+    }
+
+    fn set_skill_rows(&mut self, cx: &mut Cx, rows: Vec<crate::state::CapabilitySkillRow>) {
+        self.skill_rows = rows;
+        self.view.widget(cx, ids!(skill_list)).redraw(cx);
+    }
+
+    fn set_skill_status(&mut self, cx: &mut Cx, status: &str) {
+        self.view
+            .label(cx, ids!(skill_status_lbl))
+            .set_text(cx, status);
     }
 
     fn set_extension_status(&mut self, cx: &mut Cx, status: &str) {
@@ -2978,6 +3236,7 @@ impl ProviderSettingsModal {
         let google_selected = self.page == SettingsPage::GoogleAntigravity;
         let openai_selected = self.page == SettingsPage::OpenAi;
         let capabilities_selected = self.page == SettingsPage::Capabilities;
+        let skills_selected = self.page == SettingsPage::Skills;
         let about_selected = self.page == SettingsPage::About;
 
         let normal_color = Vec4f {
@@ -2996,6 +3255,7 @@ impl ProviderSettingsModal {
             (ids!(settings_nav_google_btn), google_selected),
             (ids!(settings_nav_openai_btn), openai_selected),
             (ids!(settings_nav_capabilities_btn), capabilities_selected),
+            (ids!(settings_nav_skills_btn), skills_selected),
             (ids!(settings_nav_about_btn), about_selected),
         ] {
             let mut button = self.view.button(cx, button_id);
@@ -3022,6 +3282,9 @@ impl ProviderSettingsModal {
             .button(cx, ids!(settings_nav_capabilities_btn))
             .set_visible(cx, true);
         self.view
+            .button(cx, ids!(settings_nav_skills_btn))
+            .set_visible(cx, true);
+        self.view
             .button(cx, ids!(settings_nav_about_btn))
             .set_visible(cx, true);
         self.view
@@ -3033,6 +3296,9 @@ impl ProviderSettingsModal {
         self.view
             .widget(cx, ids!(capabilities_page))
             .set_visible(cx, capabilities_selected);
+        self.view
+            .widget(cx, ids!(skills_page))
+            .set_visible(cx, skills_selected);
         self.view
             .widget(cx, ids!(about_page))
             .set_visible(cx, about_selected);
@@ -3851,6 +4117,8 @@ impl MatchEvent for App {
             match action.cast::<ProviderSettingsModalAction>() {
                 ProviderSettingsModalAction::ShowExtensions
                 | ProviderSettingsModalAction::Refresh => self.refresh_capability_state(cx),
+                ProviderSettingsModalAction::ShowSkills
+                | ProviderSettingsModalAction::RefreshSkills => self.refresh_skill_state(cx),
                 ProviderSettingsModalAction::Add(scope) => {
                     self.open_extension_picker(scope);
                 }
@@ -3859,6 +4127,9 @@ impl MatchEvent for App {
                 }
                 ProviderSettingsModalAction::Remove(row) => {
                     self.remove_extension(cx, row);
+                }
+                ProviderSettingsModalAction::SetSkillEnabled { row, enabled } => {
+                    self.set_skill_enabled(cx, row, enabled);
                 }
                 ProviderSettingsModalAction::None => {}
             }
@@ -4279,27 +4550,33 @@ fn format_capabilities_summary(skills: &[SkillMetadata], agents: &[AgentConfig])
 impl App {
     fn open_providers_modal(&mut self, cx: &mut Cx) {
         let mut show_extensions = false;
+        let mut show_skills = false;
         if let Some(mut modal) = self
             .ui
             .widget(cx, ids!(providers_modal))
             .borrow_mut::<ProviderSettingsModal>()
         {
             show_extensions = modal.page == SettingsPage::Capabilities;
+            show_skills = modal.page == SettingsPage::Skills;
             modal.open(cx);
         }
         if show_extensions {
             self.refresh_capability_state(cx);
         }
+        if show_skills {
+            self.refresh_skill_state(cx);
+        }
     }
 
     fn open_capabilities_modal(&mut self, cx: &mut Cx) {
+        self.refresh_skill_state(cx);
         self.refresh_capability_state(cx);
         if let Some(mut modal) = self
             .ui
             .widget(cx, ids!(providers_modal))
             .borrow_mut::<ProviderSettingsModal>()
         {
-            modal.open_page(cx, SettingsPage::Capabilities);
+            modal.open_page(cx, SettingsPage::Skills);
         }
     }
 
@@ -4325,6 +4602,77 @@ impl App {
             modal.set_extension_status(cx, "");
         }
         self.capability_cache.clear();
+    }
+
+    fn refresh_skill_state(&mut self, cx: &mut Cx) {
+        let work_dir = self.active_work_dir().map(Path::to_path_buf);
+        self.capability_state.refresh_skills(work_dir.as_deref());
+        if let Some(mut modal) = self
+            .ui
+            .widget(cx, ids!(providers_modal))
+            .borrow_mut::<ProviderSettingsModal>()
+        {
+            modal.set_skill_rows(cx, self.capability_state.skills.clone());
+            modal.set_skill_status(cx, "");
+        }
+    }
+
+    fn set_skill_status(&mut self, cx: &mut Cx, status: &str) {
+        if let Some(mut modal) = self
+            .ui
+            .widget(cx, ids!(providers_modal))
+            .borrow_mut::<ProviderSettingsModal>()
+        {
+            modal.set_skill_status(cx, status);
+        }
+    }
+
+    fn set_skill_enabled(&mut self, cx: &mut Cx, row: usize, enabled: bool) {
+        let Some(selected) = self.capability_state.skills.get(row).cloned() else {
+            self.refresh_skill_state(cx);
+            self.set_skill_status(cx, "Skill inventory changed. Please try again.");
+            return;
+        };
+        let Some(work_dir) = self.active_work_dir().map(Path::to_path_buf) else {
+            self.set_skill_status(cx, "Attach a project to manage project skills.");
+            return;
+        };
+        let mut settings = SkillSettings::load(&work_dir);
+        let status = match settings.set_enabled(&work_dir, &selected.id, enabled) {
+            Ok(()) if enabled => format!("Enabled {}.", selected.id),
+            Ok(()) => format!("Disabled {}.", selected.id),
+            Err(error) => error,
+        };
+        // Refresh the settings list, the capabilities chip / slash commands, and
+        // live session catalogs so the toggle takes effect.
+        self.refresh_skill_state(cx);
+        self.capability_cache.clear();
+        self.refresh_project_capabilities(cx, &work_dir);
+        self.refresh_live_session_skills(&work_dir);
+        self.set_skill_status(cx, &status);
+    }
+
+    /// Rediscover skills for live sessions rooted in the toggled project so their
+    /// skill catalog and `load_skill` gating reflect the new enable state.
+    fn refresh_live_session_skills(&mut self, work_dir: &Path) {
+        let canonical = std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+        let targets: Vec<_> = self
+            .session_runtimes
+            .iter()
+            .filter(|(key, _)| {
+                std::fs::canonicalize(&key.work_dir).unwrap_or_else(|_| key.work_dir.clone())
+                    == canonical
+            })
+            .map(|(_, runtime)| runtime.agent.clone())
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        get_runtime().spawn(async move {
+            for agent in targets {
+                agent.lock().await.refresh_skills();
+            }
+        });
     }
 
     fn open_extension_picker(&self, scope: ExtensionScope) {

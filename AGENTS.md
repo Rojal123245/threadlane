@@ -264,6 +264,12 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
   approvals are unsupported. LSP remains a WASI extension and launches language
   servers through brokered process capability.
 
+### Project-Scoped Skill Enable/Disable
+
+- Skills are toggled per project, not globally. `SkillSettings` persists disabled skill IDs in `<project>/.threadlane/skills.json`; skill discovery (`Discovery::finish`) applies those overrides so a disabled skill stays visible in the settings list with `enabled: false` but is excluded from the model catalog and rejected by `load_skill`.
+- The settings modal has a dedicated `skills_page` (separate `PortalList` and row template from `capability_list`). In `ProviderSettingsModal::draw_walk`, the two `PortalList`s share one `as_portal_list()` loop, so each branch must be matched by comparing `list.widget_uid()` against the resolved list widget before drawing rows.
+- A toggle must clear `capability_cache`, refresh the capabilities chip / slash commands via `refresh_project_capabilities`, and call `refresh_live_session_skills` so running sessions re-discover skills. `CodingAgent::refresh_skills` swaps the shared `SkillRegistry` `Arc`; note the already-registered `LoadSkillToolExecutor` holds the previous `Arc`, so an in-flight session keeps the catalog from its creation and a fresh session fully reflects the toggle.
+
 ## Updater Behavior
 
 - `THREADLANE_UPDATER_PUBLIC_KEY` and `THREADLANE_UPDATER_ENDPOINT` are compile-time environment values through `option_env!`.

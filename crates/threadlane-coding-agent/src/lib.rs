@@ -35,7 +35,7 @@ pub use prompt_templates::{
 pub use skills::{
     load_skill_tool_definition, LoadSkillToolExecutor, SkillDiscoveryOptions, SkillDiscoveryReport,
     SkillDiscoveryWarning, SkillDiscoveryWarningKind, SkillManager, SkillMetadata, SkillRegistry,
-    SkillScope, LOAD_SKILL_TOOL_NAME,
+    SkillScope, SkillSettings, LOAD_SKILL_TOOL_NAME,
 };
 pub use supervisor::{
     HarnessSupervisor, ProjectRecord, TaskAgentEvent, TaskKind, TaskRecord, TaskStatus,

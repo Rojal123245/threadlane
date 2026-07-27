@@ -1619,6 +1619,19 @@ impl CodingAgent {
         Ok(loaded)
     }
 
+    pub fn work_dir(&self) -> &Path {
+        &self.work_dir
+    }
+
+    /// Rediscover skills for this project, applying any persisted enable/disable
+    /// overrides, and refresh the shared registry and the model-facing system prompt.
+    pub fn refresh_skills(&mut self) {
+        let mut skill_manager = SkillManager::new();
+        skill_manager.discover_skills(Some(&self.work_dir));
+        let skills = skill_manager.snapshot();
+        self.skills = skills;
+    }
+
     pub fn new(options: CodingAgentOptions) -> Self {
         let project_context = ProjectContext::discover(&options.work_dir);
         let mut skill_manager = SkillManager::new();
@@ -2201,14 +2214,12 @@ async fn run_subagents_with_context(
 ) -> Result<(String, Vec<AgentMessage>), String> {
     let run_id = NEXT_SUBAGENT_UI_RUN_ID.fetch_add(1, Ordering::Relaxed);
     for (task_index, task) in tasks.iter().enumerate() {
-        let _ = context
-            .parent_event_tx
-            .send(AgentEvent::SubagentQueued {
-                run_id,
-                task_index,
-                agent: task.agent.clone(),
-                task: task.task.clone(),
-            });
+        let _ = context.parent_event_tx.send(AgentEvent::SubagentQueued {
+            run_id,
+            task_index,
+            agent: task.agent.clone(),
+            task: task.task.clone(),
+        });
     }
     let candidates = discover_agents(&context.work_dir, AgentScope::Both).agents;
     let run_one = |task_index: usize, task: AgentRunTask| {
@@ -2256,10 +2267,7 @@ async fn run_subagents_with_context(
                 .acquire_owned()
                 .await
                 .map_err(|_| "Subagent concurrency limiter closed".to_string())?;
-            let _ = event_tx.send(AgentEvent::SubagentStarted {
-                run_id,
-                task_index,
-            });
+            let _ = event_tx.send(AgentEvent::SubagentStarted { run_id, task_index });
             let result = timeout(
                 SUBAGENT_TIMEOUT,
                 run_subagent_task(config, task.task, context, run_id, task_index),
