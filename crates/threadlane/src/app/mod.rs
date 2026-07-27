@@ -1423,62 +1423,24 @@ script_mod! {
                         }
                     }
 
-                    antigravity_card := RoundedView {
-                        width: Fill
-                        height: Fit
-                        flow: Down
-                        padding: Inset{left: 16 top: 14 right: 16 bottom: 14}
-                        spacing: 10
-                        draw_bg +: {
-                            color: theme.color_background
-                            border_radius: 8.0
-                            border_size: 1.0
-                            border_color: theme.color_card
-                        }
+                    antigravity_card := mod.components.ProviderCard {
 
-                        ag_header := View {
-                            width: Fill
-                            height: Fit
-                            flow: Right
-                            align: Align{y: 0.5}
+                        ag_header := mod.components.ProviderCardHeader {
 
-                            ag_title := Label {
-                                width: Fill
-                                height: Fit
+                            ag_title := mod.components.ProviderCardTitle {
                                 text: "Google Antigravity"
-                                draw_text +: {
-                                    color: theme.color_foreground
-                                    text_style: theme.font_bold { font_size: 11.5 }
-                                }
                             }
 
-                            antigravity_status_lbl := Label {
-                                width: Fit
-                                height: Fit
+                            antigravity_status_lbl := mod.components.ProviderCardStatus {
                                 text: "Not Connected"
-                                draw_text +: {
-                                    color: theme.color_destructive
-                                    text_style: theme.font_bold { font_size: 10.0 }
-                                }
                             }
                         }
 
-                        ag_desc := Label {
-                            width: Fill
-                            height: Fit
+                        ag_desc := mod.components.ProviderCardDescription {
                             text: "Cloud Code Assist, Gemini 3.6 Flash / Pro via Google OAuth PKCE"
-                            draw_text +: {
-                                color: theme.color_muted_foreground
-                                text_style +: { font_size: 9.25 }
-                            }
                         }
 
-                        ag_actions := View {
-                            width: Fill
-                            height: Fit
-                            flow: Right
-                            spacing: 8
-                            align: Align{y: 0.5}
+                        ag_actions := mod.components.ProviderCardActions {
 
                             antigravity_login_btn := Button {
                                 width: Fit
@@ -1547,62 +1509,24 @@ script_mod! {
                         }
                     }
 
-                    openai_card := RoundedView {
-                        width: Fill
-                        height: Fit
-                        flow: Down
-                        padding: Inset{left: 16 top: 14 right: 16 bottom: 14}
-                        spacing: 10
-                        draw_bg +: {
-                            color: theme.color_background
-                            border_radius: 8.0
-                            border_size: 1.0
-                            border_color: theme.color_card
-                        }
+                    openai_card := mod.components.ProviderCard {
 
-                        oa_header := View {
-                            width: Fill
-                            height: Fit
-                            flow: Right
-                            align: Align{y: 0.5}
+                        oa_header := mod.components.ProviderCardHeader {
 
-                            oa_title := Label {
-                                width: Fill
-                                height: Fit
+                            oa_title := mod.components.ProviderCardTitle {
                                 text: "OpenAI / ChatGPT"
-                                draw_text +: {
-                                    color: theme.color_foreground
-                                    text_style: theme.font_bold { font_size: 11.5 }
-                                }
                             }
 
-                            openai_status_lbl := Label {
-                                width: Fit
-                                height: Fit
+                            openai_status_lbl := mod.components.ProviderCardStatus {
                                 text: "Not Connected"
-                                draw_text +: {
-                                    color: theme.color_destructive
-                                    text_style: theme.font_bold { font_size: 10.0 }
-                                }
                             }
                         }
 
-                        oa_desc := Label {
-                            width: Fill
-                            height: Fit
+                        oa_desc := mod.components.ProviderCardDescription {
                             text: "GPT-4o, Codex, and OpenAI models via ChatGPT OAuth or API key"
-                            draw_text +: {
-                                color: theme.color_muted_foreground
-                                text_style +: { font_size: 9.25 }
-                            }
                         }
 
-                        oa_actions := View {
-                            width: Fill
-                            height: Fit
-                            flow: Right
-                            spacing: 8
-                            align: Align{y: 0.5}
+                        oa_actions := mod.components.ProviderCardActions {
 
                             openai_login_btn := Button {
                                 width: Fit
@@ -1708,102 +1632,10 @@ script_mod! {
                         flow: Down
                         spacing: 8
 
-                        ExtensionRow := RoundedView {
-                            width: Fill
-                            height: 72
-                            flow: Right
-                            spacing: 10
-                            padding: Inset{left: 12 top: 9 right: 8 bottom: 9}
-                            align: Align{y: 0.5}
-                            draw_bg +: {
-                                color: theme.color_background
-                                border_color: theme.color_card
-                                border_size: 1.0
-                                border_radius: 7.0
-                            }
+                        ExtensionRow := mod.components.CapabilityRowWithRemove {}
 
-                            extension_text := View {
-                                width: Fill
-                                height: Fill
-                                flow: Down
-                                spacing: 3
-
-                                extension_name_version_lbl := mod.components.ClippedLabel {
-                                    height: 17
-                                    padding: 0
-                                    align: Align{y: 0.5}
-                                    draw_text +: {
-                                        color: theme.color_foreground
-                                        text_style: theme.font_bold { font_size: 10.5 }
-                                    }
-                                }
-                                extension_scope_status_lbl := mod.components.ClippedLabel {
-                                    height: 15
-                                    padding: 0
-                                    align: Align{y: 0.5}
-                                    draw_text +: {
-                                        color: theme.color_primary
-                                        text_style +: { font_size: 9.0 }
-                                    }
-                                }
-                                extension_path_lbl := mod.components.ClippedLabel {
-                                    height: 15
-                                    padding: 0
-                                    align: Align{y: 0.5}
-                                    draw_text +: {
-                                        color: theme.color_muted_foreground
-                                        text_style: theme.font_code { font_size: 8.0 }
-                                    }
-                                }
-                            }
-
-                            extension_enabled_toggle := Toggle {
-                                width: 34
-                                height: 24
-                                padding: 0
-                                text: ""
-                                label_walk: Walk{width: 0 height: 0}
-                                draw_bg +: {
-                                    color_active: theme.color_primary
-                                    border_color_active: theme.color_primary
-                                    mark_color_active: theme.color_primary_foreground
-                                    mark_color_active_hover: theme.color_primary_foreground
-                                }
-                                animator +: {
-                                    hover: {
-                                        on: AnimatorState {
-                                            from: {all: Snap}
-                                            apply: {
-                                                draw_bg: {down: snap(0.0), hover: 0.0}
-                                                draw_text: {down: snap(0.0), hover: 1.0}
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            extension_remove_btn := mod.components.IconButton {
-                                draw_icon +: {
-                                    svg: crate_resource("self:resources/icons/trash.svg")
-                                    color_hover: theme.color_destructive
-                                    color_focus: theme.color_destructive
-                                    color_down: theme.color_primary_foreground
-                                }
-                            }
-                        }
-
-                        EmptyRow := View {
-                            width: Fill
-                            height: 72
-                            align: Align{x: 0.5 y: 0.5}
-                            capability_empty_lbl := Label {
-                                width: Fit
-                                height: Fit
-                                text: "No WASI extensions found."
-                                draw_text +: {
-                                    color: theme.color_muted_foreground
-                                    text_style +: { font_size: 10.0 }
-                                }
-                            }
+                        EmptyRow := mod.components.CapabilityEmptyRow {
+                            empty_lbl: { text: "No WASI extensions found." }
                         }
                     }
 
@@ -1869,94 +1701,10 @@ script_mod! {
                         flow: Down
                         spacing: 8
 
-                        SkillRow := RoundedView {
-                            width: Fill
-                            height: 72
-                            flow: Right
-                            spacing: 10
-                            padding: Inset{left: 12 top: 9 right: 8 bottom: 9}
-                            align: Align{y: 0.5}
-                            draw_bg +: {
-                                color: theme.color_background
-                                border_color: theme.color_card
-                                border_size: 1.0
-                                border_radius: 7.0
-                            }
+                        SkillRow := mod.components.CapabilityRowBase {}
 
-                            skill_text := View {
-                                width: Fill
-                                height: Fill
-                                flow: Down
-                                spacing: 3
-
-                                skill_name_lbl := mod.components.ClippedLabel {
-                                    height: 17
-                                    padding: 0
-                                    align: Align{y: 0.5}
-                                    draw_text +: {
-                                        color: theme.color_foreground
-                                        text_style: theme.font_bold { font_size: 10.5 }
-                                    }
-                                }
-                                skill_scope_status_lbl := mod.components.ClippedLabel {
-                                    height: 15
-                                    padding: 0
-                                    align: Align{y: 0.5}
-                                    draw_text +: {
-                                        color: theme.color_primary
-                                        text_style +: { font_size: 9.0 }
-                                    }
-                                }
-                                skill_path_lbl := mod.components.ClippedLabel {
-                                    height: 15
-                                    padding: 0
-                                    align: Align{y: 0.5}
-                                    draw_text +: {
-                                        color: theme.color_muted_foreground
-                                        text_style: theme.font_code { font_size: 8.0 }
-                                    }
-                                }
-                            }
-
-                            skill_enabled_toggle := Toggle {
-                                width: 34
-                                height: 24
-                                padding: 0
-                                text: ""
-                                label_walk: Walk{width: 0 height: 0}
-                                draw_bg +: {
-                                    color_active: theme.color_primary
-                                    border_color_active: theme.color_primary
-                                    mark_color_active: theme.color_primary_foreground
-                                    mark_color_active_hover: theme.color_primary_foreground
-                                }
-                                animator +: {
-                                    hover: {
-                                        on: AnimatorState {
-                                            from: {all: Snap}
-                                            apply: {
-                                                draw_bg: {down: snap(0.0), hover: 0.0}
-                                                draw_text: {down: snap(0.0), hover: 1.0}
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        SkillEmptyRow := View {
-                            width: Fill
-                            height: 72
-                            align: Align{x: 0.5 y: 0.5}
-                            skill_empty_lbl := Label {
-                                width: Fit
-                                height: Fit
-                                text: "No skills found."
-                                draw_text +: {
-                                    color: theme.color_muted_foreground
-                                    text_style +: { font_size: 10.0 }
-                                }
-                            }
+                        SkillEmptyRow := mod.components.CapabilityEmptyRow {
+                            empty_lbl: { text: "No skills found." }
                         }
                     }
 
@@ -2164,25 +1912,12 @@ script_mod! {
                                     }
                                 }
                                 sidebar_brand_spacer := mod.components.FlexSpacer {}
-                                settings_btn := Button {
+                                settings_btn := mod.components.IconButton {
                                     width: 26
                                     height: 26
-                                    padding: 0
-                                    spacing: 0
-                                    text: ""
-                                    align: Align{x: 0.5 y: 0.5}
                                     icon_walk: Walk{width: 14 height: 14}
-                                    draw_bg +: {
-                                        color: theme.color_transparent
-                                        color_hover: theme.color_background
-                                        color_down: theme.color_card
-                                        border_radius: 6.0
-                                    }
                                     draw_icon +: {
                                         svg: crate_resource("self:resources/icons/settings.svg")
-                                        color: theme.color_muted_foreground
-                                        color_hover: theme.color_foreground
-                                        color_down: theme.color_primary_foreground
                                     }
                                 }
                             }
@@ -2297,72 +2032,21 @@ script_mod! {
                                 draw_icon +: { svg: crate_resource("self:resources/icons/terminal.svg") }
                             }
 
-                            caps_btn := Button {
-                                width: Fit
-                                height: 28
+                            caps_btn := mod.components.HeaderChipButton {
                                 padding: Inset{left: 8 right: 9 top: 4 bottom: 4}
                                 text: "Tools"
                                 icon_walk: Walk{width: 13 height: 13 margin: Inset{right: 2}}
                                 draw_icon +: {
                                     svg: crate_resource("self:resources/icons/skill.svg")
-                                    color: theme.color_primary
-                                    color_hover: theme.color_primary
-                                    color_down: theme.color_primary_foreground
-                                }
-                                draw_bg +: {
-                                    color: theme.color_secondary
-                                    color_hover: theme.color_card
-                                    color_focus: theme.color_card
-                                    color_down: theme.color_primary
-                                    border_color: theme.color_secondary
-                                    border_color_hover: theme.color_primary
-                                    border_color_focus: theme.color_primary
-                                    border_color_down: theme.color_primary
-                                    border_radius: 7.0
-                                    border_size: 1.0
-                                }
-                                draw_text +: {
-                                    color: theme.color_foreground
-                                    color_hover: theme.color_primary_foreground
-                                    color_focus: theme.color_primary_foreground
-                                    color_down: theme.color_primary_foreground
-                                    text_style: theme.font_bold { font_size: 9.5 }
                                 }
                             }
 
-                            task_sidebar_btn := Button {
-                                width: Fit
-                                height: 28
+                            task_sidebar_btn := mod.components.HeaderChipButton {
                                 visible: false
                                 padding: Inset{left: 9 right: 9 top: 4 bottom: 4}
-                                spacing: 5
                                 text: ""
-                                icon_walk: Walk{width: 13 height: 13}
                                 draw_icon +: {
                                     svg: crate_resource("self:resources/icons/subagent.svg")
-                                    color: theme.color_primary
-                                    color_hover: theme.color_primary
-                                    color_focus: theme.color_primary
-                                    color_down: theme.color_primary_foreground
-                                }
-                                draw_bg +: {
-                                    color: theme.color_secondary
-                                    color_hover: theme.color_card
-                                    color_focus: theme.color_card
-                                    color_down: theme.color_primary
-                                    border_color: theme.color_secondary
-                                    border_color_hover: theme.color_primary
-                                    border_color_focus: theme.color_primary
-                                    border_color_down: theme.color_primary
-                                    border_radius: 7.0
-                                    border_size: 1.0
-                                }
-                                draw_text +: {
-                                    color: theme.color_foreground
-                                    color_hover: theme.color_primary_foreground
-                                    color_focus: theme.color_primary_foreground
-                                    color_down: theme.color_primary_foreground
-                                    text_style: theme.font_bold { font_size: 9.5 }
                                 }
                             }
 
@@ -2875,7 +2559,7 @@ impl Widget for ProviderSettingsModal {
             let list = self.view.portal_list(cx, ids!(capability_list));
             for (row, item) in list.items_with_actions(actions) {
                 if let Some(enabled) = item
-                    .check_box(cx, ids!(extension_enabled_toggle))
+                    .check_box(cx, ids!(enabled_toggle))
                     .changed(actions)
                 {
                     cx.widget_action(
@@ -2883,14 +2567,14 @@ impl Widget for ProviderSettingsModal {
                         ProviderSettingsModalAction::SetEnabled { row, enabled },
                     );
                 }
-                if item.button(cx, ids!(extension_remove_btn)).clicked(actions) {
+                if item.button(cx, ids!(remove_btn)).clicked(actions) {
                     cx.widget_action(uid, ProviderSettingsModalAction::Remove(row));
                 }
             }
             let skill_list = self.view.portal_list(cx, ids!(skill_list));
             for (row, item) in skill_list.items_with_actions(actions) {
                 if let Some(enabled) = item
-                    .check_box(cx, ids!(skill_enabled_toggle))
+                    .check_box(cx, ids!(enabled_toggle))
                     .changed(actions)
                 {
                     cx.widget_action(
@@ -2942,12 +2626,12 @@ impl Widget for ProviderSettingsModal {
                                 continue;
                             };
                             let item = list.item(cx, row_index, id!(SkillRow));
-                            item.label(cx, ids!(skill_name_lbl)).set_text(cx, &row.id);
-                            item.label(cx, ids!(skill_scope_status_lbl))
+                            item.label(cx, ids!(name_lbl)).set_text(cx, &row.id);
+                            item.label(cx, ids!(scope_lbl))
                                 .set_text(cx, &row.scope_status());
-                            item.label(cx, ids!(skill_path_lbl))
+                            item.label(cx, ids!(path_lbl))
                                 .set_text(cx, &row.file_path.display().to_string());
-                            item.check_box(cx, ids!(skill_enabled_toggle)).set_active(
+                            item.check_box(cx, ids!(enabled_toggle)).set_active(
                                 cx,
                                 row.enabled && row.is_valid,
                                 Animate::No,
@@ -2968,13 +2652,13 @@ impl Widget for ProviderSettingsModal {
                                 continue;
                             };
                             let item = list.item(cx, row_index, id!(ExtensionRow));
-                            item.label(cx, ids!(extension_name_version_lbl))
+                            item.label(cx, ids!(name_lbl))
                                 .set_text(cx, &format!("{} · v{}", row.name, row.version));
-                            item.label(cx, ids!(extension_scope_status_lbl))
+                            item.label(cx, ids!(scope_lbl))
                                 .set_text(cx, &row.scope_status());
-                            item.label(cx, ids!(extension_path_lbl))
+                            item.label(cx, ids!(path_lbl))
                                 .set_text(cx, &row.module_path.display().to_string());
-                            item.check_box(cx, ids!(extension_enabled_toggle))
+                            item.check_box(cx, ids!(enabled_toggle))
                                 .set_active(cx, row.enabled, Animate::No);
                             item.draw_all_unscoped(cx);
                         }
