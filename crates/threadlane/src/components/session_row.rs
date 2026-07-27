@@ -36,7 +36,7 @@ script_mod! {
             tree_last: instance(0.0)
             is_active: instance(0.0)
             color: theme.color_transparent
-            color_hover: uniform(theme.color_background)
+            color_hover: uniform(theme.color_card)
             tree_color: uniform(theme.color_card)
             border_radius: 7.0
 
@@ -107,7 +107,7 @@ script_mod! {
             hover: instance(0.0)
             tree_color: uniform(theme.color_card)
             color: theme.color_transparent
-            color_hover: theme.color_background
+            color_hover: theme.color_card
             border_color: uniform(theme.color_transparent)
             border_size: uniform(0.0)
             border_radius: 8.0

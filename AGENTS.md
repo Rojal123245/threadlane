@@ -109,6 +109,11 @@ Reusable script components are registered through `crates/threadlane/src/compone
 - A custom widget that dereferences a `View` must delegate both `handle_event` and `draw_walk`; delegating events without drawing leaves the entire wrapper invisible.
 - **DSL inheritance**: `:= SomeName { ... }` creates an ID-bound widget instance, **not** a named prototype. An ID-bound instance cannot be used as a parent in another `:= SomeName { ... }` definition. Only `mod.components.Name` template names (defined with `=`, not `:=`) are valid prototype parents. Attempting to write `Child := ParentId { ... }` where `ParentId` was defined with `:=` will fail at runtime with "variable ParentId not found in scope".
 
+Navigation destinations that are siblings in the same menu should use
+`mod.components.NavButton`. Keep ordinary actions, icon buttons, dropdowns,
+and destructive controls as their own variants; do not recreate navigation
+hover, focus, pressed, border, or selected styling at each call site.
+
 ### Layout
 
 - Explicitly set `width`, `height`, `flow`, `spacing`, `padding`, and alignment when they affect interaction geometry.

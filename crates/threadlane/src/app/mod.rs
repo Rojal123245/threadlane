@@ -1065,6 +1065,19 @@ script_mod! {
         flow: Down
         spacing: 0
 
+        mod.components.ProjectHeaderActiveBase = mod.components.ProjectHeaderBase {
+            draw_bg +: {
+                color: theme.color_background
+                color_hover: theme.color_card
+                border_color: theme.color_primary
+                border_size: 1.0
+            }
+            project_toggle_surface +: {
+                folder_icon +: { draw_icon +: { color: theme.color_primary } }
+                name_lbl +: { draw_text +: { color: theme.color_primary_foreground } }
+            }
+        }
+
         fixed_header_slot := View {
             width: Fill
             height: 44
@@ -1073,18 +1086,8 @@ script_mod! {
             clip_y: true
 
             fixed_project_header := mod.components.ProjectHeaderBase {}
-            fixed_project_header_active := mod.components.ProjectHeaderBase {
+            fixed_project_header_active := mod.components.ProjectHeaderActiveBase {
                 visible: false
-                draw_bg +: {
-                    color: theme.color_background
-                    color_hover: theme.color_card
-                    border_color: theme.color_primary
-                    border_size: 1.0
-                }
-                project_toggle_surface +: {
-                    folder_icon +: { draw_icon +: { color: theme.color_primary } }
-                    name_lbl +: { draw_text +: { color: theme.color_primary_foreground } }
-                }
             }
         }
 
@@ -1118,18 +1121,7 @@ script_mod! {
 
             ProjectHeader := mod.components.ProjectHeaderBase {}
 
-            ProjectHeaderActive := mod.components.ProjectHeaderBase {
-                draw_bg +: {
-                    color: theme.color_background
-                    color_hover: theme.color_card
-                    border_color: theme.color_primary
-                    border_size: 1.0
-                }
-                project_toggle_surface +: {
-                    folder_icon +: { draw_icon +: { color: theme.color_primary } }
-                    name_lbl +: { draw_text +: { color: theme.color_primary_foreground } }
-                }
-            }
+            ProjectHeaderActive := mod.components.ProjectHeaderActiveBase {}
 
             SessionRow := SessionRowBase {}
 
@@ -1137,11 +1129,11 @@ script_mod! {
                 draw_bg +: { tree_last: 1.0 }
             }
 
-            SessionRowActive := SessionRowBase {
+            mod.components.SessionRowActiveBase = SessionRowBase {
                 draw_bg +: {
                     is_active: 1.0
-                    color: theme.color_background
-                    color_hover: theme.color_background
+                    color: theme.color_secondary
+                    color_hover: theme.color_accent
                     border_color: theme.color_transparent
                     border_size: 0.0
                     border_radius: 7.0
@@ -1158,29 +1150,15 @@ script_mod! {
                 }
             }
 
-            SessionRowActiveLast := SessionRowBase {
+            SessionRowActive := mod.components.SessionRowActiveBase {}
+
+            SessionRowActiveLast := mod.components.SessionRowActiveBase {
                 draw_bg +: {
                     tree_last: 1.0
-                    is_active: 1.0
-                    color: theme.color_background
-                    color_hover: theme.color_background
-                    border_color: theme.color_transparent
-                    border_size: 0.0
-                    border_radius: 7.0
-                }
-                title_surface +: {
-                    title_lbl +: {
-                        draw_text +: { color: theme.color_primary_foreground }
-                    }
-                }
-                time_lbl +: {
-                    draw_text +: {
-                        color: theme.color_card_foreground
-                    }
                 }
             }
 
-            SessionRowContext := SessionRowBase {
+            mod.components.SessionRowContextBase = SessionRowBase {
                 draw_bg +: {
                     color: theme.color_card
                     color_hover: theme.color_primary
@@ -1200,24 +1178,11 @@ script_mod! {
                 }
             }
 
-            SessionRowContextLast := SessionRowBase {
+            SessionRowContext := mod.components.SessionRowContextBase {}
+
+            SessionRowContextLast := mod.components.SessionRowContextBase {
                 draw_bg +: {
                     tree_last: 1.0
-                    color: theme.color_card
-                    color_hover: theme.color_primary
-                    border_color: theme.color_primary
-                    border_size: 1.0
-                    border_radius: 6.0
-                }
-                title_surface +: {
-                    title_lbl +: {
-                        draw_text +: { color: theme.color_primary_foreground }
-                    }
-                }
-                time_lbl +: {
-                    draw_text +: {
-                        color: theme.color_primary
-                    }
                 }
             }
 
@@ -1347,60 +1312,12 @@ script_mod! {
                     }
                 }
 
-                settings_nav_google_btn := Button {
-                    width: Fill
-                    height: 34
-                    padding: Inset{left: 10 right: 8 top: 6 bottom: 6}
-                    spacing: 0
-                    align: Align{x: 0.0 y: 0.5}
+                settings_nav_google_btn := mod.components.NavButton {
                     text: "Google Antigravity"
-                    draw_bg +: {
-                        color: theme.color_primary
-                        color_hover: theme.color_primary
-                        color_focus: theme.color_primary
-                        color_down: theme.color_primary
-                        border_color: theme.color_primary
-                        border_color_hover: theme.color_primary
-                        border_color_focus: theme.color_primary
-                        border_color_down: theme.color_primary
-                        border_size: 1.0
-                        border_radius: 6.0
-                    }
-                    draw_text +: {
-                        color: theme.color_primary_foreground
-                        color_hover: theme.color_primary_foreground
-                        color_focus: theme.color_primary_foreground
-                        color_down: theme.color_primary_foreground
-                        text_style +: { font_size: 9.5 }
-                    }
                 }
 
-                settings_nav_openai_btn := Button {
-                    width: Fill
-                    height: 34
-                    padding: Inset{left: 10 right: 8 top: 6 bottom: 6}
-                    spacing: 0
-                    align: Align{x: 0.0 y: 0.5}
+                settings_nav_openai_btn := mod.components.NavButton {
                     text: "OpenAI / ChatGPT"
-                    draw_bg +: {
-                        color: theme.color_background
-                        color_hover: theme.color_card
-                        color_focus: theme.color_secondary
-                        color_down: theme.color_primary
-                        border_color: theme.color_background
-                        border_color_hover: theme.color_primary
-                        border_color_focus: theme.color_primary
-                        border_color_down: theme.color_primary
-                        border_size: 1.0
-                        border_radius: 6.0
-                    }
-                    draw_text +: {
-                        color: theme.color_primary
-                        color_hover: theme.color_foreground
-                        color_focus: theme.color_primary_foreground
-                        color_down: theme.color_primary_foreground
-                        text_style +: { font_size: 9.5 }
-                    }
                 }
 
                 advanced_category_lbl := Label {
@@ -1414,88 +1331,16 @@ script_mod! {
                     }
                 }
 
-                settings_nav_capabilities_btn := Button {
-                    width: Fill
-                    height: 34
-                    padding: Inset{left: 10 right: 8 top: 6 bottom: 6}
-                    spacing: 0
-                    align: Align{x: 0.0 y: 0.5}
+                settings_nav_capabilities_btn := mod.components.NavButton {
                     text: "WASI Extensions"
-                    draw_bg +: {
-                        color: theme.color_background
-                        color_hover: theme.color_card
-                        color_focus: theme.color_secondary
-                        color_down: theme.color_primary
-                        border_color: theme.color_background
-                        border_color_hover: theme.color_primary
-                        border_color_focus: theme.color_primary
-                        border_color_down: theme.color_primary
-                        border_size: 1.0
-                        border_radius: 6.0
-                    }
-                    draw_text +: {
-                        color: theme.color_primary
-                        color_hover: theme.color_foreground
-                        color_focus: theme.color_primary_foreground
-                        color_down: theme.color_primary_foreground
-                        text_style +: { font_size: 9.5 }
-                    }
                 }
 
-                settings_nav_skills_btn := Button {
-                    width: Fill
-                    height: 34
-                    padding: Inset{left: 10 right: 8 top: 6 bottom: 6}
-                    spacing: 0
-                    align: Align{x: 0.0 y: 0.5}
+                settings_nav_skills_btn := mod.components.NavButton {
                     text: "Skills"
-                    draw_bg +: {
-                        color: theme.color_background
-                        color_hover: theme.color_card
-                        color_focus: theme.color_secondary
-                        color_down: theme.color_primary
-                        border_color: theme.color_background
-                        border_color_hover: theme.color_primary
-                        border_color_focus: theme.color_primary
-                        border_color_down: theme.color_primary
-                        border_size: 1.0
-                        border_radius: 6.0
-                    }
-                    draw_text +: {
-                        color: theme.color_primary
-                        color_hover: theme.color_foreground
-                        color_focus: theme.color_primary_foreground
-                        color_down: theme.color_primary_foreground
-                        text_style +: { font_size: 9.5 }
-                    }
                 }
 
-                settings_nav_about_btn := Button {
-                    width: Fill
-                    height: 34
-                    padding: Inset{left: 10 right: 8 top: 6 bottom: 6}
-                    spacing: 0
-                    align: Align{x: 0.0 y: 0.5}
+                settings_nav_about_btn := mod.components.NavButton {
                     text: "About"
-                    draw_bg +: {
-                        color: theme.color_background
-                        color_hover: theme.color_card
-                        color_focus: theme.color_secondary
-                        color_down: theme.color_primary
-                        border_color: theme.color_background
-                        border_color_hover: theme.color_primary
-                        border_color_focus: theme.color_primary
-                        border_color_down: theme.color_primary
-                        border_size: 1.0
-                        border_radius: 6.0
-                    }
-                    draw_text +: {
-                        color: theme.color_primary
-                        color_hover: theme.color_foreground
-                        color_focus: theme.color_primary_foreground
-                        color_down: theme.color_primary_foreground
-                        text_style +: { font_size: 9.5 }
-                    }
                 }
             }
 
@@ -3239,18 +3084,6 @@ impl ProviderSettingsModal {
         let skills_selected = self.page == SettingsPage::Skills;
         let about_selected = self.page == SettingsPage::About;
 
-        let normal_color = Vec4f {
-            x: 0x20 as f32 / 255.0,
-            y: 0x25 as f32 / 255.0,
-            z: 0x2e as f32 / 255.0,
-            w: 1.0,
-        };
-        let selected_color = Vec4f {
-            x: 0x2d as f32 / 255.0,
-            y: 0x40 as f32 / 255.0,
-            z: 0x5a as f32 / 255.0,
-            w: 1.0,
-        };
         for (button_id, selected) in [
             (ids!(settings_nav_google_btn), google_selected),
             (ids!(settings_nav_openai_btn), openai_selected),
@@ -3258,15 +3091,8 @@ impl ProviderSettingsModal {
             (ids!(settings_nav_skills_btn), skills_selected),
             (ids!(settings_nav_about_btn), about_selected),
         ] {
-            let mut button = self.view.button(cx, button_id);
-            let color = if selected {
-                selected_color
-            } else {
-                normal_color
-            };
-            script_apply_eval!(cx, button, {
-                draw_bg +: { color: #(color) }
-            });
+            let button = self.view.button(cx, button_id);
+            crate::components::nav_button::set_selected(cx, &button, selected);
             button.redraw(cx);
         }
 

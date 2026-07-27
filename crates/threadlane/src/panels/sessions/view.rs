@@ -74,6 +74,17 @@ fn draw_empty_session_row(cx: &mut Cx2d, list: &mut PortalList, item_id: usize) 
     item_widget.draw_all_unscoped(cx);
 }
 
+fn session_row_template(context_target: bool, active: bool, last: bool) -> LiveId {
+    match (context_target, active, last) {
+        (true, _, true) => id!(SessionRowContextLast),
+        (true, _, false) => id!(SessionRowContext),
+        (false, true, true) => id!(SessionRowActiveLast),
+        (false, true, false) => id!(SessionRowActive),
+        (false, false, true) => id!(SessionRowLast),
+        (false, false, false) => id!(SessionRow),
+    }
+}
+
 #[derive(Script, ScriptHook, Widget)]
 pub struct SessionList {
     #[deref]
@@ -285,14 +296,7 @@ impl Widget for SessionList {
                             let context_target =
                                 data.is_context_target(&session.work_dir, &session.id);
                             let last = *session_idx + 1 == project.sessions.len();
-                            let template = match (context_target, active, last) {
-                                (true, _, true) => id!(SessionRowContextLast),
-                                (true, _, false) => id!(SessionRowContext),
-                                (false, true, true) => id!(SessionRowActiveLast),
-                                (false, true, false) => id!(SessionRowActive),
-                                (false, false, true) => id!(SessionRowLast),
-                                (false, false, false) => id!(SessionRow),
-                            };
+                            let template = session_row_template(context_target, active, last);
                             let item_widget = list.item(cx, item_id, template);
                             item_widget
                                 .label(cx, ids!(title_lbl))
@@ -436,5 +440,15 @@ mod tests {
             })
         );
         assert_eq!(fixed_project_for_headers(&[], |_| true), None);
+    }
+
+    #[test]
+    fn session_template_prioritizes_context_then_active_then_last() {
+        assert_eq!(session_row_template(true, true, true), id!(SessionRowContextLast));
+        assert_eq!(session_row_template(true, false, false), id!(SessionRowContext));
+        assert_eq!(session_row_template(false, true, true), id!(SessionRowActiveLast));
+        assert_eq!(session_row_template(false, true, false), id!(SessionRowActive));
+        assert_eq!(session_row_template(false, false, true), id!(SessionRowLast));
+        assert_eq!(session_row_template(false, false, false), id!(SessionRow));
     }
 }
