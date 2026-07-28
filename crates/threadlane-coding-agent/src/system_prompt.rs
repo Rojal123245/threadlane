@@ -132,8 +132,8 @@ pub(crate) fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> Stri
         if available_tool_names.contains("search_codebase") {
             add_tool_guideline("Use `search_codebase` to search AST-indexed code nodes and retrieve relevant line-anchored code blocks for a query without reading full files.");
         }
-        if available_tool_names.contains("read_memory") || available_tool_names.contains("save_memory") {
-            add_tool_guideline("Use `save_memory` to store persistent project facts, architectural decisions, or gotchas into `.threadlane/memory.md` so future sessions benefit.");
+        if available_tool_names.contains("read_memory") || available_tool_names.contains("save_memory") || available_tool_names.contains("consolidate_memory") {
+            add_tool_guideline("Use `save_memory` or `consolidate_memory` to store persistent project facts, architectural decisions, gotchas, or verification commands into `.threadlane/memory.md` so future sessions benefit.");
         }
         if available_tool_names.contains("write_file")
             || available_tool_names.contains("edit_file")

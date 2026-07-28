@@ -137,6 +137,30 @@ fn tool_definitions() -> Vec<Value> {
                 "required": ["content"]
             }
         }),
+        json!({
+            "name": "consolidate_memory",
+            "description": "Automatically consolidate and merge new findings into .threadlane/memory.md under structured sections (## Architecture, ## Gotchas, ## Verification Commands). Deduplicates items.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "architecture": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "List of architectural decisions or patterns to merge"
+                    },
+                    "gotchas": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "List of gotchas, pitfalls, or non-obvious rules to merge"
+                    },
+                    "verification": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "List of build, test, or verification commands to merge"
+                    }
+                }
+            }
+        }),
     ]
 }
 
@@ -506,6 +530,7 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
         }
         "read_memory" => read_memory_impl(workspace_root),
         "save_memory" => save_memory_impl(workspace_root, &args),
+        "consolidate_memory" => consolidate_memory_impl(workspace_root, &args),
         unknown => format!("Error: Unknown tool '{unknown}'"),
     }
 }
@@ -564,6 +589,137 @@ fn save_memory_impl(workspace_root: &Path, args: &Value) -> String {
         Ok(_) => "Successfully saved memory to .threadlane/memory.md".to_string(),
         Err(e) => format!("Error writing to .threadlane/memory.md: {e}"),
     }
+}
+
+fn consolidate_memory_impl(workspace_root: &Path, args: &Value) -> String {
+    let parse_array = |key: &str| -> Vec<String> {
+        args.get(key)
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let architecture = parse_array("architecture");
+    let gotchas = parse_array("gotchas");
+    let verification = parse_array("verification");
+
+    let dir = workspace_root.join(".threadlane");
+    if let Err(e) = fs::create_dir_all(&dir) {
+        return format!("Error creating .threadlane directory: {e}");
+    }
+    let mem_file = dir.join("memory.md");
+
+    let existing = fs::read_to_string(&mem_file).unwrap_or_default();
+    let merged = consolidate_memory_entries(&existing, &architecture, &gotchas, &verification);
+
+    match fs::write(&mem_file, merged) {
+        Ok(_) => "Successfully consolidated memory entries in .threadlane/memory.md".to_string(),
+        Err(e) => format!("Error writing to .threadlane/memory.md: {e}"),
+    }
+}
+
+pub fn consolidate_memory_entries(
+    existing: &str,
+    architecture: &[String],
+    gotchas: &[String],
+    verification: &[String],
+) -> String {
+    let mut arch_items: Vec<String> = Vec::new();
+    let mut gotcha_items: Vec<String> = Vec::new();
+    let mut verify_items: Vec<String> = Vec::new();
+
+    let mut current_section = "";
+    for line in existing.lines() {
+        let trimmed = line.trim();
+        if trimmed == "## Architecture" {
+            current_section = "architecture";
+            continue;
+        } else if trimmed == "## Gotchas" {
+            current_section = "gotchas";
+            continue;
+        } else if trimmed == "## Verification Commands" {
+            current_section = "verification";
+            continue;
+        } else if trimmed.starts_with('#') {
+            current_section = "";
+        }
+
+        if trimmed.starts_with('-') || trimmed.starts_with('*') {
+            let item = trimmed.trim_start_matches(['-', '*', ' ']).to_string();
+            if !item.is_empty() {
+                match current_section {
+                    "architecture" => {
+                        if !arch_items.contains(&item) {
+                            arch_items.push(item);
+                        }
+                    }
+                    "gotchas" => {
+                        if !gotcha_items.contains(&item) {
+                            gotcha_items.push(item);
+                        }
+                    }
+                    "verification" => {
+                        if !verify_items.contains(&item) {
+                            verify_items.push(item);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    for item in architecture {
+        let item = item.trim().to_string();
+        if !item.is_empty() && !arch_items.contains(&item) {
+            arch_items.push(item);
+        }
+    }
+    for item in gotchas {
+        let item = item.trim().to_string();
+        if !item.is_empty() && !gotcha_items.contains(&item) {
+            gotcha_items.push(item);
+        }
+    }
+    for item in verification {
+        let item = item.trim().to_string();
+        if !item.is_empty() && !verify_items.contains(&item) {
+            verify_items.push(item);
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str("# Project Memory\n\n");
+
+    if !arch_items.is_empty() {
+        out.push_str("## Architecture\n");
+        for item in &arch_items {
+            out.push_str(&format!("- {item}\n"));
+        }
+        out.push('\n');
+    }
+
+    if !gotcha_items.is_empty() {
+        out.push_str("## Gotchas\n");
+        for item in &gotcha_items {
+            out.push_str(&format!("- {item}\n"));
+        }
+        out.push('\n');
+    }
+
+    if !verify_items.is_empty() {
+        out.push_str("## Verification Commands\n");
+        for item in &verify_items {
+            out.push_str(&format!("- {item}\n"));
+        }
+        out.push('\n');
+    }
+
+    out.trim().to_string()
 }
 
 fn get_repo_map_impl(workspace_root: &Path, rel_path: Option<&str>) -> String {
@@ -898,5 +1054,29 @@ mod tests {
         );
         assert!(res.contains("src/compaction.rs"));
         assert!(res.contains("compact_messages_to_token_budget"));
+    }
+
+    #[test]
+    fn test_consolidate_memory_tool() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        let payload = json!({
+            "architecture": ["Use Makepad UI components"],
+            "gotchas": ["cargo check requires unsandboxed bypass on macOS"],
+            "verification": ["cargo test --workspace"]
+        })
+        .to_string();
+
+        let res = execute_tool_in_workspace("consolidate_memory", &payload, root);
+        assert!(res.contains("Successfully consolidated memory entries"));
+
+        let mem_content = execute_tool_in_workspace("read_memory", "{}", root);
+        assert!(mem_content.contains("## Architecture"));
+        assert!(mem_content.contains("Use Makepad UI components"));
+        assert!(mem_content.contains("## Gotchas"));
+        assert!(mem_content.contains("cargo check requires unsandboxed bypass on macOS"));
+        assert!(mem_content.contains("## Verification Commands"));
+        assert!(mem_content.contains("cargo test --workspace"));
     }
 }

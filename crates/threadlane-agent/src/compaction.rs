@@ -210,6 +210,52 @@ fn message_excerpt(message: &AgentMessage) -> Option<String> {
     }
 }
 
+pub fn extract_session_insights(
+    messages: &[AgentMessage],
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut verification = Vec::new();
+    let mut gotchas = Vec::new();
+    let mut architecture = Vec::new();
+
+    for msg in messages {
+        match msg {
+            AgentMessage::Tool { name, content, is_error, .. } => {
+                if name == "run_command" {
+                    if content.contains("cargo test") && !content.contains("error:") {
+                        let line = "cargo test --workspace";
+                        if !verification.contains(&line.to_string()) {
+                            verification.push(line.to_string());
+                        }
+                    }
+                    if content.contains("cargo check") && !content.contains("error:") {
+                        let line = "cargo check -p threadlane";
+                        if !verification.contains(&line.to_string()) {
+                            verification.push(line.to_string());
+                        }
+                    }
+                }
+                if *is_error || content.contains("Access denied") || content.contains("Operation not permitted") {
+                    let line = "Command execution in restricted environments may require BypassSandbox mode.";
+                    if !gotchas.contains(&line.to_string()) {
+                        gotchas.push(line.to_string());
+                    }
+                }
+            }
+            AgentMessage::Assistant { content: Some(text), .. } => {
+                if text.contains("Makepad") && text.contains("theme") {
+                    let line = "UI components in crates/threadlane/src must reference theme tokens from crates/threadlane/src/theme/mod.rs.";
+                    if !architecture.contains(&line.to_string()) {
+                        architecture.push(line.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    (architecture, gotchas, verification)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,5 +313,26 @@ mod tests {
             "OpenAI SSE Error [context_length_exceeded]: input exceeds the context window"
         ));
         assert!(!is_context_overflow_error("rate limit exceeded"));
+    }
+
+    #[test]
+    fn test_extract_session_insights() {
+        let msgs = vec![
+            AgentMessage::Tool {
+                tool_call_id: "1".into(),
+                name: "run_command".into(),
+                content: "running cargo test ... finished cleanly".into(),
+                is_error: false,
+            },
+            AgentMessage::Assistant {
+                content: Some("Makepad theme tokens must be used.".into()),
+                tool_calls: None,
+            },
+        ];
+
+        let (arch, gotchas, verify) = extract_session_insights(&msgs);
+        assert!(!arch.is_empty());
+        assert!(!verify.is_empty());
+        assert!(verify.contains(&"cargo test --workspace".to_string()));
     }
 }
