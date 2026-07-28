@@ -9,10 +9,10 @@ script_mod! {
         width: Fill
         height: Fit
         draw_bg +: {
-            color: #x1f232b
-            border_color: #x3a424e
+            color: theme.color_card
+            border_color: theme.color_border
             border_size: 1.0
-            border_radius: 11.0
+            border_radius: theme.radius_xl
         }
     }
 }

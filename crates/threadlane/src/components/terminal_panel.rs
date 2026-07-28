@@ -11,10 +11,10 @@ script_mod! {
 
     mod.components.TerminalTabButton = mod.widgets.Button {
         width: Fit height: 30 padding: Inset{left: 11 right: 8} spacing: 0
-        draw_text +: { color: #xaeb8c5 color_hover: #edf2f8 color_focus: #edf2f8 color_down: #ffffff text_style: theme.font_code {font_size: 9.0} }
+        draw_text +: { color: theme.color_card_foreground color_hover: theme.color_foreground color_focus: theme.color_foreground color_down: theme.color_primary_foreground text_style: theme.font_code {font_size: 9.0} }
         draw_bg +: {
-            color: #x00000000 color_hover: #x292f38 color_focus: #x2d3540 color_down: #x36404d
-            border_color: #x00000000 border_color_hover: #x00000000 border_color_focus: #x00000000 border_color_down: #x00000000
+            color: theme.color_transparent color_hover: theme.color_card color_focus: theme.color_card color_down: theme.color_secondary
+            border_color: theme.color_transparent border_color_hover: theme.color_transparent border_color_focus: theme.color_transparent border_color_down: theme.color_transparent
             border_size: 0.0 border_radius: 4.0
         }
     }
@@ -22,17 +22,17 @@ script_mod! {
     mod.components.TerminalTabSlot = RoundedView {
         width: Fit height: 34 flow: Right spacing: 0 padding: 0 align: Align{y: 0.5}
         draw_bg +: {
-            color: #x20242a border_color: #x303741 border_size: 1.0 border_radius: 5.0
+            color: theme.color_background border_color: theme.color_card border_size: 1.0 border_radius: 5.0
         }
     }
 
     mod.components.TerminalTabCloseButton = mod.widgets.Button {
         width: 22 height: 30 padding: 0 spacing: 0 text: "" align: Align{x: 0.5 y: 0.5}
         icon_walk: Walk{width: 9 height: 9}
-        draw_icon +: { color: #x8390a0 color_hover: #xe3e9f0 color_focus: #xe3e9f0 color_down: #xffffff }
+        draw_icon +: { color: theme.color_muted_foreground color_hover: theme.color_primary_foreground color_focus: theme.color_primary_foreground color_down: theme.color_primary_foreground }
         draw_bg +: {
-            color: #x00000000 color_hover: #x313a46 color_focus: #x313a46 color_down: #x3c4857
-            border_color: #x00000000 border_color_hover: #x00000000 border_color_focus: #x00000000 border_color_down: #x00000000
+            color: theme.color_transparent color_hover: theme.color_card color_focus: theme.color_card color_down: theme.color_secondary
+            border_color: theme.color_transparent border_color_hover: theme.color_transparent border_color_focus: theme.color_transparent border_color_down: theme.color_transparent
             border_size: 0.0 border_radius: 4.0
         }
     }
@@ -40,10 +40,10 @@ script_mod! {
     mod.components.TerminalIconButton = mod.widgets.Button {
         width: 28 height: 28 padding: 0 spacing: 0 text: "" align: Align{x: 0.5 y: 0.5}
         icon_walk: Walk{width: 12 height: 12}
-        draw_icon +: { color: #x8c98a8 color_hover: #xdde3ea color_focus: #xdde3ea color_down: #xffffff }
+        draw_icon +: { color: theme.color_muted_foreground color_hover: theme.color_foreground color_focus: theme.color_foreground color_down: theme.color_primary_foreground }
         draw_bg +: {
-            color: #x00000000 color_hover: #x252b33 color_focus: #x2b333e color_down: #x35414e
-            border_color: #x00000000 border_color_hover: #x3a4655 border_color_focus: #x50657d border_color_down: #x6e8ba8 border_radius: 5.0
+            color: theme.color_transparent color_hover: theme.color_background color_focus: theme.color_card color_down: theme.color_secondary
+            border_color: theme.color_transparent border_color_hover: theme.color_secondary border_color_focus: theme.color_primary border_color_down: theme.color_primary border_radius: 5.0
         }
     }
 
@@ -56,7 +56,7 @@ script_mod! {
             icon_walk: Walk{width: 1 height: 1}
             draw_icon +: {
                 svg: crate_resource("self:resources/icons/terminal.svg")
-                color: #x00000000
+                color: theme.color_transparent
             }
         }
 
@@ -64,10 +64,10 @@ script_mod! {
             width: Fill height: 6 visible: false
             show_bg: true
             draw_bg +: {
-                color: #x2a3440
+                color: theme.color_card
                 pixel: fn() {
                     let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                    sdf.clear(#x00000000)
+                    sdf.clear(theme.color_transparent)
                     sdf.rect(0.0, self.rect_size.y * 0.5 - 0.5, self.rect_size.x, 1.0)
                     return sdf.fill(self.color)
                 }
@@ -76,7 +76,7 @@ script_mod! {
 
         terminal_body := RoundedView {
             width: Fill height: 250 visible: false flow: Down
-            draw_bg +: { color: #x15181c border_color: #x303945 border_size: 1.0 border_radius: 9.0 }
+            draw_bg +: { color: theme.color_background border_color: theme.color_card border_size: 1.0 border_radius: 9.0 }
 
             terminal_tabs := View {
                 width: Fill height: 40 flow: Right padding: Inset{left: 8 top: 3 right: 8 bottom: 3} spacing: 5 align: Align{y: 0.5}
@@ -93,14 +93,14 @@ script_mod! {
                 }
             }
 
-            terminal_rule := View {width: Fill height: 1 show_bg: true draw_bg +: {color: #x282f38}}
+            terminal_rule := View {width: Fill height: 1 show_bg: true draw_bg +: {color: theme.color_card}}
             terminal_content := View {
                 width: Fill height: Fill flow: Down padding: Inset{left: 13 top: 10 right: 13 bottom: 10} spacing: 6
                 terminal_scroll := ScrollYView {
                     width: Fill height: Fill
                     terminal_output := Label {
                         width: Fill height: Fit text: ""
-                        draw_text +: {color: #xd2d7dd text_style: theme.font_code {font_size: 9.5 line_spacing: 1.3}}
+                        draw_text +: {color: theme.color_foreground text_style: theme.font_code {font_size: 9.5 line_spacing: 1.3}}
                     }
                 }
             }
@@ -247,7 +247,7 @@ impl Widget for ProjectTerminal {
                 }
                 Event::TextInput(input)
                     if input.was_paste
-                        || input.input.chars().any(|character| !character.is_ascii()) =>
+                        || !input.input.is_ascii() =>
                 {
                     cx.widget_action(
                         self.widget_uid(),

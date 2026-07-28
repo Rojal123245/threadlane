@@ -16,8 +16,8 @@ script_mod! {
         margin: Inset{left: 2 right: 2}
         show_bg: true
         draw_bg +: {
-            color: #x1b232dc8
-            border_color: #x354353
+            color: theme.color_popover
+            border_color: theme.color_secondary
             border_size: 1.0
             border_radius: 8.0
         }

@@ -9,7 +9,7 @@ script_mod! {
         width: Fill
         height: Fit
         lbl := mod.components.ClippedLabel {
-            draw_text +: { color: #x6f7a88 text_style +: { font_size: 10.0 } }
+            draw_text +: { color: theme.color_muted_foreground text_style +: { font_size: 10.0 } }
         }
     }
 }

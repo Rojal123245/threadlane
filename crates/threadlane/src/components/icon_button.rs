@@ -18,19 +18,19 @@ script_mod! {
         align: Align{x: 0.5 y: 0.5}
         icon_walk: Walk{width: 12 height: 12 margin: 0}
         draw_icon +: {
-            color: #x758294
-            color_hover: #xb8d5f5
-            color_down: #xffffff
+            color: theme.color_primary
+            color_hover: theme.color_primary
+            color_down: theme.color_primary_foreground
         }
         draw_bg +: {
-            color: #x00000000
-            color_hover: #x283544
-            color_focus: #x283544
-            color_down: #x30445b
-            border_color: #x00000000
-            border_color_hover: #x00000000
-            border_color_focus: #x00000000
-            border_color_down: #x00000000
+            color: theme.color_transparent
+            color_hover: theme.color_secondary
+            color_focus: theme.color_secondary
+            color_down: theme.color_input
+            border_color: theme.color_transparent
+            border_color_hover: theme.color_transparent
+            border_color_focus: theme.color_transparent
+            border_color_down: theme.color_transparent
             border_size: 0.0
             border_radius: 6.0
         }

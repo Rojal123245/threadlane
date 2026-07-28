@@ -3,7 +3,6 @@ use crate::types::{
     AgentToolResult, BeforeToolCallResult,
 };
 use async_trait::async_trait;
-use std::sync::Arc;
 
 #[async_trait]
 pub trait BeforeToolCallHook: Send + Sync {
@@ -38,15 +37,6 @@ pub trait ShouldStopAfterTurnHook: Send + Sync {
         state: &AgentState,
     ) -> bool;
 }
-
-// Function closure adapters for convenience
-type DynBeforeToolCallFn =
-    Arc<dyn Fn(&AgentToolCall, &AgentState) -> BeforeToolCallResult + Send + Sync>;
-type DynAfterToolCallFn =
-    Arc<dyn Fn(&AgentToolCall, &AgentToolResult, &AgentState) -> AfterToolCallResult + Send + Sync>;
-type DynTransformContextFn = Arc<dyn Fn(Vec<AgentMessage>) -> Vec<AgentMessage> + Send + Sync>;
-type DynShouldStopFn =
-    Arc<dyn Fn(usize, &[AgentToolResult], &AgentState) -> bool + Send + Sync>;
 
 #[async_trait]
 pub trait ToolExecutor: Send + Sync {

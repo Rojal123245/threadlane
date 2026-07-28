@@ -1,4 +1,4 @@
-use crate::types::AgentMessage;
+use crate::types::{AgentMessage, PlanItem, SessionPlan};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -78,6 +78,13 @@ enum SessionRecord {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
     },
+    #[serde(rename = "session_plan")]
+    Plan {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        explanation: Option<String>,
+        #[serde(default)]
+        items: Vec<PlanItem>,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -86,6 +93,7 @@ pub struct SessionTree {
     pub name: Option<String>,
     title_attempted: bool,
     pub model: Option<String>,
+    plan: SessionPlan,
     pub nodes: HashMap<String, SessionNode>,
     /// Node IDs in persisted/insertion order. This is intentionally separate
     /// from `nodes`: the map is only an index and does not define ordering.
@@ -104,6 +112,7 @@ impl SessionTree {
             name: None,
             title_attempted: false,
             model: None,
+            plan: SessionPlan::default(),
             nodes: HashMap::new(),
             node_order: Vec::new(),
             active_node_id: None,
@@ -114,6 +123,30 @@ impl SessionTree {
 
     pub fn has_name(&self) -> bool {
         self.name.as_ref().is_some_and(|name| !name.is_empty())
+    }
+
+    pub fn plan(&self) -> &SessionPlan {
+        &self.plan
+    }
+
+    #[cfg(test)]
+    fn replace_plan(&mut self, plan: SessionPlan) -> std::io::Result<()> {
+        if let Some(path) = &self.file_path {
+            Self::append_plan_to_file(path, &plan)?;
+        }
+        self.plan = plan;
+        Ok(())
+    }
+
+    pub fn append_plan_to_file(path: &Path, plan: &SessionPlan) -> std::io::Result<()> {
+        let _guard = session_file_lock().lock().unwrap();
+        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+        let record = SessionRecord::Plan {
+            explanation: plan.explanation.clone(),
+            items: plan.items.clone(),
+        };
+        writeln!(file, "{}", serde_json::to_string(&record)?)?;
+        Ok(())
     }
 
     pub fn set_name(&mut self, name: String) -> std::io::Result<()> {
@@ -342,7 +375,7 @@ impl SessionTree {
         Some(forked)
     }
 
-    pub fn save_to_file(&self, path: &Path) -> std::io::Result<()> {
+    fn save_to_file(&self, path: &Path) -> std::io::Result<()> {
         let mut file = File::create(path)?;
         for node_id in self
             .node_order
@@ -366,6 +399,11 @@ impl SessionTree {
             };
             writeln!(file, "{}", serde_json::to_string(&metadata)?)?;
         }
+        let plan = SessionRecord::Plan {
+            explanation: self.plan.explanation.clone(),
+            items: self.plan.items.clone(),
+        };
+        writeln!(file, "{}", serde_json::to_string(&plan)?)?;
         Ok(())
     }
     fn append_metadata_to_file(&self, path: &Path) -> std::io::Result<()> {
@@ -380,7 +418,11 @@ impl SessionTree {
         Ok(())
     }
 
-    fn append_node_and_metadata_to_file(&self, path: &Path, node: &SessionNode) -> std::io::Result<()> {
+    fn append_node_and_metadata_to_file(
+        &self,
+        path: &Path,
+        node: &SessionNode,
+    ) -> std::io::Result<()> {
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
         writeln!(file, "{}", serde_json::to_string(node)?)?;
         let metadata = SessionRecord::Metadata {
@@ -411,21 +453,27 @@ impl SessionTree {
             if l.trim().is_empty() {
                 continue;
             }
-            if let Ok(SessionRecord::Metadata {
-                name,
-                title_attempted,
-                active_node_id,
-                model,
-            }) = serde_json::from_str::<SessionRecord>(&l)
-            {
-                tree.metadata_present = true;
-                tree.name = name;
-                tree.title_attempted = title_attempted;
-                tree.model = model;
-                if active_node_id.is_some() {
-                    explicit_active = true;
+            if let Ok(record) = serde_json::from_str::<SessionRecord>(&l) {
+                match record {
+                    SessionRecord::Metadata {
+                        name,
+                        title_attempted,
+                        active_node_id,
+                        model,
+                    } => {
+                        tree.metadata_present = true;
+                        tree.name = name;
+                        tree.title_attempted = title_attempted;
+                        tree.model = model;
+                        if active_node_id.is_some() {
+                            explicit_active = true;
+                        }
+                        tree.active_node_id = active_node_id;
+                    }
+                    SessionRecord::Plan { explanation, items } => {
+                        tree.plan = SessionPlan { explanation, items };
+                    }
                 }
-                tree.active_node_id = active_node_id;
             } else if let Ok(node) = serde_json::from_str::<SessionNode>(&l) {
                 if !explicit_active {
                     tree.active_node_id = Some(node.id.clone());
@@ -442,6 +490,78 @@ impl SessionTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{PlanItem, PlanItemStatus, SessionPlan};
+
+    fn test_plan(status: PlanItemStatus) -> SessionPlan {
+        SessionPlan {
+            explanation: Some("Keep the session plan".into()),
+            items: vec![PlanItem {
+                step: "Inspect".into(),
+                status,
+            }],
+        }
+    }
+
+    #[test]
+    fn session_plan_round_trips_and_latest_record_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut tree = SessionTree::new("session");
+        tree.file_path = Some(path.clone());
+
+        tree.replace_plan(test_plan(PlanItemStatus::InProgress))
+            .unwrap();
+        tree.replace_plan(test_plan(PlanItemStatus::Completed))
+            .unwrap();
+
+        let loaded = SessionTree::load_from_file(&path).unwrap();
+        assert_eq!(loaded.plan(), &test_plan(PlanItemStatus::Completed));
+    }
+
+    #[test]
+    fn session_plan_empty_replacement_clears_persisted_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut tree = SessionTree::new("session");
+        tree.file_path = Some(path.clone());
+        tree.replace_plan(test_plan(PlanItemStatus::Pending))
+            .unwrap();
+        tree.replace_plan(SessionPlan::default()).unwrap();
+
+        let loaded = SessionTree::load_from_file(&path).unwrap();
+        assert_eq!(loaded.plan(), &SessionPlan::default());
+    }
+
+    #[test]
+    fn session_plan_survives_metadata_rewrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut tree = SessionTree::new("session");
+        tree.file_path = Some(path.clone());
+        tree.replace_plan(test_plan(PlanItemStatus::Pending))
+            .unwrap();
+        tree.set_name("Named session".into()).unwrap();
+        tree.set_model("gpt-5".into()).unwrap();
+
+        let loaded = SessionTree::load_from_file(&path).unwrap();
+        assert_eq!(loaded.plan(), &test_plan(PlanItemStatus::Pending));
+    }
+
+    #[test]
+    fn session_plan_defaults_for_legacy_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(
+            &path,
+            "{\"type\":\"session_metadata\",\"name\":\"Legacy\",\"title_attempted\":false,\"active_node_id\":null}\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            SessionTree::load_from_file(&path).unwrap().plan(),
+            &SessionPlan::default()
+        );
+    }
 
     #[test]
     fn metadata_name_round_trips() {

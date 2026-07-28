@@ -8,7 +8,7 @@ script_mod! {
     mod.components.ProgressDot = RoundedView {
         width: 3
         height: 3
-        draw_bg +: { color: #x8b93a0 border_radius: 1.5 }
+        draw_bg +: { color: theme.color_muted_foreground border_radius: 1.5 }
     }
 
     mod.components.ActivityLoader = View {
@@ -16,10 +16,10 @@ script_mod! {
         height: 10
         show_bg: true
         draw_bg +: {
-            color: uniform(#x66d9ff)
-            color_mid: uniform(#x6fa8ff)
-            color_tail: uniform(#xa78bfa)
-            color_idle: uniform(#x7067d9)
+            color: uniform(theme.color_primary)
+            color_mid: uniform(theme.color_primary)
+            color_tail: uniform(theme.color_primary)
+            color_idle: uniform(theme.color_primary)
             speed: uniform(7.0)
             dot_radius: uniform(1.15)
 
@@ -35,7 +35,7 @@ script_mod! {
                 let grid = (p - vec2(padding, padding)) / cell_size
 
                 if grid.x < 0.0 || grid.y < 0.0 || grid.x >= 6.0 || grid.y >= 4.0 {
-                    return #x00000000
+                    return theme.color_transparent
                 }
 
                 let column = floor(grid.x)
@@ -82,7 +82,7 @@ script_mod! {
             width: 5
             height: 5
             draw_bg +: {
-                color: #x68a982
+                color: theme.color_success
                 border_radius: 2.5
             }
         }
@@ -91,7 +91,7 @@ script_mod! {
             height: 5
             visible: false
             draw_bg +: {
-                color: #x667180
+                color: theme.color_muted_foreground
                 border_radius: 2.5
             }
         }
@@ -101,7 +101,7 @@ script_mod! {
             visible: false
             text: "!"
             draw_text +: {
-                color: #xe06c75
+                color: theme.color_destructive
                 text_style: theme.font_bold { font_size: 8.0 }
             }
         }

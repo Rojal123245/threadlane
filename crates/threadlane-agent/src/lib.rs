@@ -6,7 +6,6 @@ pub mod hooks;
 pub mod loop_engine;
 pub mod queue;
 pub mod rules;
-pub mod session;
 pub mod session_tree;
 pub mod types;
 

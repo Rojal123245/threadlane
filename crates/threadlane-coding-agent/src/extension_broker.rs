@@ -197,10 +197,6 @@ pub struct HostCapabilityGrantPolicy {
 }
 
 impl HostCapabilityGrantPolicy {
-    fn allow_declared() -> Self {
-        Self::default()
-    }
-
     pub fn restrict_to(granted: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             allowed: Some(granted.into_iter().map(Into::into).collect()),

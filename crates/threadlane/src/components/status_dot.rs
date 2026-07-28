@@ -10,7 +10,7 @@ script_mod! {
         height: 7
         visible: false
         draw_bg +: {
-            color: #x67c58b
+            color: theme.color_success
             border_radius: 3.5
         }
     }

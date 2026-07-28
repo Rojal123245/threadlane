@@ -13,7 +13,7 @@ script_mod! {
             width: Fill
             height: Fill
             icon_walk: Walk{width: 14 height: 14}
-            draw_icon +: { color: #x7f8b9a }
+            draw_icon +: { color: theme.color_muted_foreground }
         }
     }
 
@@ -26,7 +26,7 @@ script_mod! {
         spacing: 6
         align: Align{y: 0.5}
         draw_bg +: {
-            color: #x00000000
+            color: theme.color_transparent
             border_radius: 5.0
             border_size: 0.0
         }
@@ -73,7 +73,7 @@ script_mod! {
             height: Fit
             text: "Tool"
             draw_text +: {
-                color: #xb8c0cc
+                color: theme.color_card_foreground
                 text_style: theme.font_bold { font_size: 9.5 }
             }
         }

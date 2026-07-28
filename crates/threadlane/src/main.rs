@@ -5,6 +5,7 @@ mod components;
 mod panels;
 mod path_utils;
 mod state;
+mod theme;
 mod updater;
 mod workspace;
 

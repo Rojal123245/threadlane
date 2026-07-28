@@ -1,4 +1,4 @@
-use crate::types::{AgentMessage, AgentToolResult, TokenUsage};
+use crate::types::{AgentMessage, AgentToolResult, SessionPlan, TokenUsage};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +42,26 @@ pub enum AgentEvent {
         tool_call_id: String,
         name: String,
         result: AgentToolResult,
+    },
+    SubagentQueued {
+        run_id: u64,
+        task_index: usize,
+        agent: String,
+        task: String,
+    },
+    SubagentStarted {
+        run_id: u64,
+        task_index: usize,
+    },
+    SubagentFinished {
+        run_id: u64,
+        task_index: usize,
+        succeeded: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    PlanUpdated {
+        plan: SessionPlan,
     },
     AgentError {
         error: String,
