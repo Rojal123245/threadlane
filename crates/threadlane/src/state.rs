@@ -73,10 +73,31 @@ impl CapabilityExtensionRow {
     }
 }
 
+#[derive(Clone)]
+pub struct CapabilityMcpRow {
+    pub id: String,
+    pub name: String,
+    pub transport_detail: String,
+    pub scope: threadlane_coding_agent::McpScope,
+    pub enabled: bool,
+    pub status_text: String,
+}
+
+impl CapabilityMcpRow {
+    pub fn scope_status(&self) -> String {
+        let scope = match self.scope {
+            threadlane_coding_agent::McpScope::Global => "Global",
+            threadlane_coding_agent::McpScope::Project => "Project",
+        };
+        format!("{scope} · {}", self.status_text)
+    }
+}
+
 #[derive(Default)]
 pub struct CapabilityState {
     pub extensions: Vec<CapabilityExtensionRow>,
     pub skills: Vec<CapabilitySkillRow>,
+    pub mcp_servers: Vec<CapabilityMcpRow>,
 }
 
 impl CapabilityState {
@@ -97,6 +118,43 @@ impl CapabilityState {
                 file_path: skill.file_path().to_path_buf(),
                 enabled: skill.enabled,
                 is_valid: skill.is_valid,
+            })
+            .collect();
+    }
+
+    pub fn refresh_mcp(
+        &mut self,
+        global_dir: Option<&std::path::Path>,
+        project_root: Option<&std::path::Path>,
+    ) {
+        let manager = threadlane_coding_agent::McpManager::new(
+            global_dir.map(std::path::Path::to_path_buf),
+            project_root.map(std::path::Path::to_path_buf),
+        );
+        let records = if let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            rt.block_on(manager.discover_and_connect())
+        } else {
+            Vec::new()
+        };
+        self.mcp_servers = records
+            .into_iter()
+            .map(|rec| {
+                let transport_detail = match &rec.config.transport {
+                    threadlane_coding_agent::McpTransport::Stdio { command, args, .. } => {
+                        format!("stdio: {} {}", command, args.join(" "))
+                    }
+                    threadlane_coding_agent::McpTransport::Sse { url, .. } => {
+                        format!("sse: {}", url)
+                    }
+                };
+                CapabilityMcpRow {
+                    id: rec.config.id,
+                    name: rec.config.name,
+                    transport_detail,
+                    scope: rec.config.scope,
+                    enabled: rec.config.enabled,
+                    status_text: rec.status.display_status(),
+                }
             })
             .collect();
     }

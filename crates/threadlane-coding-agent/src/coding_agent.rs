@@ -4,6 +4,7 @@ use crate::context::ProjectContext;
 use crate::extension_broker::{
     BrokerError, BrokerRequest, CapabilityDispatcher, CapabilityHandler, BROKER_API_VERSION,
 };
+use crate::mcp::{McpManager, McpToolExecutor};
 use crate::packages::default_global_threadlane_dir;
 use crate::plan::{SessionPlanStore, UpdatePlanToolExecutor};
 use crate::skills::{LoadSkillToolExecutor, SkillManager, SkillRegistry};
@@ -1774,6 +1775,22 @@ impl CodingAgent {
                 }))
         {
             eprintln!("WASI tool registration failed: {error}");
+        }
+        let mcp_manager = Arc::new(McpManager::new(
+            default_global_threadlane_dir(),
+            Some(options.work_dir.clone()),
+        ));
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let manager_clone = mcp_manager.clone();
+            handle.spawn(async move {
+                manager_clone.discover_and_connect().await;
+            });
+        }
+        if let Err(error) = agent
+            .loop_engine
+            .register_tool_executor(Arc::new(McpToolExecutor::new(mcp_manager)))
+        {
+            eprintln!("MCP tool registration failed: {error}");
         }
         agent.loop_engine.work_dir = Some(options.work_dir.clone());
 

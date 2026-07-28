@@ -1340,6 +1340,10 @@ script_mod! {
                     text: "Skills"
                 }
 
+                settings_nav_mcp_btn := mod.components.NavButton {
+                    text: "MCP Servers"
+                }
+
                 settings_nav_about_btn := mod.components.NavButton {
                     text: "About"
                 }
@@ -1710,6 +1714,169 @@ script_mod! {
                     }
 
                     skill_status_lbl := Label {
+                        width: Fill
+                        height: Fit
+                        padding: 0
+                        text: ""
+                        draw_text +: {
+                            color: theme.color_primary
+                            text_style +: { font_size: 9.5 }
+                        }
+                    }
+                }
+
+                mcp_page := View {
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    spacing: 12
+                    visible: false
+
+                    mcp_header := View {
+                        width: Fill
+                        height: 28
+                        flow: Right
+                        spacing: 6
+                        align: Align{y: 0.5}
+
+                        mcp_page_title := Label {
+                            width: Fill
+                            height: 28
+                            padding: 0
+                            align: Align{y: 0.5}
+                            text: "MCP Servers"
+                            draw_text +: {
+                                color: theme.color_foreground
+                                text_style: theme.font_bold { font_size: 18.0 }
+                            }
+                        }
+
+                        mcp_scope_global_btn := SettingsActionButton {
+                            height: 24
+                            padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
+                            text: "Global"
+                        }
+                        mcp_scope_project_btn := SettingsActionButton {
+                            height: 24
+                            padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
+                            text: "Project"
+                            draw_bg +: {
+                                color: theme.color_primary
+                                border_color: theme.color_primary
+                            }
+                        }
+                        mcp_refresh_btn := mod.components.IconButton {
+                            draw_icon +: {
+                                svg: crate_resource("self:resources/icons/refresh.svg")
+                            }
+                        }
+                    }
+
+                    mcp_page_desc := Label {
+                        width: Fill
+                        height: Fit
+                        padding: 0
+                        text: "Model Context Protocol servers providing external tools over stdio or HTTP/SSE."
+                        draw_text +: {
+                            color: theme.color_muted_foreground
+                            text_style +: { font_size: 10.0 }
+                        }
+                    }
+
+                    mcp_add_card := RoundedView {
+                        width: Fill
+                        height: Fit
+                        flow: Down
+                        padding: Inset{left: 12 top: 10 right: 12 bottom: 10}
+                        spacing: 8
+                        draw_bg +: {
+                            color: theme.color_card
+                            border_radius: 8.0
+                            border_size: 1.0
+                            border_color: theme.color_input
+                        }
+
+                        mcp_add_title := Label {
+                            width: Fill
+                            height: Fit
+                            text: "Add MCP Server"
+                            draw_text +: {
+                                color: theme.color_foreground
+                                text_style: theme.font_bold { font_size: 11.0 }
+                            }
+                        }
+
+                        mcp_add_inputs := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 8
+                            align: Align{y: 0.5}
+
+                            mcp_name_input := TextInput {
+                                width: 140
+                                height: 28
+                                padding: Inset{left: 8 right: 8}
+                                empty_text: "Name (e.g. fs)"
+                                draw_bg +: {
+                                    color: theme.color_input
+                                    color_focus: theme.color_input
+                                    border_color: theme.color_secondary
+                                    border_color_focus: theme.color_primary
+                                    border_radius: 5.0
+                                    border_size: 1.0
+                                }
+                                draw_text +: {
+                                    color: theme.color_foreground
+                                    color_empty: theme.color_muted_foreground
+                                }
+                            }
+
+                            mcp_command_input := TextInput {
+                                width: Fill
+                                height: 28
+                                padding: Inset{left: 8 right: 8}
+                                empty_text: "Command (e.g. npx -y @modelcontextprotocol/server-filesystem /path)"
+                                draw_bg +: {
+                                    color: theme.color_input
+                                    color_focus: theme.color_input
+                                    border_color: theme.color_secondary
+                                    border_color_focus: theme.color_primary
+                                    border_radius: 5.0
+                                    border_size: 1.0
+                                }
+                                draw_text +: {
+                                    color: theme.color_foreground
+                                    color_empty: theme.color_muted_foreground
+                                }
+                            }
+
+                            mcp_submit_add_btn := SettingsActionButton {
+                                height: 28
+                                padding: Inset{left: 12 right: 12 top: 4 bottom: 4}
+                                text: "Add"
+                                draw_bg +: {
+                                    color: theme.color_primary
+                                    border_color: theme.color_primary
+                                }
+                            }
+                        }
+                    }
+
+                    mcp_list := PortalList {
+                        width: Fill
+                        height: Fill
+                        flow: Down
+                        spacing: 8
+
+                        McpRow := mod.components.CapabilityRowWithRemove {}
+
+                        McpEmptyRow := mod.components.CapabilityEmptyRow {
+                            empty_lbl: { text: "No MCP servers configured." }
+                        }
+                    }
+
+                    mcp_status_lbl := Label {
                         width: Fill
                         height: Fit
                         padding: 0
@@ -2425,6 +2592,7 @@ enum SettingsPage {
     OpenAi,
     Capabilities,
     Skills,
+    McpServers,
     About,
 }
 
@@ -2432,6 +2600,7 @@ enum SettingsPage {
 enum ProviderSettingsModalAction {
     ShowExtensions,
     ShowSkills,
+    ShowMcpServers,
     Add(ExtensionScope),
     Refresh,
     SetEnabled {
@@ -2444,6 +2613,17 @@ enum ProviderSettingsModalAction {
         enabled: bool,
     },
     RefreshSkills,
+    SetMcpEnabled {
+        row: usize,
+        enabled: bool,
+    },
+    RemoveMcpServer(usize),
+    RefreshMcpServers,
+    AddMcpServer {
+        scope: threadlane_coding_agent::McpScope,
+        name: String,
+        command: String,
+    },
     #[default]
     None,
 }
@@ -2464,6 +2644,8 @@ struct ProviderSettingsModal {
     extension_rows: Vec<crate::state::CapabilityExtensionRow>,
     #[rust]
     skill_rows: Vec<crate::state::CapabilitySkillRow>,
+    #[rust]
+    mcp_rows: Vec<crate::state::CapabilityMcpRow>,
     #[rust]
     install_scope_global: bool,
 }
@@ -2534,6 +2716,14 @@ impl Widget for ProviderSettingsModal {
             }
             if self
                 .view
+                .button(cx, ids!(settings_nav_mcp_btn))
+                .clicked(actions)
+            {
+                self.set_page(cx, SettingsPage::McpServers);
+                cx.widget_action(uid, ProviderSettingsModalAction::ShowMcpServers);
+            }
+            if self
+                .view
                 .button(cx, ids!(settings_nav_about_btn))
                 .clicked(actions)
             {
@@ -2551,9 +2741,42 @@ impl Widget for ProviderSettingsModal {
                 .view
                 .button(cx, ids!(capability_scope_project_btn))
                 .clicked(actions)
+                || self
+                    .view
+                    .button(cx, ids!(mcp_scope_project_btn))
+                    .clicked(actions)
             {
                 self.install_scope_global = false;
                 self.sync_install_scope(cx);
+            }
+            if self
+                .view
+                .button(cx, ids!(capability_scope_global_btn))
+                .clicked(actions)
+                || self
+                    .view
+                    .button(cx, ids!(mcp_scope_global_btn))
+                    .clicked(actions)
+            {
+                self.install_scope_global = true;
+                self.sync_install_scope(cx);
+            }
+            if self
+                .view
+                .button(cx, ids!(mcp_submit_add_btn))
+                .clicked(actions)
+            {
+                let name = self.view.text_input(cx, ids!(mcp_name_input)).text();
+                let command = self.view.text_input(cx, ids!(mcp_command_input)).text();
+                let scope = if self.install_scope_global {
+                    threadlane_coding_agent::McpScope::Global
+                } else {
+                    threadlane_coding_agent::McpScope::Project
+                };
+                cx.widget_action(
+                    uid,
+                    ProviderSettingsModalAction::AddMcpServer { scope, name, command },
+                );
             }
             if self
                 .view
@@ -2576,6 +2799,13 @@ impl Widget for ProviderSettingsModal {
             {
                 cx.widget_action(uid, ProviderSettingsModalAction::RefreshSkills);
             }
+            if self
+                .view
+                .button(cx, ids!(mcp_refresh_btn))
+                .clicked(actions)
+            {
+                cx.widget_action(uid, ProviderSettingsModalAction::RefreshMcpServers);
+            }
             let list = self.view.portal_list(cx, ids!(capability_list));
             for (row, item) in list.items_with_actions(actions) {
                 if let Some(enabled) = item.check_box(cx, ids!(enabled_toggle)).changed(actions) {
@@ -2595,6 +2825,18 @@ impl Widget for ProviderSettingsModal {
                         uid,
                         ProviderSettingsModalAction::SetSkillEnabled { row, enabled },
                     );
+                }
+            }
+            let mcp_list = self.view.portal_list(cx, ids!(mcp_list));
+            for (row, item) in mcp_list.items_with_actions(actions) {
+                if let Some(enabled) = item.check_box(cx, ids!(enabled_toggle)).changed(actions) {
+                    cx.widget_action(
+                        uid,
+                        ProviderSettingsModalAction::SetMcpEnabled { row, enabled },
+                    );
+                }
+                if item.button(cx, ids!(remove_btn)).clicked(actions) {
+                    cx.widget_action(uid, ProviderSettingsModalAction::RemoveMcpServer(row));
                 }
             }
         }
@@ -2648,6 +2890,31 @@ impl Widget for ProviderSettingsModal {
                             item.check_box(cx, ids!(enabled_toggle)).set_active(
                                 cx,
                                 row.enabled && row.is_valid,
+                                Animate::No,
+                            );
+                            item.draw_all_unscoped(cx);
+                        }
+                    } else if self.page == SettingsPage::McpServers {
+                        list.set_item_range(cx, 0, self.mcp_rows.len().max(1));
+                        while let Some(row_index) = list.next_visible_item(cx) {
+                            if self.mcp_rows.is_empty() {
+                                if row_index == 0 {
+                                    list.item(cx, row_index, id!(McpEmptyRow))
+                                        .draw_all_unscoped(cx);
+                                }
+                                continue;
+                            }
+                            let Some(row) = self.mcp_rows.get(row_index) else {
+                                continue;
+                            };
+                            let item = list.item(cx, row_index, id!(McpRow));
+                            item.label(cx, ids!(name_lbl)).set_text(cx, &row.name);
+                            item.label(cx, ids!(scope_lbl))
+                                .set_text(cx, &row.scope_status());
+                            item.label(cx, ids!(path_lbl)).set_text(cx, &row.transport_detail);
+                            item.check_box(cx, ids!(enabled_toggle)).set_active(
+                                cx,
+                                row.enabled,
                                 Animate::No,
                             );
                             item.draw_all_unscoped(cx);
@@ -2707,6 +2974,17 @@ impl ProviderSettingsModal {
         self.view.widget(cx, ids!(skill_list)).redraw(cx);
     }
 
+    fn set_mcp_rows(&mut self, cx: &mut Cx, rows: Vec<crate::state::CapabilityMcpRow>) {
+        self.mcp_rows = rows;
+        self.view.widget(cx, ids!(mcp_list)).redraw(cx);
+    }
+
+    fn set_mcp_status(&mut self, cx: &mut Cx, status: &str) {
+        self.view
+            .label(cx, ids!(mcp_status_lbl))
+            .set_text(cx, status);
+    }
+
     fn set_skill_status(&mut self, cx: &mut Cx, status: &str) {
         self.view
             .label(cx, ids!(skill_status_lbl))
@@ -2750,6 +3028,11 @@ impl ProviderSettingsModal {
                 ids!(capability_scope_project_btn),
                 !self.install_scope_global,
             ),
+            (ids!(mcp_scope_global_btn), self.install_scope_global),
+            (
+                ids!(mcp_scope_project_btn),
+                !self.install_scope_global,
+            ),
         ] {
             let mut button = self.view.button(cx, button_id);
             let color = if selected {
@@ -2783,6 +3066,7 @@ impl ProviderSettingsModal {
         let openai_selected = self.page == SettingsPage::OpenAi;
         let capabilities_selected = self.page == SettingsPage::Capabilities;
         let skills_selected = self.page == SettingsPage::Skills;
+        let mcp_selected = self.page == SettingsPage::McpServers;
         let about_selected = self.page == SettingsPage::About;
 
         for (button_id, selected) in [
@@ -2790,6 +3074,7 @@ impl ProviderSettingsModal {
             (ids!(settings_nav_openai_btn), openai_selected),
             (ids!(settings_nav_capabilities_btn), capabilities_selected),
             (ids!(settings_nav_skills_btn), skills_selected),
+            (ids!(settings_nav_mcp_btn), mcp_selected),
             (ids!(settings_nav_about_btn), about_selected),
         ] {
             let button = self.view.button(cx, button_id);
@@ -2812,6 +3097,9 @@ impl ProviderSettingsModal {
             .button(cx, ids!(settings_nav_skills_btn))
             .set_visible(cx, true);
         self.view
+            .button(cx, ids!(settings_nav_mcp_btn))
+            .set_visible(cx, true);
+        self.view
             .button(cx, ids!(settings_nav_about_btn))
             .set_visible(cx, true);
         self.view
@@ -2826,6 +3114,9 @@ impl ProviderSettingsModal {
         self.view
             .widget(cx, ids!(skills_page))
             .set_visible(cx, skills_selected);
+        self.view
+            .widget(cx, ids!(mcp_page))
+            .set_visible(cx, mcp_selected);
         self.view
             .widget(cx, ids!(about_page))
             .set_visible(cx, about_selected);
@@ -3654,6 +3945,8 @@ impl MatchEvent for App {
                 | ProviderSettingsModalAction::Refresh => self.refresh_capability_state(cx),
                 ProviderSettingsModalAction::ShowSkills
                 | ProviderSettingsModalAction::RefreshSkills => self.refresh_skill_state(cx),
+                ProviderSettingsModalAction::ShowMcpServers
+                | ProviderSettingsModalAction::RefreshMcpServers => self.refresh_mcp_state(cx),
                 ProviderSettingsModalAction::Add(scope) => {
                     self.open_extension_picker(scope);
                 }
@@ -3665,6 +3958,15 @@ impl MatchEvent for App {
                 }
                 ProviderSettingsModalAction::SetSkillEnabled { row, enabled } => {
                     self.set_skill_enabled(cx, row, enabled);
+                }
+                ProviderSettingsModalAction::SetMcpEnabled { row, enabled } => {
+                    self.set_mcp_enabled(cx, row, enabled);
+                }
+                ProviderSettingsModalAction::RemoveMcpServer(row) => {
+                    self.remove_mcp_server(cx, row);
+                }
+                ProviderSettingsModalAction::AddMcpServer { scope, name, command } => {
+                    self.add_mcp_server(cx, scope, name, command);
                 }
                 ProviderSettingsModalAction::None => {}
             }
@@ -4088,6 +4390,7 @@ impl App {
     fn open_providers_modal(&mut self, cx: &mut Cx) {
         let mut show_extensions = false;
         let mut show_skills = false;
+        let mut show_mcp = false;
         if let Some(mut modal) = self
             .ui
             .widget(cx, ids!(providers_modal))
@@ -4095,6 +4398,7 @@ impl App {
         {
             show_extensions = modal.page == SettingsPage::Capabilities;
             show_skills = modal.page == SettingsPage::Skills;
+            show_mcp = modal.page == SettingsPage::McpServers;
             modal.open(cx);
         }
         if show_extensions {
@@ -4103,11 +4407,15 @@ impl App {
         if show_skills {
             self.refresh_skill_state(cx);
         }
+        if show_mcp {
+            self.refresh_mcp_state(cx);
+        }
     }
 
     fn open_capabilities_modal(&mut self, cx: &mut Cx) {
         self.refresh_skill_state(cx);
         self.refresh_capability_state(cx);
+        self.refresh_mcp_state(cx);
         if let Some(mut modal) = self
             .ui
             .widget(cx, ids!(providers_modal))
@@ -4151,6 +4459,177 @@ impl App {
         {
             modal.set_skill_rows(cx, self.capability_state.skills.clone());
             modal.set_skill_status(cx, "");
+        }
+    }
+
+    fn refresh_mcp_state(&mut self, cx: &mut Cx) {
+        let global_dir = threadlane_coding_agent::default_global_threadlane_dir();
+        let work_dir = self.active_work_dir().map(Path::to_path_buf);
+        self.capability_state
+            .refresh_mcp(global_dir.as_deref(), work_dir.as_deref());
+        if let Some(mut modal) = self
+            .ui
+            .widget(cx, ids!(providers_modal))
+            .borrow_mut::<ProviderSettingsModal>()
+        {
+            modal.set_mcp_rows(cx, self.capability_state.mcp_servers.clone());
+            modal.set_mcp_status(cx, "");
+        }
+    }
+
+    fn set_mcp_enabled(&mut self, cx: &mut Cx, row: usize, enabled: bool) {
+        let Some(selected) = self.capability_state.mcp_servers.get(row).cloned() else {
+            self.refresh_mcp_state(cx);
+            return;
+        };
+        let global_dir = threadlane_coding_agent::default_global_threadlane_dir();
+        let work_dir = self.active_work_dir().map(Path::to_path_buf);
+        let target_dir = match selected.scope {
+            threadlane_coding_agent::McpScope::Global => global_dir.as_deref(),
+            threadlane_coding_agent::McpScope::Project => work_dir.as_deref(),
+        };
+        let Some(dir) = target_dir else {
+            return;
+        };
+        let mut configs = match selected.scope {
+            threadlane_coding_agent::McpScope::Global => {
+                threadlane_coding_agent::McpSettings::load_global(global_dir.as_deref())
+            }
+            threadlane_coding_agent::McpScope::Project => {
+                threadlane_coding_agent::McpSettings::load_project(work_dir.as_deref())
+            }
+        };
+        if let Some(cfg) = configs.iter_mut().find(|c| c.id == selected.id) {
+            cfg.enabled = enabled;
+            let _ = threadlane_coding_agent::McpSettings::save(dir, &configs);
+        }
+        self.refresh_mcp_state(cx);
+    }
+
+    fn remove_mcp_server(&mut self, cx: &mut Cx, row: usize) {
+        let Some(selected) = self.capability_state.mcp_servers.get(row).cloned() else {
+            self.refresh_mcp_state(cx);
+            return;
+        };
+        let global_dir = threadlane_coding_agent::default_global_threadlane_dir();
+        let work_dir = self.active_work_dir().map(Path::to_path_buf);
+        let target_dir = match selected.scope {
+            threadlane_coding_agent::McpScope::Global => global_dir.as_deref(),
+            threadlane_coding_agent::McpScope::Project => work_dir.as_deref(),
+        };
+        let Some(dir) = target_dir else {
+            return;
+        };
+        let mut configs = match selected.scope {
+            threadlane_coding_agent::McpScope::Global => {
+                threadlane_coding_agent::McpSettings::load_global(global_dir.as_deref())
+            }
+            threadlane_coding_agent::McpScope::Project => {
+                threadlane_coding_agent::McpSettings::load_project(work_dir.as_deref())
+            }
+        };
+        configs.retain(|c| c.id != selected.id);
+        let _ = threadlane_coding_agent::McpSettings::save(dir, &configs);
+        self.refresh_mcp_state(cx);
+    }
+
+    fn add_mcp_server(
+        &mut self,
+        cx: &mut Cx,
+        scope: threadlane_coding_agent::McpScope,
+        name: String,
+        command: String,
+    ) {
+        let name = name.trim().to_string();
+        let command = command.trim().to_string();
+        if name.is_empty() || command.is_empty() {
+            if let Some(mut modal) = self
+                .ui
+                .widget(cx, ids!(providers_modal))
+                .borrow_mut::<ProviderSettingsModal>()
+            {
+                modal.set_mcp_status(cx, "Please provide both a server name and a command or URL.");
+            }
+            return;
+        }
+
+        let global_dir = threadlane_coding_agent::default_global_threadlane_dir();
+        let work_dir = self.active_work_dir().map(Path::to_path_buf);
+
+        let target_dir = match scope {
+            threadlane_coding_agent::McpScope::Global => global_dir.as_deref(),
+            threadlane_coding_agent::McpScope::Project => work_dir.as_deref(),
+        };
+
+        let Some(dir) = target_dir else {
+            if let Some(mut modal) = self
+                .ui
+                .widget(cx, ids!(providers_modal))
+                .borrow_mut::<ProviderSettingsModal>()
+            {
+                modal.set_mcp_status(cx, "Attach a project to add project-scoped MCP servers.");
+            }
+            return;
+        };
+
+        let mut configs = match scope {
+            threadlane_coding_agent::McpScope::Global => {
+                threadlane_coding_agent::McpSettings::load_global(global_dir.as_deref())
+            }
+            threadlane_coding_agent::McpScope::Project => {
+                threadlane_coding_agent::McpSettings::load_project(work_dir.as_deref())
+            }
+        };
+
+        let id = name.to_lowercase().replace(' ', "_");
+
+        let transport = if command.starts_with("http://") || command.starts_with("https://") {
+            threadlane_coding_agent::McpTransport::Sse {
+                url: command,
+                headers: std::collections::HashMap::new(),
+            }
+        } else {
+            let mut parts = command.split_whitespace();
+            let cmd = parts.next().unwrap_or("").to_string();
+            let args: Vec<String> = parts.map(String::from).collect();
+            threadlane_coding_agent::McpTransport::Stdio {
+                command: cmd,
+                args,
+                env: std::collections::HashMap::new(),
+            }
+        };
+
+        let new_config = threadlane_coding_agent::McpServerConfig {
+            id,
+            name: name.clone(),
+            transport,
+            enabled: true,
+            scope,
+        };
+
+        configs.retain(|c| c.id != new_config.id);
+        configs.push(new_config);
+
+        match threadlane_coding_agent::McpSettings::save(dir, &configs) {
+            Ok(()) => {
+                self.refresh_mcp_state(cx);
+                if let Some(mut modal) = self
+                    .ui
+                    .widget(cx, ids!(providers_modal))
+                    .borrow_mut::<ProviderSettingsModal>()
+                {
+                    modal.set_mcp_status(cx, &format!("Added MCP server '{}'.", name));
+                }
+            }
+            Err(e) => {
+                if let Some(mut modal) = self
+                    .ui
+                    .widget(cx, ids!(providers_modal))
+                    .borrow_mut::<ProviderSettingsModal>()
+                {
+                    modal.set_mcp_status(cx, &format!("Failed to save MCP server: {e}"));
+                }
+            }
         }
     }
 
