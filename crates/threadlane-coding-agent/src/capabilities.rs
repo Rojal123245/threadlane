@@ -1,100 +1,31 @@
-use crate::agents::{discover_agents, AgentConfig, AgentScope};
-use crate::full_trust_extension::{compute_executable_revision, TrustStore};
-use crate::packages::{PackageManager, PackageRecord};
-use crate::skills::{SkillManager, SkillMetadata};
-use crate::wasi_extension::WasiExtensionManager;
-use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use crate::packages::{default_global_threadlane_dir, ExtensionManager, ExtensionRecord};
+use std::path::Path;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExtensionMetadata {
-    id: String,
-    name: String,
-    path: PathBuf,
-    is_full_trust: bool,
-    enabled: bool,
-    is_valid: bool,
-    validation_error: Option<String>,
-    revision: Option<String>,
-    is_trusted: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct CapabilityCatalog {
-    pub skills: Vec<SkillMetadata>,
-    extensions: Vec<ExtensionMetadata>,
-    packages: Vec<PackageRecord>,
-    agents: Vec<AgentConfig>,
+    extensions: Vec<ExtensionRecord>,
 }
 
 impl CapabilityCatalog {
-    pub fn discover(project_root: Option<&Path>, global_dir: &Path) -> Self {
-        let mut skill_mgr = SkillManager::new();
-        skill_mgr.discover_skills(project_root);
-        let skills = skill_mgr.list_skills();
+    pub fn discover(project_root: Option<&Path>) -> Self {
+        let global_threadlane_dir = default_global_threadlane_dir();
+        Self::discover_with_roots(global_threadlane_dir.as_deref(), project_root)
+    }
 
-        let pkg_mgr = PackageManager::new(global_dir.to_path_buf());
-        let packages = pkg_mgr.list_packages(project_root);
+    pub fn discover_with_roots(
+        global_threadlane_dir: Option<&Path>,
+        project_root: Option<&Path>,
+    ) -> Self {
+        let extensions = ExtensionManager::new(
+            global_threadlane_dir.map(Path::to_path_buf),
+            project_root.map(Path::to_path_buf),
+        )
+        .discover();
 
-        let cwd = project_root.unwrap_or(global_dir);
-        let agents = discover_agents(cwd, AgentScope::Both).agents;
+        Self { extensions }
+    }
 
-        let mut extensions = Vec::new();
-
-        if let Some(proj) = project_root {
-            let mut wasi_mgr = WasiExtensionManager::for_project(proj);
-            wasi_mgr.discover_and_load(proj);
-            for (id, ext) in wasi_mgr.get_extensions() {
-                extensions.push(ExtensionMetadata {
-                    id: id.clone(),
-                    name: ext.manifest.name.clone(),
-                    path: ext.file_path.clone().unwrap_or_default(),
-                    is_full_trust: false,
-                    enabled: true,
-                    is_valid: true,
-                    validation_error: None,
-                    revision: None,
-                    is_trusted: true,
-                });
-            }
-        }
-
-        let trust_file = global_dir.join("state/trust.json");
-        let trust_store = TrustStore::load_from_file(&trust_file);
-
-        for pkg in &packages {
-            if let Some(ref exe_rel) = pkg.manifest.full_trust_executable {
-                let exe_path = pkg.root_dir.join(exe_rel);
-                let (is_valid, err, rev) = match compute_executable_revision(&exe_path) {
-                    Ok(r) => (true, None, Some(r)),
-                    Err(e) => (false, Some(e), None),
-                };
-
-                let trusted = if let Some(ref r) = rev {
-                    trust_store.is_trusted(&pkg.manifest.id, r)
-                } else {
-                    false
-                };
-
-                extensions.push(ExtensionMetadata {
-                    id: format!("{}-exe", pkg.manifest.id),
-                    name: format!("{} (Executable)", pkg.manifest.name),
-                    path: exe_path,
-                    is_full_trust: true,
-                    enabled: trusted && is_valid,
-                    is_valid,
-                    validation_error: err,
-                    revision: rev,
-                    is_trusted: trusted,
-                });
-            }
-        }
-
-        Self {
-            skills,
-            extensions,
-            packages,
-            agents,
-        }
+    pub fn extensions(&self) -> &[ExtensionRecord] {
+        &self.extensions
     }
 }

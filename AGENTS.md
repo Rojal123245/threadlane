@@ -90,6 +90,12 @@ A normal `cargo run` may be unsuitable for testing installation: update installa
 
 ## Makepad Component Conventions
 
+### Theme Colors
+
+- All UI colors in crates/threadlane/src must reference role-based `theme.*` tokens (`background`, `foreground`, `card`, `primary`, `secondary`, `muted`, `accent`, `destructive`, `success`, `warning`, `border`, `input`, `ring`); new color literals belong only in crates/threadlane/src/theme/mod.rs.
+- Do not add one-off hue or component tokens when an existing semantic role fits; add a role only when it represents a reusable UI meaning.
+- Preserve explicit hover, focus, pressed, border, transparency, and alpha variants when migrating or adding theme tokens.
+
 ### Registration and Namespaces
 
 Reusable script components are registered through `crates/threadlane/src/components/mod.rs`.
@@ -102,6 +108,11 @@ Reusable script components are registered through `crates/threadlane/src/compone
 - Custom widgets should handle actions from their deeply nested child controls locally and emit a typed `cx.widget_action(...)` for the app shell. Do not rely on root-level widget lookup to resolve controls inside a custom widget's dereferenced view. Check for child button actions inside `if let Event::Actions(actions) = event` using `self.view.button(cx, ids!(btn_id)).clicked(actions)` rather than listening for raw pointer events.
 - A custom widget that dereferences a `View` must delegate both `handle_event` and `draw_walk`; delegating events without drawing leaves the entire wrapper invisible.
 - **DSL inheritance**: `:= SomeName { ... }` creates an ID-bound widget instance, **not** a named prototype. An ID-bound instance cannot be used as a parent in another `:= SomeName { ... }` definition. Only `mod.components.Name` template names (defined with `=`, not `:=`) are valid prototype parents. Attempting to write `Child := ParentId { ... }` where `ParentId` was defined with `:=` will fail at runtime with "variable ParentId not found in scope".
+
+Navigation destinations that are siblings in the same menu should use
+`mod.components.NavButton`. Keep ordinary actions, icon buttons, dropdowns,
+and destructive controls as their own variants; do not recreate navigation
+hover, focus, pressed, border, or selected styling at each call site.
 
 ### Layout
 
@@ -186,8 +197,10 @@ Drawing in an overlay does not automatically stop widgets underneath from receiv
 - `SubagentRail` manually draws dynamic `ToolFoldHeader` rows but does not keep per-row draw state. Consume each row with `draw_all_unscoped`; propagating a row's intermediate `DrawStep` restarts the rail loop at the first header and prevents expanded bodies from drawing.
 - Custom containers that manually draw dynamic children need their own valid hit area. Prefer an instance-backed transparent draw primitive for that area; retaining a raw turtle `Area::Rect` across recycled `PortalList` redraws can leave a stale `rect_id` and panic during pointer movement.
 - The chat `PortalList` range is based on display rows, not raw message count. If changing grouping, preserve stable ordering, auto-tail behavior, and non-reused fold widget state.
+- A `PortalList` can yield a stale visible item ID for one draw after its range shrinks. Resolve dynamic backing rows with `.get(item_id)` and skip missing entries instead of indexing directly.
 - Avoid calling `markdown.set_text(cx, text)` unconditionally inside `draw_walk` when text is unchanged; `set_text` forces Makepad to discard its AST and re-parse Markdown/syntax highlighting on every frame draw. Check `widget.text() != text` before updating.
 - Precalculate tool details, activity summaries, and JSON presentations in `DisplayRow` state when building display items rather than invoking `serde_json::from_str` or string line-splitting during `draw_walk`.
+- Cross-session task UI reads the canonical `HarnessSupervisor` registry. Keep detached `/task` work and foreground model-subagent lifecycle there rather than adding another GUI-only counter; model subagents remain synchronous and emit lifecycle events only for observation.
 
 ### Composer Drop-Ups
 
@@ -221,6 +234,7 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 ## Session and Context-Menu Behavior
 
 - Project terminal groups are keyed by canonical project work directory, not by session ID. Each project can own multiple independent shell tabs; switching sessions in one project must retain its shells, active tab, and output, while switching projects selects that project's terminal group.
+- Model-managed todo plans are session-scoped and persisted as complete `session_plan` records in the existing session JSONL. Show only the active session's plan above the project-wide task groups; do not derive plan state from compactable tool-call history or merge it into supervisor task state.
 
 - The project attach button appears while hovering the `PROJECTS` header. It is the only sidebar action synchronized from `App::sync_sidebar_action_visibility` and the retained app-level pointer.
 - `ProjectHeader` locally owns project-row hover hit-testing, action-button paint/redraw, and typed select/new/detach actions for both fixed and portal-list headers. Keep its controls laid out inside the fixed-width action slot; do not restore app-level project-row geometry synchronization.
@@ -250,6 +264,23 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 - Credential checks follow the selected model. Antigravity models require stored Antigravity OAuth credentials but must not require an OpenAI key; OpenAI models retain the existing OpenAI credential requirement.
 - Automatic session titles currently use the OpenAI title endpoint. Skip that side path for Antigravity sessions rather than consuming an OpenAI credential or permanently marking a failed Antigravity title attempt.
 
+## Background Tasks and Capabilities
+
+- `HarnessSupervisor` owns only explicit background tasks (currently `/task <prompt>`). Ordinary chat sessions continue to use the existing `SessionRuntime` path and must not be mirrored into supervisor tasks.
+- Forward supervisor events through `GuiAgentEvent`; update `BackgroundTaskState` and widgets only on the Makepad event thread.
+- Threadlane extensions are compiled WASI modules with an exported
+  `extension_info` manifest. The settings picker installs a `.wasm` into either
+  `~/.threadlane/extensions/` or `<project>/.threadlane/extensions/`; it never
+  runs Cargo or extension build scripts. Native extension executables and trust
+  approvals are unsupported. LSP remains a WASI extension and launches language
+  servers through brokered process capability.
+
+### Project-Scoped Skill Enable/Disable
+
+- Skills are toggled per project, not globally. `SkillSettings` persists disabled skill IDs in `<project>/.threadlane/skills.json`; skill discovery (`Discovery::finish`) applies those overrides so a disabled skill stays visible in the settings list with `enabled: false` but is excluded from the model catalog and rejected by `load_skill`.
+- The settings modal has a dedicated `skills_page` (separate `PortalList` and row template from `capability_list`). In `ProviderSettingsModal::draw_walk`, the two `PortalList`s share one `as_portal_list()` loop, so each branch must be matched by comparing `list.widget_uid()` against the resolved list widget before drawing rows.
+- A toggle must clear `capability_cache`, refresh the capabilities chip / slash commands via `refresh_project_capabilities`, and call `refresh_live_session_skills` so running sessions re-discover skills. `CodingAgent::refresh_skills` swaps the shared `SkillRegistry` `Arc`; note the already-registered `LoadSkillToolExecutor` holds the previous `Arc`, so an in-flight session keeps the catalog from its creation and a fresh session fully reflects the toggle.
+
 ## Updater Behavior
 
 - `THREADLANE_UPDATER_PUBLIC_KEY` and `THREADLANE_UPDATER_ENDPOINT` are compile-time environment values through `option_env!`.
@@ -264,8 +295,18 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 ## WASI Extensions
 
 - Extension crates live under `extensions/` and target `wasm32-wasip1`.
+- Extension install, toggle, and removal must reject symlinked destination
+  components and keep every mutation inside the selected global or project
+  `.threadlane/extensions` root. Validate staged WASM and its embedded manifest
+  before swapping it into place so installation cannot report failure after
+  commit.
+- Inventory and runtime loading share one scoped discovery path. Enabled project
+  modules override enabled global modules with the same manifest name, while
+  both rows remain visible in settings. Disabling a project override reveals an
+  enabled global module.
 - Use `./scripts/build_extensions.sh` to compile and deploy them.
-- The script intentionally treats missing binaries and copy failures as fatal.
+- The script treats missing binaries and copy failures as fatal and must not
+  clear user-installed modules or disabled markers from the extension root.
 - Bundled agent definitions and prompts are part of a valid extension deployment; do not update only the `.wasm` artifact when associated metadata also changes.
 
 ## Security and Sensitive Files

@@ -19,7 +19,7 @@ pub fn builtin_commands() -> Vec<CommandInfo> {
         ("clone", "Clone the active session tree"),
         ("skill", "Load a discovered skill by ID"),
         ("subagent", "Delegate tasks to subagents in parallel or sequentially"),
-        ("clear-plan", "Clear active plan items"),
+        ("task", "Run a prompt as a background task"),
         ("quit", "Quit threadlane agent"),
     ]
     .into_iter()
@@ -39,5 +39,7 @@ mod tests {
         let commands = builtin_commands();
 
         assert!(commands.iter().any(|command| command.name == "skill"));
+        assert!(commands.iter().any(|command| command.name == "task"));
+        assert!(!commands.iter().any(|command| command.name == "clear-plan"));
     }
 }

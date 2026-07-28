@@ -10,7 +10,7 @@ script_mod! {
         height: Fit
         text: ""
         draw_text +: {
-            color: #x5d6878
+            color: theme.color_muted_foreground
             text_style: theme.font_bold { font_size: 9.0 }
         }
     }

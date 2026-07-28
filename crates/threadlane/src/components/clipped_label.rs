@@ -11,7 +11,7 @@ script_mod! {
         max_lines: 1
         text_overflow: Ellipsis
         draw_text +: {
-            color: #x9ba7b6
+            color: theme.color_muted_foreground
             text_style +: { font_size: 9.0 }
         }
     }

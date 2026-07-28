@@ -8,6 +8,6 @@ script_mod! {
     mod.components.PanelSurface = RoundedView {
         width: Fill
         height: Fill
-        draw_bg +: { color: #x1f232b border_radius: 10.0 }
+        draw_bg +: { color: theme.color_card border_radius: 10.0 }
     }
 }

@@ -12,8 +12,8 @@ script_mod! {
         spacing: 4
         padding: Inset{left: 8 top: 5 right: 8 bottom: 6}
         draw_bg +: {
-            color: #x1c2027
-            border_color: #x29313b
+            color: theme.color_background
+            border_color: theme.color_card
             border_radius: 4.0
             border_size: 1.0
         }
@@ -22,7 +22,7 @@ script_mod! {
             height: Fit
             text: "SECTION"
             draw_text +: {
-                color: #x8190a3
+                color: theme.color_primary
                 text_style: theme.font_bold { font_size: 7.5 }
             }
         }

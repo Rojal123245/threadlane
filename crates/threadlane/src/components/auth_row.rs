@@ -14,15 +14,15 @@ script_mod! {
         align: Align{y: 0.5}
         padding: 10
         draw_bg +: {
-            color: #x262133
+            color: theme.color_background
             border_radius: 8.0
             border_size: 1.0
-            border_color: #x4a3c55
+            border_color: theme.color_secondary
         }
         Label {
             text: "Not signed in"
             draw_text +: {
-                color: #xc7cdd6
+                color: theme.color_card_foreground
                 text_style +: { font_size: 10.5 }
             }
         }

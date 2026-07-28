@@ -288,7 +288,7 @@ pub struct AgentLoop {
     pub api_key: String,
     pub account_id: Option<String>,
     provider_client: ProviderClient,
-    pub prompt_cache_key: Option<String>,
+    prompt_cache_key: Option<String>,
     pub tool_execution_mode: ToolExecutionMode,
     allowed_tool_names: Option<HashSet<String>>,
     steering_queue: PendingMessageQueue,

@@ -1,12 +1,12 @@
 use async_trait::async_trait;
-use threadlane_agent::{AgentToolDefinition, ToolExecutor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use threadlane_agent::{AgentToolDefinition, ToolExecutor};
 
 pub const LOAD_SKILL_TOOL_NAME: &str = "load_skill";
 const DEFAULT_MAX_SKILL_BYTES: usize = 512 * 1024;
@@ -16,6 +16,9 @@ const DEFAULT_MAX_DIRECTORY_ENTRIES: usize = 1_024;
 const DEFAULT_MAX_SKILLS: usize = 512;
 const MAX_SKILL_NAME_CHARS: usize = 128;
 const MAX_CATALOG_DESCRIPTION_CHARS: usize = 320;
+/// Maximum size accepted for a project skill-settings file.
+const MAX_SKILL_SETTINGS_BYTES: usize = 256 * 1024;
+const SKILL_SETTINGS_RELATIVE_PATH: &str = ".threadlane/skills.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SkillScope {
@@ -73,6 +76,90 @@ pub struct SkillMetadata {
     pub enabled: bool,
     pub is_valid: bool,
     validation_error: Option<String>,
+}
+
+/// Project-scoped persisted skill enable/disable state, stored in
+/// `<project>/.threadlane/skills.json`.
+#[derive(Debug, Clone, Default)]
+pub struct SkillSettings {
+    disabled: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct SkillSettingsFile {
+    #[serde(default)]
+    disabled: Vec<String>,
+}
+
+impl SkillSettings {
+    pub fn load(project_root: &Path) -> Self {
+        let Some(root) = canonical_or_plain(project_root) else {
+            return Self::default();
+        };
+        let path = root.join(SKILL_SETTINGS_RELATIVE_PATH);
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(_) => return Self::default(),
+        };
+        if bytes.len() > MAX_SKILL_SETTINGS_BYTES {
+            return Self::default();
+        }
+        let parsed = serde_json::from_slice::<SkillSettingsFile>(&bytes).unwrap_or_default();
+        Self {
+            disabled: parsed.disabled.into_iter().collect(),
+        }
+    }
+
+    pub fn is_disabled(&self, skill_id: &str) -> bool {
+        self.disabled.contains(skill_id)
+    }
+
+    pub fn set_enabled(
+        &mut self,
+        project_root: &Path,
+        skill_id: &str,
+        enabled: bool,
+    ) -> Result<(), String> {
+        if enabled {
+            self.disabled.remove(skill_id);
+        } else {
+            self.disabled.insert(skill_id.to_string());
+        }
+        self.save(project_root)
+    }
+
+    fn save(&self, project_root: &Path) -> Result<(), String> {
+        let root = canonical_or_plain(project_root)
+            .ok_or_else(|| "Unable to resolve project root".to_string())?;
+        let path = root.join(SKILL_SETTINGS_RELATIVE_PATH);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("Failed to create skill settings directory: {error}"))?;
+        }
+        let file = SkillSettingsFile {
+            disabled: self.disabled.iter().cloned().collect(),
+        };
+        let bytes = serde_json::to_vec_pretty(&file)
+            .map_err(|error| format!("Failed to encode skill settings: {error}"))?;
+        let mut handle = File::create(&path)
+            .map_err(|error| format!("Failed to write skill settings: {error}"))?;
+        handle
+            .write_all(&bytes)
+            .map_err(|error| format!("Failed to write skill settings: {error}"))?;
+        Ok(())
+    }
+}
+
+fn canonical_or_plain(path: &Path) -> Option<PathBuf> {
+    fs::canonicalize(path)
+        .ok()
+        .or_else(|| Some(path.to_path_buf()))
+}
+
+impl SkillMetadata {
+    pub fn file_path(&self) -> &Path {
+        &self.file_path
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -182,12 +269,6 @@ impl SkillRegistry {
         sorted_metadata(self.records.values().map(|record| record.metadata.clone()))
     }
 
-    fn metadata(&self, skill_id: &str) -> Option<SkillMetadata> {
-        self.records
-            .get(skill_id)
-            .map(|record| record.metadata.clone())
-    }
-
     pub(crate) fn get_skill_instructions(&self, skill_id: &str) -> Result<String, String> {
         self.load_skill(skill_id).map(|skill| skill.instructions)
     }
@@ -290,7 +371,7 @@ impl SkillManager {
         }
     }
 
-    pub(crate) fn discover_skills(&mut self, project_root: Option<&Path>) {
+    pub fn discover_skills(&mut self, project_root: Option<&Path>) {
         self.discover_skills_with_home(project_root, dirs_home().as_deref());
     }
 
@@ -320,10 +401,6 @@ impl SkillManager {
         Arc::clone(&self.registry)
     }
 
-    fn warnings(&self) -> &[SkillDiscoveryWarning] {
-        &self.warnings
-    }
-
     pub fn list_skills(&self) -> Vec<SkillMetadata> {
         self.registry.list_skills()
     }
@@ -337,7 +414,7 @@ impl SkillManager {
     }
 }
 
-pub(crate) fn discover_skill_registry<O>(options: O) -> (Arc<SkillRegistry>, SkillDiscoveryReport)
+fn discover_skill_registry<O>(options: O) -> (Arc<SkillRegistry>, SkillDiscoveryReport)
 where
     O: Into<SkillDiscoveryOptions>,
 {
@@ -355,10 +432,6 @@ pub struct LoadSkillToolExecutor {
 impl LoadSkillToolExecutor {
     pub fn new(registry: Arc<SkillRegistry>) -> Self {
         Self { registry }
-    }
-
-    fn registry(&self) -> Arc<SkillRegistry> {
-        Arc::clone(&self.registry)
     }
 }
 
@@ -513,6 +586,23 @@ impl Discovery {
     }
 
     fn finish(mut self) -> (Arc<SkillRegistry>, SkillDiscoveryReport) {
+        // Apply project-scoped persisted enable/disable overrides. Disabled skills
+        // remain visible to the GUI settings page but are excluded from the model
+        // catalog and rejected on load.
+        let settings = self
+            .options
+            .project_root
+            .as_deref()
+            .map(SkillSettings::load)
+            .unwrap_or_default();
+        if !settings.disabled.is_empty() {
+            for record in self.records.values_mut() {
+                if settings.is_disabled(&record.metadata.id) {
+                    record.metadata.enabled = false;
+                }
+            }
+        }
+
         self.warnings.sort_by(|left, right| {
             (
                 left.kind,
@@ -1449,4 +1539,82 @@ fn dirs_home() -> Option<PathBuf> {
     directories::UserDirs::new()
         .map(|u| u.home_dir().to_path_buf())
         .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_skill(root: &Path, scope_dir: &str, id: &str) {
+        let dir = root.join(scope_dir).join(id);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {id}\ndescription: test skill {id}\n---\nBODY"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn skill_settings_round_trip_persists_disabled_ids() {
+        let project = tempfile::tempdir().unwrap();
+        let mut settings = SkillSettings::load(project.path());
+        assert!(!settings.is_disabled("alpha"));
+        settings
+            .set_enabled(project.path(), "alpha", false)
+            .unwrap();
+        settings.set_enabled(project.path(), "beta", false).unwrap();
+
+        let reloaded = SkillSettings::load(project.path());
+        assert!(reloaded.is_disabled("alpha"));
+        assert!(reloaded.is_disabled("beta"));
+
+        let mut reloaded = reloaded;
+        reloaded.set_enabled(project.path(), "alpha", true).unwrap();
+        let reloaded = SkillSettings::load(project.path());
+        assert!(!reloaded.is_disabled("alpha"));
+        assert!(reloaded.is_disabled("beta"));
+    }
+
+    #[test]
+    fn discovery_applies_project_disabled_overrides() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        write_skill(project.path(), ".threadlane/skills", "proj-skill");
+        write_skill(home.path(), ".threadlane/skills", "global-skill");
+
+        // Disable the project skill; leave the global skill enabled.
+        let mut settings = SkillSettings::load(project.path());
+        settings
+            .set_enabled(project.path(), "proj-skill", false)
+            .unwrap();
+
+        let mut manager = SkillManager::new();
+        let mut options = SkillDiscoveryOptions::new(
+            Some(project.path().to_path_buf()),
+            Some(home.path().to_path_buf()),
+        );
+        options.include_pi_compatibility = false;
+        let report = manager.discover_skills_with_options(options);
+
+        let project_skill = report
+            .skills
+            .iter()
+            .find(|skill| skill.id == "proj-skill")
+            .expect("project skill should be discovered");
+        assert!(project_skill.is_valid);
+        assert!(!project_skill.enabled, "disabled override must win");
+
+        let global_skill = report
+            .skills
+            .iter()
+            .find(|skill| skill.id == "global-skill")
+            .expect("global skill should be discovered");
+        assert!(global_skill.enabled, "unaffected skill stays enabled");
+
+        // The disabled skill is excluded from the model catalog but still listed.
+        let catalog = manager.render_model_catalog();
+        assert!(!catalog.contains("proj-skill"));
+        assert!(catalog.contains("global-skill"));
+    }
 }

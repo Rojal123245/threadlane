@@ -110,8 +110,6 @@ fn test_session_tree_persistence_and_branching() {
     });
 
     assert_eq!(tree.nodes.len(), 2);
-    tree.save_to_file(&file_path).unwrap();
-
     let loaded = SessionTree::load_from_file(&file_path).unwrap();
     assert_eq!(loaded.nodes.len(), 2);
 

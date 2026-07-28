@@ -4,6 +4,9 @@
 
 use crate::components::model_dropdown::IconDropDownWidgetRefExt;
 use crate::components::session_row::ProjectHeaderAction;
+use crate::components::task_sidebar::{
+    task_header_state, TaskSidebar, TaskSidebarAction, TaskSidebarItem,
+};
 use crate::components::terminal_panel::ProjectTerminalWidgetRefExt;
 use crate::panels::chat::{
     accepts_generation_event, concise_status, draft_for_cancellation, submitted_draft, ChatList,
@@ -19,10 +22,10 @@ use crate::state::{
     active_session_entry, archive_session, begin_title_generation, builtin_commands,
     create_new_session, delete_session, end_title_generation, is_project_working,
     is_session_working, normalize_session_title, project_work_dir_at_row, refresh_sessions,
-    session_entry_at_row, session_overflow_at_row, session_title_eligible, set_active_project,
-    set_active_session, set_session_context_target, set_session_working,
+    session_entry_at_row, session_entry_for_file, session_overflow_at_row, session_title_eligible,
+    set_active_project, set_active_session, set_session_context_target, set_session_working,
     title_prompt_for_submission, toggle_project_collapsed, toggle_project_show_all, truncate_chars,
-    CommandInfo, GuiAgentEvent, MsgRole, SessionEntry, ToolStatus,
+    CapabilityState, CommandInfo, GuiAgentEvent, MsgRole, SessionEntry, ToolStatus,
 };
 use crate::updater::UpdateStatus;
 use crate::workspace::{AppState, SessionKey, WorkspaceUiState};
@@ -30,10 +33,11 @@ use base64::Engine as _;
 use makepad_widgets::text::selection::Cursor;
 use makepad_widgets::*;
 use robius_file_picker::FileDialog;
-use threadlane_agent::{get_runtime, AgentEvent, ImageAttachment, ReasoningEffort};
+use threadlane_agent::{get_runtime, AgentEvent, ImageAttachment, ReasoningEffort, SessionPlan};
 use threadlane_coding_agent::{
-    discover_agents, AgentConfig, AgentScope, CodingAgent, CodingAgentOptions, ProjectContext,
-    SkillMetadata,
+    default_global_threadlane_dir, discover_agents, AgentConfig, AgentScope, CapabilityCatalog,
+    CodingAgent, CodingAgentOptions, ExtensionManager, ExtensionScope, HarnessSupervisor,
+    ProjectContext, SkillMetadata, SkillSettings, TaskRecord,
 };
 use threadlane_provider::auth;
 use threadlane_provider::openai::{fetch_available_models, OpenAIClient};
@@ -239,8 +243,8 @@ script_mod! {
                 margin: Inset{bottom: 22}
                 align: Align{x: 0.5 y: 0.5}
                 draw_bg +: {
-                    color: #x20252d
-                    border_color: #x2d3745
+                    color: theme.color_background
+                    border_color: theme.color_card
                     border_size: 1.0
                     border_radius: 14.0
                 }
@@ -250,7 +254,7 @@ script_mod! {
                     icon_walk: Walk{width: 28 height: 28}
                     draw_icon +: {
                         svg: crate_resource("self:resources/icons/logo.svg")
-                        color: #x6b7a8e
+                        color: theme.color_primary
                     }
                 }
             }
@@ -268,7 +272,7 @@ script_mod! {
                     height: Fit
                     text: "What should we build in "
                     draw_text +: {
-                        color: #xd0d8e4
+                        color: theme.color_card_foreground
                         text_style: theme.font_bold { font_size: 20.0 }
                     }
                 }
@@ -277,7 +281,7 @@ script_mod! {
                     height: Fit
                     text: ""
                     draw_text +: {
-                        color: #xe7ebf0
+                        color: theme.color_foreground
                         text_style: theme.font_bold { font_size: 20.0 }
                     }
                 }
@@ -286,7 +290,7 @@ script_mod! {
                     height: Fit
                     text: "?"
                     draw_text +: {
-                        color: #xd0d8e4
+                        color: theme.color_card_foreground
                         text_style: theme.font_bold { font_size: 20.0 }
                     }
                 }
@@ -299,7 +303,7 @@ script_mod! {
                 text: ""
                 margin: Inset{bottom: 28}
                 draw_text +: {
-                    color: #x5e6a7a
+                    color: theme.color_muted_foreground
                     text_style +: { font_size: 10.5 }
                 }
             }
@@ -316,8 +320,8 @@ script_mod! {
                     height: 108
                     flow: Overlay
                     draw_bg +: {
-                        color: #x1d232c
-                        border_color: #x2a3441
+                        color: theme.color_card
+                        border_color: theme.color_input
                         border_size: 1.0
                         border_radius: 10.0
                     }
@@ -338,8 +342,8 @@ script_mod! {
                                 height: 26
                                 align: Align{x: 0.5 y: 0.5}
                                 draw_bg +: {
-                                    color: #x5fa0de18
-                                    border_color: #x5fa0de35
+                                    color: theme.color_primary_tint
+                                    border_color: theme.color_primary_tint
                                     border_size: 1.0
                                     border_radius: 7.0
                                 }
@@ -349,7 +353,7 @@ script_mod! {
                                     icon_walk: Walk{width: 14 height: 14}
                                     draw_icon +: {
                                         svg: crate_resource("self:resources/icons/read-file.svg")
-                                        color: #x68b5f4
+                                        color: theme.color_primary
                                     }
                                 }
                             }
@@ -358,7 +362,7 @@ script_mod! {
                                 height: Fit
                                 text: "Explore code"
                                 draw_text +: {
-                                    color: #xe0e6ef
+                                    color: theme.color_primary_foreground
                                     text_style: theme.font_bold { font_size: 11.0 }
                                 }
                             }
@@ -368,7 +372,7 @@ script_mod! {
                             height: Fit
                             text: "Understand the structure and key files"
                             draw_text +: {
-                                color: #x8592a4
+                                color: theme.color_primary
                                 text_style +: { font_size: 9.5 }
                             }
                         }
@@ -381,22 +385,22 @@ script_mod! {
                         spacing: 0
                         icon_walk: Walk{width: 0 height: 0}
                         draw_bg +: {
-                            color: #x00000000
-                            color_hover: #x5fa0de10
-                            color_focus: #x5fa0de10
-                            color_down: #x5fa0de22
-                            border_color: #x00000000
-                            border_color_hover: #x00000000
-                            border_color_focus: #x00000000
-                            border_color_down: #x00000000
+                            color: theme.color_transparent
+                            color_hover: theme.color_primary_tint
+                            color_focus: theme.color_primary_tint
+                            color_down: theme.color_primary_tint
+                            border_color: theme.color_transparent
+                            border_color_hover: theme.color_transparent
+                            border_color_focus: theme.color_transparent
+                            border_color_down: theme.color_transparent
                             border_size: 0.0
                             border_radius: 10.0
                         }
                         draw_text +: {
-                            color: #x00000000
-                            color_hover: #x00000000
-                            color_focus: #x00000000
-                            color_down: #x00000000
+                            color: theme.color_transparent
+                            color_hover: theme.color_transparent
+                            color_focus: theme.color_transparent
+                            color_down: theme.color_transparent
                         }
                     }
                 }
@@ -406,8 +410,8 @@ script_mod! {
                     height: 108
                     flow: Overlay
                     draw_bg +: {
-                        color: #x1d232c
-                        border_color: #x2a3441
+                        color: theme.color_card
+                        border_color: theme.color_input
                         border_size: 1.0
                         border_radius: 10.0
                     }
@@ -428,8 +432,8 @@ script_mod! {
                                 height: 26
                                 align: Align{x: 0.5 y: 0.5}
                                 draw_bg +: {
-                                    color: #x9a75d518
-                                    border_color: #x9a75d535
+                                    color: theme.color_accent_tint
+                                    border_color: theme.color_accent_tint
                                     border_size: 1.0
                                     border_radius: 7.0
                                 }
@@ -439,7 +443,7 @@ script_mod! {
                                     icon_walk: Walk{width: 14 height: 14}
                                     draw_icon +: {
                                         svg: crate_resource("self:resources/icons/write-file.svg")
-                                        color: #xb18ae8
+                                        color: theme.color_primary
                                     }
                                 }
                             }
@@ -448,7 +452,7 @@ script_mod! {
                                 height: Fit
                                 text: "Build something"
                                 draw_text +: {
-                                    color: #xe0e6ef
+                                    color: theme.color_primary_foreground
                                     text_style: theme.font_bold { font_size: 11.0 }
                                 }
                             }
@@ -458,7 +462,7 @@ script_mod! {
                             height: Fit
                             text: "Start a feature, app, or tool"
                             draw_text +: {
-                                color: #x8592a4
+                                color: theme.color_primary
                                 text_style +: { font_size: 9.5 }
                             }
                         }
@@ -471,22 +475,22 @@ script_mod! {
                         spacing: 0
                         icon_walk: Walk{width: 0 height: 0}
                         draw_bg +: {
-                            color: #x00000000
-                            color_hover: #x9370c810
-                            color_focus: #x9370c810
-                            color_down: #x9370c822
-                            border_color: #x00000000
-                            border_color_hover: #x00000000
-                            border_color_focus: #x00000000
-                            border_color_down: #x00000000
+                            color: theme.color_transparent
+                            color_hover: theme.color_accent_tint
+                            color_focus: theme.color_accent_tint
+                            color_down: theme.color_accent_tint
+                            border_color: theme.color_transparent
+                            border_color_hover: theme.color_transparent
+                            border_color_focus: theme.color_transparent
+                            border_color_down: theme.color_transparent
                             border_size: 0.0
                             border_radius: 10.0
                         }
                         draw_text +: {
-                            color: #x00000000
-                            color_hover: #x00000000
-                            color_focus: #x00000000
-                            color_down: #x00000000
+                            color: theme.color_transparent
+                            color_hover: theme.color_transparent
+                            color_focus: theme.color_transparent
+                            color_down: theme.color_transparent
                         }
                     }
                 }
@@ -496,8 +500,8 @@ script_mod! {
                     height: 108
                     flow: Overlay
                     draw_bg +: {
-                        color: #x1d232c
-                        border_color: #x2a3441
+                        color: theme.color_card
+                        border_color: theme.color_input
                         border_size: 1.0
                         border_radius: 10.0
                     }
@@ -518,8 +522,8 @@ script_mod! {
                                 height: 26
                                 align: Align{x: 0.5 y: 0.5}
                                 draw_bg +: {
-                                    color: #x3aaa7818
-                                    border_color: #x3aaa7835
+                                    color: theme.color_success_tint
+                                    border_color: theme.color_success_tint
                                     border_size: 1.0
                                     border_radius: 7.0
                                 }
@@ -529,7 +533,7 @@ script_mod! {
                                     icon_walk: Walk{width: 14 height: 14}
                                     draw_icon +: {
                                         svg: crate_resource("self:resources/icons/edit-file.svg")
-                                        color: #x4bc98d
+                                        color: theme.color_success
                                     }
                                 }
                             }
@@ -538,7 +542,7 @@ script_mod! {
                                 height: Fit
                                 text: "Review code"
                                 draw_text +: {
-                                    color: #xe0e6ef
+                                    color: theme.color_primary_foreground
                                     text_style: theme.font_bold { font_size: 11.0 }
                                 }
                             }
@@ -548,7 +552,7 @@ script_mod! {
                             height: Fit
                             text: "Find bugs and simplify changes"
                             draw_text +: {
-                                color: #x8592a4
+                                color: theme.color_primary
                                 text_style +: { font_size: 9.5 }
                             }
                         }
@@ -561,22 +565,22 @@ script_mod! {
                         spacing: 0
                         icon_walk: Walk{width: 0 height: 0}
                         draw_bg +: {
-                            color: #x00000000
-                            color_hover: #x3aaa7810
-                            color_focus: #x3aaa7810
-                            color_down: #x3aaa7822
-                            border_color: #x00000000
-                            border_color_hover: #x00000000
-                            border_color_focus: #x00000000
-                            border_color_down: #x00000000
+                            color: theme.color_transparent
+                            color_hover: theme.color_success_tint
+                            color_focus: theme.color_success_tint
+                            color_down: theme.color_success_tint
+                            border_color: theme.color_transparent
+                            border_color_hover: theme.color_transparent
+                            border_color_focus: theme.color_transparent
+                            border_color_down: theme.color_transparent
                             border_size: 0.0
                             border_radius: 10.0
                         }
                         draw_text +: {
-                            color: #x00000000
-                            color_hover: #x00000000
-                            color_focus: #x00000000
-                            color_down: #x00000000
+                            color: theme.color_transparent
+                            color_hover: theme.color_transparent
+                            color_focus: theme.color_transparent
+                            color_down: theme.color_transparent
                         }
                     }
                 }
@@ -586,8 +590,8 @@ script_mod! {
                     height: 108
                     flow: Overlay
                     draw_bg +: {
-                        color: #x1d232c
-                        border_color: #x2a3441
+                        color: theme.color_card
+                        border_color: theme.color_input
                         border_size: 1.0
                         border_radius: 10.0
                     }
@@ -608,8 +612,8 @@ script_mod! {
                                 height: 26
                                 align: Align{x: 0.5 y: 0.5}
                                 draw_bg +: {
-                                    color: #xc0703018
-                                    border_color: #xc0703035
+                                    color: theme.color_destructive_tint
+                                    border_color: theme.color_destructive_tint
                                     border_size: 1.0
                                     border_radius: 7.0
                                 }
@@ -619,7 +623,7 @@ script_mod! {
                                     icon_walk: Walk{width: 14 height: 14}
                                     draw_icon +: {
                                         svg: crate_resource("self:resources/icons/tool.svg")
-                                        color: #xe08a43
+                                        color: theme.color_warning
                                     }
                                 }
                             }
@@ -628,7 +632,7 @@ script_mod! {
                                 height: Fit
                                 text: "Fix an issue"
                                 draw_text +: {
-                                    color: #xe0e6ef
+                                    color: theme.color_primary_foreground
                                     text_style: theme.font_bold { font_size: 11.0 }
                                 }
                             }
@@ -638,7 +642,7 @@ script_mod! {
                             height: Fit
                             text: "Diagnose errors and failures"
                             draw_text +: {
-                                color: #x8592a4
+                                color: theme.color_primary
                                 text_style +: { font_size: 9.5 }
                             }
                         }
@@ -651,22 +655,22 @@ script_mod! {
                         spacing: 0
                         icon_walk: Walk{width: 0 height: 0}
                         draw_bg +: {
-                            color: #x00000000
-                            color_hover: #xc0703010
-                            color_focus: #xc0703010
-                            color_down: #xc0703022
-                            border_color: #x00000000
-                            border_color_hover: #x00000000
-                            border_color_focus: #x00000000
-                            border_color_down: #x00000000
+                            color: theme.color_transparent
+                            color_hover: theme.color_destructive_tint
+                            color_focus: theme.color_destructive_tint
+                            color_down: theme.color_destructive_tint
+                            border_color: theme.color_transparent
+                            border_color_hover: theme.color_transparent
+                            border_color_focus: theme.color_transparent
+                            border_color_down: theme.color_transparent
                             border_size: 0.0
                             border_radius: 10.0
                         }
                         draw_text +: {
-                            color: #x00000000
-                            color_hover: #x00000000
-                            color_focus: #x00000000
-                            color_down: #x00000000
+                            color: theme.color_transparent
+                            color_hover: theme.color_transparent
+                            color_focus: theme.color_transparent
+                            color_down: theme.color_transparent
                         }
                     }
                 }
@@ -696,7 +700,7 @@ script_mod! {
                         width: Fit{max: FitBound.Abs(654)}
                     }
                     draw_bg +: {
-                        color: #x2a3547
+                        color: theme.color_card
                         border_radius: 9.0
                     }
                 }
@@ -713,7 +717,7 @@ script_mod! {
                     padding: Inset{left: 13 top: 8 right: 13 bottom: 8}
                     md +: { width: Fill }
                     draw_bg +: {
-                        color: #x2a3547
+                        color: theme.color_card
                         border_radius: 9.0
                     }
                 }
@@ -739,7 +743,7 @@ script_mod! {
                     height: Fit
                     text: ""
                     draw_text +: {
-                        color: #x8b93a0
+                        color: theme.color_muted_foreground
                         text_style +: { font_size: 10.0 }
                     }
                 }
@@ -770,7 +774,7 @@ script_mod! {
                         align: Align{y: 0.5}
                         clip_x: true
                         preview_lbl := mod.components.ClippedLabel {
-                            draw_text +: { color: #x9ba7b6 }
+                            draw_text +: { color: theme.color_muted_foreground }
                         }
                         status_indicator := ActivityStatusIndicator {}
                     }
@@ -780,7 +784,7 @@ script_mod! {
                     height: Fit
                     padding: Inset{left: 30 top: 3 right: 18 bottom: 7}
                     draw_bg +: {
-                        color: #x00000000
+                        color: theme.color_transparent
                         border_size: 0.0
                     }
                     md := mod.components.ChatMarkdown {}
@@ -803,14 +807,14 @@ script_mod! {
                             icon_generic +: { visible: false }
                             icon_thinking +: {
                                 visible: true
-                                icon +: { draw_icon +: { color: #x8d8aa3 } }
+                                icon +: { draw_icon +: { color: theme.color_muted_foreground } }
                             }
                         }
                     }
                     title_lbl +: {
                         width: 70
                         text: "Thinking"
-                        draw_text +: { color: #xbcb8cf }
+                        draw_text +: { color: theme.color_card_foreground }
                     }
                     summary := View {
                         width: Fill
@@ -818,7 +822,7 @@ script_mod! {
                         align: Align{y: 0.5}
                         clip_x: true
                         preview_lbl := mod.components.ClippedLabel {
-                            draw_text +: { color: #x8f98a6 }
+                            draw_text +: { color: theme.color_muted_foreground }
                         }
                     }
                 }
@@ -827,7 +831,7 @@ script_mod! {
                     height: Fit
                     padding: Inset{left: 30 top: 5 right: 24 bottom: 8}
                     draw_bg +: {
-                        color: #x00000000
+                        color: theme.color_transparent
                         border_size: 0.0
                     }
                     md := mod.components.ChatMarkdown {}
@@ -863,7 +867,7 @@ script_mod! {
                         clip_x: true
                         preview_lbl := mod.components.ClippedLabel {
                             width: Fit
-                            draw_text +: { color: #x8794a3 }
+                            draw_text +: { color: theme.color_muted_foreground }
                         }
                         status_indicator := ActivityStatusIndicator {}
                     }
@@ -875,7 +879,7 @@ script_mod! {
                     flow: Down
                     spacing: 6
                     draw_bg +: {
-                        color: #x00000000
+                        color: theme.color_transparent
                         border_size: 0.0
                     }
                     rail := #(SubagentRail::register_widget(vm)) {
@@ -883,7 +887,7 @@ script_mod! {
                         height: Fit
                         flow: Down
                         spacing: 7
-                        draw_bg +: { color: #x00000000 }
+                        draw_bg +: { color: theme.color_transparent }
                         row_template: #(ToolFoldHeader::register_widget(vm)) {
                             width: Fill
                             height: Fit
@@ -903,7 +907,7 @@ script_mod! {
                                     padding: 0
                                     align: Align{y: 0.5}
                                     draw_text +: {
-                                        color: #xd5dbe4
+                                        color: theme.color_foreground
                                         text_style: theme.font_regular { font_size: 12.0 }
                                     }
                                 }
@@ -919,7 +923,7 @@ script_mod! {
                                         height: 20
                                         padding: 0
                                         align: Align{y: 0.5}
-                                        draw_text +: { color: #x8794a3 }
+                                        draw_text +: { color: theme.color_muted_foreground }
                                     }
                                     status_lbl := Label {
                                         width: Fit
@@ -927,7 +931,7 @@ script_mod! {
                                         align: Align{y: 0.5}
                                         padding: 0
                                         draw_text +: {
-                                            color: #x8794a3
+                                            color: theme.color_muted_foreground
                                             text_style +: { font_size: 9.0 }
                                         }
                                     }
@@ -955,11 +959,11 @@ script_mod! {
                                     }
                                     working_lbl := Label {
                                         text: "Working..."
-                                        draw_text +: { color: #x8794a3 text_style +: { font_size: 9.0 } }
+                                        draw_text +: { color: theme.color_muted_foreground text_style +: { font_size: 9.0 } }
                                     }
                                 }
                                 draw_bg +: {
-                                    color: #x00000000
+                                    color: theme.color_transparent
                                     border_size: 0.0
                                 }
                                 detail_md := mod.components.ChatMarkdown {}
@@ -995,7 +999,7 @@ script_mod! {
                             max_lines: 1
                             text_overflow: Ellipsis
                             draw_text +: {
-                                color: #xc7d0dc
+                                color: theme.color_foreground
                                 text_style +: { font_size: 9.0 }
                             }
                         }
@@ -1004,13 +1008,13 @@ script_mod! {
                             visible: false
                             max_lines: 1
                             text_overflow: Ellipsis
-                            draw_text +: { color: #x8794a3 }
+                            draw_text +: { color: theme.color_muted_foreground }
                         }
                         result_meta_header_lbl := mod.components.ClippedLabel {
                             width: Fit
                             visible: false
                             draw_text +: {
-                                color: #x708197
+                                color: theme.color_primary
                                 text_style +: { font_size: 8.0 }
                             }
                         }
@@ -1025,7 +1029,7 @@ script_mod! {
                     flow: Down
                     spacing: 4
                     draw_bg +: {
-                        color: #x00000000
+                        color: theme.color_transparent
                         border_size: 0.0
                     }
                     details_row := View {
@@ -1034,10 +1038,10 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         meta_lbl := mod.components.CodeLabel {
-                            draw_text +: { color: #x8494a8 }
+                            draw_text +: { color: theme.color_primary }
                         }
                         result_meta_lbl := mod.components.CodeLabel {
-                            draw_text +: { color: #x768292 }
+                            draw_text +: { color: theme.color_muted_foreground }
                         }
                     }
                     args_section := ToolSection {
@@ -1045,7 +1049,7 @@ script_mod! {
                     }
                     result_section := ToolSection {
                         section_label +: { text: "OUTPUT" }
-                        content_lbl +: { draw_text +: { color: #xaeb8c5 } }
+                        content_lbl +: { draw_text +: { color: theme.color_card_foreground } }
                     }
                 }
             }
@@ -1061,6 +1065,19 @@ script_mod! {
         flow: Down
         spacing: 0
 
+        mod.components.ProjectHeaderActiveBase = mod.components.ProjectHeaderBase {
+            draw_bg +: {
+                color: theme.color_background
+                color_hover: theme.color_card
+                border_color: theme.color_primary
+                border_size: 1.0
+            }
+            project_toggle_surface +: {
+                folder_icon +: { draw_icon +: { color: theme.color_primary } }
+                name_lbl +: { draw_text +: { color: theme.color_primary_foreground } }
+            }
+        }
+
         fixed_header_slot := View {
             width: Fill
             height: 44
@@ -1069,18 +1086,8 @@ script_mod! {
             clip_y: true
 
             fixed_project_header := mod.components.ProjectHeaderBase {}
-            fixed_project_header_active := mod.components.ProjectHeaderBase {
+            fixed_project_header_active := mod.components.ProjectHeaderActiveBase {
                 visible: false
-                draw_bg +: {
-                    color: #x222c38
-                    color_hover: #x283543
-                    border_color: #x34465a
-                    border_size: 1.0
-                }
-                project_toggle_surface +: {
-                    folder_icon +: { draw_icon +: { color: #x8fb9e8 } }
-                    name_lbl +: { draw_text +: { color: #xe0e7ef } }
-                }
             }
         }
 
@@ -1096,12 +1103,12 @@ script_mod! {
                 draw_bg +: {
                     size: 5.0
                     border_size: 0.0
-                    color: #x00000000
-                    color_hover: #x00000000
-                    color_drag: #x00000000
-                    border_color: #x00000000
-                    border_color_hover: #x00000000
-                    border_color_drag: #x00000000
+                    color: theme.color_transparent
+                    color_hover: theme.color_transparent
+                    color_drag: theme.color_transparent
+                    border_color: theme.color_transparent
+                    border_color_hover: theme.color_transparent
+                    border_color_drag: theme.color_transparent
                 }
             }
 
@@ -1109,23 +1116,12 @@ script_mod! {
                 width: Fill
                 height: 1
                 show_bg: true
-                draw_bg +: { color: #x00000000 }
+                draw_bg +: { color: theme.color_transparent }
             }
 
             ProjectHeader := mod.components.ProjectHeaderBase {}
 
-            ProjectHeaderActive := mod.components.ProjectHeaderBase {
-                draw_bg +: {
-                    color: #x222c38
-                    color_hover: #x283543
-                    border_color: #x34465a
-                    border_size: 1.0
-                }
-                project_toggle_surface +: {
-                    folder_icon +: { draw_icon +: { color: #x8fb9e8 } }
-                    name_lbl +: { draw_text +: { color: #xe0e7ef } }
-                }
-            }
+            ProjectHeaderActive := mod.components.ProjectHeaderActiveBase {}
 
             SessionRow := SessionRowBase {}
 
@@ -1133,87 +1129,60 @@ script_mod! {
                 draw_bg +: { tree_last: 1.0 }
             }
 
-            SessionRowActive := SessionRowBase {
+            mod.components.SessionRowActiveBase = SessionRowBase {
                 draw_bg +: {
                     is_active: 1.0
-                    color: #x1a2535
-                    color_hover: #x1e2a3a
-                    border_color: #x00000000
+                    color: theme.color_secondary
+                    color_hover: theme.color_accent
+                    border_color: theme.color_transparent
                     border_size: 0.0
                     border_radius: 7.0
                 }
                 title_surface +: {
                     title_lbl +: {
-                        draw_text +: { color: #xe8edf4 }
+                        draw_text +: { color: theme.color_primary_foreground }
                     }
                 }
                 time_lbl +: {
                     draw_text +: {
-                        color: #xaeb6c2
+                        color: theme.color_card_foreground
                     }
                 }
             }
 
-            SessionRowActiveLast := SessionRowBase {
+            SessionRowActive := mod.components.SessionRowActiveBase {}
+
+            SessionRowActiveLast := mod.components.SessionRowActiveBase {
                 draw_bg +: {
                     tree_last: 1.0
-                    is_active: 1.0
-                    color: #x1a2535
-                    color_hover: #x1e2a3a
-                    border_color: #x00000000
-                    border_size: 0.0
-                    border_radius: 7.0
-                }
-                title_surface +: {
-                    title_lbl +: {
-                        draw_text +: { color: #xe8edf4 }
-                    }
-                }
-                time_lbl +: {
-                    draw_text +: {
-                        color: #xaeb6c2
-                    }
                 }
             }
 
-            SessionRowContext := SessionRowBase {
+            mod.components.SessionRowContextBase = SessionRowBase {
                 draw_bg +: {
-                    color: #x273344
-                    color_hover: #x30425a
-                    border_color: #x4f82bd
+                    color: theme.color_card
+                    color_hover: theme.color_primary
+                    border_color: theme.color_primary
                     border_size: 1.0
                     border_radius: 6.0
                 }
                 title_surface +: {
                     title_lbl +: {
-                        draw_text +: { color: #xf0f4fa }
+                        draw_text +: { color: theme.color_primary_foreground }
                     }
                 }
                 time_lbl +: {
                     draw_text +: {
-                        color: #xb7c5d8
+                        color: theme.color_primary
                     }
                 }
             }
 
-            SessionRowContextLast := SessionRowBase {
+            SessionRowContext := mod.components.SessionRowContextBase {}
+
+            SessionRowContextLast := mod.components.SessionRowContextBase {
                 draw_bg +: {
                     tree_last: 1.0
-                    color: #x273344
-                    color_hover: #x30425a
-                    border_color: #x4f82bd
-                    border_size: 1.0
-                    border_radius: 6.0
-                }
-                title_surface +: {
-                    title_lbl +: {
-                        draw_text +: { color: #xf0f4fa }
-                    }
-                }
-                time_lbl +: {
-                    draw_text +: {
-                        color: #xb7c5d8
-                    }
                 }
             }
 
@@ -1230,21 +1199,21 @@ script_mod! {
                     text: "Show more"
                     align: Align{x: 0.0 y: 0.5}
                     draw_bg +: {
-                        color: #x00000000
-                        color_hover: #x00000000
-                        color_focus: #x00000000
-                        color_down: #x00000000
-                        border_color: #x00000000
-                        border_color_hover: #x00000000
-                        border_color_focus: #x00000000
-                        border_color_down: #x00000000
+                        color: theme.color_transparent
+                        color_hover: theme.color_transparent
+                        color_focus: theme.color_transparent
+                        color_down: theme.color_transparent
+                        border_color: theme.color_transparent
+                        border_color_hover: theme.color_transparent
+                        border_color_focus: theme.color_transparent
+                        border_color_down: theme.color_transparent
                         border_size: 0.0
                     }
                     draw_text +: {
-                        color: #x788596
-                        color_hover: #xaebdce
-                        color_focus: #xaebdce
-                        color_down: #xd7e2ee
+                        color: theme.color_muted_foreground
+                        color_hover: theme.color_primary
+                        color_focus: theme.color_primary
+                        color_down: theme.color_foreground
                         text_style +: { font_size: 9.5 }
                     }
                 }
@@ -1254,9 +1223,34 @@ script_mod! {
                 padding: Inset{left: 43 top: 4 right: 10 bottom: 8}
                 lbl +: {
                     text: "No sessions yet"
-                    draw_text +: { color: #x596474 text_style +: { font_size: 9.5 } }
+                    draw_text +: { color: theme.color_muted_foreground text_style +: { font_size: 9.5 } }
                 }
             }
+        }
+    }
+
+    let SettingsActionButton = Button {
+        width: Fit
+        height: 28
+        padding: Inset{left: 10 right: 10 top: 4 bottom: 4}
+        draw_bg +: {
+            color: theme.color_card
+            color_hover: theme.color_secondary
+            color_focus: theme.color_secondary
+            color_down: theme.color_input
+            border_color: theme.color_secondary
+            border_color_hover: theme.color_primary
+            border_color_focus: theme.color_primary
+            border_color_down: theme.color_primary
+            border_size: 1.0
+            border_radius: 6.0
+        }
+        draw_text +: {
+            color: theme.color_card_foreground
+            color_hover: theme.color_foreground
+            color_focus: theme.color_primary_foreground
+            color_down: theme.color_primary_foreground
+            text_style +: { font_size: 9.0 }
         }
     }
 
@@ -1273,10 +1267,10 @@ script_mod! {
                 blur_level: 5.2
                 corner_radius: 0.0
                 border_width: 0.0
-                tint_color: #x181a1f
+                tint_color: theme.color_background
                 tint_alpha: 0.16
                 surface_alpha: 0.62
-                fallback_color: #x181a1f
+                fallback_color: theme.color_background
                 shadow_radius: 0.0
                 shadow_offset: vec2(0.0 0.0)
             }
@@ -1289,10 +1283,10 @@ script_mod! {
             padding: 0
             spacing: 0
             draw_bg +: {
-                color: #x1a1d24
+                color: theme.color_background
                 border_radius: 12.0
                 border_size: 1.0
-                border_color: #x323a48
+                border_color: theme.color_card
             }
 
             settings_nav := View {
@@ -1302,8 +1296,8 @@ script_mod! {
                 padding: Inset{left: 16 top: 24 right: 12 bottom: 20}
                 spacing: 8
                 draw_bg +: {
-                    color: #x171a20
-                    border_color: #x2d3440
+                    color: theme.color_background
+                    border_color: theme.color_card
                     border_size: 1.0
                 }
 
@@ -1313,65 +1307,17 @@ script_mod! {
                     margin: Inset{bottom: 4}
                     text: "PROVIDERS"
                     draw_text +: {
-                        color: #x697587
+                        color: theme.color_muted_foreground
                         text_style: theme.font_bold { font_size: 9.0 }
                     }
                 }
 
-                settings_nav_google_btn := Button {
-                    width: Fill
-                    height: 34
-                    padding: Inset{left: 10 right: 8 top: 6 bottom: 6}
-                    spacing: 0
-                    align: Align{x: 0.0 y: 0.5}
+                settings_nav_google_btn := mod.components.NavButton {
                     text: "Google Antigravity"
-                    draw_bg +: {
-                        color: #x2d405a
-                        color_hover: #x354b69
-                        color_focus: #x3a5272
-                        color_down: #x46638a
-                        border_color: #x4b719f
-                        border_color_hover: #x5a84b8
-                        border_color_focus: #x6b96c8
-                        border_color_down: #x7ba9dc
-                        border_size: 1.0
-                        border_radius: 6.0
-                    }
-                    draw_text +: {
-                        color: #xe4edf8
-                        color_hover: #xffffff
-                        color_focus: #xffffff
-                        color_down: #xffffff
-                        text_style +: { font_size: 9.5 }
-                    }
                 }
 
-                settings_nav_openai_btn := Button {
-                    width: Fill
-                    height: 34
-                    padding: Inset{left: 10 right: 8 top: 6 bottom: 6}
-                    spacing: 0
-                    align: Align{x: 0.0 y: 0.5}
+                settings_nav_openai_btn := mod.components.NavButton {
                     text: "OpenAI / ChatGPT"
-                    draw_bg +: {
-                        color: #x20252e
-                        color_hover: #x2b3442
-                        color_focus: #x303b4b
-                        color_down: #x39485b
-                        border_color: #x20252e
-                        border_color_hover: #x3b4b60
-                        border_color_focus: #x4b5e76
-                        border_color_down: #x5c718d
-                        border_size: 1.0
-                        border_radius: 6.0
-                    }
-                    draw_text +: {
-                        color: #x9ba8ba
-                        color_hover: #xd8e2ef
-                        color_focus: #xe7eef7
-                        color_down: #xffffff
-                        text_style +: { font_size: 9.5 }
-                    }
                 }
 
                 advanced_category_lbl := Label {
@@ -1380,37 +1326,21 @@ script_mod! {
                     margin: Inset{top: 18 bottom: 4}
                     text: "ADVANCED"
                     draw_text +: {
-                        color: #x697587
+                        color: theme.color_muted_foreground
                         text_style: theme.font_bold { font_size: 9.0 }
                     }
                 }
 
-                settings_nav_about_btn := Button {
-                    width: Fill
-                    height: 34
-                    padding: Inset{left: 10 right: 8 top: 6 bottom: 6}
-                    spacing: 0
-                    align: Align{x: 0.0 y: 0.5}
+                settings_nav_capabilities_btn := mod.components.NavButton {
+                    text: "WASI Extensions"
+                }
+
+                settings_nav_skills_btn := mod.components.NavButton {
+                    text: "Skills"
+                }
+
+                settings_nav_about_btn := mod.components.NavButton {
                     text: "About"
-                    draw_bg +: {
-                        color: #x20252e
-                        color_hover: #x2b3442
-                        color_focus: #x303b4b
-                        color_down: #x39485b
-                        border_color: #x20252e
-                        border_color_hover: #x3b4b60
-                        border_color_focus: #x4b5e76
-                        border_color_down: #x5c718d
-                        border_size: 1.0
-                        border_radius: 6.0
-                    }
-                    draw_text +: {
-                        color: #x9ba8ba
-                        color_hover: #xd8e2ef
-                        color_focus: #xe7eef7
-                        color_down: #xffffff
-                        text_style +: { font_size: 9.5 }
-                    }
                 }
             }
 
@@ -1432,7 +1362,7 @@ script_mod! {
                         height: Fit
                         text: "Provider Settings"
                         draw_text +: {
-                            color: #xe7ebf0
+                            color: theme.color_foreground
                             text_style: theme.font_bold { font_size: 14.0 }
                         }
                     }
@@ -1446,23 +1376,23 @@ script_mod! {
                         align: Align{x: 0.5 y: 0.5}
                         icon_walk: Walk{width: 12 height: 12}
                         draw_bg +: {
-                            color: #x00000000
-                            color_hover: #x2e3543
-                            color_focus: #x2e3543
-                            color_down: #x3e485a
-                            border_color: #x00000000
-                            border_color_hover: #x00000000
-                            border_color_focus: #x00000000
-                            border_color_down: #x00000000
+                            color: theme.color_transparent
+                            color_hover: theme.color_card
+                            color_focus: theme.color_card
+                            color_down: theme.color_secondary
+                            border_color: theme.color_transparent
+                            border_color_hover: theme.color_transparent
+                            border_color_focus: theme.color_transparent
+                            border_color_down: theme.color_transparent
                             border_size: 0.0
                             border_radius: 6.0
                         }
                         draw_icon +: {
                             svg: crate_resource("self:resources/icons/close.svg")
-                            color: #x8b93a0
-                            color_hover: #xffffff
-                            color_focus: #xffffff
-                            color_down: #xffffff
+                            color: theme.color_muted_foreground
+                            color_hover: theme.color_primary_foreground
+                            color_focus: theme.color_primary_foreground
+                            color_down: theme.color_primary_foreground
                         }
                     }
                 }
@@ -1478,7 +1408,7 @@ script_mod! {
                         height: Fit
                         text: "Google Antigravity"
                         draw_text +: {
-                            color: #xe7ebf0
+                            color: theme.color_foreground
                             text_style: theme.font_bold { font_size: 18.0 }
                         }
                     }
@@ -1488,67 +1418,29 @@ script_mod! {
                         height: Fit
                         text: "Connect your AI model providers to use them in Threadlane."
                         draw_text +: {
-                            color: #x7f8c9d
+                            color: theme.color_muted_foreground
                             text_style +: { font_size: 10.0 }
                         }
                     }
 
-                    antigravity_card := RoundedView {
-                        width: Fill
-                        height: Fit
-                        flow: Down
-                        padding: Inset{left: 16 top: 14 right: 16 bottom: 14}
-                        spacing: 10
-                        draw_bg +: {
-                            color: #x222631
-                            border_radius: 8.0
-                            border_size: 1.0
-                            border_color: #x323a48
-                        }
+                    antigravity_card := mod.components.ProviderCard {
 
-                        ag_header := View {
-                            width: Fill
-                            height: Fit
-                            flow: Right
-                            align: Align{y: 0.5}
+                        ag_header := mod.components.ProviderCardHeader {
 
-                            ag_title := Label {
-                                width: Fill
-                                height: Fit
+                            ag_title := mod.components.ProviderCardTitle {
                                 text: "Google Antigravity"
-                                draw_text +: {
-                                    color: #xe7ebf0
-                                    text_style: theme.font_bold { font_size: 11.5 }
-                                }
                             }
 
-                            antigravity_status_lbl := Label {
-                                width: Fit
-                                height: Fit
+                            antigravity_status_lbl := mod.components.ProviderCardStatus {
                                 text: "Not Connected"
-                                draw_text +: {
-                                    color: #xe06c75
-                                    text_style: theme.font_bold { font_size: 10.0 }
-                                }
                             }
                         }
 
-                        ag_desc := Label {
-                            width: Fill
-                            height: Fit
+                        ag_desc := mod.components.ProviderCardDescription {
                             text: "Cloud Code Assist, Gemini 3.6 Flash / Pro via Google OAuth PKCE"
-                            draw_text +: {
-                                color: #x7f8c9d
-                                text_style +: { font_size: 9.25 }
-                            }
                         }
 
-                        ag_actions := View {
-                            width: Fill
-                            height: Fit
-                            flow: Right
-                            spacing: 8
-                            align: Align{y: 0.5}
+                        ag_actions := mod.components.ProviderCardActions {
 
                             antigravity_login_btn := Button {
                                 width: Fit
@@ -1556,13 +1448,13 @@ script_mod! {
                                 padding: Inset{left: 12 right: 12 top: 4 bottom: 4}
                                 text: "Sign in with Google"
                                 draw_bg +: {
-                                    color: #x3b669e
-                                    color_hover: #x4a7bc0
-                                    color_down: #x5a8de0
+                                    color: theme.color_primary
+                                    color_hover: theme.color_primary
+                                    color_down: theme.color_primary
                                     border_radius: 6.0
                                 }
                                 draw_text +: {
-                                    color: #xffffff
+                                    color: theme.color_primary_foreground
                                     text_style: theme.font_bold { font_size: 9.5 }
                                 }
                             }
@@ -1573,16 +1465,16 @@ script_mod! {
                                 padding: Inset{left: 10 right: 10 top: 4 bottom: 4}
                                 text: "Run Health Check"
                                 draw_bg +: {
-                                    color: #x2b313d
-                                    color_hover: #x363e4d
-                                    color_down: #x444f62
-                                    border_color: #x3a4354
+                                    color: theme.color_card
+                                    color_hover: theme.color_secondary
+                                    color_down: theme.color_input
+                                    border_color: theme.color_secondary
                                     border_size: 1.0
                                     border_radius: 6.0
                                 }
                                 draw_text +: {
-                                    color: #xa4b0c2
-                                    color_hover: #xd8e0ec
+                                    color: theme.color_card_foreground
+                                    color_hover: theme.color_foreground
                                     text_style +: { font_size: 9.0 }
                                 }
                             }
@@ -1602,7 +1494,7 @@ script_mod! {
                         height: Fit
                         text: "OpenAI / ChatGPT"
                         draw_text +: {
-                            color: #xe7ebf0
+                            color: theme.color_foreground
                             text_style: theme.font_bold { font_size: 18.0 }
                         }
                     }
@@ -1612,67 +1504,29 @@ script_mod! {
                         height: Fit
                         text: "Connect your AI model providers to use them in Threadlane."
                         draw_text +: {
-                            color: #x7f8c9d
+                            color: theme.color_muted_foreground
                             text_style +: { font_size: 10.0 }
                         }
                     }
 
-                    openai_card := RoundedView {
-                        width: Fill
-                        height: Fit
-                        flow: Down
-                        padding: Inset{left: 16 top: 14 right: 16 bottom: 14}
-                        spacing: 10
-                        draw_bg +: {
-                            color: #x222631
-                            border_radius: 8.0
-                            border_size: 1.0
-                            border_color: #x323a48
-                        }
+                    openai_card := mod.components.ProviderCard {
 
-                        oa_header := View {
-                            width: Fill
-                            height: Fit
-                            flow: Right
-                            align: Align{y: 0.5}
+                        oa_header := mod.components.ProviderCardHeader {
 
-                            oa_title := Label {
-                                width: Fill
-                                height: Fit
+                            oa_title := mod.components.ProviderCardTitle {
                                 text: "OpenAI / ChatGPT"
-                                draw_text +: {
-                                    color: #xe7ebf0
-                                    text_style: theme.font_bold { font_size: 11.5 }
-                                }
                             }
 
-                            openai_status_lbl := Label {
-                                width: Fit
-                                height: Fit
+                            openai_status_lbl := mod.components.ProviderCardStatus {
                                 text: "Not Connected"
-                                draw_text +: {
-                                    color: #xe06c75
-                                    text_style: theme.font_bold { font_size: 10.0 }
-                                }
                             }
                         }
 
-                        oa_desc := Label {
-                            width: Fill
-                            height: Fit
+                        oa_desc := mod.components.ProviderCardDescription {
                             text: "GPT-4o, Codex, and OpenAI models via ChatGPT OAuth or API key"
-                            draw_text +: {
-                                color: #x7f8c9d
-                                text_style +: { font_size: 9.25 }
-                            }
                         }
 
-                        oa_actions := View {
-                            width: Fill
-                            height: Fit
-                            flow: Right
-                            spacing: 8
-                            align: Align{y: 0.5}
+                        oa_actions := mod.components.ProviderCardActions {
 
                             openai_login_btn := Button {
                                 width: Fit
@@ -1680,16 +1534,188 @@ script_mod! {
                                 padding: Inset{left: 12 right: 12 top: 4 bottom: 4}
                                 text: "Sign in with ChatGPT"
                                 draw_bg +: {
-                                    color: #x2c6e49
-                                    color_hover: #x358759
-                                    color_down: #x3ea36c
+                                    color: theme.color_success
+                                    color_hover: theme.color_success
+                                    color_down: theme.color_success
                                     border_radius: 6.0
                                 }
                                 draw_text +: {
-                                    color: #xffffff
+                                    color: theme.color_primary_foreground
                                     text_style: theme.font_bold { font_size: 9.5 }
                                 }
                             }
+                        }
+                    }
+                }
+
+                capabilities_page := View {
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    spacing: 12
+                    visible: false
+
+                    capability_header := View {
+                        width: Fill
+                        height: 28
+                        flow: Right
+                        spacing: 6
+                        align: Align{y: 0.5}
+
+                        capability_page_title := Label {
+                            width: Fill
+                            height: 28
+                            padding: 0
+                            align: Align{y: 0.5}
+                            text: "WASI Extensions"
+                            draw_text +: {
+                                color: theme.color_foreground
+                                text_style: theme.font_bold { font_size: 18.0 }
+                            }
+                        }
+
+                        capability_install_scope_lbl := Label {
+                            width: Fit
+                            height: Fit
+                            padding: 0
+                            text: "Install to"
+                            draw_text +: {
+                                color: theme.color_muted_foreground
+                                text_style +: { font_size: 8.75 }
+                            }
+                        }
+                        capability_scope_global_btn := SettingsActionButton {
+                            height: 24
+                            padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
+                            text: "Global"
+                        }
+                        capability_scope_project_btn := SettingsActionButton {
+                            height: 24
+                            padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
+                            text: "Project"
+                            draw_bg +: {
+                                color: theme.color_primary
+                                border_color: theme.color_primary
+                            }
+                        }
+                        capability_add_btn := mod.components.IconButton {
+                            draw_icon +: {
+                                svg: crate_resource("self:resources/icons/plus.svg")
+                            }
+                        }
+                        capability_refresh_btn := mod.components.IconButton {
+                            draw_icon +: {
+                                svg: crate_resource("self:resources/icons/refresh.svg")
+                            }
+                        }
+                    }
+
+                    capability_page_desc := Label {
+                        width: Fill
+                        height: Fit
+                        padding: 0
+                        text: "Choose a compiled .wasm file. Threadlane never runs Cargo or build scripts."
+                        draw_text +: {
+                            color: theme.color_muted_foreground
+                            text_style +: { font_size: 10.0 }
+                        }
+                    }
+
+                    capability_build_command := mod.components.CodeLabel {
+                        padding: 0
+                        text: "cargo build --target wasm32-wasip1 --release"
+                    }
+
+                    capability_list := PortalList {
+                        width: Fill
+                        height: Fill
+                        flow: Down
+                        spacing: 8
+
+                        ExtensionRow := mod.components.CapabilityRowWithRemove {}
+
+                        EmptyRow := mod.components.CapabilityEmptyRow {
+                            empty_lbl: { text: "No WASI extensions found." }
+                        }
+                    }
+
+                    capability_status_lbl := Label {
+                        width: Fill
+                        height: Fit
+                        padding: 0
+                        text: ""
+                        draw_text +: {
+                            color: theme.color_primary
+                            text_style +: { font_size: 9.5 }
+                        }
+                    }
+                }
+
+                skills_page := View {
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    spacing: 12
+                    visible: false
+
+                    skill_header := View {
+                        width: Fill
+                        height: 28
+                        flow: Right
+                        spacing: 6
+                        align: Align{y: 0.5}
+
+                        skill_page_title := Label {
+                            width: Fill
+                            height: 28
+                            padding: 0
+                            align: Align{y: 0.5}
+                            text: "Skills"
+                            draw_text +: {
+                                color: theme.color_foreground
+                                text_style: theme.font_bold { font_size: 18.0 }
+                            }
+                        }
+
+                        skill_refresh_btn := mod.components.IconButton {
+                            draw_icon +: {
+                                svg: crate_resource("self:resources/icons/refresh.svg")
+                            }
+                        }
+                    }
+
+                    skill_page_desc := Label {
+                        width: Fill
+                        height: Fit
+                        padding: 0
+                        text: "Enable or disable discovered skills for this project. Disabled skills are hidden from the composer and the model."
+                        draw_text +: {
+                            color: theme.color_muted_foreground
+                            text_style +: { font_size: 10.0 }
+                        }
+                    }
+
+                    skill_list := PortalList {
+                        width: Fill
+                        height: Fill
+                        flow: Down
+                        spacing: 8
+
+                        SkillRow := mod.components.CapabilityRowBase {}
+
+                        SkillEmptyRow := mod.components.CapabilityEmptyRow {
+                            empty_lbl: { text: "No skills found." }
+                        }
+                    }
+
+                    skill_status_lbl := Label {
+                        width: Fill
+                        height: Fit
+                        padding: 0
+                        text: ""
+                        draw_text +: {
+                            color: theme.color_primary
+                            text_style +: { font_size: 9.5 }
                         }
                     }
                 }
@@ -1714,7 +1740,7 @@ script_mod! {
                             icon_walk: Walk{width: 28 height: 28}
                             draw_icon +: {
                                 svg: crate_resource("self:resources/icons/logo.svg")
-                                color: #xe7ebf0
+                                color: theme.color_foreground
                             }
                         }
 
@@ -1723,7 +1749,7 @@ script_mod! {
                             height: Fit
                             text: "Threadlane"
                             draw_text +: {
-                                color: #xe7ebf0
+                                color: theme.color_foreground
                                 text_style: theme.font_bold { font_size: 18.0 }
                             }
                         }
@@ -1734,7 +1760,7 @@ script_mod! {
                         height: Fit
                         text: "Version"
                         draw_text +: {
-                            color: #x9ba8ba
+                            color: theme.color_primary
                             text_style: theme.font_bold { font_size: 10.0 }
                         }
                     }
@@ -1744,7 +1770,7 @@ script_mod! {
                         height: Fit
                         text: "Threadlane is a focused workspace for building software with AI coding agents."
                         draw_text +: {
-                            color: #xc4cedc
+                            color: theme.color_foreground
                             text_style +: { font_size: 11.0 }
                         }
                     }
@@ -1754,7 +1780,7 @@ script_mod! {
                         height: Fit
                         text: "Keep projects, sessions, and provider connections together in one calm, native desktop app."
                         draw_text +: {
-                            color: #x7f8c9d
+                            color: theme.color_muted_foreground
                             text_style +: { font_size: 10.0 }
                         }
                     }
@@ -1768,7 +1794,7 @@ script_mod! {
             main_window := Window {
                 window.inner_size: vec2(1280, 768)
                 window.title: "Threadlane"
-                pass.clear_color: #x181a1f
+                pass.clear_color: theme.color_background
                 body +: {
                     window_body := View {
                         width: Fill
@@ -1787,13 +1813,13 @@ script_mod! {
                         splitter: Splitter {
                             size: 6.0
                             draw_bg +: {
-                                color: uniform(#x303946)
-                                color_hover: uniform(#x4b5d70)
-                                color_drag: uniform(#x6a7b91)
+                                color: uniform(theme.color_card)
+                                color_hover: uniform(theme.color_primary)
+                                color_drag: uniform(theme.color_primary)
 
                                 pixel: fn() {
                                     let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                                    sdf.clear(#x00000000)
+                                    sdf.clear(theme.color_transparent)
                                     let line_color = mix(
                                         self.color
                                         mix(self.color_hover, self.color_drag, self.drag)
@@ -1851,10 +1877,10 @@ script_mod! {
                             padding: Inset{left: 8 top: 8 right: 8 bottom: 10}
                             show_bg: true
                             draw_bg +: {
-                                color: #x2d3744
+                                color: theme.color_secondary
                                 pixel: fn() {
                                     let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                                    sdf.clear(#x00000000)
+                                    sdf.clear(theme.color_transparent)
                                     sdf.rect(self.rect_size.x - 1.0, 0.0, 1.0, self.rect_size.y)
                                     return sdf.fill(self.color)
                                 }
@@ -1873,7 +1899,7 @@ script_mod! {
                                     icon_walk: Walk{width: 16 height: 16}
                                     draw_icon +: {
                                         svg: crate_resource("self:resources/icons/logo.svg")
-                                        color: #xe7ebf0
+                                        color: theme.color_foreground
                                     }
                                 }
                                 sidebar_brand_label := Label {
@@ -1881,30 +1907,17 @@ script_mod! {
                                     height: Fit
                                     text: "Threadlane"
                                     draw_text +: {
-                                        color: #xe7ebf0
+                                        color: theme.color_foreground
                                         text_style: theme.font_bold { font_size: 14.0 }
                                     }
                                 }
                                 sidebar_brand_spacer := mod.components.FlexSpacer {}
-                                settings_btn := Button {
+                                settings_btn := mod.components.IconButton {
                                     width: 26
                                     height: 26
-                                    padding: 0
-                                    spacing: 0
-                                    text: ""
-                                    align: Align{x: 0.5 y: 0.5}
                                     icon_walk: Walk{width: 14 height: 14}
-                                    draw_bg +: {
-                                        color: #x00000000
-                                        color_hover: #x252a32
-                                        color_down: #x323844
-                                        border_radius: 6.0
-                                    }
                                     draw_icon +: {
                                         svg: crate_resource("self:resources/icons/settings.svg")
-                                        color: #x9ba7b6
-                                        color_hover: #xe7ebf0
-                                        color_down: #xffffff
                                     }
                                 }
                             }
@@ -1913,7 +1926,7 @@ script_mod! {
                                 height: 1
                                 margin: Inset{left: 6 right: 6 bottom: 4}
                                 show_bg: true
-                                draw_bg +: { color: #x2a303a }
+                                draw_bg +: { color: theme.color_input }
                             }
 
                             projects_header := mod.components.SectionHeader {
@@ -1935,22 +1948,22 @@ script_mod! {
                                     padding: Inset{left: 10 right: 10 top: 6 bottom: 6}
                                     text: "Update Threadlane"
                                     draw_bg +: {
-                                        color: #x1d2822
-                                        color_hover: #x25342b
-                                        color_focus: #x25342b
-                                        color_down: #x2c4034
-                                        border_color: #x344b3c
-                                        border_color_hover: #x466853
-                                        border_color_focus: #x466853
-                                        border_color_down: #x5c8b6d
+                                        color: theme.color_background
+                                        color_hover: theme.color_background
+                                        color_focus: theme.color_background
+                                        color_down: theme.color_card
+                                        border_color: theme.color_secondary
+                                        border_color_hover: theme.color_success
+                                        border_color_focus: theme.color_success
+                                        border_color_down: theme.color_success
                                         border_radius: 8.0
                                         border_size: 1.0
                                     }
                                     draw_text +: {
-                                        color: #x8eb89d
-                                        color_hover: #xb5d4be
-                                        color_focus: #xb5d4be
-                                        color_down: #xe7f5eb
+                                        color: theme.color_success
+                                        color_hover: theme.color_success
+                                        color_focus: theme.color_success
+                                        color_down: theme.color_primary_foreground
                                         text_style: theme.font_bold { font_size: 9.0 }
                                     }
                                 }
@@ -1988,7 +2001,7 @@ script_mod! {
                                         icon_walk: Walk{width: 12 height: 12}
                                         draw_icon +: {
                                             svg: crate_resource("self:resources/icons/folder.svg")
-                                            color: #x8fb9e8
+                                            color: theme.color_primary
                                         }
                                     }
                                     project_name_label := mod.components.ClippedLabel {
@@ -1996,7 +2009,7 @@ script_mod! {
                                         padding: 0
                                         align: Align{y: 0.6}
                                         draw_text +: {
-                                            color: #xf0f4fa
+                                            color: theme.color_primary_foreground
                                             text_style: theme.font_bold { font_size: 12.0 }
                                         }
                                     }
@@ -2006,7 +2019,7 @@ script_mod! {
                                     padding: 0
                                     align: Align{y: 0.5}
                                     draw_text +: {
-                                        color: #x737f8e
+                                        color: theme.color_muted_foreground
                                         text_style +: { font_size: 9.0 }
                                     }
                                 }
@@ -2019,36 +2032,21 @@ script_mod! {
                                 draw_icon +: { svg: crate_resource("self:resources/icons/terminal.svg") }
                             }
 
-                            caps_btn := Button {
-                                width: Fit
-                                height: 28
+                            caps_btn := mod.components.HeaderChipButton {
                                 padding: Inset{left: 8 right: 9 top: 4 bottom: 4}
                                 text: "Tools"
                                 icon_walk: Walk{width: 13 height: 13 margin: Inset{right: 2}}
                                 draw_icon +: {
                                     svg: crate_resource("self:resources/icons/skill.svg")
-                                    color: #x8fb9e8
-                                    color_hover: #xb9d7fa
-                                    color_down: #xffffff
                                 }
-                                draw_bg +: {
-                                    color: #x232830
-                                    color_hover: #x2d3642
-                                    color_focus: #x2d3642
-                                    color_down: #x36475c
-                                    border_color: #x3f4a59
-                                    border_color_hover: #x6184ac
-                                    border_color_focus: #x6184ac
-                                    border_color_down: #x7eb4f2
-                                    border_radius: 7.0
-                                    border_size: 1.0
-                                }
-                                draw_text +: {
-                                    color: #xcbd3dd
-                                    color_hover: #xe8edf4
-                                    color_focus: #xe8edf4
-                                    color_down: #xffffff
-                                    text_style: theme.font_bold { font_size: 9.5 }
+                            }
+
+                            task_sidebar_btn := mod.components.HeaderChipButton {
+                                visible: false
+                                padding: Inset{left: 9 right: 9 top: 4 bottom: 4}
+                                text: ""
+                                draw_icon +: {
+                                    svg: crate_resource("self:resources/icons/subagent.svg")
                                 }
                             }
 
@@ -2067,13 +2065,13 @@ script_mod! {
                                     draw_bg +: { dot_radius: 1.05 speed: 3.0 }
                                 }
                                 update_notice_available_dot := mod.components.StatusDot {
-                                    draw_bg +: { color: #x78aef0 }
+                                    draw_bg +: { color: theme.color_primary }
                                 }
                                 update_notice_ready_dot := mod.components.StatusDot {
-                                    draw_bg +: { color: #x67c58b }
+                                    draw_bg +: { color: theme.color_success }
                                 }
                                 update_notice_error_dot := mod.components.StatusDot {
-                                    draw_bg +: { color: #xe86a64 }
+                                    draw_bg +: { color: theme.color_destructive }
                                 }
                             }
 
@@ -2082,13 +2080,13 @@ script_mod! {
                                 height: Fit
                                 text: ""
                                 draw_text +: {
-                                    color: #xdce6f2
+                                    color: theme.color_primary_foreground
                                     text_style: theme.font_bold { font_size: 9.5 }
                                 }
                             }
                             update_notice_detail := mod.components.ClippedLabel {
                                 draw_text +: {
-                                    color: #x8493a5
+                                    color: theme.color_primary
                                     text_style +: { font_size: 8.5 }
                                 }
                             }
@@ -2114,7 +2112,7 @@ script_mod! {
                                 flow: Down
                                 padding: Inset{left: 4 top: 6 right: 4 bottom: 6}
                                 draw_bg +: {
-                                    color: #x1c1f26
+                                    color: theme.color_background
                                     border_radius: 10.0
                                 }
                                 chat_list := ChatList {
@@ -2147,13 +2145,13 @@ script_mod! {
                                 padding: Inset{left: 9 top: 7 right: 7 bottom: 7}
                                 new_batch: true
                                 draw_bg +: {
-                                    color: #x1f232b
-                                    color_hover: #x232830
-                                    color_focus: #x252b35
-                                    border_color: #x3a424e
-                                    border_color_focus: #x4a6f9e
-                                    border_color_down: #x6fa8ff
-                                    border_color_error: #xb85c55
+                                    color: theme.color_card
+                                    color_hover: theme.color_secondary
+                                    color_focus: theme.color_background
+                                    border_color: theme.color_border
+                                    border_color_focus: theme.color_primary
+                                    border_color_down: theme.color_primary
+                                    border_color_error: theme.color_destructive
                                     border_size: 1.0
                                     border_radius: 11.0
                                 }
@@ -2177,8 +2175,8 @@ script_mod! {
                                     height: Fit
                                     trigger: "/"
                                     inline_search: true
-                                    color_focus: #x252b35
-                                    color_hover: #x232830
+                                    color_focus: theme.color_background
+                                    color_hover: theme.color_secondary
 
                                     persistent +: {
                                         width: Fill
@@ -2195,25 +2193,25 @@ script_mod! {
                                                 submit_on_enter: true
                                                 empty_text: "Ask threadlane anything…"
                                                 draw_bg +: {
-                                                    color: #x00000000
-                                                    color_empty: #x00000000
-                                                    color_hover: #x00000000
-                                                    color_focus: #x00000000
-                                                    color_down: #x00000000
-                                                    border_color: #x00000000
-                                                    border_color_empty: #x00000000
-                                                    border_color_hover: #x00000000
-                                                    border_color_focus: #x00000000
-                                                    border_color_down: #x00000000
+                                                    color: theme.color_transparent
+                                                    color_empty: theme.color_transparent
+                                                    color_hover: theme.color_transparent
+                                                    color_focus: theme.color_transparent
+                                                    color_down: theme.color_transparent
+                                                    border_color: theme.color_transparent
+                                                    border_color_empty: theme.color_transparent
+                                                    border_color_hover: theme.color_transparent
+                                                    border_color_focus: theme.color_transparent
+                                                    border_color_down: theme.color_transparent
                                                     border_size: 0.0
                                                 }
                                                 draw_text +: {
-                                                    color: #xdde3ea
-                                                    color_hover: #xffffff
-                                                    color_focus: #xffffff
-                                                    color_empty: #x7f8b9a
-                                                    color_empty_hover: #x9aa5b3
-                                                    color_empty_focus: #x9aa5b3
+                                                    color: theme.color_foreground
+                                                    color_hover: theme.color_primary_foreground
+                                                    color_focus: theme.color_primary_foreground
+                                                    color_empty: theme.color_muted_foreground
+                                                    color_empty_hover: theme.color_muted_foreground
+                                                    color_empty_focus: theme.color_muted_foreground
                                                     text_style +: {
                                                         font_size: 10.5
                                                         line_spacing: 1.35
@@ -2236,7 +2234,7 @@ script_mod! {
                                         width: Fit
                                         visible: false
                                         draw_text +: {
-                                            color: #x9aa5b3
+                                            color: theme.color_muted_foreground
                                             text_style +: { font_size: 8.5 }
                                         }
                                     }
@@ -2249,16 +2247,16 @@ script_mod! {
                                         icon_walk: Walk{width: 14 height: 14}
                                         draw_icon +: {
                                             svg: crate_resource("self:resources/icons/attach.svg")
-                                            color: #x9aa5b3
-                                            color_hover: #xdde3ea
-                                            color_down: #xffffff
+                                            color: theme.color_muted_foreground
+                                            color_hover: theme.color_foreground
+                                            color_down: theme.color_primary_foreground
                                         }
                                         draw_bg +: {
-                                            color: #x232830
-                                            color_hover: #x2a313c
-                                            color_down: #x354153
-                                            border_color: #x3a424e
-                                            border_color_hover: #x4a5564
+                                            color: theme.color_secondary
+                                            color_hover: theme.color_secondary
+                                            color_down: theme.color_input
+                                            border_color: theme.color_border
+                                            border_color_hover: theme.color_input
                                             border_size: 1.0
                                             border_radius: 6.0
                                         }
@@ -2267,7 +2265,7 @@ script_mod! {
                                     composer_hint := mod.components.ClippedLabel {
                                         text: "Enter sends · Shift+Enter adds a line"
                                         draw_text +: {
-                                            color: #x7f8b9a
+                                            color: theme.color_muted_foreground
                                             text_style +: { font_size: 8.5 }
                                         }
                                     }
@@ -2338,7 +2336,7 @@ script_mod! {
                                             icon_walk: Walk{width: 15 height: 15}
                                             draw_icon +: {
                                                 svg: crate_resource("self:resources/icons/send.svg")
-                                                color: #xffffff
+                                                color: theme.color_primary_foreground
                                             }
                                         }
 
@@ -2353,22 +2351,22 @@ script_mod! {
                                             align: Align{x: 0.5 y: 0.5}
                                             icon_walk: Walk{width: 12 height: 12}
                                             draw_bg +: {
-                                                color: #xb85c55
-                                                color_hover: #xd4775f
-                                                color_focus: #xd4775f
-                                                color_down: #xe39a5d
-                                                border_color: #x00000000
-                                                border_color_hover: #x00000000
-                                                border_color_focus: #x00000000
-                                                border_color_down: #x00000000
+                                                color: theme.color_destructive
+                                                color_hover: theme.color_destructive
+                                                color_focus: theme.color_destructive
+                                                color_down: theme.color_destructive
+                                                border_color: theme.color_transparent
+                                                border_color_hover: theme.color_transparent
+                                                border_color_focus: theme.color_transparent
+                                                border_color_down: theme.color_transparent
                                                 border_size: 0.0
                                             }
                                             draw_icon +: {
                                                 svg: crate_resource("self:resources/icons/stop.svg")
-                                                color: #xffffff
-                                                color_hover: #xffffff
-                                                color_focus: #xffffff
-                                                color_down: #xffffff
+                                                color: theme.color_primary_foreground
+                                                color_hover: theme.color_primary_foreground
+                                                color_focus: theme.color_primary_foreground
+                                                color_down: theme.color_primary_foreground
                                             }
                                         }
                                     }
@@ -2378,6 +2376,15 @@ script_mod! {
                             project_terminal := mod.components.ProjectTerminal {}
                             }
 
+                            task_sidebar_wrap := View {
+                                width: 280
+                                height: Fill
+                                visible: false
+                                task_sidebar := mod.components.TaskSidebar {
+                                    width: Fill
+                                    height: Fill
+                                }
+                            }
 
                         }
                     }
@@ -2391,17 +2398,34 @@ script_mod! {
 }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum SettingsPage {
+    #[default]
     GoogleAntigravity,
     OpenAi,
+    Capabilities,
+    Skills,
     About,
 }
 
-impl Default for SettingsPage {
-    fn default() -> Self {
-        Self::GoogleAntigravity
-    }
+#[derive(Clone, Debug, Default)]
+enum ProviderSettingsModalAction {
+    ShowExtensions,
+    ShowSkills,
+    Add(ExtensionScope),
+    Refresh,
+    SetEnabled {
+        row: usize,
+        enabled: bool,
+    },
+    Remove(usize),
+    SetSkillEnabled {
+        row: usize,
+        enabled: bool,
+    },
+    RefreshSkills,
+    #[default]
+    None,
 }
 
 #[derive(Script, Widget)]
@@ -2416,6 +2440,12 @@ struct ProviderSettingsModal {
     opened: bool,
     #[rust]
     page: SettingsPage,
+    #[rust]
+    extension_rows: Vec<crate::state::CapabilityExtensionRow>,
+    #[rust]
+    skill_rows: Vec<crate::state::CapabilitySkillRow>,
+    #[rust]
+    install_scope_global: bool,
 }
 
 impl ScriptHook for ProviderSettingsModal {
@@ -2451,6 +2481,7 @@ impl Widget for ProviderSettingsModal {
 
         self.view.handle_event(cx, event, scope);
         if let Event::Actions(actions) = event {
+            let uid = self.widget_uid();
             if self
                 .view
                 .button(cx, ids!(settings_nav_google_btn))
@@ -2467,10 +2498,90 @@ impl Widget for ProviderSettingsModal {
             }
             if self
                 .view
+                .button(cx, ids!(settings_nav_capabilities_btn))
+                .clicked(actions)
+            {
+                self.set_page(cx, SettingsPage::Capabilities);
+                cx.widget_action(uid, ProviderSettingsModalAction::ShowExtensions);
+            }
+            if self
+                .view
+                .button(cx, ids!(settings_nav_skills_btn))
+                .clicked(actions)
+            {
+                self.set_page(cx, SettingsPage::Skills);
+                cx.widget_action(uid, ProviderSettingsModalAction::ShowSkills);
+            }
+            if self
+                .view
                 .button(cx, ids!(settings_nav_about_btn))
                 .clicked(actions)
             {
                 self.set_page(cx, SettingsPage::About);
+            }
+            if self
+                .view
+                .button(cx, ids!(capability_scope_global_btn))
+                .clicked(actions)
+            {
+                self.install_scope_global = true;
+                self.sync_install_scope(cx);
+            }
+            if self
+                .view
+                .button(cx, ids!(capability_scope_project_btn))
+                .clicked(actions)
+            {
+                self.install_scope_global = false;
+                self.sync_install_scope(cx);
+            }
+            if self
+                .view
+                .button(cx, ids!(capability_add_btn))
+                .clicked(actions)
+            {
+                cx.widget_action(uid, ProviderSettingsModalAction::Add(self.install_scope()));
+            }
+            if self
+                .view
+                .button(cx, ids!(capability_refresh_btn))
+                .clicked(actions)
+            {
+                cx.widget_action(uid, ProviderSettingsModalAction::Refresh);
+            }
+            if self
+                .view
+                .button(cx, ids!(skill_refresh_btn))
+                .clicked(actions)
+            {
+                cx.widget_action(uid, ProviderSettingsModalAction::RefreshSkills);
+            }
+            let list = self.view.portal_list(cx, ids!(capability_list));
+            for (row, item) in list.items_with_actions(actions) {
+                if let Some(enabled) = item
+                    .check_box(cx, ids!(enabled_toggle))
+                    .changed(actions)
+                {
+                    cx.widget_action(
+                        uid,
+                        ProviderSettingsModalAction::SetEnabled { row, enabled },
+                    );
+                }
+                if item.button(cx, ids!(remove_btn)).clicked(actions) {
+                    cx.widget_action(uid, ProviderSettingsModalAction::Remove(row));
+                }
+            }
+            let skill_list = self.view.portal_list(cx, ids!(skill_list));
+            for (row, item) in skill_list.items_with_actions(actions) {
+                if let Some(enabled) = item
+                    .check_box(cx, ids!(enabled_toggle))
+                    .changed(actions)
+                {
+                    cx.widget_action(
+                        uid,
+                        ProviderSettingsModalAction::SetSkillEnabled { row, enabled },
+                    );
+                }
             }
         }
         let modal_rect = self.view.widget(cx, ids!(modal_card)).area().rect(cx);
@@ -2492,15 +2603,68 @@ impl Widget for ProviderSettingsModal {
         let pass_size = cx.current_pass_size();
         cx.begin_root_turtle(pass_size, Layout::flow_overlay());
         if self.opened {
-            self.view.draw_walk_all(
-                cx,
-                scope,
-                Walk {
-                    width: Size::Fixed(pass_size.x),
-                    height: Size::Fixed(pass_size.y),
-                    ..Default::default()
-                },
-            );
+            let walk = Walk {
+                width: Size::Fixed(pass_size.x),
+                height: Size::Fixed(pass_size.y),
+                ..Default::default()
+            };
+            while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
+                if let Some(mut list) = item.as_portal_list().borrow_mut() {
+                    // Only one settings page is visible at a time, so the single
+                    // PortalList encountered in the walk belongs to the active page.
+                    if self.page == SettingsPage::Skills {
+                        list.set_item_range(cx, 0, self.skill_rows.len().max(1));
+                        while let Some(row_index) = list.next_visible_item(cx) {
+                            if self.skill_rows.is_empty() {
+                                if row_index == 0 {
+                                    list.item(cx, row_index, id!(SkillEmptyRow))
+                                        .draw_all_unscoped(cx);
+                                }
+                                continue;
+                            }
+                            let Some(row) = self.skill_rows.get(row_index) else {
+                                continue;
+                            };
+                            let item = list.item(cx, row_index, id!(SkillRow));
+                            item.label(cx, ids!(name_lbl)).set_text(cx, &row.id);
+                            item.label(cx, ids!(scope_lbl))
+                                .set_text(cx, &row.scope_status());
+                            item.label(cx, ids!(path_lbl))
+                                .set_text(cx, &row.file_path.display().to_string());
+                            item.check_box(cx, ids!(enabled_toggle)).set_active(
+                                cx,
+                                row.enabled && row.is_valid,
+                                Animate::No,
+                            );
+                            item.draw_all_unscoped(cx);
+                        }
+                    } else {
+                        list.set_item_range(cx, 0, self.extension_rows.len().max(1));
+                        while let Some(row_index) = list.next_visible_item(cx) {
+                            if self.extension_rows.is_empty() {
+                                if row_index == 0 {
+                                    list.item(cx, row_index, id!(EmptyRow))
+                                        .draw_all_unscoped(cx);
+                                }
+                                continue;
+                            }
+                            let Some(row) = self.extension_rows.get(row_index) else {
+                                continue;
+                            };
+                            let item = list.item(cx, row_index, id!(ExtensionRow));
+                            item.label(cx, ids!(name_lbl))
+                                .set_text(cx, &format!("{} · v{}", row.name, row.version));
+                            item.label(cx, ids!(scope_lbl))
+                                .set_text(cx, &row.scope_status());
+                            item.label(cx, ids!(path_lbl))
+                                .set_text(cx, &row.module_path.display().to_string());
+                            item.check_box(cx, ids!(enabled_toggle))
+                                .set_active(cx, row.enabled, Animate::No);
+                            item.draw_all_unscoped(cx);
+                        }
+                    }
+                }
+            }
         }
         cx.end_pass_sized_turtle();
         draw_list.end(cx);
@@ -2508,6 +2672,88 @@ impl Widget for ProviderSettingsModal {
     }
 }
 impl ProviderSettingsModal {
+    fn install_scope(&self) -> ExtensionScope {
+        if self.install_scope_global {
+            ExtensionScope::Global
+        } else {
+            ExtensionScope::Project
+        }
+    }
+
+    fn set_extension_rows(&mut self, cx: &mut Cx, rows: Vec<crate::state::CapabilityExtensionRow>) {
+        self.extension_rows = rows;
+        self.view.widget(cx, ids!(capability_list)).redraw(cx);
+    }
+
+    fn set_skill_rows(&mut self, cx: &mut Cx, rows: Vec<crate::state::CapabilitySkillRow>) {
+        self.skill_rows = rows;
+        self.view.widget(cx, ids!(skill_list)).redraw(cx);
+    }
+
+    fn set_skill_status(&mut self, cx: &mut Cx, status: &str) {
+        self.view
+            .label(cx, ids!(skill_status_lbl))
+            .set_text(cx, status);
+    }
+
+    fn set_extension_status(&mut self, cx: &mut Cx, status: &str) {
+        self.view
+            .label(cx, ids!(capability_status_lbl))
+            .set_text(cx, status);
+    }
+
+    fn sync_install_scope(&mut self, cx: &mut Cx) {
+        let normal_color = Vec4f {
+            x: 0x2b as f32 / 255.0,
+            y: 0x31 as f32 / 255.0,
+            z: 0x3d as f32 / 255.0,
+            w: 1.0,
+        };
+        let selected_color = Vec4f {
+            x: 0x2d as f32 / 255.0,
+            y: 0x40 as f32 / 255.0,
+            z: 0x5a as f32 / 255.0,
+            w: 1.0,
+        };
+        let normal_border = Vec4f {
+            x: 0x3a as f32 / 255.0,
+            y: 0x43 as f32 / 255.0,
+            z: 0x54 as f32 / 255.0,
+            w: 1.0,
+        };
+        let selected_border = Vec4f {
+            x: 0x4b as f32 / 255.0,
+            y: 0x71 as f32 / 255.0,
+            z: 0x9f as f32 / 255.0,
+            w: 1.0,
+        };
+        for (button_id, selected) in [
+            (ids!(capability_scope_global_btn), self.install_scope_global),
+            (
+                ids!(capability_scope_project_btn),
+                !self.install_scope_global,
+            ),
+        ] {
+            let mut button = self.view.button(cx, button_id);
+            let color = if selected {
+                selected_color
+            } else {
+                normal_color
+            };
+            let border_color = if selected {
+                selected_border
+            } else {
+                normal_border
+            };
+            script_apply_eval!(cx, button, {
+                draw_bg +: {
+                    color: #(color)
+                    border_color: #(border_color)
+                }
+            });
+            button.redraw(cx);
+        }
+    }
 
     fn set_page(&mut self, cx: &mut Cx, page: SettingsPage) {
         self.page = page;
@@ -2518,20 +2764,19 @@ impl ProviderSettingsModal {
     fn sync_page_visibility(&mut self, cx: &mut Cx) {
         let google_selected = self.page == SettingsPage::GoogleAntigravity;
         let openai_selected = self.page == SettingsPage::OpenAi;
+        let capabilities_selected = self.page == SettingsPage::Capabilities;
+        let skills_selected = self.page == SettingsPage::Skills;
         let about_selected = self.page == SettingsPage::About;
 
-        let normal_color = Vec4f { x: 0x20 as f32 / 255.0, y: 0x25 as f32 / 255.0, z: 0x2e as f32 / 255.0, w: 1.0 };
-        let selected_color = Vec4f { x: 0x2d as f32 / 255.0, y: 0x40 as f32 / 255.0, z: 0x5a as f32 / 255.0, w: 1.0 };
         for (button_id, selected) in [
             (ids!(settings_nav_google_btn), google_selected),
             (ids!(settings_nav_openai_btn), openai_selected),
+            (ids!(settings_nav_capabilities_btn), capabilities_selected),
+            (ids!(settings_nav_skills_btn), skills_selected),
             (ids!(settings_nav_about_btn), about_selected),
         ] {
-            let mut button = self.view.button(cx, button_id);
-            let color = if selected { selected_color } else { normal_color };
-            script_apply_eval!(cx, button, {
-                draw_bg +: { color: #(color) }
-            });
+            let button = self.view.button(cx, button_id);
+            crate::components::nav_button::set_selected(cx, &button, selected);
             button.redraw(cx);
         }
 
@@ -2544,6 +2789,12 @@ impl ProviderSettingsModal {
             .button(cx, ids!(settings_nav_openai_btn))
             .set_visible(cx, true);
         self.view
+            .button(cx, ids!(settings_nav_capabilities_btn))
+            .set_visible(cx, true);
+        self.view
+            .button(cx, ids!(settings_nav_skills_btn))
+            .set_visible(cx, true);
+        self.view
             .button(cx, ids!(settings_nav_about_btn))
             .set_visible(cx, true);
         self.view
@@ -2553,12 +2804,23 @@ impl ProviderSettingsModal {
             .widget(cx, ids!(openai_page))
             .set_visible(cx, openai_selected);
         self.view
+            .widget(cx, ids!(capabilities_page))
+            .set_visible(cx, capabilities_selected);
+        self.view
+            .widget(cx, ids!(skills_page))
+            .set_visible(cx, skills_selected);
+        self.view
             .widget(cx, ids!(about_page))
             .set_visible(cx, about_selected);
+        self.sync_install_scope(cx);
     }
 
     fn open(&mut self, cx: &mut Cx) {
-        self.page = SettingsPage::GoogleAntigravity;
+        self.open_page(cx, SettingsPage::GoogleAntigravity);
+    }
+
+    fn open_page(&mut self, cx: &mut Cx, page: SettingsPage) {
+        self.page = page;
         self.opened = true;
         self.sync_page_visibility(cx);
         if let Some(draw_list) = &self.draw_list {
@@ -2739,6 +3001,87 @@ fn clear_composer_for_dispatch(origin: InputOrigin, composer: &mut WorkspaceUiSt
     }
 }
 
+fn extension_reload_matches(
+    scope: ExtensionScope,
+    changed_project: &Path,
+    runtime_project: &Path,
+) -> bool {
+    scope == ExtensionScope::Global || changed_project == runtime_project
+}
+
+struct ExtensionReloadOutcome {
+    reloaded: usize,
+    failures: Vec<String>,
+}
+
+fn session_reload_count(result: Result<usize, String>) -> Result<usize, String> {
+    result.map(|_| 1)
+}
+
+fn aggregate_extension_reload_results(
+    results: impl IntoIterator<Item = (String, Result<usize, String>)>,
+) -> ExtensionReloadOutcome {
+    let mut outcome = ExtensionReloadOutcome {
+        reloaded: 0,
+        failures: Vec::new(),
+    };
+    for (label, result) in results {
+        match result {
+            Ok(reloaded) => outcome.reloaded += reloaded,
+            Err(error) => outcome.failures.push(format!("{label}: {error}")),
+        }
+    }
+    outcome
+}
+
+fn extension_reload_status(reloaded: usize, failures: &[String]) -> String {
+    if failures.is_empty() {
+        return match reloaded {
+            0 => "Extension updated on disk; no live sessions were open.".to_owned(),
+            1 => "Reloaded extensions in 1 live session.".to_owned(),
+            count => format!("Reloaded extensions in {count} live sessions."),
+        };
+    }
+
+    let failures = truncate_chars(&failures.join("; "), 180);
+    match reloaded {
+        0 => format!("Live reload failed for {failures}"),
+        1 => format!("Reloaded 1 live session; failed for {failures}"),
+        count => format!("Reloaded {count} live sessions; failed for {failures}"),
+    }
+}
+
+fn task_sidebar_items(
+    records: Vec<TaskRecord>,
+    mut session_label: impl FnMut(&TaskRecord) -> Option<String>,
+) -> Vec<TaskSidebarItem> {
+    records
+        .into_iter()
+        .map(|record| {
+            let cancellable = record.cancellable();
+            let label = session_label(&record).unwrap_or_else(|| {
+                if record.session_id == "draft" {
+                    "Project draft".to_owned()
+                } else {
+                    record.session_id.clone()
+                }
+            });
+            TaskSidebarItem {
+                id: record.id,
+                session_id: record.session_id,
+                session_label: label,
+                session_file: record.session_file,
+                agent: record.agent,
+                summary: truncate_chars(&record.summary, 120),
+                activity: record.current_activity.unwrap_or_default(),
+                status: record.status,
+                cancellable,
+                started_at_ms: record.started_at_ms,
+            }
+        })
+        .collect()
+}
+
 struct GenerationRun {
     id: u64,
     handle: tokio::task::JoinHandle<()>,
@@ -2746,6 +3089,7 @@ struct GenerationRun {
 
 struct SessionRuntime {
     agent: Arc<tokio::sync::Mutex<CodingAgent>>,
+    session_file: Option<PathBuf>,
     generation: Option<GenerationRun>,
     terminal_generation_id: Option<u64>,
     submitted_draft: Option<(u64, String)>,
@@ -2754,6 +3098,7 @@ struct SessionRuntime {
     status_text: String,
     model: String,
     reasoning_effort: ReasoningEffort,
+    plan: SessionPlan,
 }
 
 #[derive(Clone)]
@@ -2765,8 +3110,11 @@ struct ProjectCapabilities {
 
 impl SessionRuntime {
     fn new(agent: CodingAgent, model: String, reasoning_effort: ReasoningEffort) -> Self {
+        let session_file = agent.session_tree.file_path.clone();
+        let plan = agent.current_plan();
         Self {
             agent: Arc::new(tokio::sync::Mutex::new(agent)),
+            session_file,
             generation: None,
             terminal_generation_id: None,
             submitted_draft: None,
@@ -2775,6 +3123,7 @@ impl SessionRuntime {
             status_text: String::new(),
             model,
             reasoning_effort,
+            plan,
         }
     }
 }
@@ -2791,6 +3140,8 @@ pub struct App {
     session_runtimes: HashMap<SessionKey, SessionRuntime>,
     #[rust]
     next_generation_id: u64,
+    #[rust]
+    next_extension_reload_id: u64,
     #[rust]
     busy: bool,
     #[rust]
@@ -2813,6 +3164,14 @@ pub struct App {
     project_registry: Option<ProjectRegistry>,
     #[rust]
     capability_cache: HashMap<PathBuf, ProjectCapabilities>,
+    #[rust]
+    capability_state: CapabilityState,
+    #[rust]
+    supervisor: Option<Arc<HarnessSupervisor>>,
+    #[rust]
+    supervisor_projects: HashMap<PathBuf, String>,
+    #[rust]
+    task_sidebar_open: bool,
     #[rust]
     update_status: UpdateStatus,
     #[rust]
@@ -2863,6 +3222,34 @@ impl MatchEvent for App {
             }
             Err(error) => registry_error = Some(error.to_string()),
         }
+        let supervisor = Arc::new(HarnessSupervisor::new(
+            global_threadlane_dir().join("supervisor"),
+        ));
+        if let Some(registry) = &self.project_registry {
+            for project in registry.projects() {
+                if let Ok(record) = supervisor.register_project(&project.path) {
+                    let path = std::fs::canonicalize(&project.path)
+                        .unwrap_or_else(|_| project.path.clone());
+                    self.supervisor_projects.insert(path, record.id);
+                }
+            }
+        }
+        if let Some(tx) = self.tx.clone() {
+            let mut events = supervisor.subscribe();
+            get_runtime().spawn(async move {
+                loop {
+                    match events.recv().await {
+                        Ok(event) => {
+                            let _ = tx.send(GuiAgentEvent::BackgroundTask(event));
+                            SignalToUI::set_ui_signal();
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+        }
+        self.supervisor = Some(supervisor);
         let project_dirs = self.registered_project_dirs_or(&launch_dir);
         refresh_sessions(&project_dirs);
         let selected_project = self
@@ -2989,11 +3376,7 @@ impl MatchEvent for App {
             format_capabilities_summary(&discovered_skills, &discovered_agents);
         self.ui.button(cx, ids!(caps_btn)).set_text(
             cx,
-            &format!(
-                "{} skills · {} agents",
-                discovered_skills.len(),
-                discovered_agents.len()
-            ),
+            &format_capabilities_button_text(discovered_skills.len(), discovered_agents.len()),
         );
 
         self.commands = builtin_commands();
@@ -3006,31 +3389,24 @@ impl MatchEvent for App {
                     truncate_chars(&normalize_catalog_text(&skill.description), 120)
                 ),
             }));
-        if coding_agent.wasi_extensions.extensions.is_empty() {
+        for manifest in coding_agent.wasi_extensions.extension_manifests() {
+            let mut cmd_names = Vec::new();
+            for cmd in &manifest.commands {
+                cmd_names.push(format!("/{}", cmd.name));
+                self.commands.push(CommandInfo {
+                    name: cmd.name.clone(),
+                    description: cmd.description.clone(),
+                });
+            }
             self.push_chat(
                 MsgRole::System,
-                "No WASI extensions loaded (place packages in ./.threadlane/extensions/<id>/)",
+                format!(
+                    "Loaded WASI extension `{}` ({}) — commands: {}",
+                    manifest.name,
+                    manifest.description,
+                    cmd_names.join(", ")
+                ),
             );
-        } else {
-            for (ext_name, ext) in &coding_agent.wasi_extensions.extensions {
-                let mut cmd_names = Vec::new();
-                for cmd in &ext.manifest.commands {
-                    cmd_names.push(format!("/{}", cmd.name));
-                    self.commands.push(CommandInfo {
-                        name: cmd.name.clone(),
-                        description: cmd.description.clone(),
-                    });
-                }
-                self.push_chat(
-                    MsgRole::System,
-                    format!(
-                        "Loaded WASI extension `{}` ({}) — commands: {}",
-                        ext_name,
-                        ext.manifest.description,
-                        cmd_names.join(", ")
-                    ),
-                );
-            }
         }
         self.push_chat(
             MsgRole::System,
@@ -3058,6 +3434,7 @@ impl MatchEvent for App {
         self.spawn_model_fetch(api_key, account_id_opt);
         self.trigger_update_check(cx);
         self.sync_terminal_project(cx);
+        self.sync_task_sidebar(cx);
 
         cx.redraw_all();
     }
@@ -3111,7 +3488,11 @@ impl MatchEvent for App {
             }
         }
 
-        if self.ui.button(cx, ids!(terminal_header_btn)).clicked(actions) {
+        if self
+            .ui
+            .button(cx, ids!(terminal_header_btn))
+            .clicked(actions)
+        {
             self.ui
                 .project_terminal(cx, ids!(project_terminal))
                 .toggle(cx);
@@ -3238,9 +3619,74 @@ impl MatchEvent for App {
         }
 
         if self.ui.button(cx, ids!(caps_btn)).clicked(actions) {
-            let summary = self.capabilities_summary.clone();
-            self.push_chat(MsgRole::System, summary);
-            self.ui.widget(cx, ids!(chat_list)).redraw(cx);
+            self.open_capabilities_modal(cx);
+        }
+
+        let providers_modal_uid = self.ui.widget(cx, ids!(providers_modal)).widget_uid();
+        if let Some(action) = actions.find_widget_action(providers_modal_uid) {
+            match action.cast::<ProviderSettingsModalAction>() {
+                ProviderSettingsModalAction::ShowExtensions
+                | ProviderSettingsModalAction::Refresh => self.refresh_capability_state(cx),
+                ProviderSettingsModalAction::ShowSkills
+                | ProviderSettingsModalAction::RefreshSkills => self.refresh_skill_state(cx),
+                ProviderSettingsModalAction::Add(scope) => {
+                    self.open_extension_picker(scope);
+                }
+                ProviderSettingsModalAction::SetEnabled { row, enabled } => {
+                    self.set_extension_enabled(cx, row, enabled);
+                }
+                ProviderSettingsModalAction::Remove(row) => {
+                    self.remove_extension(cx, row);
+                }
+                ProviderSettingsModalAction::SetSkillEnabled { row, enabled } => {
+                    self.set_skill_enabled(cx, row, enabled);
+                }
+                ProviderSettingsModalAction::None => {}
+            }
+        }
+
+        if self.ui.button(cx, ids!(task_sidebar_btn)).clicked(actions) {
+            self.task_sidebar_open = !self.task_sidebar_open;
+            self.sync_task_sidebar(cx);
+        }
+
+        let task_sidebar_uid = self.ui.widget(cx, ids!(task_sidebar)).widget_uid();
+        if let Some(action) = actions.find_widget_action(task_sidebar_uid) {
+            match action.cast::<TaskSidebarAction>() {
+                TaskSidebarAction::Close => {
+                    self.task_sidebar_open = false;
+                    self.sync_task_sidebar(cx);
+                }
+                TaskSidebarAction::OpenSession {
+                    session_id,
+                    session_file,
+                } => {
+                    let Some(work_dir) = self.active_work_dir().map(Path::to_path_buf) else {
+                        return;
+                    };
+                    self.refresh_registered_sessions();
+                    if let Some(entry) = session_file
+                        .as_deref()
+                        .and_then(|path| session_entry_for_file(&work_dir, path))
+                    {
+                        self.activate_session(cx, entry);
+                    } else if session_id == "draft" {
+                        self.select_project_draft(cx, work_dir);
+                    } else {
+                        self.push_chat(MsgRole::System, "That task session is not available yet.");
+                        self.ui.widget(cx, ids!(chat_list)).redraw(cx);
+                    }
+                }
+                TaskSidebarAction::Cancel(task_id) => {
+                    if let Some(supervisor) = &self.supervisor {
+                        if let Err(error) = supervisor.cancel_task(&task_id) {
+                            self.push_chat(MsgRole::System, error);
+                        }
+                    }
+                    self.sync_task_sidebar(cx);
+                }
+                TaskSidebarAction::None => {}
+            }
         }
 
         if self.ui.button(cx, ids!(update_btn)).clicked(actions) {
@@ -3299,6 +3745,9 @@ impl MatchEvent for App {
                     .workspace_mut(key.clone())
                     .chat
                     .mark_generation_stopped();
+                if self.finish_session_tasks(&key.work_dir, &key.session_id) {
+                    self.sync_task_sidebar(cx);
+                }
                 self.set_session_status(cx, &key, UiStatus::Ready, "Stopped");
                 self.push_chat(MsgRole::System, "Generation stopped.");
                 self.ui.widget(cx, ids!(chat_list)).redraw(cx);
@@ -3490,7 +3939,9 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
-        crate::makepad_widgets::script_mod(vm);
+        crate::makepad_widgets::theme_mod(vm);
+        crate::theme::install(vm);
+        crate::makepad_widgets::widgets_mod(vm);
         crate::components::script_mod(vm);
         self::script_mod(vm)
     }
@@ -3542,6 +3993,15 @@ const MAX_CAPABILITY_SUMMARY_ITEMS: usize = 32;
 
 fn normalize_catalog_text(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn format_capabilities_button_text(skills_count: usize, agents_count: usize) -> String {
+    match (skills_count, agents_count) {
+        (0, 0) => "Capabilities".to_string(),
+        (s, 0) => format!("{s} skills"),
+        (0, a) => format!("{a} agents"),
+        (s, a) => format!("{s} skills · {a} agents"),
+    }
 }
 
 fn format_capabilities_summary(skills: &[SkillMetadata], agents: &[AgentConfig]) -> String {
@@ -3601,12 +4061,34 @@ fn format_capabilities_summary(skills: &[SkillMetadata], agents: &[AgentConfig])
 
 impl App {
     fn open_providers_modal(&mut self, cx: &mut Cx) {
+        let mut show_extensions = false;
+        let mut show_skills = false;
         if let Some(mut modal) = self
             .ui
             .widget(cx, ids!(providers_modal))
             .borrow_mut::<ProviderSettingsModal>()
         {
+            show_extensions = modal.page == SettingsPage::Capabilities;
+            show_skills = modal.page == SettingsPage::Skills;
             modal.open(cx);
+        }
+        if show_extensions {
+            self.refresh_capability_state(cx);
+        }
+        if show_skills {
+            self.refresh_skill_state(cx);
+        }
+    }
+
+    fn open_capabilities_modal(&mut self, cx: &mut Cx) {
+        self.refresh_skill_state(cx);
+        self.refresh_capability_state(cx);
+        if let Some(mut modal) = self
+            .ui
+            .widget(cx, ids!(providers_modal))
+            .borrow_mut::<ProviderSettingsModal>()
+        {
+            modal.open_page(cx, SettingsPage::Skills);
         }
     }
 
@@ -3618,6 +4100,267 @@ impl App {
         {
             modal.close(cx);
         }
+    }
+
+    fn refresh_capability_state(&mut self, cx: &mut Cx) {
+        self.capability_state
+            .refresh(&CapabilityCatalog::discover(self.active_work_dir()));
+        if let Some(mut modal) = self
+            .ui
+            .widget(cx, ids!(providers_modal))
+            .borrow_mut::<ProviderSettingsModal>()
+        {
+            modal.set_extension_rows(cx, self.capability_state.extensions.clone());
+            modal.set_extension_status(cx, "");
+        }
+        self.capability_cache.clear();
+    }
+
+    fn refresh_skill_state(&mut self, cx: &mut Cx) {
+        let work_dir = self.active_work_dir().map(Path::to_path_buf);
+        self.capability_state.refresh_skills(work_dir.as_deref());
+        if let Some(mut modal) = self
+            .ui
+            .widget(cx, ids!(providers_modal))
+            .borrow_mut::<ProviderSettingsModal>()
+        {
+            modal.set_skill_rows(cx, self.capability_state.skills.clone());
+            modal.set_skill_status(cx, "");
+        }
+    }
+
+    fn set_skill_status(&mut self, cx: &mut Cx, status: &str) {
+        if let Some(mut modal) = self
+            .ui
+            .widget(cx, ids!(providers_modal))
+            .borrow_mut::<ProviderSettingsModal>()
+        {
+            modal.set_skill_status(cx, status);
+        }
+    }
+
+    fn set_skill_enabled(&mut self, cx: &mut Cx, row: usize, enabled: bool) {
+        let Some(selected) = self.capability_state.skills.get(row).cloned() else {
+            self.refresh_skill_state(cx);
+            self.set_skill_status(cx, "Skill inventory changed. Please try again.");
+            return;
+        };
+        let Some(work_dir) = self.active_work_dir().map(Path::to_path_buf) else {
+            self.set_skill_status(cx, "Attach a project to manage project skills.");
+            return;
+        };
+        let mut settings = SkillSettings::load(&work_dir);
+        let status = match settings.set_enabled(&work_dir, &selected.id, enabled) {
+            Ok(()) if enabled => format!("Enabled {}.", selected.id),
+            Ok(()) => format!("Disabled {}.", selected.id),
+            Err(error) => error,
+        };
+        // Refresh the settings list, the capabilities chip / slash commands, and
+        // live session catalogs so the toggle takes effect.
+        self.refresh_skill_state(cx);
+        self.capability_cache.clear();
+        self.refresh_project_capabilities(cx, &work_dir);
+        self.refresh_live_session_skills(&work_dir);
+        self.set_skill_status(cx, &status);
+    }
+
+    /// Rediscover skills for live sessions rooted in the toggled project so their
+    /// skill catalog and `load_skill` gating reflect the new enable state.
+    fn refresh_live_session_skills(&mut self, work_dir: &Path) {
+        let canonical = std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+        let targets: Vec<_> = self
+            .session_runtimes
+            .iter()
+            .filter(|(key, _)| {
+                std::fs::canonicalize(&key.work_dir).unwrap_or_else(|_| key.work_dir.clone())
+                    == canonical
+            })
+            .map(|(_, runtime)| runtime.agent.clone())
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        get_runtime().spawn(async move {
+            for agent in targets {
+                agent.lock().await.refresh_skills();
+            }
+        });
+    }
+
+    fn open_extension_picker(&self, scope: ExtensionScope) {
+        let picked = rfd::FileDialog::new()
+            .set_title("Install a compiled WASI extension")
+            .add_filter("WebAssembly", &["wasm"])
+            .pick_file();
+        if let Some(tx) = self.tx.as_ref() {
+            let _ = tx.send(GuiAgentEvent::ExtensionFilePicked {
+                path: picked,
+                scope,
+            });
+            SignalToUI::set_ui_signal();
+        }
+    }
+
+    fn extension_manager(&self) -> ExtensionManager {
+        ExtensionManager::new(
+            default_global_threadlane_dir(),
+            self.active_work_dir().map(Path::to_path_buf),
+        )
+    }
+
+    fn set_capability_status(&mut self, cx: &mut Cx, status: &str) {
+        if let Some(mut modal) = self
+            .ui
+            .widget(cx, ids!(providers_modal))
+            .borrow_mut::<ProviderSettingsModal>()
+        {
+            modal.set_extension_status(cx, status);
+        }
+    }
+
+    fn reload_extension_runtimes(&mut self, scope: ExtensionScope) {
+        self.next_extension_reload_id = self.next_extension_reload_id.wrapping_add(1);
+        let reload_id = self.next_extension_reload_id;
+        let changed_project = self.active_work_dir().map(Path::to_path_buf);
+        let session_targets =
+            self.session_runtimes
+                .iter()
+                .filter(|(key, _)| {
+                    changed_project.as_deref().is_some_and(|project| {
+                        extension_reload_matches(scope, project, &key.work_dir)
+                    }) || scope == ExtensionScope::Global
+                })
+                .map(|(key, runtime)| (key.clone(), runtime.agent.clone()))
+                .collect::<Vec<_>>();
+        let supervisor = self.supervisor.clone();
+        let tx = self.tx.clone();
+
+        get_runtime().spawn(async move {
+            let mut results = Vec::new();
+            for (key, agent) in session_targets {
+                let result = session_reload_count(agent.lock().await.reload_extensions().await);
+                results.push((
+                    format!(
+                        "session '{}' in '{}'",
+                        key.session_id,
+                        key.work_dir.display()
+                    ),
+                    result,
+                ));
+            }
+            if let Some(supervisor) = supervisor {
+                results.push((
+                    "background tasks".to_owned(),
+                    supervisor
+                        .reload_extensions(scope, changed_project.as_deref())
+                        .await,
+                ));
+            }
+
+            let outcome = aggregate_extension_reload_results(results);
+            if let Some(tx) = tx {
+                let _ = tx.send(GuiAgentEvent::ExtensionReloadCompleted {
+                    reload_id,
+                    reloaded: outcome.reloaded,
+                    failures: outcome.failures,
+                });
+                SignalToUI::set_ui_signal();
+            }
+        });
+    }
+
+    fn install_extension(&mut self, cx: &mut Cx, source: PathBuf, scope: ExtensionScope) {
+        let manager = self.extension_manager();
+        let (status, reload_scope) = match manager.install_from_wasm(&source, scope) {
+            Ok(record) => (
+                format!(
+                    "Installed {} on disk. Reloading live sessions…",
+                    record.name()
+                ),
+                Some(record.scope()),
+            ),
+            Err(error) => (error, None),
+        };
+        if let Some(scope) = reload_scope {
+            self.reload_extension_runtimes(scope);
+        }
+        self.refresh_capability_state(cx);
+        self.set_capability_status(cx, &status);
+    }
+
+    fn set_extension_enabled(&mut self, cx: &mut Cx, row: usize, enabled: bool) {
+        let Some(selected) = self.capability_state.extensions.get(row).cloned() else {
+            self.refresh_capability_state(cx);
+            self.set_capability_status(cx, "Extension inventory changed. Please try again.");
+            return;
+        };
+        let manager = self.extension_manager();
+        let record = manager
+            .discover()
+            .into_iter()
+            .find(|record| selected.matches_record(record));
+        let (status, reload_scope) = match record {
+            Some(record) => match manager.set_enabled(&record, enabled) {
+                Ok(()) if enabled => (
+                    format!(
+                        "Enabled {} on disk. Reloading live sessions…",
+                        record.name()
+                    ),
+                    Some(record.scope()),
+                ),
+                Ok(()) => (
+                    format!(
+                        "Disabled {} on disk. Reloading live sessions…",
+                        record.name()
+                    ),
+                    Some(record.scope()),
+                ),
+                Err(error) => (error, None),
+            },
+            None => (
+                "Extension inventory changed. Please try again.".to_owned(),
+                None,
+            ),
+        };
+        if let Some(scope) = reload_scope {
+            self.reload_extension_runtimes(scope);
+        }
+        self.refresh_capability_state(cx);
+        self.set_capability_status(cx, &status);
+    }
+
+    fn remove_extension(&mut self, cx: &mut Cx, row: usize) {
+        let Some(selected) = self.capability_state.extensions.get(row).cloned() else {
+            self.refresh_capability_state(cx);
+            self.set_capability_status(cx, "Extension inventory changed. Please try again.");
+            return;
+        };
+        let manager = self.extension_manager();
+        let record = manager
+            .discover()
+            .into_iter()
+            .find(|record| selected.matches_record(record));
+        let (status, reload_scope) = match record {
+            Some(record) => match manager.remove(&record) {
+                Ok(()) => (
+                    format!(
+                        "Removed {} from disk. Reloading live sessions…",
+                        record.name()
+                    ),
+                    Some(record.scope()),
+                ),
+                Err(error) => (error, None),
+            },
+            None => (
+                "Extension inventory changed. Please try again.".to_owned(),
+                None,
+            ),
+        };
+        if let Some(scope) = reload_scope {
+            self.reload_extension_runtimes(scope);
+        }
+        self.refresh_capability_state(cx);
+        self.set_capability_status(cx, &status);
     }
 
     fn refresh_provider_connection_ui(&mut self, cx: &mut Cx) {
@@ -4219,6 +4962,86 @@ impl App {
             .map(|key| key.work_dir.as_path())
     }
 
+    fn sync_task_sidebar(&mut self, cx: &mut Cx) {
+        let active_key = self.workspace_state.active_key().cloned();
+        let records = active_key.as_ref().and_then(|key| {
+            let work_dir =
+                std::fs::canonicalize(&key.work_dir).unwrap_or_else(|_| key.work_dir.clone());
+            let project_id = self.supervisor_projects.get(&work_dir)?;
+            Some((
+                work_dir,
+                self.supervisor.as_ref()?.list_tasks_for_project(project_id),
+            ))
+        });
+        let items = records
+            .map(|(work_dir, records)| {
+                task_sidebar_items(records, |record| {
+                    record
+                        .session_file
+                        .as_deref()
+                        .and_then(|path| session_entry_for_file(&work_dir, path))
+                        .map(|entry| entry.title)
+                })
+            })
+            .unwrap_or_default();
+        let plan = active_key
+            .as_ref()
+            .and_then(|key| self.session_runtimes.get(key))
+            .map(|runtime| runtime.plan.clone())
+            .unwrap_or_default();
+        let (visible, count) = task_header_state(&plan, &items);
+        self.ui
+            .button(cx, ids!(task_sidebar_btn))
+            .set_visible(cx, visible);
+        self.ui
+            .button(cx, ids!(task_sidebar_btn))
+            .set_text(cx, &count);
+        if !visible {
+            self.task_sidebar_open = false;
+        }
+        self.ui
+            .view(cx, ids!(task_sidebar_wrap))
+            .set_visible(cx, visible && self.task_sidebar_open);
+        if let Some(mut sidebar) = self
+            .ui
+            .widget(cx, ids!(task_sidebar))
+            .borrow_mut::<TaskSidebar>()
+        {
+            sidebar.set_content(
+                cx,
+                plan,
+                items,
+                active_key.as_ref().map(|key| key.session_id.clone()),
+            );
+        }
+    }
+
+    fn observe_session_task_event(
+        &self,
+        work_dir: &Path,
+        session_id: &str,
+        session_file: Option<&Path>,
+        event: &AgentEvent,
+    ) -> bool {
+        let canonical = std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+        let Some(project_id) = self.supervisor_projects.get(&canonical) else {
+            return false;
+        };
+        self.supervisor.as_ref().is_some_and(|supervisor| {
+            supervisor.observe_session_event(project_id, session_id, session_file, event)
+        })
+    }
+
+    fn finish_session_tasks(&self, work_dir: &Path, session_id: &str) -> bool {
+        let canonical = std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+        let Some(project_id) = self.supervisor_projects.get(&canonical) else {
+            return false;
+        };
+        self.supervisor
+            .as_ref()
+            .is_some_and(|supervisor| supervisor.finish_session_tasks(project_id, session_id))
+    }
+
     fn is_attached_project(&self, work_dir: &Path) -> bool {
         if let Some(registry) = self.project_registry.as_ref() {
             return registry
@@ -4265,6 +5088,13 @@ impl App {
         };
         match registry.attach(&raw_path) {
             Ok(project) => {
+                if let Some(supervisor) = &self.supervisor {
+                    if let Ok(record) = supervisor.register_project(&project.path) {
+                        let path = std::fs::canonicalize(&project.path)
+                            .unwrap_or_else(|_| project.path.clone());
+                        self.supervisor_projects.insert(path, record.id);
+                    }
+                }
                 self.refresh_registered_sessions();
                 self.select_project_draft(cx, project.path);
                 self.ui
@@ -4404,14 +5234,9 @@ impl App {
         let Some(work_dir) = self.active_terminal_project() else {
             return;
         };
-        if self
-            .project_terminals
-            .get(&work_dir)
-            .is_some_and(|group| {
-                group.sessions.len()
-                    >= crate::components::terminal_panel::MAX_VISIBLE_TERMINALS
-            })
-        {
+        if self.project_terminals.get(&work_dir).is_some_and(|group| {
+            group.sessions.len() >= crate::components::terminal_panel::MAX_VISIBLE_TERMINALS
+        }) {
             return;
         }
         let (cols, rows) = self
@@ -4597,7 +5422,7 @@ impl App {
             if row_index == cursor_row {
                 let width = line.chars().count();
                 if width < cursor_col {
-                    line.extend(std::iter::repeat(' ').take(cursor_col - width));
+                    line.extend(std::iter::repeat_n(' ', cursor_col - width));
                 }
                 let byte_index = line
                     .char_indices()
@@ -4688,54 +5513,123 @@ impl App {
         cx.redraw_all();
     }
 
+    fn start_background_task(
+        &mut self,
+        cx: &mut Cx,
+        work_dir: PathBuf,
+        prompt: String,
+        api_key: String,
+        account_id: Option<String>,
+        model: String,
+    ) {
+        if prompt.is_empty() {
+            self.push_chat(MsgRole::System, "Usage: /task <prompt>");
+            return;
+        }
+        let Some(supervisor) = self.supervisor.clone() else {
+            self.push_chat(MsgRole::System, "Background task service is unavailable.");
+            return;
+        };
+        let canonical = std::fs::canonicalize(&work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+        let project_id = match self.supervisor_projects.get(&canonical) {
+            Some(project_id) => project_id.clone(),
+            None => match supervisor.register_project(&canonical) {
+                Ok(project) => {
+                    self.supervisor_projects
+                        .insert(canonical.clone(), project.id.clone());
+                    project.id
+                }
+                Err(error) => {
+                    self.push_chat(
+                        MsgRole::System,
+                        format!("Could not register background task project: {error}"),
+                    );
+                    return;
+                }
+            },
+        };
+        let task_id = match supervisor.create_task(
+            &project_id,
+            None,
+            CodingAgentOptions {
+                api_key,
+                account_id,
+                model,
+                work_dir: canonical.clone(),
+                session_file: None,
+                system_prompt: Default::default(),
+            },
+        ) {
+            Ok(task_id) => task_id,
+            Err(error) => {
+                self.push_chat(
+                    MsgRole::System,
+                    format!("Could not create background task: {error}"),
+                );
+                return;
+            }
+        };
+        if let Err(error) = supervisor.submit_input(&task_id, prompt) {
+            let _ = supervisor.cancel_task(&task_id);
+            self.push_chat(
+                MsgRole::System,
+                format!("Could not start background task: {error}"),
+            );
+        } else {
+            self.push_chat(
+                MsgRole::System,
+                format!("Started background task {task_id}."),
+            );
+        }
+        self.sync_task_sidebar(cx);
+        cx.redraw_all();
+    }
+
     fn refresh_project_capabilities(&mut self, cx: &mut Cx, work_dir: &Path) {
         let canonical = std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
-        let capabilities =
-            if let Some(cached) = self.capability_cache.get(&canonical) {
-                cached.clone()
-            } else {
-                let (api_key, account_id) = self.current_credentials(cx);
-                let agent = CodingAgent::new(CodingAgentOptions {
-                    api_key,
-                    account_id,
-                    model: "gpt-5.6-luna".to_string(),
-                    work_dir: canonical.clone(),
-                    session_file: None,
-                    system_prompt: Default::default(),
-                });
-                let skills = agent
-                    .skills
-                    .list_skills()
-                    .into_iter()
-                    .filter(|skill| skill.enabled && skill.is_valid)
-                    .collect::<Vec<_>>();
-                let agents = discover_agents(&canonical, AgentScope::Both).agents;
-                let mut commands = builtin_commands();
-                commands.extend(skills.iter().map(|skill| CommandInfo {
-                    name: format!("skill {}", skill.id),
-                    description: format!(
-                        "{} · {}",
-                        skill.scope.display_name(),
-                        truncate_chars(&normalize_catalog_text(&skill.description), 120)
-                    ),
+        let capabilities = if let Some(cached) = self.capability_cache.get(&canonical) {
+            cached.clone()
+        } else {
+            let (api_key, account_id) = self.current_credentials(cx);
+            let agent = CodingAgent::new(CodingAgentOptions {
+                api_key,
+                account_id,
+                model: "gpt-5.6-luna".to_string(),
+                work_dir: canonical.clone(),
+                session_file: None,
+                system_prompt: Default::default(),
+            });
+            let skills = agent
+                .skills
+                .list_skills()
+                .into_iter()
+                .filter(|skill| skill.enabled && skill.is_valid)
+                .collect::<Vec<_>>();
+            let agents = discover_agents(&canonical, AgentScope::Both).agents;
+            let mut commands = builtin_commands();
+            commands.extend(skills.iter().map(|skill| CommandInfo {
+                name: format!("skill {}", skill.id),
+                description: format!(
+                    "{} · {}",
+                    skill.scope.display_name(),
+                    truncate_chars(&normalize_catalog_text(&skill.description), 120)
+                ),
+            }));
+            for manifest in agent.wasi_extensions.extension_manifests() {
+                commands.extend(manifest.commands.into_iter().map(|command| CommandInfo {
+                    name: command.name,
+                    description: command.description,
                 }));
-                for extension in agent.wasi_extensions.extensions.values() {
-                    commands.extend(extension.manifest.commands.iter().map(|command| {
-                        CommandInfo {
-                            name: command.name.clone(),
-                            description: command.description.clone(),
-                        }
-                    }));
-                }
-                let capabilities = ProjectCapabilities {
-                    summary: format_capabilities_summary(&skills, &agents),
-                    button_text: format!("{} skills · {} agents", skills.len(), agents.len()),
-                    commands,
-                };
-                self.capability_cache
-                    .insert(canonical.clone(), capabilities.clone());
-                capabilities
+            }
+            let capabilities = ProjectCapabilities {
+                summary: format_capabilities_summary(&skills, &agents),
+                button_text: format_capabilities_button_text(skills.len(), agents.len()),
+                commands,
             };
+            self.capability_cache
+                .insert(canonical.clone(), capabilities.clone());
+            capabilities
+        };
         self.capabilities_summary = capabilities.summary;
         self.commands = capabilities.commands;
         self.ui
@@ -4778,6 +5672,7 @@ impl App {
             .set_text(cx, &draft);
         self.refresh_attachment_ui(cx);
         self.sync_terminal_project(cx);
+        self.sync_task_sidebar(cx);
     }
 
     fn push_chat(&mut self, role: MsgRole, text: impl Into<String>) {
@@ -5024,6 +5919,7 @@ impl App {
 
         self.refresh_project_capabilities(cx, &entry.work_dir);
         self.restore_active_status(cx);
+        self.sync_task_sidebar(cx);
         cx.redraw_all();
     }
 
@@ -5050,6 +5946,11 @@ impl App {
             }
             "/antigravity.doctor" | "/doctor" => {
                 self.start_antigravity_doctor(cx);
+                return;
+            }
+            "/task" => {
+                self.push_chat(MsgRole::System, "Usage: /task <prompt>");
+                cx.redraw_all();
                 return;
             }
             _ => {}
@@ -5095,6 +5996,27 @@ impl App {
             return;
         };
         let work_dir = active_key.work_dir.clone();
+
+        if let Some(prompt) = input_text.trim().strip_prefix("/task ") {
+            self.start_background_task(
+                cx,
+                work_dir,
+                prompt.trim().to_string(),
+                api_key,
+                account_id,
+                model_name,
+            );
+            if consumes_composer {
+                if let Some(workspace) = self.workspace_state.active_workspace_mut() {
+                    clear_composer_for_dispatch(origin, &mut workspace.ui);
+                }
+                self.refresh_attachment_ui(cx);
+                self.ui
+                    .threadlane_command_text_input(cx, ids!(prompt_input))
+                    .reset(cx);
+            }
+            return;
+        }
 
         if consumes_composer
             && active_session_entry().is_none()
@@ -5601,7 +6523,20 @@ impl App {
                     format!("⚠ Injected stream rule '{rule_name}' after matching '{matched_text}': {reminder}"),
                 );
             }
-            AgentEvent::TurnStart { .. } | AgentEvent::MessageStart { .. } => {}
+            AgentEvent::PlanUpdated { plan } => {
+                let Some(key) = target_key else { return };
+                if let Some(runtime) = self.session_runtimes.get_mut(&key) {
+                    runtime.plan = plan;
+                }
+                if self.workspace_state.is_active(&key) {
+                    self.sync_task_sidebar(cx);
+                }
+            }
+            AgentEvent::TurnStart { .. }
+            | AgentEvent::MessageStart { .. }
+            | AgentEvent::SubagentQueued { .. }
+            | AgentEvent::SubagentStarted { .. }
+            | AgentEvent::SubagentFinished { .. } => {}
         }
     }
 
@@ -5649,7 +6584,7 @@ impl App {
                     work_dir,
                     session_id,
                 } => {
-                    let key = SessionKey::new(work_dir, session_id);
+                    let key = SessionKey::new(work_dir.clone(), session_id.clone());
                     let is_current = self
                         .session_runtimes
                         .get(&key)
@@ -5670,6 +6605,9 @@ impl App {
                         .flush_streaming();
                     self.set_session_status(cx, &key, UiStatus::Ready, "Ready");
 
+                    if self.finish_session_tasks(&work_dir, &session_id) {
+                        self.sync_task_sidebar(cx);
+                    }
                     self.refresh_registered_sessions();
                 }
 
@@ -5690,6 +6628,29 @@ impl App {
                 }
                 GuiAgentEvent::ProjectFolderPicked(result) => {
                     self.apply_project_folder_result(cx, result);
+                }
+                GuiAgentEvent::ExtensionFilePicked {
+                    path: Some(path),
+                    scope,
+                } => {
+                    self.install_extension(cx, path, scope);
+                }
+                GuiAgentEvent::ExtensionFilePicked { path: None, .. } => {}
+                GuiAgentEvent::ExtensionReloadCompleted {
+                    reload_id,
+                    reloaded,
+                    failures,
+                } => {
+                    if reload_id != self.next_extension_reload_id {
+                        continue;
+                    }
+                    self.refresh_capability_state(cx);
+                    if let Some(work_dir) = self.active_work_dir().map(Path::to_path_buf) {
+                        self.refresh_project_capabilities(cx, &work_dir);
+                    } else {
+                        self.commands = builtin_commands();
+                    }
+                    self.set_capability_status(cx, &extension_reload_status(reloaded, &failures));
                 }
                 GuiAgentEvent::DeviceCodePrompt { user_code, url } => {
                     if let Some(key) = self.auth_workspace.clone() {
@@ -5779,13 +6740,18 @@ impl App {
                     self.push_chat(MsgRole::System, report);
                     cx.redraw_all();
                 }
+                GuiAgentEvent::BackgroundTask(event) => {
+                    let _ = event.into_parts();
+                    self.refresh_registered_sessions();
+                    self.sync_task_sidebar(cx);
+                }
                 GuiAgentEvent::GenerationAgent {
                     generation_id,
                     work_dir,
                     session_id,
                     event: agent_event,
                 } => {
-                    let key = SessionKey::new(work_dir, session_id);
+                    let key = SessionKey::new(work_dir.clone(), session_id.clone());
                     let is_current = self
                         .session_runtimes
                         .get(&key)
@@ -5793,6 +6759,18 @@ impl App {
                         .is_some_and(|generation| generation.id == generation_id);
                     if !is_current {
                         continue;
+                    }
+                    let session_file = self
+                        .session_runtimes
+                        .get(&key)
+                        .and_then(|runtime| runtime.session_file.as_deref());
+                    if self.observe_session_task_event(
+                        &work_dir,
+                        &session_id,
+                        session_file,
+                        &agent_event,
+                    ) {
+                        self.sync_task_sidebar(cx);
                     }
                     self.handle_agent_event(cx, agent_event, Some((key, generation_id)))
                 }
@@ -5806,13 +6784,110 @@ impl App {
 #[cfg(test)]
 mod workspace_header_tests {
     use super::{
-        append_antigravity_models, clear_composer_for_dispatch, compact_workspace_path,
-        model_credential_error, ordered_model_options, project_name, InputOrigin,
-        truncate_terminal_output, ANTIGRAVITY_MODELS, MAX_TERMINAL_OUTPUT,
+        aggregate_extension_reload_results, append_antigravity_models, clear_composer_for_dispatch,
+        compact_workspace_path, extension_reload_matches, extension_reload_status,
+        model_credential_error, ordered_model_options, project_name, session_reload_count,
+        task_sidebar_items, truncate_terminal_output, InputOrigin, ANTIGRAVITY_MODELS,
+        MAX_TERMINAL_OUTPUT,
     };
     use crate::workspace::WorkspaceUiState;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use threadlane_agent::ImageAttachment;
+    use threadlane_coding_agent::{ExtensionScope, TaskKind, TaskRecord, TaskStatus};
+
+    #[test]
+    fn task_sidebar_items_preserve_session_navigation_and_cancel_policy() {
+        let session_file = PathBuf::from("/project/.threadlane/sessions/chat.jsonl");
+        let items = task_sidebar_items(
+            vec![TaskRecord {
+                id: "task-1".into(),
+                project_id: "project-1".into(),
+                session_id: "chat".into(),
+                session_file: Some(session_file.clone()),
+                parent_task_id: None,
+                kind: TaskKind::Background,
+                agent: "task".into(),
+                summary: "Inspect the workspace".into(),
+                current_activity: Some("read_file".into()),
+                status: TaskStatus::Running,
+                started_at_ms: 1,
+                finished_at_ms: None,
+            }],
+            |_| Some("Architecture review".into()),
+        );
+
+        assert_eq!(items[0].session_label, "Architecture review");
+        assert_eq!(items[0].session_file.as_ref(), Some(&session_file));
+        assert!(items[0].cancellable);
+    }
+
+    #[test]
+    fn extension_reload_results_preserve_successes_and_labeled_failures() {
+        let outcome = aggregate_extension_reload_results([
+            ("session alpha".to_owned(), Ok(1)),
+            ("session beta".to_owned(), Err("invalid module".to_owned())),
+            ("background tasks".to_owned(), Ok(2)),
+        ]);
+
+        assert_eq!(outcome.reloaded, 3);
+        assert_eq!(
+            outcome.failures,
+            ["session beta: invalid module".to_owned()]
+        );
+    }
+
+    #[test]
+    fn session_reload_counts_one_session_not_loaded_extensions() {
+        assert_eq!(session_reload_count(Ok(7)), Ok(1));
+        assert_eq!(
+            session_reload_count(Err("invalid module".to_owned())),
+            Err("invalid module".to_owned())
+        );
+    }
+
+    #[test]
+    fn extension_reload_status_surfaces_success() {
+        assert_eq!(
+            extension_reload_status(2, &[]),
+            "Reloaded extensions in 2 live sessions."
+        );
+    }
+
+    #[test]
+    fn extension_reload_status_surfaces_failures() {
+        let failures = vec!["session beta: invalid module".to_owned()];
+
+        assert_eq!(
+            extension_reload_status(1, &failures),
+            "Reloaded 1 live session; failed for session beta: invalid module"
+        );
+    }
+
+    #[test]
+    fn extension_reload_scope_selects_matching_session_runtimes() {
+        let changed_project = Path::new("/projects/alpha");
+
+        assert!(extension_reload_matches(
+            ExtensionScope::Global,
+            changed_project,
+            Path::new("/projects/alpha"),
+        ));
+        assert!(extension_reload_matches(
+            ExtensionScope::Global,
+            changed_project,
+            Path::new("/projects/beta"),
+        ));
+        assert!(extension_reload_matches(
+            ExtensionScope::Project,
+            changed_project,
+            Path::new("/projects/alpha"),
+        ));
+        assert!(!extension_reload_matches(
+            ExtensionScope::Project,
+            changed_project,
+            Path::new("/projects/beta"),
+        ));
+    }
 
     #[test]
     fn internal_model_switch_preserves_composer_draft_and_attachments() {

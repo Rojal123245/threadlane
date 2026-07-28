@@ -25,18 +25,18 @@ script_mod! {
         use_provider_icons: true
         draw_openai_icon +: {
             svg: crate_resource("self:resources/icons/openai.svg")
-            color: #xc9d0da
+            color: theme.color_foreground
         }
         draw_antigravity_icon +: {
             svg: crate_resource("self:resources/icons/google.svg")
         }
         draw_icon +: {
             svg: crate_resource("self:resources/icons/reasoning.svg")
-            color: #x9fc5f2
+            color: theme.color_primary
         }
         draw_text +: {
-            color: #xc9d0da
-            color_hover: #xffffff
+            color: theme.color_foreground
+            color_hover: theme.color_primary_foreground
             hover: instance(0.0)
             active: instance(0.0)
             get_color: fn() {
@@ -45,8 +45,8 @@ script_mod! {
             text_style: theme.font_regular { font_size: 9.5 }
         }
         draw_bg +: {
-            color: #x00000000
-            color_hover: #x303844
+            color: theme.color_transparent
+            color_hover: theme.color_card
             hover: instance(0.0)
             active: instance(0.0)
             pixel: fn() {
@@ -103,9 +103,9 @@ script_mod! {
         padding: Inset{left: 4 top: 4 right: 4 bottom: 0}
         menu_item: mod.components.IconPopupMenuItem {}
         draw_bg +: {
-            color: #x242932
-            border_color: #x454e5b
-            connector_color: uniform(#x5f82ad)
+            color: theme.color_background
+            border_color: theme.color_input
+            connector_color: uniform(theme.color_primary)
             border_size: 1.0
             border_radius: 7.0
             selected_anchor_height: uniform(24.0)
@@ -142,34 +142,34 @@ script_mod! {
         use_provider_icons: true
         draw_openai_icon +: {
             svg: crate_resource("self:resources/icons/openai.svg")
-            color: #xc7cdd6
+            color: theme.color_card_foreground
         }
         draw_antigravity_icon +: {
             svg: crate_resource("self:resources/icons/google.svg")
         }
         draw_icon +: {
             svg: crate_resource("self:resources/icons/reasoning.svg")
-            color: #x9fc5f2
+            color: theme.color_primary
         }
         draw_bg +: {
             hover: instance(0.0)
             focus: instance(0.0)
             down: instance(0.0)
             disabled: instance(0.0)
-            color: #x232830
-            color_hover: #x2a313c
-            color_focus: #x2f3a4d
-            color_down: #x354153
-            border_color: #x3a424e
-            border_color_hover: #x4a5564
-            border_color_focus: #x6fa8ff
-            border_color_down: #x6fa8ff
+            color: theme.color_secondary
+            color_hover: theme.color_secondary
+            color_focus: theme.color_secondary
+            color_down: theme.color_input
+            border_color: theme.color_border
+            border_color_hover: theme.color_input
+            border_color_focus: theme.color_primary
+            border_color_down: theme.color_primary
             border_size: 1.0
             border_radius: 6.0
-            arrow_color: #x7f8b9a
-            arrow_color_hover: #xc7cdd6
-            arrow_color_focus: #xc7cdd6
-            arrow_color_down: #xffffff
+            arrow_color: theme.color_muted_foreground
+            arrow_color_hover: theme.color_card_foreground
+            arrow_color_focus: theme.color_card_foreground
+            arrow_color_down: theme.color_primary_foreground
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 let fill = self.color
@@ -208,10 +208,10 @@ script_mod! {
             hover: instance(0.0)
             focus: instance(0.0)
             down: instance(0.0)
-            color: #xc7cdd6
-            color_hover: #xdde3ea
-            color_focus: #xdde3ea
-            color_down: #xffffff
+            color: theme.color_card_foreground
+            color_hover: theme.color_foreground
+            color_focus: theme.color_foreground
+            color_down: theme.color_primary_foreground
             get_color: fn() {
                 return self.color
                     .mix(self.color_focus, self.focus)
