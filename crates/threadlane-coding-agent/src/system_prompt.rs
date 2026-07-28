@@ -148,8 +148,11 @@ pub(crate) fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> Stri
             add_tool_guideline("If a hashline mismatch occurs, re-read the relevant file range with `read_file` to obtain updated line hashes before retrying.");
         }
         if available_tool_names.contains("subagent") {
-            add_tool_guideline("STRICT SUBAGENT DELEGATION: You are an orchestrator. For any multi-step task, multi-file inspection, complex refactoring, testing, or code review, ALWAYS use the `subagent` tool to fan out work to specialized subagents in parallel to complete tasks faster.");
-            add_tool_guideline("When invoking `subagent`, generate clear custom `instructions` (system prompt) and specify the precise list of allowed `tools` for each subagent.");
+            add_tool_guideline("SUBAGENT DELEGATION RULES: Use `subagent` judiciously and only when necessary.");
+            add_tool_guideline("Do NOT spawn subagents for simple requests, single-file edits, or direct questions—handle them directly.");
+            add_tool_guideline("Phase-Ordered Execution: Subagents MUST follow a sequential lifecycle (Research -> Implementation -> Review). NEVER spawn a `reviewer` or `tester` subagent concurrently with or before code changes exist.");
+            add_tool_guideline("Parallel subagents are reserved ONLY for independent read-only exploration across multiple files.");
+            add_tool_guideline("When invoking `subagent`, specify clear custom `instructions` and the minimum required `tools` for each subagent.");
         }
         if available_tool_names.contains("update_plan") {
             add_tool_guideline("For multi-step work, maintain a concise plan with `update_plan`; keep at most one item in progress and skip plans for simple requests.");
@@ -358,5 +361,23 @@ mod tests {
 
         assert!(!prompt.contains("SKILL_SENTINEL"));
         assert!(!prompt.contains("AGENT_SENTINEL"));
+    }
+
+    #[test]
+    fn subagent_guidelines_enforce_controlled_delegation() {
+        let tools = vec![tool("subagent", "Invoke a subagent.")];
+        let prompt = build_system_prompt(SystemPromptBuildOptions {
+            config: &SystemPromptConfig::default(),
+            work_dir: Path::new("/workspace"),
+            tools: &tools,
+            project_context: &ProjectContext::default(),
+            skill_catalog: None,
+            agent_catalog: None,
+            loaded_extension_count: 0,
+        });
+
+        assert!(prompt.contains("SUBAGENT DELEGATION RULES: Use `subagent` judiciously and only when necessary."));
+        assert!(prompt.contains("NEVER spawn a `reviewer` or `tester` subagent concurrently with or before code changes exist."));
+        assert!(!prompt.contains("ALWAYS use the `subagent` tool to fan out work"));
     }
 }
