@@ -11,6 +11,7 @@ pub struct ProjectContext {
     pub context_files: Vec<PathBuf>,
     pub instructions: Vec<ProjectInstruction>,
     pub combined_instructions: String,
+    pub memory_content: Option<String>,
 }
 
 impl ProjectContext {
@@ -19,6 +20,16 @@ impl ProjectContext {
         let mut context_files = Vec::new();
         let mut instruction_entries = Vec::new();
         let mut combined_instructions = String::new();
+
+        let memory_candidate = start_dir.join(".threadlane").join("memory.md");
+        let memory_content = if memory_candidate.is_file() {
+            std::fs::read_to_string(&memory_candidate)
+                .ok()
+                .map(|c| c.trim().to_string())
+                .filter(|c| !c.is_empty())
+        } else {
+            None
+        };
 
         loop {
             for filename in &["AGENTS.md", "THREADLANE.md", ".threadlane/AGENTS.md"] {
@@ -49,6 +60,7 @@ impl ProjectContext {
             context_files,
             instructions: instruction_entries,
             combined_instructions,
+            memory_content,
         }
     }
 }

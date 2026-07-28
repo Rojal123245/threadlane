@@ -1,4 +1,6 @@
+pub mod ast;
 pub mod hashline;
+pub mod rag;
 
 use serde_json::{json, Value};
 use std::fs;
@@ -91,6 +93,72 @@ fn tool_definitions() -> Vec<Value> {
                     "cwd": { "type": "string", "description": "Working directory for the command" }
                 },
                 "required": ["command"]
+            }
+        }),
+        json!({
+            "name": "get_repo_map",
+            "description": "Generate a compact workspace skeleton showing files, subdirectories, and top-level exported symbols (structs, functions, traits, modules) without full file bodies to save tokens.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Optional relative subdirectory path to scope the map to. Defaults to workspace root." }
+                }
+            }
+        }),
+        json!({
+            "name": "search_codebase",
+            "description": "Search the codebase using AST-indexed nodes and RAG retrieval. Returns relevant line-anchored AST code blocks (functions, structs, traits, impls) for a query without reading full files.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Natural language or symbol query (e.g. 'where are prompt cache keys clamped?' or 'compaction logic')" },
+                    "top_k": { "type": "integer", "description": "Optional maximum number of AST snippet matches to return (default: 5)." }
+                },
+                "required": ["query"]
+            }
+        }),
+        json!({
+            "name": "read_memory",
+            "description": "Read the persistent project memory stored in .threadlane/memory.md.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }),
+        json!({
+            "name": "save_memory",
+            "description": "Save or append project architectural insights, conventions, build instructions, or gotchas into .threadlane/memory.md so future sessions benefit.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": { "type": "string", "description": "Memory content or note to write to .threadlane/memory.md" },
+                    "mode": { "type": "string", "enum": ["append", "overwrite"], "description": "Mode: 'append' (default) adds to memory.md; 'overwrite' replaces memory.md content." }
+                },
+                "required": ["content"]
+            }
+        }),
+        json!({
+            "name": "consolidate_memory",
+            "description": "Automatically consolidate and merge new findings into .threadlane/memory.md under structured sections (## Architecture, ## Gotchas, ## Verification Commands). Deduplicates items.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "architecture": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "List of architectural decisions or patterns to merge"
+                    },
+                    "gotchas": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "List of gotchas, pitfalls, or non-obvious rules to merge"
+                    },
+                    "verification": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "List of build, test, or verification commands to merge"
+                    }
+                }
             }
         }),
     ]
@@ -284,7 +352,7 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
                             hashline::format_line_hashline(line_no, line)
                         })
                         .collect();
-                    formatted_lines.join("\n")
+                    truncate_tool_output(&formatted_lines.join("\n"))
                 }
                 Err(e) => format!("Error reading file '{raw_path}': {e}"),
             }
@@ -412,7 +480,7 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
                         items.push(format!("{kind} {name}"));
                     }
                     items.sort();
-                    items.join("\n")
+                    truncate_tool_output(&items.join("\n"))
                 }
                 Err(e) => format!("Error reading directory '{raw_path}': {e}"),
             }
@@ -438,14 +506,278 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     let exit = output.status;
 
-                    format!(
+                    truncate_tool_output(&format!(
                         "Exit Status: {exit}\n--- STDOUT ---\n{stdout}\n--- STDERR ---\n{stderr}"
-                    )
+                    ))
                 }
                 Err(e) => format!("Error executing command '{cmd_str}': {e}"),
             }
         }
+        "get_repo_map" => {
+            let raw_path = args.get("path").and_then(|v| v.as_str());
+            get_repo_map_impl(workspace_root, raw_path)
+        }
+        "search_codebase" => {
+            let query = match args.get("query").and_then(|v| v.as_str()) {
+                Some(q) => q,
+                None => return "Error: 'query' parameter is required".into(),
+            };
+            let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+            rag::search_codebase_impl(workspace_root, query, top_k)
+        }
+        "read_memory" => read_memory_impl(workspace_root),
+        "save_memory" => save_memory_impl(workspace_root, &args),
+        "consolidate_memory" => consolidate_memory_impl(workspace_root, &args),
         unknown => format!("Error: Unknown tool '{unknown}'"),
+    }
+}
+
+const MAX_TOOL_OUTPUT_CHARS: usize = 3_000;
+const TRUNCATE_HEAD_CHARS: usize = 1_200;
+const TRUNCATE_TAIL_CHARS: usize = 1_200;
+
+pub fn truncate_tool_output(output: &str) -> String {
+    let output_chars = output.chars().count();
+    if output_chars <= MAX_TOOL_OUTPUT_CHARS {
+        output.to_string()
+    } else {
+        let head: String = output.chars().take(TRUNCATE_HEAD_CHARS).collect();
+        let tail_chars: Vec<char> = output.chars().rev().take(TRUNCATE_TAIL_CHARS).collect();
+        let tail: String = tail_chars.into_iter().rev().collect();
+        let hidden = output_chars.saturating_sub(TRUNCATE_HEAD_CHARS + TRUNCATE_TAIL_CHARS);
+        format!(
+            "{head}\n\n[... Output truncated: {hidden} characters hidden to reduce token explosion ...]\n\n{tail}"
+        )
+    }
+}
+
+fn read_memory_impl(workspace_root: &Path) -> String {
+    let mem_file = workspace_root.join(".threadlane").join("memory.md");
+    if mem_file.is_file() {
+        match fs::read_to_string(&mem_file) {
+            Ok(content) => truncate_tool_output(&content),
+            Err(e) => format!("Error reading .threadlane/memory.md: {e}"),
+        }
+    } else {
+        "No persistent memory found in .threadlane/memory.md yet.".to_string()
+    }
+}
+
+fn save_memory_impl(workspace_root: &Path, args: &Value) -> String {
+    let content = match args.get("content").and_then(|v| v.as_str()) {
+        Some(c) => c,
+        None => return "Error: 'content' parameter is required".into(),
+    };
+    let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("append");
+
+    let dir = workspace_root.join(".threadlane");
+    if let Err(e) = fs::create_dir_all(&dir) {
+        return format!("Error creating .threadlane directory: {e}");
+    }
+    let mem_file = dir.join("memory.md");
+
+    let new_content = if mode == "overwrite" || !mem_file.exists() {
+        content.trim().to_string()
+    } else {
+        let existing = fs::read_to_string(&mem_file).unwrap_or_default();
+        format!("{}\n\n{}", existing.trim(), content.trim())
+    };
+
+    match fs::write(&mem_file, new_content) {
+        Ok(_) => "Successfully saved memory to .threadlane/memory.md".to_string(),
+        Err(e) => format!("Error writing to .threadlane/memory.md: {e}"),
+    }
+}
+
+fn consolidate_memory_impl(workspace_root: &Path, args: &Value) -> String {
+    let parse_array = |key: &str| -> Vec<String> {
+        args.get(key)
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let architecture = parse_array("architecture");
+    let gotchas = parse_array("gotchas");
+    let verification = parse_array("verification");
+
+    let dir = workspace_root.join(".threadlane");
+    if let Err(e) = fs::create_dir_all(&dir) {
+        return format!("Error creating .threadlane directory: {e}");
+    }
+    let mem_file = dir.join("memory.md");
+
+    let existing = fs::read_to_string(&mem_file).unwrap_or_default();
+    let merged = consolidate_memory_entries(&existing, &architecture, &gotchas, &verification);
+
+    match fs::write(&mem_file, merged) {
+        Ok(_) => "Successfully consolidated memory entries in .threadlane/memory.md".to_string(),
+        Err(e) => format!("Error writing to .threadlane/memory.md: {e}"),
+    }
+}
+
+pub fn consolidate_memory_entries(
+    existing: &str,
+    architecture: &[String],
+    gotchas: &[String],
+    verification: &[String],
+) -> String {
+    fn append_section(existing: &str, heading: &str, items: &[String]) -> String {
+        let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
+        let section_range = lines
+            .iter()
+            .position(|line| line.trim() == heading)
+            .map(|start| {
+                let end = lines
+                    .iter()
+                    .enumerate()
+                    .skip(start + 1)
+                    .find(|(_, line)| line.trim().starts_with('#'))
+                    .map(|(index, _)| index)
+                    .unwrap_or(lines.len());
+                (start, end)
+            });
+        let existing_items: Vec<String> = section_range
+            .map(|(start, end)| {
+                lines[start + 1..end]
+                    .iter()
+                    .filter_map(|line| {
+                        let trimmed = line.trim();
+                        trimmed
+                            .strip_prefix("- ")
+                            .or_else(|| trimmed.strip_prefix("* "))
+                            .map(str::to_string)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let items: Vec<String> = items
+            .iter()
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .filter(|item| !existing_items.contains(item))
+            .collect();
+        if items.is_empty() {
+            return existing.to_string();
+        }
+
+        if let Some((_, end)) = section_range {
+            lines.splice(end..end, items.into_iter().map(|item| format!("- {item}")));
+        } else {
+            if !lines.is_empty() {
+                lines.push(String::new());
+            }
+            lines.push(heading.to_string());
+            lines.extend(items.into_iter().map(|item| format!("- {item}")));
+        }
+        lines.join("\n")
+    }
+
+    let mut out = existing.trim().to_string();
+    if out.is_empty() {
+        out = "# Project Memory".to_string();
+    }
+    out = append_section(&out, "## Architecture", architecture);
+    out = append_section(&out, "## Gotchas", gotchas);
+    append_section(&out, "## Verification Commands", verification)
+}
+
+fn get_repo_map_impl(workspace_root: &Path, rel_path: Option<&str>) -> String {
+    let target_dir = match rel_path {
+        Some(path) => match validate_path_in_workspace(path, workspace_root) {
+            Ok(p) => p,
+            Err(err) => return err,
+        },
+        None => workspace_root.to_path_buf(),
+    };
+
+    let mut lines = Vec::new();
+    walk_repo_skeleton(&target_dir, workspace_root, 0, &mut lines);
+
+    if lines.is_empty() {
+        "No source code definitions found in repository map.".to_string()
+    } else {
+        truncate_tool_output(&lines.join("\n"))
+    }
+}
+
+fn walk_repo_skeleton(dir: &Path, root: &Path, depth: usize, out: &mut Vec<String>) {
+    if depth > 4 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut sorted_entries: Vec<_> = entries.flatten().collect();
+    sorted_entries.sort_by_key(|e| e.file_name());
+
+    for entry in sorted_entries {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.')
+            || name == "target"
+            || name == "node_modules"
+            || name == "dist"
+            || name == "packaging"
+        {
+            continue;
+        }
+
+        let path = entry.path();
+        if file_type.is_dir() {
+            walk_repo_skeleton(&path, root, depth + 1, out);
+        } else if file_type.is_file() {
+            let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+            if matches!(ext, "rs" | "py" | "js" | "ts" | "go" | "toml") {
+                let rel = path.strip_prefix(root).unwrap_or(&path);
+                let Ok(content) = fs::read_to_string(&path) else {
+                    continue;
+                };
+
+                let mut symbols = Vec::new();
+                if ext == "rs" {
+                    let snippets = ast::parse_rust_ast(rel, &content);
+                    for s in snippets {
+                        symbols.push(format!("  L{}: {}", s.start_line, s.signature));
+                    }
+                } else {
+                    for (idx, line) in content.lines().enumerate() {
+                        let trimmed = line.trim();
+                        if trimmed.starts_with("pub fn ")
+                            || trimmed.starts_with("pub struct ")
+                            || trimmed.starts_with("pub enum ")
+                            || trimmed.starts_with("pub trait ")
+                            || trimmed.starts_with("pub mod ")
+                            || trimmed.starts_with("fn ")
+                            || trimmed.starts_with("class ")
+                            || trimmed.starts_with("def ")
+                            || (ext == "toml" && trimmed.starts_with('[') && trimmed.ends_with(']'))
+                        {
+                            let sig = if trimmed.len() > 100 {
+                                format!("{}...", &trimmed[..97])
+                            } else {
+                                trimmed.to_string()
+                            };
+                            symbols.push(format!("  L{}: {sig}", idx + 1));
+                        }
+                    }
+                }
+
+                if !symbols.is_empty() {
+                    out.push(format!("{}", rel.display()));
+                    out.extend(symbols);
+                }
+            }
+        }
     }
 }
 
@@ -632,5 +964,146 @@ mod tests {
             res,
             "Invalid line range: end_line (2) must not be before start_line (3)."
         );
+    }
+
+    #[test]
+    fn test_save_and_read_memory_tool() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        let initial_read = execute_tool_in_workspace("read_memory", "{}", root);
+        assert!(initial_read.contains("No persistent memory found"));
+
+        let payload = json!({"content": "## Architectural Decision\nUse Makepad with threadlane state."}).to_string();
+        let save_res = execute_tool_in_workspace("save_memory", &payload, root);
+        assert!(save_res.contains("Successfully saved memory"));
+
+        let read_res = execute_tool_in_workspace("read_memory", "{}", root);
+        assert!(read_res.contains("Use Makepad with threadlane state."));
+    }
+
+    #[test]
+    fn test_get_repo_map_tool() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let src_dir = root.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        let rs_file = src_dir.join("main.rs");
+        fs::write(
+            &rs_file,
+            "pub struct AppState {}\npub fn main() {\n    println!(\"hello\");\n}\n",
+        )
+        .unwrap();
+
+        let map_res = execute_tool_in_workspace("get_repo_map", "{}", root);
+        assert!(map_res.contains("src/main.rs"));
+        assert!(map_res.contains("pub struct AppState"));
+        assert!(map_res.contains("pub fn main()"));
+    }
+
+    #[test]
+    fn test_truncate_tool_output() {
+        let long_string = "a".repeat(5000);
+        let truncated = truncate_tool_output(&long_string);
+        assert!(truncated.contains("[... Output truncated:"));
+        assert!(truncated.len() < 3000);
+    }
+
+    #[test]
+    fn test_truncate_tool_output_uses_characters_for_unicode() {
+        let output = "😀".repeat(2_000);
+        let truncated = truncate_tool_output(&output);
+
+        assert_eq!(truncated, output);
+    }
+
+    #[test]
+    fn test_search_codebase_tool() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let src_dir = root.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        let rs_file = src_dir.join("compaction.rs");
+        fs::write(
+            &rs_file,
+            "pub fn compact_messages_to_token_budget() {\n    // compaction logic\n}\n",
+        )
+        .unwrap();
+
+        let res = execute_tool_in_workspace(
+            "search_codebase",
+            r#"{"query": "compaction logic"}"#,
+            root,
+        );
+        assert!(res.contains("src/compaction.rs"));
+        assert!(res.contains("compact_messages_to_token_budget"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_code_tools_skip_symlinked_directories_outside_workspace() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        fs::write(
+            outside.path().join("secret.rs"),
+            "pub fn external_secret_symbol() {}\n",
+        )
+        .unwrap();
+        symlink(outside.path(), dir.path().join("linked")).unwrap();
+
+        let search = execute_tool_in_workspace(
+            "search_codebase",
+            r#"{"query":"external_secret_symbol"}"#,
+            dir.path(),
+        );
+        let map = execute_tool_in_workspace("get_repo_map", "{}", dir.path());
+
+        assert!(!search.contains("external_secret_symbol"));
+        assert!(!map.contains("external_secret_symbol"));
+    }
+
+    #[test]
+    fn test_consolidate_memory_preserves_unmanaged_content() {
+        let existing = "# Project Memory\n\nPersonal notes with\nmultiple lines.\n\n## Other Notes\n- Keep this.\n\n## Architecture\n- Existing architecture\n";
+        assert_eq!(consolidate_memory_entries(existing, &[], &[], &[]), existing.trim());
+        let merged = consolidate_memory_entries(
+            existing,
+            &["New architecture".to_string()],
+            &[],
+            &[],
+        );
+
+        assert!(merged.contains("Personal notes with\nmultiple lines."));
+        assert!(merged.contains("## Other Notes\n- Keep this."));
+        assert!(merged.contains("- Existing architecture"));
+        assert!(merged.contains("- New architecture"));
+    }
+
+    #[test]
+    fn test_consolidate_memory_tool() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        let payload = json!({
+            "architecture": ["Use Makepad UI components"],
+            "gotchas": ["cargo check requires unsandboxed bypass on macOS"],
+            "verification": ["cargo test --workspace"]
+        })
+        .to_string();
+
+        let res = execute_tool_in_workspace("consolidate_memory", &payload, root);
+        assert!(res.contains("Successfully consolidated memory entries"));
+
+        let mem_content = execute_tool_in_workspace("read_memory", "{}", root);
+        assert!(mem_content.contains("## Architecture"));
+        assert!(mem_content.contains("Use Makepad UI components"));
+        assert!(mem_content.contains("## Gotchas"));
+        assert!(mem_content.contains("cargo check requires unsandboxed bypass on macOS"));
+        assert!(mem_content.contains("## Verification Commands"));
+        assert!(mem_content.contains("cargo test --workspace"));
     }
 }
