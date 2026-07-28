@@ -774,24 +774,31 @@ fn walk_repo_skeleton(dir: &Path, root: &Path, depth: usize, out: &mut Vec<Strin
                 };
 
                 let mut symbols = Vec::new();
-                for (idx, line) in content.lines().enumerate() {
-                    let trimmed = line.trim();
-                    if trimmed.starts_with("pub fn ")
-                        || trimmed.starts_with("pub struct ")
-                        || trimmed.starts_with("pub enum ")
-                        || trimmed.starts_with("pub trait ")
-                        || trimmed.starts_with("pub mod ")
-                        || trimmed.starts_with("fn ")
-                        || trimmed.starts_with("class ")
-                        || trimmed.starts_with("def ")
-                        || (ext == "toml" && trimmed.starts_with('[') && trimmed.ends_with(']'))
-                    {
-                        let sig = if trimmed.len() > 100 {
-                            format!("{}...", &trimmed[..97])
-                        } else {
-                            trimmed.to_string()
-                        };
-                        symbols.push(format!("  L{}: {sig}", idx + 1));
+                if ext == "rs" {
+                    let snippets = ast::parse_rust_ast(rel, &content);
+                    for s in snippets {
+                        symbols.push(format!("  L{}: {}", s.start_line, s.signature));
+                    }
+                } else {
+                    for (idx, line) in content.lines().enumerate() {
+                        let trimmed = line.trim();
+                        if trimmed.starts_with("pub fn ")
+                            || trimmed.starts_with("pub struct ")
+                            || trimmed.starts_with("pub enum ")
+                            || trimmed.starts_with("pub trait ")
+                            || trimmed.starts_with("pub mod ")
+                            || trimmed.starts_with("fn ")
+                            || trimmed.starts_with("class ")
+                            || trimmed.starts_with("def ")
+                            || (ext == "toml" && trimmed.starts_with('[') && trimmed.ends_with(']'))
+                        {
+                            let sig = if trimmed.len() > 100 {
+                                format!("{}...", &trimmed[..97])
+                            } else {
+                                trimmed.to_string()
+                            };
+                            symbols.push(format!("  L{}: {sig}", idx + 1));
+                        }
                     }
                 }
 

@@ -14,14 +14,7 @@ pub struct AstIndexEntry {
     pub content: String,
 }
 
-fn calculate_query_score(query: &str, entry: &AstIndexEntry) -> f32 {
-    let query_words: Vec<String> = query
-        .to_lowercase()
-        .split(|c: char| !c.is_alphanumeric() && c != '_')
-        .filter(|w| w.len() > 1)
-        .map(|w| w.to_string())
-        .collect();
-
+fn calculate_query_score(query_words: &[String], entry: &AstIndexEntry) -> f32 {
     if query_words.is_empty() {
         return 0.0;
     }
@@ -31,7 +24,7 @@ fn calculate_query_score(query: &str, entry: &AstIndexEntry) -> f32 {
     let content_lower = entry.content.to_lowercase();
 
     let mut score = 0.0f32;
-    for word in &query_words {
+    for word in query_words {
         if name_lower.contains(word) {
             score += 10.0;
         }
@@ -54,9 +47,16 @@ pub fn search_codebase_impl(workspace_root: &Path, query: &str, top_k: usize) ->
         return "No Rust AST nodes found in workspace.".to_string();
     }
 
+    let query_words: Vec<String> = query
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|w| w.len() > 1)
+        .map(|w| w.to_string())
+        .collect();
+
     let mut scored: Vec<(f32, &AstIndexEntry)> = entries
         .iter()
-        .map(|entry| (calculate_query_score(query, entry), entry))
+        .map(|entry| (calculate_query_score(&query_words, entry), entry))
         .filter(|(score, _)| *score > 0.0)
         .collect();
 
@@ -76,8 +76,8 @@ pub fn search_codebase_impl(workspace_root: &Path, query: &str, top_k: usize) ->
         };
 
         results.push(format!(
-            "--- Match (Score: {score:.1}) ---\nFile: {}:L{}-L{}\nKind: {} | Name: {}\nSignature: {}\nContent:\n{}\n",
-            entry.file_path, entry.start_line, entry.end_line, entry.kind, entry.name, entry.signature, content_snippet
+            "--- Match (Score: {score:.1}) ---\nLocation: {}:{}\nKind: {} | Name: {}\nSignature: {}\nContent:\n{}\n",
+            entry.file_path, entry.start_line, entry.kind, entry.name, entry.signature, content_snippet
         ));
     }
 
