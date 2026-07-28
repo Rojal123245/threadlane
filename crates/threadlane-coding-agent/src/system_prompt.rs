@@ -109,49 +109,53 @@ pub(crate) fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> Stri
                 .join("\n")
         };
 
-        let mut guidelines = Vec::new();
+        let mut tool_guidelines = Vec::new();
         let mut seen = HashSet::new();
-        let mut add_guideline = |guideline: &str| {
+        let mut add_tool_guideline = |guideline: &str| {
             let guideline = normalize_line(guideline);
             if !guideline.is_empty() && seen.insert(guideline.clone()) {
-                guidelines.push(guideline);
+                tool_guidelines.push(guideline);
             }
         };
 
         if available_tool_names.contains("read_file") {
-            add_guideline("Inspect relevant files before making changes; do not guess about code you have not read.");
+            add_tool_guideline("Inspect relevant files before making changes; do not guess about code, variable names, or schemas you have not read.");
         }
-        if available_tool_names.contains("write_file") || available_tool_names.contains("edit_file") || available_tool_names.contains("edit_file_hashline")
+        if available_tool_names.contains("write_file")
+            || available_tool_names.contains("edit_file")
+            || available_tool_names.contains("edit_file_hashline")
         {
-            add_guideline("Keep edits focused, preserve existing user work, and follow the project's established style.");
+            add_tool_guideline("Keep edits focused, preserve existing user work, and follow the project's established style.");
         }
         if available_tool_names.contains("edit_file_hashline") {
-            add_guideline("Prefer `edit_file_hashline` for high-precision edits using line:hash anchors (e.g. '12:a3f') returned from `read_file`.");
-            add_guideline("For multi-line code blocks or deletions, use range edits (start_anchor and end_anchor) rather than per-line edits.");
-            add_guideline("Batch all edits for a file into a single `edit_file_hashline` tool call's edits array.");
-            add_guideline("If a hashline mismatch occurs, re-read the relevant file range with `read_file` to obtain updated line hashes before retrying.");
-        }
-        if available_tool_names.contains("run_command") {
-            add_guideline("Run focused validation after changes when practical, and never claim a command passed unless you ran it successfully.");
+            add_tool_guideline("Prefer `edit_file_hashline` for high-precision edits using line:hash anchors (e.g. '12:a3f') returned from `read_file`.");
+            add_tool_guideline("For multi-line code blocks or deletions, use range edits (start_anchor and end_anchor) rather than per-line edits.");
+            add_tool_guideline("Batch all edits for a file into a single `edit_file_hashline` tool call's edits array.");
+            add_tool_guideline("If a hashline mismatch occurs, re-read the relevant file range with `read_file` to obtain updated line hashes before retrying.");
         }
         if available_tool_names.contains("subagent") {
-            add_guideline("STRICT SUBAGENT DELEGATION: You are an orchestrator. For any multi-step task, multi-file inspection, complex refactoring, testing, or code review, ALWAYS use the `subagent` tool to fan out work to specialized subagents in parallel to complete tasks faster.");
-            add_guideline("When invoking `subagent`, generate clear custom `instructions` (system prompt) and specify the precise list of allowed `tools` for each subagent.");
+            add_tool_guideline("STRICT SUBAGENT DELEGATION: You are an orchestrator. For any multi-step task, multi-file inspection, complex refactoring, testing, or code review, ALWAYS use the `subagent` tool to fan out work to specialized subagents in parallel to complete tasks faster.");
+            add_tool_guideline("When invoking `subagent`, generate clear custom `instructions` (system prompt) and specify the precise list of allowed `tools` for each subagent.");
         }
         if available_tool_names.contains("update_plan") {
-            add_guideline("For multi-step work, maintain a concise plan with `update_plan`; keep at most one item in progress and skip plans for simple requests.");
+            add_tool_guideline("For multi-step work, maintain a concise plan with `update_plan`; keep at most one item in progress and skip plans for simple requests.");
         }
         for guideline in &options.config.guidelines {
-            add_guideline(guideline);
+            add_tool_guideline(guideline);
         }
-        add_guideline("Be concise and direct in your responses.");
-        add_guideline("Show file paths clearly when working with files.");
 
-        let guidelines = guidelines
-            .into_iter()
-            .map(|guideline| format!("- {guideline}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let formatted_tool_guidelines = if tool_guidelines.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n{}",
+                tool_guidelines
+                    .into_iter()
+                    .map(|g| format!("- {g}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )
+        };
 
         let extension_note = if options.loaded_extension_count == 0 {
             String::new()
@@ -162,8 +166,33 @@ pub(crate) fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> Stri
             )
         };
 
+        let validation_rule = if available_tool_names.contains("run_command") {
+            "\n- Run focused validation after changes when practical, and never claim a command passed unless you ran it successfully and verified the output."
+        } else {
+            ""
+        };
+
         format!(
-            "You are an expert coding assistant operating inside threadlane, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.\n\nAvailable tools:\n{tools}\n\nAdditional custom tools may be available depending on the project.\n\nGuidelines:\n{guidelines}{extension_note}"
+            "You are an expert coding assistant operating inside threadlane, a native coding agent harness. You help users solve software engineering tasks by reading files, executing commands, editing code, and writing new files.\n\n\
+            ## Available Tools\n\
+            {tools}\n\n\
+            Additional custom tools may be available depending on the project.\n\n\
+            ## Delivering Work & Execution Rules\n\
+            - Deliver complete, production-ready work. Act on the actual request without quietly narrowing, widening, or transforming the requested scope.\n\
+            - Do not stop halfway, leave temporary placeholders or TODOs, or report completion until the task is fully finished and verified.\n\
+            - If part of a task is blocked, finish every unblocked part first and state clearly what was left out and why.\n\
+            - Reserve blocking questions for cases where proceeding under any assumption would be unsafe or render the work useless. Make reasonable, documented assumptions and proceed.\n\
+            - Avoid unnecessary self-correction, apologies, or ruminating over past errors; state corrections plainly and continue.\n\
+            - Do not re-derive facts already established in the conversation or re-litigate decisions already made.\n\n\
+            ## Tool Strategy & Guidance\
+            {formatted_tool_guidelines}\n\
+            - If a tool call fails or is declined, adjust your strategy based on the error or feedback instead of retrying verbatim.\n\
+            - Independent tool calls can run in parallel in a single response when appropriate.\n\n\
+            ## Code Quality & Verification\n\
+            - Match the surrounding code's idioms, naming, style, and comment density.{validation_rule}\n\
+            - Report outcomes faithfully: state test failures directly with relevant output snippets, and report status without hedging.\n\
+            - Reference code locations as `file_path:line_number` (e.g. `src/main.rs:42`) so they render as clickable links in the harness UI.\n\
+            - Be concise and direct in your responses. Show file paths clearly when working with files.{extension_note}"
         )
     };
 
@@ -223,6 +252,9 @@ mod tests {
         assert!(!prompt.contains("write_file:"));
         assert!(prompt.contains("Inspect relevant files before making changes"));
         assert!(!prompt.contains("Run focused validation after changes"));
+        assert!(prompt.contains("## Delivering Work & Execution Rules"));
+        assert!(prompt.contains("## Tool Strategy & Guidance"));
+        assert!(prompt.contains("## Code Quality & Verification"));
         assert!(prompt.ends_with("Current working directory: /workspace"));
     }
 
@@ -246,6 +278,24 @@ mod tests {
         assert!(prompt.contains("For multi-line code blocks or deletions, use range edits (start_anchor and end_anchor) rather than per-line edits."));
         assert!(prompt.contains("Batch all edits for a file into a single `edit_file_hashline` tool call's edits array."));
         assert!(prompt.contains("If a hashline mismatch occurs, re-read the relevant file range with `read_file` to obtain updated line hashes before retrying."));
+    }
+
+    #[test]
+    fn test_run_command_guideline_presence() {
+        let tools = vec![
+            tool("run_command", "Run shell command."),
+        ];
+        let prompt = build_system_prompt(SystemPromptBuildOptions {
+            config: &SystemPromptConfig::default(),
+            work_dir: Path::new("/workspace"),
+            tools: &tools,
+            project_context: &ProjectContext::default(),
+            skill_catalog: None,
+            agent_catalog: None,
+            loaded_extension_count: 0,
+        });
+
+        assert!(prompt.contains("Run focused validation after changes when practical, and never claim a command passed unless you ran it successfully and verified the output."));
     }
 
     #[test]
