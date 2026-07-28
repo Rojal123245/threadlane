@@ -1,7 +1,7 @@
-use threadlane_provider::openai::ToolCall;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
+use threadlane_provider::openai::ToolCall;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentToolDefinition {
@@ -185,7 +185,6 @@ pub enum QueueMode {
     All,
     OneAtATime,
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageAttachment {

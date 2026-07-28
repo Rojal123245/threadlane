@@ -53,6 +53,7 @@ pub struct SessionsData {
     pub collapsed_projects: HashSet<PathBuf>,
     pub show_all_projects: HashSet<PathBuf>,
     pub rows: Vec<SessionListRow>,
+    pub search_query: String,
 }
 
 impl SessionsData {
@@ -66,18 +67,46 @@ impl SessionsData {
 
     fn rebuild_rows(&self) -> Vec<SessionListRow> {
         let mut rows = Vec::new();
+        let query = self.search_query.trim().to_lowercase();
+        let searching = !query.is_empty();
         for (project_idx, project) in self.projects.iter().enumerate() {
+            let project_matches = searching
+                && (project.name.to_lowercase().contains(&query)
+                    || project
+                        .work_dir
+                        .to_string_lossy()
+                        .to_lowercase()
+                        .contains(&query));
+            let matching_sessions = if searching && !project_matches {
+                project
+                    .sessions
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, session)| {
+                        session
+                            .title
+                            .to_lowercase()
+                            .contains(&query)
+                            .then_some(index)
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                (0..project.sessions.len()).collect::<Vec<_>>()
+            };
+            if searching && !project_matches && matching_sessions.is_empty() {
+                continue;
+            }
             rows.push(SessionListRow::ProjectHeader { project_idx });
-            if self.collapsed_projects.contains(&project.work_dir) {
+            if !searching && self.collapsed_projects.contains(&project.work_dir) {
                 continue;
             }
             if project.sessions.is_empty() {
                 rows.push(SessionListRow::EmptyProject);
                 continue;
             }
-
-            let showing_all = self.show_all_projects.contains(&project.work_dir);
-            let session_indices = if showing_all {
+            let session_indices = if searching {
+                matching_sessions
+            } else if self.show_all_projects.contains(&project.work_dir) {
                 (0..project.sessions.len()).collect()
             } else {
                 preview_session_indices(
@@ -92,7 +121,8 @@ impl SessionsData {
                     session_idx,
                 });
             }
-            if project.sessions.len() > SESSION_PREVIEW_LIMIT {
+            if !searching && project.sessions.len() > SESSION_PREVIEW_LIMIT {
+                let showing_all = self.show_all_projects.contains(&project.work_dir);
                 rows.push(SessionListRow::Overflow {
                     project_idx,
                     hidden_count: if showing_all {
@@ -105,6 +135,11 @@ impl SessionsData {
             }
         }
         rows
+    }
+
+    pub fn set_search_query(&mut self, query: impl Into<String>) {
+        self.search_query = query.into();
+        self.refresh_rows();
     }
 
     fn refresh_rows(&mut self) {
@@ -219,6 +254,7 @@ pub static SESSIONS_DATA: LazyLock<RwLock<SessionsData>> = LazyLock::new(|| {
         collapsed_projects: HashSet::new(),
         show_all_projects: HashSet::new(),
         rows: Vec::new(),
+        search_query: String::new(),
     })
 });
 
@@ -327,6 +363,10 @@ fn preview_session_indices(
         }
     }
     indices
+}
+
+pub fn set_search_query(query: impl Into<String>) {
+    SESSIONS_DATA.write().unwrap().set_search_query(query);
 }
 
 pub fn refresh_sessions(project_dirs: &[PathBuf]) -> Vec<SessionListRow> {
@@ -440,6 +480,9 @@ pub fn set_active_project(work_dir: &Path) {
 
 pub fn toggle_project_collapsed(work_dir: &Path) {
     let mut data = SESSIONS_DATA.write().unwrap();
+    if !data.search_query.trim().is_empty() {
+        return;
+    }
     let work_dir = canonicalize_path(work_dir);
     if !data.collapsed_projects.remove(&work_dir) {
         data.collapsed_projects.insert(work_dir.clone());
@@ -650,6 +693,7 @@ mod tests {
             collapsed_projects: HashSet::new(),
             show_all_projects: HashSet::new(),
             rows: Vec::new(),
+            search_query: String::new(),
         }
     }
 
@@ -677,6 +721,26 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn search_filters_sessions_and_expands_matching_project() {
+        let mut data = test_sessions_data(6);
+        data.search_query = "session 5".to_string();
+        let rows = data.rebuild_rows();
+        assert!(matches!(
+            rows.as_slice(),
+            [
+                SessionListRow::ProjectHeader { project_idx: 0 },
+                SessionListRow::Session {
+                    project_idx: 0,
+                    session_idx: 5,
+                },
+            ]
+        ));
+
+        data.search_query = "project".to_string();
+        assert_eq!(data.rebuild_rows().len(), 7);
     }
 
     #[test]

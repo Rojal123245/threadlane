@@ -16,7 +16,8 @@ use crate::panels::chat::{
 use crate::panels::command_palette::*;
 
 use crate::panels::sessions::{
-    ProjectRegistry, SessionContextMenu, SessionContextMenuAction, SessionList, SessionListAction,
+    set_search_query, ProjectRegistry, SessionContextMenu, SessionContextMenuAction, SessionList,
+    SessionListAction,
 };
 use crate::state::{
     active_session_entry, archive_session, begin_title_generation, builtin_commands,
@@ -1928,6 +1929,25 @@ script_mod! {
                                 show_bg: true
                                 draw_bg +: { color: theme.color_input }
                             }
+                            sidebar_search := TextInput {
+                                width: Fill
+                                height: 32
+                                margin: Inset{left: 3 right: 3 bottom: 8}
+                                padding: Inset{left: 10 right: 10}
+                                empty_text: "Search projects and sessions"
+                                draw_bg +: {
+                                    color: theme.color_input
+                                    color_focus: theme.color_input
+                                    border_color: theme.color_secondary
+                                    border_color_focus: theme.color_primary
+                                    border_radius: 7.0
+                                    border_size: 1.0
+                                }
+                                draw_text +: {
+                                    color: theme.color_foreground
+                                    color_empty: theme.color_muted_foreground
+                                }
+                            }
 
                             projects_header := mod.components.SectionHeader {
                                 section_label +: { text: "PROJECTS" }
@@ -2558,10 +2578,7 @@ impl Widget for ProviderSettingsModal {
             }
             let list = self.view.portal_list(cx, ids!(capability_list));
             for (row, item) in list.items_with_actions(actions) {
-                if let Some(enabled) = item
-                    .check_box(cx, ids!(enabled_toggle))
-                    .changed(actions)
-                {
+                if let Some(enabled) = item.check_box(cx, ids!(enabled_toggle)).changed(actions) {
                     cx.widget_action(
                         uid,
                         ProviderSettingsModalAction::SetEnabled { row, enabled },
@@ -2573,10 +2590,7 @@ impl Widget for ProviderSettingsModal {
             }
             let skill_list = self.view.portal_list(cx, ids!(skill_list));
             for (row, item) in skill_list.items_with_actions(actions) {
-                if let Some(enabled) = item
-                    .check_box(cx, ids!(enabled_toggle))
-                    .changed(actions)
-                {
+                if let Some(enabled) = item.check_box(cx, ids!(enabled_toggle)).changed(actions) {
                     cx.widget_action(
                         uid,
                         ProviderSettingsModalAction::SetSkillEnabled { row, enabled },
@@ -2658,8 +2672,11 @@ impl Widget for ProviderSettingsModal {
                                 .set_text(cx, &row.scope_status());
                             item.label(cx, ids!(path_lbl))
                                 .set_text(cx, &row.module_path.display().to_string());
-                            item.check_box(cx, ids!(enabled_toggle))
-                                .set_active(cx, row.enabled, Animate::No);
+                            item.check_box(cx, ids!(enabled_toggle)).set_active(
+                                cx,
+                                row.enabled,
+                                Animate::No,
+                            );
                             item.draw_all_unscoped(cx);
                         }
                     }
@@ -3440,6 +3457,14 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        if let Some(action) =
+            actions.find_widget_action(self.ui.text_input(cx, ids!(sidebar_search)).widget_uid())
+        {
+            if let TextInputAction::Changed(query) = action.cast() {
+                set_search_query(query);
+                self.ui.widget(cx, ids!(session_list)).redraw(cx);
+            }
+        }
         let terminal_actions = self
             .ui
             .project_terminal(cx, ids!(project_terminal))

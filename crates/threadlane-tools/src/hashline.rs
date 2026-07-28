@@ -50,7 +50,9 @@ fn parse_anchor(anchor: &str) -> Result<(usize, String), String> {
         format!("Invalid line number in anchor '{anchor}'. Must be a positive integer.")
     })?;
     if line_no == 0 {
-        return Err(format!("Invalid line number 0 in anchor '{anchor}'. Line numbers are 1-indexed."));
+        return Err(format!(
+            "Invalid line number 0 in anchor '{anchor}'. Line numbers are 1-indexed."
+        ));
     }
     let hash = second.trim().to_lowercase();
     if hash.is_empty() {
@@ -60,7 +62,10 @@ fn parse_anchor(anchor: &str) -> Result<(usize, String), String> {
 }
 
 /// Apply a series of hash-anchored edits to a multi-line document.
-pub(crate) fn apply_hashline_edits(content: &str, edits: &[HashlineEdit]) -> Result<String, String> {
+pub(crate) fn apply_hashline_edits(
+    content: &str,
+    edits: &[HashlineEdit],
+) -> Result<String, String> {
     if edits.is_empty() {
         return Ok(content.to_string());
     }
@@ -85,7 +90,9 @@ pub(crate) fn apply_hashline_edits(content: &str, edits: &[HashlineEdit]) -> Res
         if start_line > lines.len() {
             return Err(format!(
                 "Anchor '{}' line number {} exceeds total line count ({}) of file.",
-                edit.start_anchor, start_line, lines.len()
+                edit.start_anchor,
+                start_line,
+                lines.len()
             ));
         }
 
@@ -109,7 +116,9 @@ pub(crate) fn apply_hashline_edits(content: &str, edits: &[HashlineEdit]) -> Res
             if end_line > lines.len() {
                 return Err(format!(
                     "End anchor '{}' line number {} exceeds total line count ({}) of file.",
-                    end_anchor, end_line, lines.len()
+                    end_anchor,
+                    end_line,
+                    lines.len()
                 ));
             }
             let idx = end_line - 1;

@@ -17,8 +17,7 @@ pub enum PayloadFormat {
     Codex,
 }
 
-pub type LazyPayloadBuilder =
-    Arc<dyn Fn(PayloadFormat) -> BoxFuture<'static, Value> + Send + Sync>;
+pub type LazyPayloadBuilder = Arc<dyn Fn(PayloadFormat) -> BoxFuture<'static, Value> + Send + Sync>;
 
 pub enum PayloadSource {
     Eager {

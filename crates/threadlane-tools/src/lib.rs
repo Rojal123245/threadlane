@@ -125,10 +125,7 @@ pub fn get_codex_tools() -> Vec<Value> {
         .collect()
 }
 
-fn validate_path_in_workspace(
-    path_input: &str,
-    workspace_root: &Path,
-) -> Result<PathBuf, String> {
+fn validate_path_in_workspace(path_input: &str, workspace_root: &Path) -> Result<PathBuf, String> {
     let canonical_root = workspace_root
         .canonicalize()
         .map_err(|e| format!("Invalid workspace root '{}': {e}", workspace_root.display()))?;

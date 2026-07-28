@@ -1,10 +1,10 @@
+use std::fs::File;
+use std::io::Write;
+use tempfile::tempdir;
 use threadlane_agent::{Agent, AgentMessage, SessionTree};
 use threadlane_coding_agent::{
     execute_slash_command, parse_slash_command, CommandAction, ProjectContext,
 };
-use std::fs::File;
-use std::io::Write;
-use tempfile::tempdir;
 
 #[test]
 fn test_project_context_discovery() {

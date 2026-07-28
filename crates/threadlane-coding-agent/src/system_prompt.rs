@@ -1,7 +1,7 @@
 use crate::context::ProjectContext;
-use threadlane_agent::AgentToolDefinition;
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
+use threadlane_agent::AgentToolDefinition;
 
 const MAX_TOOL_DESCRIPTION_CHARS: usize = 240;
 

@@ -154,7 +154,10 @@ pub enum ProjectTerminalAction {
         control: bool,
         alt: bool,
     },
-    LayoutChanged { cols: usize, rows: usize },
+    LayoutChanged {
+        cols: usize,
+        rows: usize,
+    },
     New,
     Select(usize),
     Close(usize),
@@ -212,7 +215,9 @@ impl Widget for ProjectTerminal {
             );
         }
         if self.focus_next_frame.is_event(event).is_some() && self.expanded {
-            self.view.button(cx, ids!(terminal_toggle)).set_key_focus(cx);
+            self.view
+                .button(cx, ids!(terminal_toggle))
+                .set_key_focus(cx);
         }
         let terminal_has_focus = self.view.button(cx, ids!(terminal_toggle)).key_focus(cx);
         if self.expanded && terminal_has_focus {
@@ -233,10 +238,7 @@ impl Widget for ProjectTerminal {
                                 alt: key.modifiers.alt,
                             },
                         );
-                    } else if !key.modifiers.control
-                        && !key.modifiers.alt
-                        && !key.modifiers.logo
-                    {
+                    } else if !key.modifiers.control && !key.modifiers.alt && !key.modifiers.logo {
                         if let Some(ch) = key.key_code.to_char(key.modifiers.shift) {
                             cx.widget_action(
                                 self.widget_uid(),
@@ -245,10 +247,7 @@ impl Widget for ProjectTerminal {
                         }
                     }
                 }
-                Event::TextInput(input)
-                    if input.was_paste
-                        || !input.input.is_ascii() =>
-                {
+                Event::TextInput(input) if input.was_paste || !input.input.is_ascii() => {
                     cx.widget_action(
                         self.widget_uid(),
                         ProjectTerminalAction::Input(input.input.as_bytes().to_vec()),
@@ -300,7 +299,9 @@ impl Widget for ProjectTerminal {
             if let Event::MouseDown(pointer) = event {
                 let body = self.view.view(cx, ids!(terminal_body)).area().rect(cx);
                 if pointer.button.is_primary() && body.contains(pointer.abs) {
-                    self.view.button(cx, ids!(terminal_toggle)).set_key_focus(cx);
+                    self.view
+                        .button(cx, ids!(terminal_toggle))
+                        .set_key_focus(cx);
                 }
             }
         }
@@ -365,7 +366,9 @@ impl ProjectTerminal {
         if self.expanded {
             self.focus_next_frame = cx.new_next_frame();
             self.layout_next_frame = cx.new_next_frame();
-            self.view.button(cx, ids!(terminal_toggle)).set_key_focus(cx);
+            self.view
+                .button(cx, ids!(terminal_toggle))
+                .set_key_focus(cx);
         }
         self.view.redraw(cx);
     }
@@ -391,7 +394,9 @@ impl ProjectTerminal {
         } else {
             &self.output_without_cursor
         };
-        self.view.label(cx, ids!(terminal_output)).set_text(cx, display);
+        self.view
+            .label(cx, ids!(terminal_output))
+            .set_text(cx, display);
         self.view.redraw(cx);
     }
 }
@@ -502,7 +507,12 @@ mod tests {
         terminal.process_bytes(b"hello\x1b[31mred");
 
         let screen = terminal.screen();
-        let text: String = screen.grid.row_slice(0).iter().map(|cell| cell.codepoint).collect();
+        let text: String = screen
+            .grid
+            .row_slice(0)
+            .iter()
+            .map(|cell| cell.codepoint)
+            .collect();
         assert_eq!(text.trim_end(), "hellored");
         assert_ne!(screen.grid.cell(5, 0).style.fg, Default::default());
     }

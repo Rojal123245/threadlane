@@ -1,8 +1,8 @@
+use tempfile::TempDir;
 use threadlane_coding_agent::prompt_templates::{
     expand_prompt_template, load_prompt_templates, parse_command_args, parse_frontmatter,
     substitute_args,
 };
-use tempfile::TempDir;
 
 #[test]
 fn test_parse_command_args() {

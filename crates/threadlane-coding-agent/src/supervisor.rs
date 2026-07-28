@@ -607,10 +607,7 @@ fn apply_subagent_event(
             );
             true
         }
-        AgentEvent::SubagentStarted {
-            run_id,
-            task_index,
-        } => {
+        AgentEvent::SubagentStarted { run_id, task_index } => {
             let id = format!("subagent-{run_id}:{task_index}");
             let Some(task) = tasks.get_mut(&id) else {
                 return false;
