@@ -101,6 +101,8 @@ pub struct SessionList {
     scrollbar_revealed: bool,
     #[rust]
     scrollbar_hide_timer: Timer,
+    #[rust]
+    search_query: String,
 }
 
 impl SessionList {
@@ -206,6 +208,7 @@ impl SessionList {
         };
         let Some(fixed) = fixed else {
             self.fixed_work_dir = None;
+            slot.set_visible(cx, false);
             return;
         };
         let Some(project) = data.projects.get(fixed.project_idx) else {
@@ -228,6 +231,13 @@ impl SessionList {
 impl Widget for SessionList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let data = SESSIONS_DATA.read().unwrap();
+        if self.search_query != data.search_query {
+            self.search_query.clone_from(&data.search_query);
+            self.fixed_work_dir = None;
+            self.view
+                .portal_list(cx, ids!(list))
+                .set_first_id_and_scroll(0, 0.0);
+        }
         self.configure_fixed_header(cx, &data);
 
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
@@ -295,7 +305,15 @@ impl Widget for SessionList {
                             let active = data.is_active(&session.work_dir, &session.id);
                             let context_target =
                                 data.is_context_target(&session.work_dir, &session.id);
-                            let last = *session_idx + 1 == project.sessions.len();
+                            let last = !data.rows[item_id + 1..].iter().any(|row| {
+                                matches!(
+                                    row,
+                                    SessionListRow::Session {
+                                        project_idx: next_project_idx,
+                                        ..
+                                    } if *next_project_idx == *project_idx
+                                )
+                            });
                             let template = session_row_template(context_target, active, last);
                             let item_widget = list.item(cx, item_id, template);
                             item_widget
