@@ -93,15 +93,21 @@ fn walk_and_index(dir: &Path, root: &Path, depth: usize, out: &mut Vec<AstIndexE
     };
 
     for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
         let name = entry.file_name().to_string_lossy().to_string();
         if name.starts_with('.') || name == "target" || name == "node_modules" || name == "dist" {
             continue;
         }
 
         let path = entry.path();
-        if path.is_dir() {
+        if file_type.is_dir() {
             walk_and_index(&path, root, depth + 1, out);
-        } else if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("rs") {
+        } else if file_type.is_file() && path.extension().and_then(|s| s.to_str()) == Some("rs") {
             let rel = path.strip_prefix(root).unwrap_or(&path);
             let Ok(code) = fs::read_to_string(&path) else {
                 continue;

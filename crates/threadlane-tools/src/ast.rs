@@ -66,7 +66,8 @@ fn collect_rust_nodes(
 
         let first_line = lines.get(start_line - 1).copied().unwrap_or("").trim();
         let signature = if first_line.len() > 100 {
-            format!("{}...", &first_line[..97])
+            let prefix: String = first_line.chars().take(97).collect();
+            format!("{prefix}...")
         } else {
             first_line.to_string()
         };
@@ -88,5 +89,19 @@ fn collect_rust_nodes(
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         collect_rust_nodes(child, code, lines, file_path, out);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_rust_ast;
+
+    #[test]
+    fn truncates_unicode_signatures_without_panicking() {
+        let code = format!("fn {}() {{}}", "한".repeat(40));
+        let snippets = parse_rust_ast(std::path::Path::new("test.rs"), &code);
+
+        assert_eq!(snippets.len(), 1);
+        assert!(snippets[0].signature.ends_with("..."));
     }
 }

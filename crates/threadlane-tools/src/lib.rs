@@ -540,13 +540,14 @@ const TRUNCATE_HEAD_CHARS: usize = 1_200;
 const TRUNCATE_TAIL_CHARS: usize = 1_200;
 
 pub fn truncate_tool_output(output: &str) -> String {
-    if output.len() <= MAX_TOOL_OUTPUT_CHARS {
+    let output_chars = output.chars().count();
+    if output_chars <= MAX_TOOL_OUTPUT_CHARS {
         output.to_string()
     } else {
         let head: String = output.chars().take(TRUNCATE_HEAD_CHARS).collect();
         let tail_chars: Vec<char> = output.chars().rev().take(TRUNCATE_TAIL_CHARS).collect();
         let tail: String = tail_chars.into_iter().rev().collect();
-        let hidden = output.len().saturating_sub(TRUNCATE_HEAD_CHARS + TRUNCATE_TAIL_CHARS);
+        let hidden = output_chars.saturating_sub(TRUNCATE_HEAD_CHARS + TRUNCATE_TAIL_CHARS);
         format!(
             "{head}\n\n[... Output truncated: {hidden} characters hidden to reduce token explosion ...]\n\n{tail}"
         )
@@ -628,98 +629,64 @@ pub fn consolidate_memory_entries(
     gotchas: &[String],
     verification: &[String],
 ) -> String {
-    let mut arch_items: Vec<String> = Vec::new();
-    let mut gotcha_items: Vec<String> = Vec::new();
-    let mut verify_items: Vec<String> = Vec::new();
-
-    let mut current_section = "";
-    for line in existing.lines() {
-        let trimmed = line.trim();
-        if trimmed == "## Architecture" {
-            current_section = "architecture";
-            continue;
-        } else if trimmed == "## Gotchas" {
-            current_section = "gotchas";
-            continue;
-        } else if trimmed == "## Verification Commands" {
-            current_section = "verification";
-            continue;
-        } else if trimmed.starts_with('#') {
-            current_section = "";
+    fn append_section(existing: &str, heading: &str, items: &[String]) -> String {
+        let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
+        let section_range = lines
+            .iter()
+            .position(|line| line.trim() == heading)
+            .map(|start| {
+                let end = lines
+                    .iter()
+                    .enumerate()
+                    .skip(start + 1)
+                    .find(|(_, line)| line.trim().starts_with('#'))
+                    .map(|(index, _)| index)
+                    .unwrap_or(lines.len());
+                (start, end)
+            });
+        let existing_items: Vec<String> = section_range
+            .map(|(start, end)| {
+                lines[start + 1..end]
+                    .iter()
+                    .filter_map(|line| {
+                        let trimmed = line.trim();
+                        trimmed
+                            .strip_prefix("- ")
+                            .or_else(|| trimmed.strip_prefix("* "))
+                            .map(str::to_string)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let items: Vec<String> = items
+            .iter()
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .filter(|item| !existing_items.contains(item))
+            .collect();
+        if items.is_empty() {
+            return existing.to_string();
         }
 
-        if trimmed.starts_with('-') || trimmed.starts_with('*') {
-            let item = trimmed.trim_start_matches(['-', '*', ' ']).to_string();
-            if !item.is_empty() {
-                match current_section {
-                    "architecture" => {
-                        if !arch_items.contains(&item) {
-                            arch_items.push(item);
-                        }
-                    }
-                    "gotchas" => {
-                        if !gotcha_items.contains(&item) {
-                            gotcha_items.push(item);
-                        }
-                    }
-                    "verification" => {
-                        if !verify_items.contains(&item) {
-                            verify_items.push(item);
-                        }
-                    }
-                    _ => {}
-                }
+        if let Some((_, end)) = section_range {
+            lines.splice(end..end, items.into_iter().map(|item| format!("- {item}")));
+        } else {
+            if !lines.is_empty() {
+                lines.push(String::new());
             }
+            lines.push(heading.to_string());
+            lines.extend(items.into_iter().map(|item| format!("- {item}")));
         }
+        lines.join("\n")
     }
 
-    for item in architecture {
-        let item = item.trim().to_string();
-        if !item.is_empty() && !arch_items.contains(&item) {
-            arch_items.push(item);
-        }
+    let mut out = existing.trim().to_string();
+    if out.is_empty() {
+        out = "# Project Memory".to_string();
     }
-    for item in gotchas {
-        let item = item.trim().to_string();
-        if !item.is_empty() && !gotcha_items.contains(&item) {
-            gotcha_items.push(item);
-        }
-    }
-    for item in verification {
-        let item = item.trim().to_string();
-        if !item.is_empty() && !verify_items.contains(&item) {
-            verify_items.push(item);
-        }
-    }
-
-    let mut out = String::new();
-    out.push_str("# Project Memory\n\n");
-
-    if !arch_items.is_empty() {
-        out.push_str("## Architecture\n");
-        for item in &arch_items {
-            out.push_str(&format!("- {item}\n"));
-        }
-        out.push('\n');
-    }
-
-    if !gotcha_items.is_empty() {
-        out.push_str("## Gotchas\n");
-        for item in &gotcha_items {
-            out.push_str(&format!("- {item}\n"));
-        }
-        out.push('\n');
-    }
-
-    if !verify_items.is_empty() {
-        out.push_str("## Verification Commands\n");
-        for item in &verify_items {
-            out.push_str(&format!("- {item}\n"));
-        }
-        out.push('\n');
-    }
-
-    out.trim().to_string()
+    out = append_section(&out, "## Architecture", architecture);
+    out = append_section(&out, "## Gotchas", gotchas);
+    append_section(&out, "## Verification Commands", verification)
 }
 
 fn get_repo_map_impl(workspace_root: &Path, rel_path: Option<&str>) -> String {
@@ -752,6 +719,12 @@ fn walk_repo_skeleton(dir: &Path, root: &Path, depth: usize, out: &mut Vec<Strin
     sorted_entries.sort_by_key(|e| e.file_name());
 
     for entry in sorted_entries {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
         let name = entry.file_name().to_string_lossy().to_string();
         if name.starts_with('.')
             || name == "target"
@@ -763,9 +736,9 @@ fn walk_repo_skeleton(dir: &Path, root: &Path, depth: usize, out: &mut Vec<Strin
         }
 
         let path = entry.path();
-        if path.is_dir() {
+        if file_type.is_dir() {
             walk_repo_skeleton(&path, root, depth + 1, out);
-        } else if path.is_file() {
+        } else if file_type.is_file() {
             let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
             if matches!(ext, "rs" | "py" | "js" | "ts" | "go" | "toml") {
                 let rel = path.strip_prefix(root).unwrap_or(&path);
@@ -1041,6 +1014,14 @@ mod tests {
     }
 
     #[test]
+    fn test_truncate_tool_output_uses_characters_for_unicode() {
+        let output = "😀".repeat(2_000);
+        let truncated = truncate_tool_output(&output);
+
+        assert_eq!(truncated, output);
+    }
+
+    #[test]
     fn test_search_codebase_tool() {
         let dir = tempdir().unwrap();
         let root = dir.path();
@@ -1061,6 +1042,48 @@ mod tests {
         );
         assert!(res.contains("src/compaction.rs"));
         assert!(res.contains("compact_messages_to_token_budget"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_code_tools_skip_symlinked_directories_outside_workspace() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        fs::write(
+            outside.path().join("secret.rs"),
+            "pub fn external_secret_symbol() {}\n",
+        )
+        .unwrap();
+        symlink(outside.path(), dir.path().join("linked")).unwrap();
+
+        let search = execute_tool_in_workspace(
+            "search_codebase",
+            r#"{"query":"external_secret_symbol"}"#,
+            dir.path(),
+        );
+        let map = execute_tool_in_workspace("get_repo_map", "{}", dir.path());
+
+        assert!(!search.contains("external_secret_symbol"));
+        assert!(!map.contains("external_secret_symbol"));
+    }
+
+    #[test]
+    fn test_consolidate_memory_preserves_unmanaged_content() {
+        let existing = "# Project Memory\n\nPersonal notes with\nmultiple lines.\n\n## Other Notes\n- Keep this.\n\n## Architecture\n- Existing architecture\n";
+        assert_eq!(consolidate_memory_entries(existing, &[], &[], &[]), existing.trim());
+        let merged = consolidate_memory_entries(
+            existing,
+            &["New architecture".to_string()],
+            &[],
+            &[],
+        );
+
+        assert!(merged.contains("Personal notes with\nmultiple lines."));
+        assert!(merged.contains("## Other Notes\n- Keep this."));
+        assert!(merged.contains("- Existing architecture"));
+        assert!(merged.contains("- New architecture"));
     }
 
     #[test]
