@@ -63,20 +63,25 @@ fn visible_tools(tools: &[AgentToolDefinition]) -> Vec<(&str, String)> {
 }
 
 fn append_project_context(prompt: &mut String, context: &ProjectContext) {
-    if context.instructions.is_empty() {
-        return;
+    if !context.instructions.is_empty() {
+        prompt.push_str("\n\n<project_context>\n");
+        prompt.push_str("Project-specific instructions and guidelines:\n\n");
+        for instruction in &context.instructions {
+            prompt.push_str(&format!(
+                "<project_instructions path=\"{}\">\n{}\n</project_instructions>\n\n",
+                escaped_attribute(&instruction.path),
+                instruction.content
+            ));
+        }
+        prompt.push_str("</project_context>");
     }
 
-    prompt.push_str("\n\n<project_context>\n");
-    prompt.push_str("Project-specific instructions and guidelines:\n\n");
-    for instruction in &context.instructions {
-        prompt.push_str(&format!(
-            "<project_instructions path=\"{}\">\n{}\n</project_instructions>\n\n",
-            escaped_attribute(&instruction.path),
-            instruction.content
-        ));
+    if let Some(memory) = &context.memory_content {
+        prompt.push_str("\n\n<project_memory>\n");
+        prompt.push_str("Persistent project memory from .threadlane/memory.md:\n\n");
+        prompt.push_str(memory);
+        prompt.push_str("\n</project_memory>");
     }
-    prompt.push_str("</project_context>");
 }
 
 fn append_catalog(prompt: &mut String, catalog: Option<&str>) {
@@ -120,6 +125,12 @@ pub(crate) fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> Stri
 
         if available_tool_names.contains("read_file") {
             add_tool_guideline("Inspect relevant files before making changes; do not guess about code, variable names, or schemas you have not read.");
+        }
+        if available_tool_names.contains("get_repo_map") {
+            add_tool_guideline("Use `get_repo_map` to get a compact skeleton of the workspace files and top-level exported symbols without pulling full file bodies into context.");
+        }
+        if available_tool_names.contains("read_memory") || available_tool_names.contains("save_memory") {
+            add_tool_guideline("Use `save_memory` to store persistent project facts, architectural decisions, or gotchas into `.threadlane/memory.md` so future sessions benefit.");
         }
         if available_tool_names.contains("write_file")
             || available_tool_names.contains("edit_file")
@@ -307,6 +318,7 @@ mod tests {
                 content: "Always test.".into(),
             }],
             combined_instructions: "Always test.".into(),
+            memory_content: None,
         };
         let config = SystemPromptConfig {
             custom_prompt: Some("Custom identity.".into()),

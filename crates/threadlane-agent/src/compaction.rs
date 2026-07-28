@@ -194,7 +194,17 @@ fn message_excerpt(message: &AgentMessage) -> Option<String> {
             .as_ref()
             .filter(|content| !content.trim().is_empty())
             .map(|content| format!("Assistant: {content}")),
-        AgentMessage::Tool { name, content, .. } => Some(format!("Tool {name}: {content}")),
+        AgentMessage::Tool { name, content, .. } => {
+            let truncated_content = if content.len() > 400 {
+                let head: String = content.chars().take(200).collect();
+                let tail_chars: Vec<char> = content.chars().rev().take(150).collect();
+                let tail: String = tail_chars.into_iter().rev().collect();
+                format!("{head} ... [truncated] ... {tail}")
+            } else {
+                content.clone()
+            };
+            Some(format!("Tool {name}: {truncated_content}"))
+        }
         AgentMessage::Custom { .. } => compaction_summary_text(message).map(str::to_string),
         AgentMessage::System { .. } => None,
     }

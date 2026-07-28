@@ -93,6 +93,36 @@ fn tool_definitions() -> Vec<Value> {
                 "required": ["command"]
             }
         }),
+        json!({
+            "name": "get_repo_map",
+            "description": "Generate a compact workspace skeleton showing files, subdirectories, and top-level exported symbols (structs, functions, traits, modules) without full file bodies to save tokens.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Optional relative subdirectory path to scope the map to. Defaults to workspace root." }
+                }
+            }
+        }),
+        json!({
+            "name": "read_memory",
+            "description": "Read the persistent project memory stored in .threadlane/memory.md.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }),
+        json!({
+            "name": "save_memory",
+            "description": "Save or append project architectural insights, conventions, build instructions, or gotchas into .threadlane/memory.md so future sessions benefit.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": { "type": "string", "description": "Memory content or note to write to .threadlane/memory.md" },
+                    "mode": { "type": "string", "enum": ["append", "overwrite"], "description": "Mode: 'append' (default) adds to memory.md; 'overwrite' replaces memory.md content." }
+                },
+                "required": ["content"]
+            }
+        }),
     ]
 }
 
@@ -287,7 +317,7 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
                             hashline::format_line_hashline(line_no, line)
                         })
                         .collect();
-                    formatted_lines.join("\n")
+                    truncate_tool_output(&formatted_lines.join("\n"))
                 }
                 Err(e) => format!("Error reading file '{raw_path}': {e}"),
             }
@@ -415,7 +445,7 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
                         items.push(format!("{kind} {name}"));
                     }
                     items.sort();
-                    items.join("\n")
+                    truncate_tool_output(&items.join("\n"))
                 }
                 Err(e) => format!("Error reading directory '{raw_path}': {e}"),
             }
@@ -441,14 +471,158 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     let exit = output.status;
 
-                    format!(
+                    truncate_tool_output(&format!(
                         "Exit Status: {exit}\n--- STDOUT ---\n{stdout}\n--- STDERR ---\n{stderr}"
-                    )
+                    ))
                 }
                 Err(e) => format!("Error executing command '{cmd_str}': {e}"),
             }
         }
+        "get_repo_map" => {
+            let raw_path = args.get("path").and_then(|v| v.as_str());
+            get_repo_map_impl(workspace_root, raw_path)
+        }
+        "read_memory" => read_memory_impl(workspace_root),
+        "save_memory" => save_memory_impl(workspace_root, &args),
         unknown => format!("Error: Unknown tool '{unknown}'"),
+    }
+}
+
+const MAX_TOOL_OUTPUT_CHARS: usize = 3_000;
+const TRUNCATE_HEAD_CHARS: usize = 1_200;
+const TRUNCATE_TAIL_CHARS: usize = 1_200;
+
+pub fn truncate_tool_output(output: &str) -> String {
+    if output.len() <= MAX_TOOL_OUTPUT_CHARS {
+        output.to_string()
+    } else {
+        let head: String = output.chars().take(TRUNCATE_HEAD_CHARS).collect();
+        let tail_chars: Vec<char> = output.chars().rev().take(TRUNCATE_TAIL_CHARS).collect();
+        let tail: String = tail_chars.into_iter().rev().collect();
+        let hidden = output.len().saturating_sub(TRUNCATE_HEAD_CHARS + TRUNCATE_TAIL_CHARS);
+        format!(
+            "{head}\n\n[... Output truncated: {hidden} characters hidden to reduce token explosion ...]\n\n{tail}"
+        )
+    }
+}
+
+fn read_memory_impl(workspace_root: &Path) -> String {
+    let mem_file = workspace_root.join(".threadlane").join("memory.md");
+    if mem_file.is_file() {
+        match fs::read_to_string(&mem_file) {
+            Ok(content) => truncate_tool_output(&content),
+            Err(e) => format!("Error reading .threadlane/memory.md: {e}"),
+        }
+    } else {
+        "No persistent memory found in .threadlane/memory.md yet.".to_string()
+    }
+}
+
+fn save_memory_impl(workspace_root: &Path, args: &Value) -> String {
+    let content = match args.get("content").and_then(|v| v.as_str()) {
+        Some(c) => c,
+        None => return "Error: 'content' parameter is required".into(),
+    };
+    let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("append");
+
+    let dir = workspace_root.join(".threadlane");
+    if let Err(e) = fs::create_dir_all(&dir) {
+        return format!("Error creating .threadlane directory: {e}");
+    }
+    let mem_file = dir.join("memory.md");
+
+    let new_content = if mode == "overwrite" || !mem_file.exists() {
+        content.trim().to_string()
+    } else {
+        let existing = fs::read_to_string(&mem_file).unwrap_or_default();
+        format!("{}\n\n{}", existing.trim(), content.trim())
+    };
+
+    match fs::write(&mem_file, new_content) {
+        Ok(_) => "Successfully saved memory to .threadlane/memory.md".to_string(),
+        Err(e) => format!("Error writing to .threadlane/memory.md: {e}"),
+    }
+}
+
+fn get_repo_map_impl(workspace_root: &Path, rel_path: Option<&str>) -> String {
+    let target_dir = match rel_path {
+        Some(path) => match validate_path_in_workspace(path, workspace_root) {
+            Ok(p) => p,
+            Err(err) => return err,
+        },
+        None => workspace_root.to_path_buf(),
+    };
+
+    let mut lines = Vec::new();
+    walk_repo_skeleton(&target_dir, workspace_root, 0, &mut lines);
+
+    if lines.is_empty() {
+        "No source code definitions found in repository map.".to_string()
+    } else {
+        truncate_tool_output(&lines.join("\n"))
+    }
+}
+
+fn walk_repo_skeleton(dir: &Path, root: &Path, depth: usize, out: &mut Vec<String>) {
+    if depth > 4 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut sorted_entries: Vec<_> = entries.flatten().collect();
+    sorted_entries.sort_by_key(|e| e.file_name());
+
+    for entry in sorted_entries {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.')
+            || name == "target"
+            || name == "node_modules"
+            || name == "dist"
+            || name == "packaging"
+        {
+            continue;
+        }
+
+        let path = entry.path();
+        if path.is_dir() {
+            walk_repo_skeleton(&path, root, depth + 1, out);
+        } else if path.is_file() {
+            let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+            if matches!(ext, "rs" | "py" | "js" | "ts" | "go" | "toml") {
+                let rel = path.strip_prefix(root).unwrap_or(&path);
+                let Ok(content) = fs::read_to_string(&path) else {
+                    continue;
+                };
+
+                let mut symbols = Vec::new();
+                for (idx, line) in content.lines().enumerate() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("pub fn ")
+                        || trimmed.starts_with("pub struct ")
+                        || trimmed.starts_with("pub enum ")
+                        || trimmed.starts_with("pub trait ")
+                        || trimmed.starts_with("pub mod ")
+                        || trimmed.starts_with("fn ")
+                        || trimmed.starts_with("class ")
+                        || trimmed.starts_with("def ")
+                        || (ext == "toml" && trimmed.starts_with('[') && trimmed.ends_with(']'))
+                    {
+                        let sig = if trimmed.len() > 100 {
+                            format!("{}...", &trimmed[..97])
+                        } else {
+                            trimmed.to_string()
+                        };
+                        symbols.push(format!("  L{}: {sig}", idx + 1));
+                    }
+                }
+
+                if !symbols.is_empty() {
+                    out.push(format!("{}", rel.display()));
+                    out.extend(symbols);
+                }
+            }
+        }
     }
 }
 
@@ -635,5 +809,49 @@ mod tests {
             res,
             "Invalid line range: end_line (2) must not be before start_line (3)."
         );
+    }
+
+    #[test]
+    fn test_save_and_read_memory_tool() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        let initial_read = execute_tool_in_workspace("read_memory", "{}", root);
+        assert!(initial_read.contains("No persistent memory found"));
+
+        let payload = json!({"content": "## Architectural Decision\nUse Makepad with threadlane state."}).to_string();
+        let save_res = execute_tool_in_workspace("save_memory", &payload, root);
+        assert!(save_res.contains("Successfully saved memory"));
+
+        let read_res = execute_tool_in_workspace("read_memory", "{}", root);
+        assert!(read_res.contains("Use Makepad with threadlane state."));
+    }
+
+    #[test]
+    fn test_get_repo_map_tool() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let src_dir = root.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        let rs_file = src_dir.join("main.rs");
+        fs::write(
+            &rs_file,
+            "pub struct AppState {}\npub fn main() {\n    println!(\"hello\");\n}\n",
+        )
+        .unwrap();
+
+        let map_res = execute_tool_in_workspace("get_repo_map", "{}", root);
+        assert!(map_res.contains("src/main.rs"));
+        assert!(map_res.contains("pub struct AppState"));
+        assert!(map_res.contains("pub fn main()"));
+    }
+
+    #[test]
+    fn test_truncate_tool_output() {
+        let long_string = "a".repeat(5000);
+        let truncated = truncate_tool_output(&long_string);
+        assert!(truncated.contains("[... Output truncated:"));
+        assert!(truncated.len() < 3000);
     }
 }
