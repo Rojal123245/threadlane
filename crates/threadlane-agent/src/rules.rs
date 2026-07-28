@@ -67,7 +67,6 @@ impl StreamRuleMonitor {
     fn reset(&mut self) {
         self.accumulated_text.clear();
     }
-
 }
 
 #[cfg(test)]

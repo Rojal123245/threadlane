@@ -1,7 +1,7 @@
 use crate::context::ProjectContext;
-use threadlane_agent::AgentToolDefinition;
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
+use threadlane_agent::AgentToolDefinition;
 
 const MAX_TOOL_DESCRIPTION_CHARS: usize = 240;
 
@@ -121,7 +121,9 @@ pub(crate) fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> Stri
         if available_tool_names.contains("read_file") {
             add_guideline("Inspect relevant files before making changes; do not guess about code you have not read.");
         }
-        if available_tool_names.contains("write_file") || available_tool_names.contains("edit_file") || available_tool_names.contains("edit_file_hashline")
+        if available_tool_names.contains("write_file")
+            || available_tool_names.contains("edit_file")
+            || available_tool_names.contains("edit_file_hashline")
         {
             add_guideline("Keep edits focused, preserve existing user work, and follow the project's established style.");
         }

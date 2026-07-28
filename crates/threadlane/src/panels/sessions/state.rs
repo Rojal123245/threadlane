@@ -480,6 +480,9 @@ pub fn set_active_project(work_dir: &Path) {
 
 pub fn toggle_project_collapsed(work_dir: &Path) {
     let mut data = SESSIONS_DATA.write().unwrap();
+    if !data.search_query.trim().is_empty() {
+        return;
+    }
     let work_dir = canonicalize_path(work_dir);
     if !data.collapsed_projects.remove(&work_dir) {
         data.collapsed_projects.insert(work_dir.clone());

@@ -10,9 +10,7 @@ pub use composer::{
     accepts_generation_event, concise_status, draft_for_cancellation, submitted_draft,
     ComposerState, ComposerStatus, GenerationEvent,
 };
-pub use state::{
-    ChatData, MsgRole, StreamingKind, ToolStatus,
-};
 #[cfg(test)]
 pub use state::ChatMessage;
+pub use state::{ChatData, MsgRole, StreamingKind, ToolStatus};
 pub use view::{ChatList, ChatListWidgetRefExt, StarterPromptAction, SubagentRail};

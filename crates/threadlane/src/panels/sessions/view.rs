@@ -462,11 +462,26 @@ mod tests {
 
     #[test]
     fn session_template_prioritizes_context_then_active_then_last() {
-        assert_eq!(session_row_template(true, true, true), id!(SessionRowContextLast));
-        assert_eq!(session_row_template(true, false, false), id!(SessionRowContext));
-        assert_eq!(session_row_template(false, true, true), id!(SessionRowActiveLast));
-        assert_eq!(session_row_template(false, true, false), id!(SessionRowActive));
-        assert_eq!(session_row_template(false, false, true), id!(SessionRowLast));
+        assert_eq!(
+            session_row_template(true, true, true),
+            id!(SessionRowContextLast)
+        );
+        assert_eq!(
+            session_row_template(true, false, false),
+            id!(SessionRowContext)
+        );
+        assert_eq!(
+            session_row_template(false, true, true),
+            id!(SessionRowActiveLast)
+        );
+        assert_eq!(
+            session_row_template(false, true, false),
+            id!(SessionRowActive)
+        );
+        assert_eq!(
+            session_row_template(false, false, true),
+            id!(SessionRowLast)
+        );
         assert_eq!(session_row_template(false, false, false), id!(SessionRow));
     }
 }

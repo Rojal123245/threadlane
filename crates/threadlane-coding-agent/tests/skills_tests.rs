@@ -1,12 +1,12 @@
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
+use tempfile::tempdir;
 use threadlane_agent::ToolExecutor;
 use threadlane_coding_agent::{
     load_skill_tool_definition, LoadSkillToolExecutor, SkillDiscoveryOptions,
     SkillDiscoveryWarningKind, SkillManager, SkillScope, LOAD_SKILL_TOOL_NAME,
 };
-use std::collections::BTreeMap;
-use std::fs;
-use std::path::Path;
-use tempfile::tempdir;
 
 fn write_skill(directory: &Path, id: &str, description: &str, body: &str) {
     fs::create_dir_all(directory).unwrap();
@@ -96,7 +96,9 @@ fn native_sources_are_preserved_with_deterministic_precedence() {
         "global package wins globally",
     );
     write_native_package(
-        &project.path().join(".threadlane/packages/duplicate-project"),
+        &project
+            .path()
+            .join(".threadlane/packages/duplicate-project"),
         "duplicate",
         "project package wins",
     );

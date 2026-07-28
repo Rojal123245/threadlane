@@ -2578,10 +2578,7 @@ impl Widget for ProviderSettingsModal {
             }
             let list = self.view.portal_list(cx, ids!(capability_list));
             for (row, item) in list.items_with_actions(actions) {
-                if let Some(enabled) = item
-                    .check_box(cx, ids!(enabled_toggle))
-                    .changed(actions)
-                {
+                if let Some(enabled) = item.check_box(cx, ids!(enabled_toggle)).changed(actions) {
                     cx.widget_action(
                         uid,
                         ProviderSettingsModalAction::SetEnabled { row, enabled },
@@ -2593,10 +2590,7 @@ impl Widget for ProviderSettingsModal {
             }
             let skill_list = self.view.portal_list(cx, ids!(skill_list));
             for (row, item) in skill_list.items_with_actions(actions) {
-                if let Some(enabled) = item
-                    .check_box(cx, ids!(enabled_toggle))
-                    .changed(actions)
-                {
+                if let Some(enabled) = item.check_box(cx, ids!(enabled_toggle)).changed(actions) {
                     cx.widget_action(
                         uid,
                         ProviderSettingsModalAction::SetSkillEnabled { row, enabled },
@@ -2678,8 +2672,11 @@ impl Widget for ProviderSettingsModal {
                                 .set_text(cx, &row.scope_status());
                             item.label(cx, ids!(path_lbl))
                                 .set_text(cx, &row.module_path.display().to_string());
-                            item.check_box(cx, ids!(enabled_toggle))
-                                .set_active(cx, row.enabled, Animate::No);
+                            item.check_box(cx, ids!(enabled_toggle)).set_active(
+                                cx,
+                                row.enabled,
+                                Animate::No,
+                            );
                             item.draw_all_unscoped(cx);
                         }
                     }

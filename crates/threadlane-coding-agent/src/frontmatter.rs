@@ -66,7 +66,8 @@ mod tests {
 
     #[test]
     fn test_parse_frontmatter_valid() {
-        let text = "---\nname: test_agent\ndescription: \"Test Description\"\n---\nHello world body";
+        let text =
+            "---\nname: test_agent\ndescription: \"Test Description\"\n---\nHello world body";
         let parsed = parse_frontmatter(text);
         assert_eq!(parsed.get("name"), Some("test_agent"));
         assert_eq!(parsed.get("description"), Some("Test Description"));
@@ -87,6 +88,9 @@ mod tests {
     fn test_parse_frontmatter_unclosed() {
         let text = "---\nname: test\nbody text";
         let parsed = parse_frontmatter(text);
-        assert_eq!(parsed.parse_error, Some("Unclosed frontmatter delimiter '---'".into()));
+        assert_eq!(
+            parsed.parse_error,
+            Some("Unclosed frontmatter delimiter '---'".into())
+        );
     }
 }
