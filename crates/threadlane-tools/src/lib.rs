@@ -1,4 +1,6 @@
+pub mod ast;
 pub mod hashline;
+pub mod rag;
 
 use serde_json::{json, Value};
 use std::fs;
@@ -101,6 +103,18 @@ fn tool_definitions() -> Vec<Value> {
                 "properties": {
                     "path": { "type": "string", "description": "Optional relative subdirectory path to scope the map to. Defaults to workspace root." }
                 }
+            }
+        }),
+        json!({
+            "name": "search_codebase",
+            "description": "Search the codebase using AST-indexed nodes and RAG retrieval. Returns relevant line-anchored AST code blocks (functions, structs, traits, impls) for a query without reading full files.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Natural language or symbol query (e.g. 'where are prompt cache keys clamped?' or 'compaction logic')" },
+                    "top_k": { "type": "integer", "description": "Optional maximum number of AST snippet matches to return (default: 5)." }
+                },
+                "required": ["query"]
             }
         }),
         json!({
@@ -482,6 +496,14 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
             let raw_path = args.get("path").and_then(|v| v.as_str());
             get_repo_map_impl(workspace_root, raw_path)
         }
+        "search_codebase" => {
+            let query = match args.get("query").and_then(|v| v.as_str()) {
+                Some(q) => q,
+                None => return "Error: 'query' parameter is required".into(),
+            };
+            let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+            rag::search_codebase_impl(workspace_root, query, top_k)
+        }
         "read_memory" => read_memory_impl(workspace_root),
         "save_memory" => save_memory_impl(workspace_root, &args),
         unknown => format!("Error: Unknown tool '{unknown}'"),
@@ -853,5 +875,28 @@ mod tests {
         let truncated = truncate_tool_output(&long_string);
         assert!(truncated.contains("[... Output truncated:"));
         assert!(truncated.len() < 3000);
+    }
+
+    #[test]
+    fn test_search_codebase_tool() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let src_dir = root.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        let rs_file = src_dir.join("compaction.rs");
+        fs::write(
+            &rs_file,
+            "pub fn compact_messages_to_token_budget() {\n    // compaction logic\n}\n",
+        )
+        .unwrap();
+
+        let res = execute_tool_in_workspace(
+            "search_codebase",
+            r#"{"query": "compaction logic"}"#,
+            root,
+        );
+        assert!(res.contains("src/compaction.rs"));
+        assert!(res.contains("compact_messages_to_token_budget"));
     }
 }

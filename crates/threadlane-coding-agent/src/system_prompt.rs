@@ -129,6 +129,9 @@ pub(crate) fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> Stri
         if available_tool_names.contains("get_repo_map") {
             add_tool_guideline("Use `get_repo_map` to get a compact skeleton of the workspace files and top-level exported symbols without pulling full file bodies into context.");
         }
+        if available_tool_names.contains("search_codebase") {
+            add_tool_guideline("Use `search_codebase` to search AST-indexed code nodes and retrieve relevant line-anchored code blocks for a query without reading full files.");
+        }
         if available_tool_names.contains("read_memory") || available_tool_names.contains("save_memory") {
             add_tool_guideline("Use `save_memory` to store persistent project facts, architectural decisions, or gotchas into `.threadlane/memory.md` so future sessions benefit.");
         }
