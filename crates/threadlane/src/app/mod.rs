@@ -2928,15 +2928,23 @@ script_mod! {
                                         padding: Inset{left: 10 right: 10 top: 8 bottom: 8}
                                         draw_bg +: {
                                             color: theme.color_card
+                                            color_hover: theme.color_card
                                             color_focus: theme.color_background
+                                            color_down: theme.color_background
                                             border_color: theme.color_border
+                                            border_color_hover: theme.color_border
                                             border_color_focus: theme.color_primary
+                                            border_color_down: theme.color_primary
                                             border_radius: 8.0
                                             border_size: 1.0
                                         }
                                         draw_text +: {
                                             color: theme.color_foreground
+                                            color_hover: theme.color_foreground
+                                            color_focus: theme.color_foreground
                                             color_empty: theme.color_muted_foreground
+                                            color_empty_hover: theme.color_muted_foreground
+                                            color_empty_focus: theme.color_muted_foreground
                                             text_style +: {
                                                 font_size: 9.0
                                                 line_spacing: 1.35
