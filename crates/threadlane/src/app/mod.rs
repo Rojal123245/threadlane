@@ -2866,9 +2866,7 @@ impl Widget for ProviderSettingsModal {
             };
             while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
                 if let Some(mut list) = item.as_portal_list().borrow_mut() {
-                    let skill_list_uid = self.view.portal_list(cx, ids!(skill_list)).widget_uid();
-                    let mcp_list_uid = self.view.portal_list(cx, ids!(mcp_list)).widget_uid();
-                    if list.widget_uid() == skill_list_uid {
+                    if self.page == SettingsPage::Skills {
                         list.set_item_range(cx, 0, self.skill_rows.len().max(1));
                         while let Some(row_index) = list.next_visible_item(cx) {
                             if self.skill_rows.is_empty() {
@@ -2894,7 +2892,7 @@ impl Widget for ProviderSettingsModal {
                             );
                             item.draw_all_unscoped(cx);
                         }
-                    } else if list.widget_uid() == mcp_list_uid {
+                    } else if self.page == SettingsPage::McpServers {
                         list.set_item_range(cx, 0, self.mcp_rows.len().max(1));
                         while let Some(row_index) = list.next_visible_item(cx) {
                             if self.mcp_rows.is_empty() {
@@ -2920,7 +2918,7 @@ impl Widget for ProviderSettingsModal {
                             );
                             item.draw_all_unscoped(cx);
                         }
-                    } else {
+                    } else if self.page == SettingsPage::Capabilities {
                         list.set_item_range(cx, 0, self.extension_rows.len().max(1));
                         while let Some(row_index) = list.next_visible_item(cx) {
                             if self.extension_rows.is_empty() {
@@ -2965,19 +2963,26 @@ impl ProviderSettingsModal {
         }
     }
 
+    fn redraw_capability_overlay(&mut self, cx: &mut Cx) {
+        if let Some(draw_list) = &self.draw_list {
+            draw_list.redraw(cx);
+        }
+        self.view.redraw(cx);
+    }
+
     fn set_extension_rows(&mut self, cx: &mut Cx, rows: Vec<crate::state::CapabilityExtensionRow>) {
         self.extension_rows = rows;
-        self.view.widget(cx, ids!(capability_list)).redraw(cx);
+        self.redraw_capability_overlay(cx);
     }
 
     fn set_skill_rows(&mut self, cx: &mut Cx, rows: Vec<crate::state::CapabilitySkillRow>) {
         self.skill_rows = rows;
-        self.view.widget(cx, ids!(skill_list)).redraw(cx);
+        self.redraw_capability_overlay(cx);
     }
 
     fn set_mcp_rows(&mut self, cx: &mut Cx, rows: Vec<crate::state::CapabilityMcpRow>) {
         self.mcp_rows = rows;
-        self.view.widget(cx, ids!(mcp_list)).redraw(cx);
+        self.redraw_capability_overlay(cx);
     }
 
     fn set_mcp_status(&mut self, cx: &mut Cx, status: &str) {

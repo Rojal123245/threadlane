@@ -17,9 +17,10 @@ const MCP_SETTINGS_FILE: &str = "mcp.json";
 const MCP_PROJECT_SETTINGS_RELATIVE_PATH: &str = ".threadlane/mcp.json";
 const MAX_MCP_SETTINGS_BYTES: usize = 512 * 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum McpScope {
+    #[default]
     Global,
     Project,
 }
@@ -57,6 +58,7 @@ pub struct McpServerConfig {
     pub transport: McpTransport,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    #[serde(default)]
     pub scope: McpScope,
 }
 
@@ -604,5 +606,27 @@ mod tests {
 
         let deserialized: McpServerConfig = serde_json::from_str(&json_str).unwrap();
         assert_eq!(deserialized, config);
+    }
+
+    #[test]
+    fn test_mcp_server_config_deserialization_without_scope() {
+        let json_str = r#"{
+            "servers": [
+                {
+                    "id": "tokensave",
+                    "name": "TokenSave Code Graph",
+                    "transport": {
+                        "type": "stdio",
+                        "command": "tokensave",
+                        "args": ["mcp"]
+                    },
+                    "enabled": true
+                }
+            ]
+        }"#;
+
+        let settings: McpSettingsFile = serde_json::from_str(json_str).unwrap();
+        assert_eq!(settings.servers.len(), 1);
+        assert_eq!(settings.servers[0].id, "tokensave");
     }
 }
