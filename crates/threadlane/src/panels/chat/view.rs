@@ -614,7 +614,7 @@ pub enum StarterPromptAction {
 pub struct ChatList {
     #[deref]
     view: View,
-    /// Cached display rows; rebuilt only when message count or streaming kind changes.
+    /// Cached display rows; stable assistant rows are reused while their Markdown text streams.
     #[rust]
     cached_rows: Vec<DisplayRow>,
     #[rust]
@@ -628,7 +628,7 @@ pub struct ChatList {
     #[rust]
     cached_streaming_text_len: usize,
     #[rust]
-    cached_revision: u64,
+    cached_has_streaming_row: bool,
     #[rust]
     hovered_starter: Option<StarterPromptAction>,
     #[rust]
@@ -720,33 +720,41 @@ impl Widget for ChatList {
             return DrawStep::done();
         };
 
-        // Rebuild display rows only when the message list or streaming state changes.
+        // Rebuild display rows only when the message list or streaming shape changes.
         let msg_count = data.messages.len();
         let streaming_text_len = data.streaming_text.len();
-        if msg_count != self.cached_msg_count
-            || data.streaming_kind != self.cached_streaming_kind
-            || streaming_text_len != self.cached_streaming_text_len
-            || data.revision != self.cached_revision
-        {
-            if msg_count != self.cached_msg_count || data.revision != self.cached_base_revision {
+        let base_changed = msg_count != self.cached_msg_count
+            || data.revision != self.cached_base_revision;
+        let streaming_kind_changed = data.streaming_kind != self.cached_streaming_kind;
+        let has_streaming_row = data.streaming_kind == Some(StreamingKind::Assistant)
+            && !data.streaming_text.is_empty();
+        let streaming_shape_changed = streaming_kind_changed
+            || (data.streaming_kind == Some(StreamingKind::Assistant)
+                && has_streaming_row != self.cached_has_streaming_row)
+            || (data.streaming_kind != Some(StreamingKind::Assistant)
+                && streaming_text_len != self.cached_streaming_text_len);
+
+        if base_changed || streaming_shape_changed {
+            if base_changed {
                 self.cached_base_rows = display_rows(&data.messages, None, "");
                 self.cached_base_revision = data.revision;
             }
 
             if data.streaming_kind == Some(StreamingKind::Assistant) {
                 self.cached_rows = self.cached_base_rows.clone();
-                if !data.streaming_text.is_empty() {
+                if has_streaming_row {
                     self.cached_rows.push(DisplayRow::StreamingAssistant);
                 }
             } else {
                 self.cached_rows =
                     display_rows(&data.messages, data.streaming_kind, &data.streaming_text);
             }
+
             self.cached_msg_count = msg_count;
             self.cached_streaming_kind = data.streaming_kind;
-            self.cached_streaming_text_len = streaming_text_len;
-            self.cached_revision = data.revision;
+            self.cached_has_streaming_row = has_streaming_row;
         }
+        self.cached_streaming_text_len = streaming_text_len;
         let rows = &self.cached_rows;
 
         let is_empty = data.messages.is_empty() && data.streaming_text.is_empty();
