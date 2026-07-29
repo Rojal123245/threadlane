@@ -1,6 +1,5 @@
 //! Project-scoped supervisor task list shown beside the active chat.
 
-use crate::components::nav_button::set_selected;
 use makepad_widgets::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -133,79 +132,6 @@ script_mod! {
         }
     }
 
-    mod.components.TaskSidebarFilterButton = Button {
-        width: Fill
-        height: Fill
-        padding: 0
-        spacing: 0
-        align: Align{x: 0.5 y: 0.5}
-        draw_bg +: {
-            color: theme.color_input
-            color_hover: theme.color_card
-            color_focus: theme.color_card
-            color_down: theme.color_primary
-            border_color: theme.color_input
-            border_color_hover: theme.color_border
-            border_color_focus: theme.color_primary
-            border_color_down: theme.color_primary
-            border_size: 1.0
-            border_radius: 5.0
-        }
-        draw_text +: {
-            color: theme.color_muted_foreground
-            color_hover: theme.color_foreground
-            color_focus: theme.color_foreground
-            color_down: theme.color_primary_foreground
-            text_style: theme.font_bold { font_size: 8.5 }
-        }
-        animator: Animator{
-            selected: {
-                default: @off
-                off: AnimatorState{
-                    from: {all: Forward {duration: 0.}}
-                    apply: {
-                        draw_bg: {
-                            color: theme.color_input
-                            color_hover: theme.color_card
-                            color_focus: theme.color_card
-                            color_down: theme.color_primary
-                            border_color: theme.color_input
-                            border_color_hover: theme.color_border
-                            border_color_focus: theme.color_primary
-                            border_color_down: theme.color_primary
-                        }
-                        draw_text: {
-                            color: theme.color_muted_foreground
-                            color_hover: theme.color_foreground
-                            color_focus: theme.color_foreground
-                            color_down: theme.color_primary_foreground
-                        }
-                    }
-                }
-                on: AnimatorState{
-                    from: {all: Forward {duration: 0.}}
-                    apply: {
-                        draw_bg: {
-                            color: theme.color_primary
-                            color_hover: theme.color_primary
-                            color_focus: theme.color_primary
-                            color_down: theme.color_primary
-                            border_color: theme.color_primary
-                            border_color_hover: theme.color_primary
-                            border_color_focus: theme.color_primary
-                            border_color_down: theme.color_primary
-                        }
-                        draw_text: {
-                            color: theme.color_primary_foreground
-                            color_hover: theme.color_primary_foreground
-                            color_focus: theme.color_primary_foreground
-                            color_down: theme.color_primary_foreground
-                        }
-                    }
-                }
-            }
-        }
-    }
 
     mod.components.TaskSidebar = set_type_default() do mod.components.TaskSidebarBase {
         width: 280
@@ -248,32 +174,6 @@ script_mod! {
             draw_bg +: { color: theme.color_card }
         }
 
-        filter_bar := View {
-            width: Fill
-            height: 44
-            flow: Right
-            align: Align{y: 0.5}
-            padding: Inset{left: 10 right: 10 top: 6 bottom: 6}
-
-            filter_track := RoundedView {
-                width: Fill
-                height: Fill
-                flow: Right
-                spacing: 2
-                padding: Inset{left: 3 right: 3 top: 3 bottom: 3}
-                draw_bg +: {
-                    color: theme.color_input
-                    border_color: theme.color_border
-                    border_size: 1.0
-                    border_radius: 7.0
-                }
-
-                all_filter := mod.components.TaskSidebarFilterButton { text: "All" }
-                active_filter := mod.components.TaskSidebarFilterButton { text: "Active" }
-                completed_filter := mod.components.TaskSidebarFilterButton { text: "Done" }
-                failed_filter := mod.components.TaskSidebarFilterButton { text: "Failed" }
-            }
-        }
 
         list := PortalList {
             width: Fill
@@ -390,7 +290,6 @@ pub enum TaskSidebarAction {
         session_file: Option<PathBuf>,
     },
     Cancel(String),
-    SetFilter(TaskSidebarFilter),
     ToggleSession(String),
     ToggleTask(String),
     #[default]
@@ -684,33 +583,9 @@ pub struct TaskSidebar {
     current_session_id: Option<String>,
     #[rust]
     expanded_sessions: HashMap<String, bool>,
-    #[rust]
-    filter: TaskSidebarFilter,
 }
 
 impl TaskSidebar {
-    fn sync_filter_buttons(&mut self, cx: &mut Cx) {
-        set_selected(
-            cx,
-            &self.view.button(cx, ids!(all_filter)),
-            self.filter == TaskSidebarFilter::All,
-        );
-        set_selected(
-            cx,
-            &self.view.button(cx, ids!(active_filter)),
-            self.filter == TaskSidebarFilter::Active,
-        );
-        set_selected(
-            cx,
-            &self.view.button(cx, ids!(completed_filter)),
-            self.filter == TaskSidebarFilter::Completed,
-        );
-        set_selected(
-            cx,
-            &self.view.button(cx, ids!(failed_filter)),
-            self.filter == TaskSidebarFilter::Failed,
-        );
-    }
     pub fn set_content(
         &mut self,
         cx: &mut Cx,
@@ -726,31 +601,15 @@ impl TaskSidebar {
             &plan,
             &items,
             current_session_id.as_deref(),
-            self.filter,
+            TaskSidebarFilter::All,
             &self.expanded_sessions,
         );
         self.plan = plan;
         self.items = items;
         self.current_session_id = current_session_id;
         self.view.redraw(cx);
-        self.sync_filter_buttons(cx);
     }
 
-    pub fn set_filter(&mut self, cx: &mut Cx, filter: TaskSidebarFilter) {
-        if self.filter == filter {
-            return;
-        }
-        self.filter = filter;
-        self.rows = sidebar_rows_filtered(
-            &self.plan,
-            &self.items,
-            self.current_session_id.as_deref(),
-            self.filter,
-            &self.expanded_sessions,
-        );
-        self.view.redraw(cx);
-        self.sync_filter_buttons(cx);
-    }
 
     pub fn toggle_session(&mut self, cx: &mut Cx, session_id: &str) {
         let expanded = self
@@ -762,7 +621,7 @@ impl TaskSidebar {
             &self.plan,
             &self.items,
             self.current_session_id.as_deref(),
-            self.filter,
+            TaskSidebarFilter::All,
             &self.expanded_sessions,
         );
         self.view.redraw(cx);
@@ -778,7 +637,7 @@ impl TaskSidebar {
             &self.plan,
             &self.items,
             self.current_session_id.as_deref(),
-            self.filter,
+            TaskSidebarFilter::All,
             &self.expanded_sessions,
         );
         self.view.redraw(cx);
@@ -870,26 +729,6 @@ impl Widget for TaskSidebar {
         };
         if self.view.button(cx, ids!(close_btn)).clicked(actions) {
             cx.widget_action(self.widget_uid(), TaskSidebarAction::Close);
-            return;
-        }
-        let selected_filter = if self.view.button(cx, ids!(all_filter)).clicked(actions) {
-            Some(TaskSidebarFilter::All)
-        } else if self.view.button(cx, ids!(active_filter)).clicked(actions) {
-            Some(TaskSidebarFilter::Active)
-        } else if self
-            .view
-            .button(cx, ids!(completed_filter))
-            .clicked(actions)
-        {
-            Some(TaskSidebarFilter::Completed)
-        } else if self.view.button(cx, ids!(failed_filter)).clicked(actions) {
-            Some(TaskSidebarFilter::Failed)
-        } else {
-            None
-        };
-        if let Some(filter) = selected_filter {
-            self.set_filter(cx, filter);
-            cx.widget_action(self.widget_uid(), TaskSidebarAction::SetFilter(filter));
             return;
         }
         let list = self.view.portal_list(cx, ids!(list));
