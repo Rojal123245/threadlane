@@ -1336,6 +1336,7 @@ pub struct CodingAgent {
     broker_dispatcher: Arc<CapabilityDispatcher>,
     managed_processes: ManagedProcessRegistry,
     agent_work: AgentWorkScheduler,
+    mcp_manager: Arc<McpManager>,
     plan_store: SessionPlanStore,
     prompt_templates: Option<Vec<crate::prompt_templates::PromptTemplate>>,
     #[cfg(test)]
@@ -1633,6 +1634,10 @@ impl CodingAgent {
         self.skills = skills;
     }
 
+    pub async fn refresh_mcp(&self) {
+        self.mcp_manager.discover_and_connect().await;
+    }
+
     pub fn new(options: CodingAgentOptions) -> Self {
         let project_context = ProjectContext::discover(&options.work_dir);
         let mut skill_manager = SkillManager::new();
@@ -1780,15 +1785,13 @@ impl CodingAgent {
             default_global_threadlane_dir(),
             Some(options.work_dir.clone()),
         ));
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            let manager_clone = mcp_manager.clone();
-            handle.spawn(async move {
-                manager_clone.discover_and_connect().await;
-            });
-        }
+        let manager_clone = mcp_manager.clone();
+        threadlane_agent::get_runtime().spawn(async move {
+            manager_clone.discover_and_connect().await;
+        });
         if let Err(error) = agent
             .loop_engine
-            .register_tool_executor(Arc::new(McpToolExecutor::new(mcp_manager)))
+            .register_tool_executor(Arc::new(McpToolExecutor::new(mcp_manager.clone())))
         {
             eprintln!("MCP tool registration failed: {error}");
         }
@@ -1851,6 +1854,7 @@ impl CodingAgent {
             broker_dispatcher,
             managed_processes,
             agent_work,
+            mcp_manager,
             plan_store,
             prompt_templates: None,
             #[cfg(test)]

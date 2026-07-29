@@ -122,20 +122,7 @@ impl CapabilityState {
             .collect();
     }
 
-    pub fn refresh_mcp(
-        &mut self,
-        global_dir: Option<&std::path::Path>,
-        project_root: Option<&std::path::Path>,
-    ) {
-        let manager = threadlane_coding_agent::McpManager::new(
-            global_dir.map(std::path::Path::to_path_buf),
-            project_root.map(std::path::Path::to_path_buf),
-        );
-        let records = if let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
-            rt.block_on(manager.discover_and_connect())
-        } else {
-            Vec::new()
-        };
+    pub fn refresh_mcp_records(&mut self, records: Vec<threadlane_coding_agent::McpServerRecord>) {
         self.mcp_servers = records
             .into_iter()
             .map(|rec| {
@@ -218,6 +205,7 @@ pub enum GuiAgentEvent {
     },
     AntigravityLoginError(String),
     AntigravityDoctorReport(String),
+    McpRefreshCompleted(Vec<threadlane_coding_agent::McpServerRecord>),
 }
 
 #[cfg(test)]

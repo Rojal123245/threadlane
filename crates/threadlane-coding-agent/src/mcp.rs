@@ -13,7 +13,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::Mutex as TokioMutex;
 
-const MCP_SETTINGS_RELATIVE_PATH: &str = ".threadlane/mcp.json";
+const MCP_SETTINGS_FILE: &str = "mcp.json";
+const MCP_PROJECT_SETTINGS_RELATIVE_PATH: &str = ".threadlane/mcp.json";
 const MAX_MCP_SETTINGS_BYTES: usize = 512 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,7 +84,7 @@ impl McpSettings {
         let Some(dir) = global_dir else {
             return Vec::new();
         };
-        let path = dir.join(MCP_SETTINGS_RELATIVE_PATH);
+        let path = dir.join(MCP_SETTINGS_FILE);
         Self::load_file(&path, McpScope::Global)
     }
 
@@ -91,7 +92,7 @@ impl McpSettings {
         let Some(root) = project_root else {
             return Vec::new();
         };
-        let path = root.join(MCP_SETTINGS_RELATIVE_PATH);
+        let path = root.join(MCP_PROJECT_SETTINGS_RELATIVE_PATH);
         Self::load_file(&path, McpScope::Project)
     }
 
@@ -118,8 +119,15 @@ impl McpSettings {
             .collect()
     }
 
-    pub fn save(dir: &Path, servers: &[McpServerConfig]) -> Result<(), String> {
-        let file_path = dir.join(MCP_SETTINGS_RELATIVE_PATH);
+    pub fn save_global(dir: &Path, servers: &[McpServerConfig]) -> Result<(), String> {
+        Self::save_file(&dir.join(MCP_SETTINGS_FILE), servers)
+    }
+
+    pub fn save_project(root: &Path, servers: &[McpServerConfig]) -> Result<(), String> {
+        Self::save_file(&root.join(MCP_PROJECT_SETTINGS_RELATIVE_PATH), servers)
+    }
+
+    fn save_file(file_path: &Path, servers: &[McpServerConfig]) -> Result<(), String> {
         if let Some(parent) = file_path.parent() {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create settings directory: {e}"))?;
@@ -129,8 +137,7 @@ impl McpSettings {
         };
         let bytes = serde_json::to_vec_pretty(&file_data)
             .map_err(|e| format!("Failed to serialize MCP settings: {e}"))?;
-        fs::write(&file_path, bytes)
-            .map_err(|e| format!("Failed to write MCP settings: {e}"))
+        fs::write(&file_path, bytes).map_err(|e| format!("Failed to write MCP settings: {e}"))
     }
 }
 
@@ -148,7 +155,11 @@ impl McpServerStatus {
             McpServerStatus::Disconnected => "Disconnected".to_string(),
             McpServerStatus::Connecting => "Connecting...".to_string(),
             McpServerStatus::Connected { tool_count } => {
-                format!("Connected ({} tool{})", tool_count, if *tool_count == 1 { "" } else { "s" })
+                format!(
+                    "Connected ({} tool{})",
+                    tool_count,
+                    if *tool_count == 1 { "" } else { "s" }
+                )
             }
             McpServerStatus::Error(err) => format!("Error: {err}"),
         }
@@ -194,7 +205,10 @@ impl McpManager {
         let mut all_configs = Vec::new();
         let mut seen_ids = BTreeSet::new();
 
-        for config in project_configs.into_iter().chain(global_configs.into_iter()) {
+        for config in project_configs
+            .into_iter()
+            .chain(global_configs.into_iter())
+        {
             if seen_ids.insert(config.id.clone()) {
                 all_configs.push(config);
             }
@@ -217,7 +231,11 @@ impl McpManager {
             for t in &tools {
                 tool_defs.push(t.definition.clone());
             }
-            records.push(McpServerRecord { config, status, tools });
+            records.push(McpServerRecord {
+                config,
+                status,
+                tools,
+            });
         }
 
         let mut guard = self.servers.lock().await;
@@ -242,16 +260,31 @@ impl McpManager {
 
                 let mut child = match cmd.spawn() {
                     Ok(c) => c,
-                    Err(e) => return (McpServerStatus::Error(format!("Failed to spawn process: {e}")), Vec::new()),
+                    Err(e) => {
+                        return (
+                            McpServerStatus::Error(format!("Failed to spawn process: {e}")),
+                            Vec::new(),
+                        )
+                    }
                 };
 
                 let mut stdin = match child.stdin.take() {
                     Some(s) => s,
-                    None => return (McpServerStatus::Error("Failed to open stdin".into()), Vec::new()),
+                    None => {
+                        return (
+                            McpServerStatus::Error("Failed to open stdin".into()),
+                            Vec::new(),
+                        )
+                    }
                 };
                 let stdout = match child.stdout.take() {
                     Some(s) => s,
-                    None => return (McpServerStatus::Error("Failed to open stdout".into()), Vec::new()),
+                    None => {
+                        return (
+                            McpServerStatus::Error("Failed to open stdout".into()),
+                            Vec::new(),
+                        )
+                    }
                 };
 
                 let mut reader = BufReader::new(stdout);
@@ -275,13 +308,20 @@ impl McpManager {
                 let write_res = stdin.write_all(format!("{}\n", init_req).as_bytes()).await;
                 if let Err(e) = write_res {
                     let _ = child.kill().await;
-                    return (McpServerStatus::Error(format!("Failed to send initialize: {e}")), Vec::new());
+                    return (
+                        McpServerStatus::Error(format!("Failed to send initialize: {e}")),
+                        Vec::new(),
+                    );
                 }
 
-                let read_res = tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line)).await;
+                let read_res =
+                    tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line)).await;
                 if read_res.is_err() || line.trim().is_empty() {
                     let _ = child.kill().await;
-                    return (McpServerStatus::Error("Initialize response timed out".into()), Vec::new());
+                    return (
+                        McpServerStatus::Error("Initialize response timed out".into()),
+                        Vec::new(),
+                    );
                 }
 
                 // Send initialized notification
@@ -289,7 +329,9 @@ impl McpManager {
                     "jsonrpc": "2.0",
                     "method": "notifications/initialized"
                 });
-                let _ = stdin.write_all(format!("{}\n", init_notif).as_bytes()).await;
+                let _ = stdin
+                    .write_all(format!("{}\n", init_notif).as_bytes())
+                    .await;
 
                 // Send tools/list request
                 let list_req = json!({
@@ -301,20 +343,33 @@ impl McpManager {
                 let _ = stdin.write_all(format!("{}\n", list_req).as_bytes()).await;
 
                 line.clear();
-                let list_res = tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line)).await;
+                let list_res =
+                    tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line)).await;
                 let _ = child.kill().await;
 
                 if list_res.is_err() || line.trim().is_empty() {
-                    return (McpServerStatus::Error("tools/list response timed out".into()), Vec::new());
+                    return (
+                        McpServerStatus::Error("tools/list response timed out".into()),
+                        Vec::new(),
+                    );
                 }
 
                 let response_json: Value = match serde_json::from_str(line.trim()) {
                     Ok(val) => val,
-                    Err(e) => return (McpServerStatus::Error(format!("Failed to parse response: {e}")), Vec::new()),
+                    Err(e) => {
+                        return (
+                            McpServerStatus::Error(format!("Failed to parse response: {e}")),
+                            Vec::new(),
+                        )
+                    }
                 };
 
                 let mut mcp_tools = Vec::new();
-                if let Some(tools_arr) = response_json.get("result").and_then(|r| r.get("tools")).and_then(|t| t.as_array()) {
+                if let Some(tools_arr) = response_json
+                    .get("result")
+                    .and_then(|r| r.get("tools"))
+                    .and_then(|t| t.as_array())
+                {
                     for tool_val in tools_arr {
                         if let Some(name) = tool_val.get("name").and_then(|n| n.as_str()) {
                             let description = tool_val
@@ -346,12 +401,10 @@ impl McpManager {
                 let count = mcp_tools.len();
                 (McpServerStatus::Connected { tool_count: count }, mcp_tools)
             }
-            McpTransport::Sse { url, .. } => {
-                (
-                    McpServerStatus::Error(format!("SSE transport ({url}) not active")),
-                    Vec::new(),
-                )
-            }
+            McpTransport::Sse { url, .. } => (
+                McpServerStatus::Error(format!("SSE transport ({url}) not active")),
+                Vec::new(),
+            ),
         }
     }
 
@@ -425,10 +478,13 @@ impl McpManager {
                 let _ = stdin.write_all(format!("{}\n", init_req).as_bytes()).await;
 
                 let mut line = String::new();
-                let _ = tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line)).await;
+                let _ =
+                    tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line)).await;
 
                 let init_notif = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
-                let _ = stdin.write_all(format!("{}\n", init_notif).as_bytes()).await;
+                let _ = stdin
+                    .write_all(format!("{}\n", init_notif).as_bytes())
+                    .await;
 
                 // Execute call
                 let call_req = json!({
@@ -443,7 +499,9 @@ impl McpManager {
                 let _ = stdin.write_all(format!("{}\n", call_req).as_bytes()).await;
 
                 line.clear();
-                let read_res = tokio::time::timeout(Duration::from_secs(15), reader.read_line(&mut line)).await;
+                let read_res =
+                    tokio::time::timeout(Duration::from_secs(15), reader.read_line(&mut line))
+                        .await;
                 let _ = child.kill().await;
 
                 if read_res.is_err() || line.trim().is_empty() {
@@ -452,16 +510,25 @@ impl McpManager {
 
                 let response_json: Value = match serde_json::from_str(line.trim()) {
                     Ok(v) => v,
-                    Err(e) => return Some(Err(format!("Failed to parse tool execution response: {e}"))),
+                    Err(e) => {
+                        return Some(Err(format!("Failed to parse tool execution response: {e}")))
+                    }
                 };
 
                 if let Some(err) = response_json.get("error") {
-                    let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("MCP error");
+                    let msg = err
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("MCP error");
                     return Some(Err(msg.to_string()));
                 }
 
                 let mut output = String::new();
-                if let Some(content) = response_json.get("result").and_then(|r| r.get("content")).and_then(|c| c.as_array()) {
+                if let Some(content) = response_json
+                    .get("result")
+                    .and_then(|r| r.get("content"))
+                    .and_then(|c| c.as_array())
+                {
                     for item in content {
                         if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
                             if !output.is_empty() {
@@ -478,9 +545,9 @@ impl McpManager {
 
                 Some(Ok(output))
             }
-            McpTransport::Sse { url, .. } => {
-                Some(Err(format!("SSE transport for {url} not currently supported")))
-            }
+            McpTransport::Sse { url, .. } => Some(Err(format!(
+                "SSE transport for {url} not currently supported"
+            ))),
         }
     }
 }
@@ -521,7 +588,10 @@ mod tests {
             name: "Filesystem".to_string(),
             transport: McpTransport::Stdio {
                 command: "npx".to_string(),
-                args: vec!["-y".to_string(), "@modelcontextprotocol/server-filesystem".to_string()],
+                args: vec![
+                    "-y".to_string(),
+                    "@modelcontextprotocol/server-filesystem".to_string(),
+                ],
                 env: HashMap::new(),
             },
             enabled: true,

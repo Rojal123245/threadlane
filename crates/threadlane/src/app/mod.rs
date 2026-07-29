@@ -1776,7 +1776,7 @@ script_mod! {
                         width: Fill
                         height: Fit
                         padding: 0
-                        text: "Model Context Protocol servers providing external tools over stdio or HTTP/SSE."
+                        text: "Model Context Protocol servers providing external tools over stdio."
                         draw_text +: {
                             color: theme.color_muted_foreground
                             text_style +: { font_size: 10.0 }
@@ -2775,7 +2775,11 @@ impl Widget for ProviderSettingsModal {
                 };
                 cx.widget_action(
                     uid,
-                    ProviderSettingsModalAction::AddMcpServer { scope, name, command },
+                    ProviderSettingsModalAction::AddMcpServer {
+                        scope,
+                        name,
+                        command,
+                    },
                 );
             }
             if self
@@ -2799,11 +2803,7 @@ impl Widget for ProviderSettingsModal {
             {
                 cx.widget_action(uid, ProviderSettingsModalAction::RefreshSkills);
             }
-            if self
-                .view
-                .button(cx, ids!(mcp_refresh_btn))
-                .clicked(actions)
-            {
+            if self.view.button(cx, ids!(mcp_refresh_btn)).clicked(actions) {
                 cx.widget_action(uid, ProviderSettingsModalAction::RefreshMcpServers);
             }
             let list = self.view.portal_list(cx, ids!(capability_list));
@@ -2866,9 +2866,9 @@ impl Widget for ProviderSettingsModal {
             };
             while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
                 if let Some(mut list) = item.as_portal_list().borrow_mut() {
-                    // Only one settings page is visible at a time, so the single
-                    // PortalList encountered in the walk belongs to the active page.
-                    if self.page == SettingsPage::Skills {
+                    let skill_list_uid = self.view.portal_list(cx, ids!(skill_list)).widget_uid();
+                    let mcp_list_uid = self.view.portal_list(cx, ids!(mcp_list)).widget_uid();
+                    if list.widget_uid() == skill_list_uid {
                         list.set_item_range(cx, 0, self.skill_rows.len().max(1));
                         while let Some(row_index) = list.next_visible_item(cx) {
                             if self.skill_rows.is_empty() {
@@ -2894,7 +2894,7 @@ impl Widget for ProviderSettingsModal {
                             );
                             item.draw_all_unscoped(cx);
                         }
-                    } else if self.page == SettingsPage::McpServers {
+                    } else if list.widget_uid() == mcp_list_uid {
                         list.set_item_range(cx, 0, self.mcp_rows.len().max(1));
                         while let Some(row_index) = list.next_visible_item(cx) {
                             if self.mcp_rows.is_empty() {
@@ -2911,7 +2911,8 @@ impl Widget for ProviderSettingsModal {
                             item.label(cx, ids!(name_lbl)).set_text(cx, &row.name);
                             item.label(cx, ids!(scope_lbl))
                                 .set_text(cx, &row.scope_status());
-                            item.label(cx, ids!(path_lbl)).set_text(cx, &row.transport_detail);
+                            item.label(cx, ids!(path_lbl))
+                                .set_text(cx, &row.transport_detail);
                             item.check_box(cx, ids!(enabled_toggle)).set_active(
                                 cx,
                                 row.enabled,
@@ -3029,10 +3030,7 @@ impl ProviderSettingsModal {
                 !self.install_scope_global,
             ),
             (ids!(mcp_scope_global_btn), self.install_scope_global),
-            (
-                ids!(mcp_scope_project_btn),
-                !self.install_scope_global,
-            ),
+            (ids!(mcp_scope_project_btn), !self.install_scope_global),
         ] {
             let mut button = self.view.button(cx, button_id);
             let color = if selected {
@@ -3965,7 +3963,11 @@ impl MatchEvent for App {
                 ProviderSettingsModalAction::RemoveMcpServer(row) => {
                     self.remove_mcp_server(cx, row);
                 }
-                ProviderSettingsModalAction::AddMcpServer { scope, name, command } => {
+                ProviderSettingsModalAction::AddMcpServer {
+                    scope,
+                    name,
+                    command,
+                } => {
                     self.add_mcp_server(cx, scope, name, command);
                 }
                 ProviderSettingsModalAction::None => {}
@@ -4462,19 +4464,31 @@ impl App {
         }
     }
 
-    fn refresh_mcp_state(&mut self, cx: &mut Cx) {
+    fn refresh_mcp_state(&mut self, _cx: &mut Cx) {
         let global_dir = threadlane_coding_agent::default_global_threadlane_dir();
         let work_dir = self.active_work_dir().map(Path::to_path_buf);
-        self.capability_state
-            .refresh_mcp(global_dir.as_deref(), work_dir.as_deref());
-        if let Some(mut modal) = self
-            .ui
-            .widget(cx, ids!(providers_modal))
-            .borrow_mut::<ProviderSettingsModal>()
-        {
-            modal.set_mcp_rows(cx, self.capability_state.mcp_servers.clone());
-            modal.set_mcp_status(cx, "");
+        if let Some(tx) = self.tx.clone() {
+            get_runtime().spawn(async move {
+                let records = threadlane_coding_agent::McpManager::new(global_dir, work_dir)
+                    .discover_and_connect()
+                    .await;
+                let _ = tx.send(GuiAgentEvent::McpRefreshCompleted(records));
+                SignalToUI::set_ui_signal();
+            });
         }
+    }
+
+    fn refresh_live_session_mcp(&self) {
+        let agents: Vec<_> = self
+            .session_runtimes
+            .values()
+            .map(|runtime| runtime.agent.clone())
+            .collect();
+        get_runtime().spawn(async move {
+            for agent in agents {
+                agent.lock().await.refresh_mcp().await;
+            }
+        });
     }
 
     fn set_mcp_enabled(&mut self, cx: &mut Cx, row: usize, enabled: bool) {
@@ -4484,13 +4498,6 @@ impl App {
         };
         let global_dir = threadlane_coding_agent::default_global_threadlane_dir();
         let work_dir = self.active_work_dir().map(Path::to_path_buf);
-        let target_dir = match selected.scope {
-            threadlane_coding_agent::McpScope::Global => global_dir.as_deref(),
-            threadlane_coding_agent::McpScope::Project => work_dir.as_deref(),
-        };
-        let Some(dir) = target_dir else {
-            return;
-        };
         let mut configs = match selected.scope {
             threadlane_coding_agent::McpScope::Global => {
                 threadlane_coding_agent::McpSettings::load_global(global_dir.as_deref())
@@ -4501,8 +4508,22 @@ impl App {
         };
         if let Some(cfg) = configs.iter_mut().find(|c| c.id == selected.id) {
             cfg.enabled = enabled;
-            let _ = threadlane_coding_agent::McpSettings::save(dir, &configs);
+            let _ = match selected.scope {
+                threadlane_coding_agent::McpScope::Global => {
+                    threadlane_coding_agent::McpSettings::save_global(
+                        global_dir.as_deref().unwrap(),
+                        &configs,
+                    )
+                }
+                threadlane_coding_agent::McpScope::Project => {
+                    threadlane_coding_agent::McpSettings::save_project(
+                        work_dir.as_deref().unwrap(),
+                        &configs,
+                    )
+                }
+            };
         }
+        self.refresh_live_session_mcp();
         self.refresh_mcp_state(cx);
     }
 
@@ -4513,13 +4534,6 @@ impl App {
         };
         let global_dir = threadlane_coding_agent::default_global_threadlane_dir();
         let work_dir = self.active_work_dir().map(Path::to_path_buf);
-        let target_dir = match selected.scope {
-            threadlane_coding_agent::McpScope::Global => global_dir.as_deref(),
-            threadlane_coding_agent::McpScope::Project => work_dir.as_deref(),
-        };
-        let Some(dir) = target_dir else {
-            return;
-        };
         let mut configs = match selected.scope {
             threadlane_coding_agent::McpScope::Global => {
                 threadlane_coding_agent::McpSettings::load_global(global_dir.as_deref())
@@ -4529,7 +4543,21 @@ impl App {
             }
         };
         configs.retain(|c| c.id != selected.id);
-        let _ = threadlane_coding_agent::McpSettings::save(dir, &configs);
+        let _ = match selected.scope {
+            threadlane_coding_agent::McpScope::Global => {
+                threadlane_coding_agent::McpSettings::save_global(
+                    global_dir.as_deref().unwrap(),
+                    &configs,
+                )
+            }
+            threadlane_coding_agent::McpScope::Project => {
+                threadlane_coding_agent::McpSettings::save_project(
+                    work_dir.as_deref().unwrap(),
+                    &configs,
+                )
+            }
+        };
+        self.refresh_live_session_mcp();
         self.refresh_mcp_state(cx);
     }
 
@@ -4548,7 +4576,23 @@ impl App {
                 .widget(cx, ids!(providers_modal))
                 .borrow_mut::<ProviderSettingsModal>()
             {
-                modal.set_mcp_status(cx, "Please provide both a server name and a command or URL.");
+                modal.set_mcp_status(
+                    cx,
+                    "Please provide both a server name and a command or URL.",
+                );
+            }
+            return;
+        }
+        if command.starts_with("http://") || command.starts_with("https://") {
+            if let Some(mut modal) = self
+                .ui
+                .widget(cx, ids!(providers_modal))
+                .borrow_mut::<ProviderSettingsModal>()
+            {
+                modal.set_mcp_status(
+                    cx,
+                    "HTTP/SSE MCP servers are not supported yet; use a stdio command.",
+                );
             }
             return;
         }
@@ -4556,12 +4600,7 @@ impl App {
         let global_dir = threadlane_coding_agent::default_global_threadlane_dir();
         let work_dir = self.active_work_dir().map(Path::to_path_buf);
 
-        let target_dir = match scope {
-            threadlane_coding_agent::McpScope::Global => global_dir.as_deref(),
-            threadlane_coding_agent::McpScope::Project => work_dir.as_deref(),
-        };
-
-        let Some(dir) = target_dir else {
+        if scope == threadlane_coding_agent::McpScope::Project && work_dir.is_none() {
             if let Some(mut modal) = self
                 .ui
                 .widget(cx, ids!(providers_modal))
@@ -4583,20 +4622,13 @@ impl App {
 
         let id = name.to_lowercase().replace(' ', "_");
 
-        let transport = if command.starts_with("http://") || command.starts_with("https://") {
-            threadlane_coding_agent::McpTransport::Sse {
-                url: command,
-                headers: std::collections::HashMap::new(),
-            }
-        } else {
-            let mut parts = command.split_whitespace();
-            let cmd = parts.next().unwrap_or("").to_string();
-            let args: Vec<String> = parts.map(String::from).collect();
-            threadlane_coding_agent::McpTransport::Stdio {
-                command: cmd,
-                args,
-                env: std::collections::HashMap::new(),
-            }
+        let mut parts = command.split_whitespace();
+        let cmd = parts.next().unwrap_or("").to_string();
+        let args: Vec<String> = parts.map(String::from).collect();
+        let transport = threadlane_coding_agent::McpTransport::Stdio {
+            command: cmd,
+            args,
+            env: std::collections::HashMap::new(),
         };
 
         let new_config = threadlane_coding_agent::McpServerConfig {
@@ -4610,8 +4642,23 @@ impl App {
         configs.retain(|c| c.id != new_config.id);
         configs.push(new_config);
 
-        match threadlane_coding_agent::McpSettings::save(dir, &configs) {
+        let save_result = match scope {
+            threadlane_coding_agent::McpScope::Global => {
+                threadlane_coding_agent::McpSettings::save_global(
+                    global_dir.as_deref().unwrap(),
+                    &configs,
+                )
+            }
+            threadlane_coding_agent::McpScope::Project => {
+                threadlane_coding_agent::McpSettings::save_project(
+                    work_dir.as_deref().unwrap(),
+                    &configs,
+                )
+            }
+        };
+        match save_result {
             Ok(()) => {
+                self.refresh_live_session_mcp();
                 self.refresh_mcp_state(cx);
                 if let Some(mut modal) = self
                     .ui
@@ -7243,6 +7290,17 @@ impl App {
                 GuiAgentEvent::AntigravityDoctorReport(report) => {
                     self.push_chat(MsgRole::System, report);
                     cx.redraw_all();
+                }
+                GuiAgentEvent::McpRefreshCompleted(records) => {
+                    self.capability_state.refresh_mcp_records(records);
+                    if let Some(mut modal) = self
+                        .ui
+                        .widget(cx, ids!(providers_modal))
+                        .borrow_mut::<ProviderSettingsModal>()
+                    {
+                        modal.set_mcp_rows(cx, self.capability_state.mcp_servers.clone());
+                        modal.set_mcp_status(cx, "");
+                    }
                 }
                 GuiAgentEvent::BackgroundTask(event) => {
                     let _ = event.into_parts();
