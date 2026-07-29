@@ -73,10 +73,31 @@ impl CapabilityExtensionRow {
     }
 }
 
+#[derive(Clone)]
+pub struct CapabilityMcpRow {
+    pub id: String,
+    pub name: String,
+    pub transport_detail: String,
+    pub scope: threadlane_coding_agent::McpScope,
+    pub enabled: bool,
+    pub status_text: String,
+}
+
+impl CapabilityMcpRow {
+    pub fn scope_status(&self) -> String {
+        let scope = match self.scope {
+            threadlane_coding_agent::McpScope::Global => "Global",
+            threadlane_coding_agent::McpScope::Project => "Project",
+        };
+        format!("{scope} · {}", self.status_text)
+    }
+}
+
 #[derive(Default)]
 pub struct CapabilityState {
     pub extensions: Vec<CapabilityExtensionRow>,
     pub skills: Vec<CapabilitySkillRow>,
+    pub mcp_servers: Vec<CapabilityMcpRow>,
 }
 
 impl CapabilityState {
@@ -97,6 +118,30 @@ impl CapabilityState {
                 file_path: skill.file_path().to_path_buf(),
                 enabled: skill.enabled,
                 is_valid: skill.is_valid,
+            })
+            .collect();
+    }
+
+    pub fn refresh_mcp_records(&mut self, records: Vec<threadlane_coding_agent::McpServerRecord>) {
+        self.mcp_servers = records
+            .into_iter()
+            .map(|rec| {
+                let transport_detail = match &rec.config.transport {
+                    threadlane_coding_agent::McpTransport::Stdio { command, args, .. } => {
+                        format!("stdio: {} {}", command, args.join(" "))
+                    }
+                    threadlane_coding_agent::McpTransport::Sse { url, .. } => {
+                        format!("sse: {}", url)
+                    }
+                };
+                CapabilityMcpRow {
+                    id: rec.config.id,
+                    name: rec.config.name,
+                    transport_detail,
+                    scope: rec.config.scope,
+                    enabled: rec.config.enabled,
+                    status_text: rec.status.display_status(),
+                }
             })
             .collect();
     }
@@ -160,6 +205,7 @@ pub enum GuiAgentEvent {
     },
     AntigravityLoginError(String),
     AntigravityDoctorReport(String),
+    McpRefreshCompleted(Vec<threadlane_coding_agent::McpServerRecord>),
 }
 
 #[cfg(test)]

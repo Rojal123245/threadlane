@@ -5,6 +5,7 @@ pub mod commands;
 pub mod context;
 pub mod extension_broker;
 pub mod frontmatter;
+pub mod mcp;
 pub mod packages;
 mod plan;
 pub mod policy;
@@ -23,6 +24,10 @@ pub use extension_broker::{
     BrokerDispatchResult, BrokerError, BrokerOperationResult, BrokerRequest, BrokerResponse,
     CapabilityDispatcher, CapabilityHandler, CapabilityPolicy, HostBrokerRequest,
     HostCapabilityGrantPolicy,
+};
+pub use mcp::{
+    McpManager, McpScope, McpServerConfig, McpServerRecord, McpServerStatus, McpSettings,
+    McpToolExecutor, McpTransport,
 };
 pub use packages::{
     default_global_threadlane_dir, ExtensionManager, ExtensionRecord, ExtensionScope,
