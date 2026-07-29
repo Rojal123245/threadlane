@@ -2906,30 +2906,41 @@ script_mod! {
                                                 text_style: theme.font_bold { font_size: 7.5 }
                                             }
                                         }
-                                        git_generate_commit_btn := mod.components.HeaderChipButton {
-                                            width: Fit
+                                        git_generate_commit_btn := mod.components.IconButton {
+                                            width: 24
                                             height: 24
-                                            text: "Generate"
-                                            padding: Inset{left: 7 right: 7 top: 3 bottom: 3}
+                                            text: ""
+                                            icon_walk: Walk{width: 12 height: 12}
+                                            align: Align{x: 0.5 y: 0.5}
+                                            draw_icon +: {
+                                                svg: crate_resource("self:resources/icons/sparkles.svg")
+                                                color: theme.color_primary
+                                                color_hover: theme.color_foreground
+                                                color_down: theme.color_primary_foreground
+                                            }
                                         }
                                     }
                                     git_commit_message := TextInput {
                                         width: Fill
-                                        height: 52
+                                        height: Fit{min: FitBound.Abs(64), max: FitBound.Abs(140)}
+                                        is_multiline: true
                                         empty_text: "Commit message (required)"
-                                        submit_on_enter: true
-                                        padding: Inset{left: 8 right: 8 top: 8 bottom: 8}
+                                        padding: Inset{left: 10 right: 10 top: 8 bottom: 8}
                                         draw_bg +: {
-                                            color: theme.color_background
+                                            color: theme.color_card
                                             color_focus: theme.color_background
                                             border_color: theme.color_border
                                             border_color_focus: theme.color_primary
-                                            border_radius: 6.0
+                                            border_radius: 8.0
                                             border_size: 1.0
                                         }
                                         draw_text +: {
                                             color: theme.color_foreground
                                             color_empty: theme.color_muted_foreground
+                                            text_style +: {
+                                                font_size: 9.0
+                                                line_spacing: 1.35
+                                            }
                                         }
                                     }
                                     git_action_row := View {
@@ -6392,14 +6403,6 @@ impl App {
                     cx,
                     status.has_changes && !self.git_operation_pending && !self.git_diff_open,
                 );
-            self.ui.button(cx, ids!(git_generate_commit_btn)).set_text(
-                cx,
-                if self.git_commit_message_pending {
-                    "Cancel"
-                } else {
-                    "Generate"
-                },
-            );
             self.ui
                 .button(cx, ids!(git_generate_commit_btn))
                 .set_enabled(cx, true);
