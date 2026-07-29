@@ -297,6 +297,16 @@ script_mod! {
             }
         }
     }
+
+    mod.components.GitBranchDropDown = mod.components.IconDropDown {
+        use_provider_icons: false
+        popup_menu: mod.components.IconPopupMenu {
+            width: 220
+            menu_item: mod.components.IconPopupMenuItem {
+                use_provider_icons: false
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]

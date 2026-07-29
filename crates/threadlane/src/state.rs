@@ -160,6 +160,17 @@ pub enum GuiAgentEvent {
     },
     AntigravityLoginError(String),
     AntigravityDoctorReport(String),
+    GitStatusLoaded {
+        request_id: u64,
+        work_dir: PathBuf,
+        result: Result<crate::git::GitStatus, String>,
+    },
+    GitOperationFinished {
+        request_id: u64,
+        work_dir: PathBuf,
+        operation: String,
+        result: Result<(), String>,
+    },
 }
 
 #[cfg(test)]

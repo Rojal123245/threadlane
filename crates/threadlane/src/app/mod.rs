@@ -7,6 +7,7 @@ use crate::components::session_row::ProjectHeaderAction;
 use crate::components::task_sidebar::{
     task_header_state, TaskSidebar, TaskSidebarAction, TaskSidebarItem,
 };
+use crate::git::GitStatus;
 use crate::components::terminal_panel::ProjectTerminalWidgetRefExt;
 use crate::panels::chat::{
     accepts_generation_event, concise_status, draft_for_cancellation, submitted_draft, ChatList,
@@ -2261,6 +2262,12 @@ script_mod! {
 
 
 
+                                    git_branch_drop := mod.components.GitBranchDropDown {
+                                        width: 180
+                                        height: 28
+                                        labels: ["Git"]
+                                    }
+
                                     attach_btn := mod.components.IconButton {
                                         width: 30
                                         height: 28
@@ -3199,6 +3206,10 @@ pub struct App {
     project_terminals: HashMap<PathBuf, ProjectTerminalGroup>,
     #[rust]
     terminal_poll_next_frame: NextFrame,
+    #[rust]
+    next_git_request_id: u64,
+    #[rust]
+    git_status: HashMap<PathBuf, GitStatus>,
 }
 
 impl ScriptHook for App {}
@@ -3451,6 +3462,7 @@ impl MatchEvent for App {
         self.spawn_model_fetch(api_key, account_id_opt);
         self.trigger_update_check(cx);
         self.sync_terminal_project(cx);
+        self.request_git_status();
         self.sync_task_sidebar(cx);
 
         cx.redraw_all();
@@ -3641,6 +3653,21 @@ impl MatchEvent for App {
 
         if self.ui.button(cx, ids!(add_project_btn)).clicked(actions) {
             self.open_project_picker();
+        }
+
+        if self
+            .ui
+            .icon_drop_down(cx, ids!(git_branch_drop))
+            .selected(actions)
+            .is_some()
+        {
+            let branch = self
+                .ui
+                .icon_drop_down(cx, ids!(git_branch_drop))
+                .selected_label();
+            if branch != "Git" {
+                self.checkout_git_branch(branch);
+            }
         }
 
         if self.ui.button(cx, ids!(caps_btn)).clicked(actions) {
@@ -5006,6 +5033,69 @@ impl App {
             .map(|key| key.work_dir.as_path())
     }
 
+    fn request_git_status(&mut self) {
+        let Some(work_dir) = self.active_work_dir().map(Path::to_path_buf) else {
+            return;
+        };
+        self.next_git_request_id = self.next_git_request_id.wrapping_add(1);
+        let request_id = self.next_git_request_id;
+        let Some(tx) = self.tx.clone() else {
+            return;
+        };
+        get_runtime().spawn_blocking(move || {
+            let result = crate::git::inspect(&work_dir).map_err(|error| error.message);
+            let _ = tx.send(GuiAgentEvent::GitStatusLoaded {
+                request_id,
+                work_dir,
+                result,
+            });
+            SignalToUI::set_ui_signal();
+        });
+    }
+
+    fn sync_git_branch_picker(&self, cx: &mut Cx) {
+        let status = self
+            .active_work_dir()
+            .and_then(|work_dir| self.git_status.get(work_dir))
+            .cloned();
+        let mut labels = status
+            .as_ref()
+            .map(|status| status.branches.clone())
+            .unwrap_or_default();
+        if labels.is_empty() {
+            labels.push("Git".to_owned());
+        }
+        let selected = status
+            .as_ref()
+            .and_then(|status| status.branch.as_ref())
+            .and_then(|branch| labels.iter().position(|label| label == branch))
+            .unwrap_or(0);
+        let picker = self.ui.icon_drop_down(cx, ids!(git_branch_drop));
+        picker.set_labels(cx, labels);
+        picker.set_selected_item(cx, selected);
+    }
+
+    fn checkout_git_branch(&mut self, branch: String) {
+        let Some(work_dir) = self.active_work_dir().map(Path::to_path_buf) else {
+            return;
+        };
+        self.next_git_request_id = self.next_git_request_id.wrapping_add(1);
+        let request_id = self.next_git_request_id;
+        let Some(tx) = self.tx.clone() else {
+            return;
+        };
+        get_runtime().spawn_blocking(move || {
+            let result = crate::git::checkout(&work_dir, &branch).map_err(|error| error.message);
+            let _ = tx.send(GuiAgentEvent::GitOperationFinished {
+                request_id,
+                work_dir,
+                operation: format!("checkout `{branch}`"),
+                result,
+            });
+            SignalToUI::set_ui_signal();
+        });
+    }
+
     fn sync_task_sidebar(&mut self, cx: &mut Cx) {
         let active_key = self.workspace_state.active_key().cloned();
         let records = active_key.as_ref().and_then(|key| {
@@ -5716,6 +5806,8 @@ impl App {
             .set_text(cx, &draft);
         self.refresh_attachment_ui(cx);
         self.sync_terminal_project(cx);
+        self.sync_git_branch_picker(cx);
+        self.request_git_status();
         self.sync_task_sidebar(cx);
     }
 
@@ -6783,6 +6875,41 @@ impl App {
                 GuiAgentEvent::AntigravityDoctorReport(report) => {
                     self.push_chat(MsgRole::System, report);
                     cx.redraw_all();
+                }
+                GuiAgentEvent::GitStatusLoaded {
+                    request_id,
+                    work_dir,
+                    result,
+                } => {
+                    if request_id != self.next_git_request_id {
+                        continue;
+                    }
+                    if let Ok(status) = result {
+                        self.git_status.insert(work_dir, status);
+                    }
+                    self.sync_git_branch_picker(cx);
+                }
+                GuiAgentEvent::GitOperationFinished {
+                    request_id,
+                    work_dir,
+                    operation,
+                    result,
+                } => {
+                    if request_id != self.next_git_request_id {
+                        continue;
+                    }
+                    match result {
+                        Ok(()) => self.push_chat(
+                            MsgRole::System,
+                            format!("Git {operation} completed."),
+                        ),
+                        Err(error) => self.push_chat(
+                            MsgRole::System,
+                            format!("Git {operation} failed: {error}"),
+                        ),
+                    }
+                    self.git_status.remove(&work_dir);
+                    self.request_git_status();
                 }
                 GuiAgentEvent::BackgroundTask(event) => {
                     let _ = event.into_parts();
