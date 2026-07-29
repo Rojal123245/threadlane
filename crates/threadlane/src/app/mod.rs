@@ -2899,39 +2899,44 @@ script_mod! {
                                         padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
                                     }
                                 }
-                                git_commit_header := View {
+                                git_commit_section := View {
                                     width: Fill
-                                    height: 24
-                                    flow: Right
-                                    align: Align{y: 0.5}
-                                    git_commit_label := ClippedLabel {
+                                    height: Fit
+                                    flow: Down
+                                    spacing: 5
+                                    git_commit_header := View {
                                         width: Fill
-                                        height: 16
-                                        text: "COMMIT MESSAGE"
-                                        align: Align{y: 0.5}
-                                        draw_text +: {
-                                            color: theme.color_muted_foreground
-                                            text_style: theme.font_bold { font_size: 7.5 }
-                                        }
-                                    }
-                                    git_commit_source_label := ClippedLabel {
-                                        width: Fit
-                                        height: 16
-                                        text: ""
-                                        align: Align{y: 0.5}
-                                        draw_text +: {
-                                            color: theme.color_muted_foreground
-                                            text_style: theme.font_code { font_size: 7.0 }
-                                        }
-                                    }
-                                    git_generate_commit_btn := mod.components.HeaderChipButton {
-                                        width: Fit
                                         height: 24
-                                        text: "Generate"
-                                        padding: Inset{left: 7 right: 7 top: 3 bottom: 3}
+                                        flow: Right
+                                        align: Align{y: 0.5}
+                                        git_commit_label := ClippedLabel {
+                                            width: Fill
+                                            height: 16
+                                            text: "COMMIT MESSAGE"
+                                            align: Align{y: 0.5}
+                                            draw_text +: {
+                                                color: theme.color_muted_foreground
+                                                text_style: theme.font_bold { font_size: 7.5 }
+                                            }
+                                        }
+                                        git_commit_source_label := ClippedLabel {
+                                            width: Fit
+                                            height: 16
+                                            text: ""
+                                            align: Align{y: 0.5}
+                                            draw_text +: {
+                                                color: theme.color_muted_foreground
+                                                text_style: theme.font_code { font_size: 7.0 }
+                                            }
+                                        }
+                                        git_generate_commit_btn := mod.components.HeaderChipButton {
+                                            width: Fit
+                                            height: 24
+                                            text: "Generate"
+                                            padding: Inset{left: 7 right: 7 top: 3 bottom: 3}
+                                        }
                                     }
-                                }
-                                git_commit_message := TextInput {
+                                    git_commit_message := TextInput {
                                         width: Fill
                                         height: 28
                                         empty_text: "Commit message (required)"
@@ -2950,32 +2955,32 @@ script_mod! {
                                             color_empty: theme.color_muted_foreground
                                         }
                                     }
-                                git_action_row := View {
+                                    git_action_row := View {
                                         width: Fill
                                         height: 28
                                         flow: Right
                                         spacing: 4
-                                    git_commit_btn := mod.components.HeaderChipButton {
+                                        git_commit_btn := mod.components.HeaderChipButton {
                                             width: Fill
                                             height: 28
-                                        text: "Commit"
-                                        padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
-                                        draw_bg +: {
-                                            color: theme.color_primary
-                                            color_hover: theme.color_primary
-                                            color_focus: theme.color_primary
-                                            color_down: theme.color_primary
-                                            border_color: theme.color_primary
-                                            border_color_hover: theme.color_primary
-                                            border_color_focus: theme.color_primary
-                                            border_color_down: theme.color_primary
-                                        }
-                                        draw_text +: {
-                                            color: theme.color_primary_foreground
-                                            color_hover: theme.color_primary_foreground
-                                            color_focus: theme.color_primary_foreground
-                                            color_down: theme.color_primary_foreground
-                                        }
+                                            text: "Commit"
+                                            padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
+                                            draw_bg +: {
+                                                color: theme.color_primary
+                                                color_hover: theme.color_primary
+                                                color_focus: theme.color_primary
+                                                color_down: theme.color_primary
+                                                border_color: theme.color_primary
+                                                border_color_hover: theme.color_primary
+                                                border_color_focus: theme.color_primary
+                                                border_color_down: theme.color_primary
+                                            }
+                                            draw_text +: {
+                                                color: theme.color_primary_foreground
+                                                color_hover: theme.color_primary_foreground
+                                                color_focus: theme.color_primary_foreground
+                                                color_down: theme.color_primary_foreground
+                                            }
                                         }
                                         git_push_btn := mod.components.HeaderChipButton {
                                             width: Fill
@@ -2990,33 +2995,33 @@ script_mod! {
                                             padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
                                         }
                                     }
-                                git_pr_label := ClippedLabel {
-                                    width: Fill
-                                    height: 13
-                                    text: "PULL REQUEST"
-                                    draw_text +: {
-                                        color: theme.color_muted_foreground
-                                        text_style: theme.font_bold { font_size: 7.5 }
+                                    git_pr_label := ClippedLabel {
+                                        width: Fill
+                                        height: 13
+                                        text: "PULL REQUEST"
+                                        draw_text +: {
+                                            color: theme.color_muted_foreground
+                                            text_style: theme.font_bold { font_size: 7.5 }
+                                        }
                                     }
-                                }
-                                git_pr_title := TextInput {
-                                    width: Fill
-                                    height: 28
-                                    empty_text: "Pull request title"
-                                    padding: Inset{left: 8 right: 8}
-                                    draw_bg +: {
-                                        color: theme.color_background
-                                        color_focus: theme.color_background
-                                        border_color: theme.color_border
-                                        border_color_focus: theme.color_primary
-                                        border_radius: 6.0
-                                        border_size: 1.0
+                                    git_pr_title := TextInput {
+                                        width: Fill
+                                        height: 28
+                                        empty_text: "Pull request title"
+                                        padding: Inset{left: 8 right: 8}
+                                        draw_bg +: {
+                                            color: theme.color_background
+                                            color_focus: theme.color_background
+                                            border_color: theme.color_border
+                                            border_color_focus: theme.color_primary
+                                            border_radius: 6.0
+                                            border_size: 1.0
+                                        }
+                                        draw_text +: {
+                                            color: theme.color_foreground
+                                            color_empty: theme.color_muted_foreground
+                                        }
                                     }
-                                    draw_text +: {
-                                        color: theme.color_foreground
-                                        color_empty: theme.color_muted_foreground
-                                    }
-                                }
                                     git_pr_row := View {
                                         width: Fill
                                         height: 28
@@ -3051,6 +3056,7 @@ script_mod! {
                                             padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
                                         }
                                     }
+                                }
                                 }
                                 task_sidebar_wrap := View {
                                     width: Fill
@@ -6564,6 +6570,9 @@ impl App {
             .set_visible(cx, has_git && tab == RightSidebarTab::Git);
         self.ui
             .view(cx, ids!(git_changes_wrap))
+            .set_visible(cx, show_git_changes);
+        self.ui
+            .view(cx, ids!(git_commit_section))
             .set_visible(cx, show_git_changes);
         self.ui
             .view(cx, ids!(git_diff_wrap))

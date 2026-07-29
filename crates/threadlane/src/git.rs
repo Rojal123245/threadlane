@@ -58,17 +58,29 @@ impl std::fmt::Display for GitError {
 impl std::error::Error for GitError {}
 
 fn command(work_dir: &Path, args: &[&str]) -> Result<String, GitError> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(work_dir)
-        .output()
-        .map_err(|error| GitError {
-            work_dir: work_dir.to_path_buf(),
-            message: format!("could not start git: {error}"),
-        })?;
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(work_dir)
+            .output()
+            .map_err(|error| GitError {
+                work_dir: work_dir.to_path_buf(),
+                message: format!("could not start git: {error}"),
+            })?;
 
-    if !output.status.success() {
+        if output.status.success() {
+            return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+        }
+
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let is_lock_error = stderr.contains("index.lock") || stderr.contains("Unable to create");
+        if is_lock_error && attempts <= 5 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            continue;
+        }
+
         return Err(GitError {
             work_dir: work_dir.to_path_buf(),
             message: if stderr.is_empty() {
@@ -78,8 +90,6 @@ fn command(work_dir: &Path, args: &[&str]) -> Result<String, GitError> {
             },
         });
     }
-
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn parse_status(_work_dir: &Path, porcelain: &str) -> GitStatus {

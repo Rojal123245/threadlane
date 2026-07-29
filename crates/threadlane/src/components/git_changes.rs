@@ -92,15 +92,15 @@ script_mod! {
 
             File := View {
                 width: Fill
-                height: 30
+                height: 28
                 flow: Right
-                spacing: 4
+                spacing: 2
                 align: Align{y: 0.5}
-                padding: Inset{left: 2 right: 2}
+                padding: Inset{left: 0 right: 0}
 
                 select_btn := Button {
-                    width: 26
-                    height: Fill
+                    width: 24
+                    height: 28
                     padding: 0
                     spacing: 0
                     text: "[ ]"
@@ -117,13 +117,13 @@ script_mod! {
                         color: theme.color_muted_foreground
                         color_hover: theme.color_foreground
                         color_down: theme.color_primary_foreground
-                        text_style: theme.font_code { font_size: 9.5 }
+                        text_style: theme.font_code { font_size: 9.0 }
                     }
                 }
                 status_lbl := Label {
                     width: 14
-                    height: Fill
-                    align: Align{y: 0.5}
+                    height: 28
+                    align: Align{x: 0.5 y: 0.5}
                     draw_text +: {
                         color: theme.color_primary
                         staged_color: uniform(theme.color_success)
@@ -140,8 +140,8 @@ script_mod! {
                 }
                 path_btn := Button {
                     width: Fill
-                    height: Fill
-                    padding: Inset{left: 2 right: 4}
+                    height: 28
+                    padding: Inset{left: 4 right: 6}
                     spacing: 0
                     align: Align{x: 0.0 y: 0.5}
                     text: ""
