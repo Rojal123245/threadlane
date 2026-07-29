@@ -2,6 +2,7 @@
 //!
 //! Chat, sessions, and command palette panels are modularized under `crate::panels`.
 
+use crate::components::file_tree::{FileTree, FileTreeAction};
 use crate::components::git_changes::{GitChanges, GitChangesAction};
 use crate::components::git_diff::GitDiffView;
 use crate::components::model_dropdown::IconDropDownWidgetRefExt;
@@ -114,7 +115,8 @@ fn normalize_generated_commit_message(raw: &str) -> String {
 enum RightSidebarTab {
     #[default]
     Git,
-    Agents,
+    Tasks,
+    FileTree,
 }
 
 fn append_antigravity_models(models: &mut Vec<String>) {
@@ -2272,15 +2274,6 @@ script_mod! {
                                 }
                             }
 
-                            task_sidebar_btn := mod.components.HeaderChipButton {
-                                visible: false
-                                padding: Inset{left: 9 right: 9 top: 4 bottom: 4}
-                                text: ""
-                                draw_icon +: {
-                                    svg: crate_resource("self:resources/icons/subagent.svg")
-                                }
-                            }
-
                             status_pill := StatusPill {}
                         }
 
@@ -2635,31 +2628,6 @@ script_mod! {
                                 visible: false
                                 flow: Down
                                 spacing: 8
-
-                                right_sidebar_tabs := View {
-                                    width: Fill
-                                    height: 30
-                                    flow: Right
-                                    spacing: 4
-                                    git_tab_btn := mod.components.NavButton {
-                                        width: Fill
-                                        height: 28
-                                        text: "Git"
-                                        padding: Inset{left: 8 right: 8 top: 4 bottom: 4}
-                                        draw_icon +: {
-                                            svg: crate_resource("self:resources/icons/git.svg")
-                                        }
-                                    }
-                                    agents_tab_btn := mod.components.NavButton {
-                                        width: Fill
-                                        height: 28
-                                        text: "Agents"
-                                        padding: Inset{left: 8 right: 8 top: 4 bottom: 4}
-                                        draw_icon +: {
-                                            svg: crate_resource("self:resources/icons/subagent.svg")
-                                        }
-                                    }
-                                }
 
                                 git_actions := View {
                                     width: Fill
@@ -3033,6 +3001,82 @@ script_mod! {
                                     task_sidebar := mod.components.TaskSidebar {
                                         width: Fill
                                         height: Fill
+                                    }
+                                }
+                                file_tree_wrap := View {
+                                    width: Fill
+                                    height: Fill
+                                    visible: false
+                                    flow: Down
+                                    padding: Inset{left: 10 top: 10 right: 10 bottom: 10}
+                                    draw_bg +: {
+                                        color: theme.color_input
+                                        border_color: theme.color_border
+                                        border_size: 1.0
+                                        border_radius: 8.0
+                                    }
+                                    file_tree := mod.components.FileTree {
+                                        width: Fill
+                                        height: Fill
+                                    }
+                                }
+                                right_sidebar_tabs := View {
+                                    width: Fill
+                                    height: 36
+                                    flow: Right
+                                    align: Align{x: 0.5 y: 0.5}
+                                    spacing: 8
+                                    padding: Inset{left: 8 right: 8 top: 4 bottom: 4}
+                                    draw_bg +: {
+                                        color: theme.color_card
+                                        border_color: theme.color_border
+                                        border_size: 1.0
+                                        border_radius: 6.0
+                                    }
+                                    tasks_tab_btn := mod.components.IconButton {
+                                        width: 36
+                                        height: 28
+                                        text: ""
+                                        icon_walk: Walk{width: 15 height: 15}
+                                        align: Align{x: 0.5 y: 0.5}
+                                        padding: 0
+                                        spacing: 0
+                                        draw_icon +: {
+                                            svg: crate_resource("self:resources/icons/subagent.svg")
+                                            color: theme.color_muted_foreground
+                                            color_hover: theme.color_foreground
+                                            color_down: theme.color_primary
+                                        }
+                                    }
+                                    git_tab_btn := mod.components.IconButton {
+                                        width: 36
+                                        height: 28
+                                        text: ""
+                                        icon_walk: Walk{width: 15 height: 15}
+                                        align: Align{x: 0.5 y: 0.5}
+                                        padding: 0
+                                        spacing: 0
+                                        draw_icon +: {
+                                            svg: crate_resource("self:resources/icons/git.svg")
+                                            color: theme.color_muted_foreground
+                                            color_hover: theme.color_foreground
+                                            color_down: theme.color_primary
+                                        }
+                                    }
+                                    file_tree_tab_btn := mod.components.IconButton {
+                                        width: 36
+                                        height: 28
+                                        text: ""
+                                        icon_walk: Walk{width: 15 height: 15}
+                                        align: Align{x: 0.5 y: 0.5}
+                                        padding: 0
+                                        spacing: 0
+                                        draw_icon +: {
+                                            svg: crate_resource("self:resources/icons/folder.svg")
+                                            color: theme.color_muted_foreground
+                                            color_hover: theme.color_foreground
+                                            color_down: theme.color_primary
+                                        }
                                     }
                                 }
                             }
@@ -4550,8 +4594,24 @@ impl MatchEvent for App {
             }
         }
 
+        let file_tree_uid = self.ui.widget(cx, ids!(file_tree)).widget_uid();
+        if let Some(action) = actions.find_widget_action(file_tree_uid) {
+            match action.cast::<FileTreeAction>() {
+                FileTreeAction::FileClicked(path) => {
+                    self.start_git_diff(cx, path);
+                }
+                FileTreeAction::FolderToggled(_) | FileTreeAction::None => {}
+            }
+        }
+
         if self.ui.button(cx, ids!(git_pr_btn)).clicked(actions) {
             self.open_github_pull_request_in_browser(cx);
+        }
+
+        if self.ui.button(cx, ids!(tasks_tab_btn)).clicked(actions) {
+            self.right_sidebar_tab = RightSidebarTab::Tasks;
+            self.task_sidebar_open = true;
+            self.sync_right_sidebar(cx);
         }
 
         if self.ui.button(cx, ids!(git_tab_btn)).clicked(actions) {
@@ -4559,9 +4619,8 @@ impl MatchEvent for App {
             self.sync_right_sidebar(cx);
         }
 
-        if self.ui.button(cx, ids!(agents_tab_btn)).clicked(actions) {
-            self.right_sidebar_tab = RightSidebarTab::Agents;
-            self.task_sidebar_open = true;
+        if self.ui.button(cx, ids!(file_tree_tab_btn)).clicked(actions) {
+            self.right_sidebar_tab = RightSidebarTab::FileTree;
             self.sync_right_sidebar(cx);
         }
 
@@ -4646,11 +4705,6 @@ impl MatchEvent for App {
             }
         }
 
-        if self.ui.button(cx, ids!(task_sidebar_btn)).clicked(actions) {
-            self.right_sidebar_tab = RightSidebarTab::Agents;
-            self.task_sidebar_open = !self.task_sidebar_open;
-            self.sync_task_sidebar(cx);
-        }
 
         let task_sidebar_uid = self.ui.widget(cx, ids!(task_sidebar)).widget_uid();
         if let Some(action) = actions.find_widget_action(task_sidebar_uid) {
@@ -6330,7 +6384,7 @@ impl App {
         let status = self
             .active_work_dir()
             .and_then(|work_dir| self.git_status.get(work_dir));
-        let has_git = status.is_some();
+        let _has_git = status.is_some();
         if let Some(status) = status {
             let branch = status.branch.as_deref().unwrap_or("detached HEAD");
             let staged = status.files.iter().filter(|file| file.staged).count();
@@ -6456,37 +6510,32 @@ impl App {
                     .set_enabled(cx, status.pr_ready && !self.git_operation_pending);
             }
         }
-        let has_agents = self.right_sidebar_agents_available;
-        let tab = if has_agents && (self.right_sidebar_tab == RightSidebarTab::Agents || !has_git) {
-            RightSidebarTab::Agents
-        } else {
-            RightSidebarTab::Git
-        };
-        let show_git_changes = has_git && tab == RightSidebarTab::Git && !self.git_diff_open;
-        let show_git_diff = has_git && tab == RightSidebarTab::Git && self.git_diff_open;
+        let tab = self.right_sidebar_tab;
+        let show_git = tab == RightSidebarTab::Git;
+        let show_tasks = tab == RightSidebarTab::Tasks;
+        let show_file_tree = tab == RightSidebarTab::FileTree;
+
+        let show_git_changes = show_git && !self.git_diff_open;
+        let show_git_diff = show_git && self.git_diff_open;
+
         self.ui
             .view(cx, ids!(right_sidebar))
-            .set_visible(cx, has_git || (has_agents && self.task_sidebar_open));
-        let right_sidebar_visible = has_git || (has_agents && self.task_sidebar_open);
+            .set_visible(cx, true);
         self.ui
             .view(cx, ids!(right_sidebar_resize_handle))
-            .set_visible(cx, right_sidebar_visible);
+            .set_visible(cx, true);
+
         if let Some(mut sidebar) = self.ui.view(cx, ids!(right_sidebar)).borrow_mut() {
             sidebar.walk.width = Size::Fixed(self.right_sidebar_width);
             sidebar.redraw(cx);
         }
+
         self.ui
-            .button(cx, ids!(git_tab_btn))
-            .set_visible(cx, has_git);
-        self.ui
-            .button(cx, ids!(agents_tab_btn))
-            .set_visible(cx, has_agents);
+            .view(cx, ids!(git_actions))
+            .set_visible(cx, show_git);
         self.ui
             .view(cx, ids!(git_changes_header))
             .set_visible(cx, show_git_changes);
-        self.ui
-            .view(cx, ids!(git_actions))
-            .set_visible(cx, has_git && tab == RightSidebarTab::Git);
         self.ui
             .view(cx, ids!(git_changes_wrap))
             .set_visible(cx, show_git_changes);
@@ -6499,9 +6548,29 @@ impl App {
         self.ui
             .view(cx, ids!(git_diff_loading))
             .set_visible(cx, show_git_diff && self.git_diff_pending);
-        self.ui.view(cx, ids!(task_sidebar_wrap)).set_visible(
+
+        self.ui
+            .view(cx, ids!(task_sidebar_wrap))
+            .set_visible(cx, show_tasks);
+
+        self.ui
+            .view(cx, ids!(file_tree_wrap))
+            .set_visible(cx, show_file_tree);
+
+        if show_file_tree {
+            if let Some(mut tree) = self
+                .ui
+                .widget(cx, ids!(file_tree))
+                .borrow_mut::<FileTree>()
+            {
+                tree.set_work_dir(cx, self.active_work_dir().map(Path::to_path_buf));
+            }
+        }
+
+        crate::components::nav_button::set_selected(
             cx,
-            has_agents && tab == RightSidebarTab::Agents && self.task_sidebar_open,
+            &self.ui.button(cx, ids!(tasks_tab_btn)),
+            tab == RightSidebarTab::Tasks || self.right_sidebar_agents_available,
         );
         crate::components::nav_button::set_selected(
             cx,
@@ -6510,8 +6579,8 @@ impl App {
         );
         crate::components::nav_button::set_selected(
             cx,
-            &self.ui.button(cx, ids!(agents_tab_btn)),
-            tab == RightSidebarTab::Agents,
+            &self.ui.button(cx, ids!(file_tree_tab_btn)),
+            tab == RightSidebarTab::FileTree,
         );
     }
 
@@ -6876,15 +6945,9 @@ impl App {
             .and_then(|key| self.session_runtimes.get(key))
             .map(|runtime| runtime.plan.clone())
             .unwrap_or_default();
-        let (visible, count) = task_header_state(&plan, &items);
+        let (visible, _count) = task_header_state(&plan, &items);
         self.right_sidebar_agents_available = visible;
-        self.ui
-            .button(cx, ids!(task_sidebar_btn))
-            .set_visible(cx, visible);
-        self.ui
-            .button(cx, ids!(task_sidebar_btn))
-            .set_text(cx, &count);
-        if !visible {
+        if !visible && self.right_sidebar_tab == RightSidebarTab::Tasks {
             self.task_sidebar_open = false;
         }
         if let Some(mut sidebar) = self
