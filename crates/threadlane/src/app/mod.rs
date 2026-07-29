@@ -2841,13 +2841,18 @@ script_mod! {
                                     spacing: 5
                                     git_diff_header := View {
                                         width: Fill
-                                        height: 28
+                                        height: 24
                                         flow: Right
-                                        spacing: 5
+                                        spacing: 6
+                                        align: Align{y: 0.5}
                                         git_diff_back_btn := mod.components.IconButton {
-                                            width: 26
-                                            height: 26
-                                            icon_walk: Walk{width: 13 height: 13}
+                                            width: 20
+                                            height: 20
+                                            text: ""
+                                            icon_walk: Walk{width: 11 height: 11}
+                                            align: Align{x: 0.5 y: 0.5}
+                                            padding: 0
+                                            spacing: 0
                                             draw_icon +: {
                                                 svg: crate_resource("self:resources/icons/back.svg")
                                                 color: theme.color_muted_foreground
@@ -2857,10 +2862,10 @@ script_mod! {
                                         }
                                         git_diff_path := ClippedLabel {
                                             width: Fill
-                                            height: 18
+                                            height: 20
                                             align: Align{y: 0.5}
                                             draw_text +: {
-                                                color: theme.color_primary_foreground
+                                                color: theme.color_foreground
                                                 text_style: theme.font_code { font_size: 8.5 }
                                             }
                                         }
@@ -6390,73 +6395,64 @@ impl App {
                 changes.set_files(cx, status.files.clone());
             }
             self.sync_git_selection_ui(cx);
-            self.ui.button(cx, ids!(git_commit_btn)).set_visible(
-                cx,
-                status.staged_changes
-                    && !self.git_operation_pending
-                    && !self.git_commit_message_pending
-                    && !self.git_diff_open,
-            );
-            self.ui.view(cx, ids!(git_commit_header)).set_visible(
-                cx,
-                status.has_changes && !self.git_operation_pending && !self.git_diff_open,
-            );
-            self.ui.widget(cx, ids!(git_commit_message)).set_visible(
-                cx,
-                status.has_changes && !self.git_operation_pending && !self.git_diff_open,
-            );
-            self.ui
-                .button(cx, ids!(git_generate_commit_btn))
-                .set_visible(
-                    cx,
-                    status.has_changes && !self.git_operation_pending && !self.git_diff_open,
-                );
-            self.ui
-                .button(cx, ids!(git_generate_commit_btn))
-                .set_enabled(cx, true);
-            self.sync_git_commit_button(cx);
+
             let has_remote = status.remote.is_some();
-            self.ui.view(cx, ids!(git_action_row)).set_visible(
-                cx,
-                !self.git_operation_pending
-                    && !self.git_commit_message_pending
-                    && (status.has_changes
-                        || (has_remote && (status.ahead > 0 || status.behind > 0)))
-                    && !self.git_diff_open,
-            );
-            self.ui.button(cx, ids!(git_commit_btn)).set_visible(
-                cx,
-                status.has_changes && !self.git_operation_pending,
-            );
-            self.ui.button(cx, ids!(git_push_btn)).set_visible(
-                cx,
-                has_remote && status.ahead > 0 && !self.git_operation_pending,
-            );
-            self.ui.button(cx, ids!(git_push_btn)).set_text(
-                cx,
-                if status.has_upstream {
-                    "Push"
-                } else {
-                    "Publish"
-                },
-            );
-            self.ui.button(cx, ids!(git_pull_btn)).set_visible(
-                cx,
-                has_remote && status.behind > 0 && !self.git_operation_pending,
-            );
-            let has_github_remote = status
-                .remote
-                .as_deref()
-                .and_then(crate::git::github_repository)
-                .is_some();
-            let has_pr_changes = has_github_remote
-                && status.has_upstream
-                && status.pr_ready
-                && !self.git_operation_pending
-                && !self.git_diff_open;
+            let show_commit_section = !self.git_diff_open;
+
             self.ui
-                .view(cx, ids!(git_pr_row))
-                .set_visible(cx, has_pr_changes);
+                .view(cx, ids!(git_commit_section))
+                .set_visible(cx, show_commit_section);
+
+            if show_commit_section {
+                let can_generate = status.has_changes
+                    && !self.git_operation_pending
+                    && !self.git_commit_message_pending;
+                self.ui
+                    .button(cx, ids!(git_generate_commit_btn))
+                    .set_enabled(cx, can_generate);
+
+                self.sync_git_commit_button(cx);
+
+                self.ui.button(cx, ids!(git_commit_btn)).set_visible(cx, true);
+
+                self.ui.button(cx, ids!(git_push_btn)).set_visible(
+                    cx,
+                    has_remote && (status.ahead > 0 || !status.has_upstream),
+                );
+                self.ui.button(cx, ids!(git_push_btn)).set_enabled(
+                    cx,
+                    (status.ahead > 0 || !status.has_upstream) && !self.git_operation_pending,
+                );
+                self.ui.button(cx, ids!(git_push_btn)).set_text(
+                    cx,
+                    if status.has_upstream {
+                        "Push"
+                    } else {
+                        "Publish"
+                    },
+                );
+
+                self.ui.button(cx, ids!(git_pull_btn)).set_visible(
+                    cx,
+                    has_remote && status.behind > 0,
+                );
+                self.ui.button(cx, ids!(git_pull_btn)).set_enabled(
+                    cx,
+                    status.behind > 0 && !self.git_operation_pending,
+                );
+
+                let has_github_remote = status
+                    .remote
+                    .as_deref()
+                    .and_then(crate::git::github_repository)
+                    .is_some();
+                self.ui
+                    .view(cx, ids!(git_pr_row))
+                    .set_visible(cx, has_github_remote);
+                self.ui
+                    .button(cx, ids!(git_pr_btn))
+                    .set_enabled(cx, status.has_upstream && !self.git_operation_pending);
+            }
         }
         let has_agents = self.right_sidebar_agents_available;
         let tab = if has_agents && (self.right_sidebar_tab == RightSidebarTab::Agents || !has_git) {

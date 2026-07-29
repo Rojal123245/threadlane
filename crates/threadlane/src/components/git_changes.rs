@@ -78,6 +78,8 @@ script_mod! {
                 status_lbl := Label {
                     width: 14
                     height: 28
+                    padding: 0
+                    margin: 0
                     align: Align{x: 0.5 y: 0.5}
                     draw_text +: {
                         color: theme.color_primary
