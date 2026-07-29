@@ -23,7 +23,8 @@ script_mod! {
         width: Fill
         height: 34
         padding: Inset{left: 10 right: 8 top: 6 bottom: 6}
-        spacing: 0
+        spacing: 6
+        icon_walk: Walk{width: 14 height: 14}
         align: Align{x: 0.0 y: 0.5}
 
         draw_bg +: {

@@ -168,6 +168,20 @@ fn ordered_model_options(
     Some((canonical, display))
 }
 
+fn default_model_name() -> &'static str {
+    let has_openai = auth::load_credentials().is_some()
+        || std::env::var("OPENAI_API_KEY")
+            .map(|k| !k.trim().is_empty())
+            .unwrap_or(false);
+    let has_antigravity =
+        threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some();
+    if !has_openai && has_antigravity {
+        "antigravity/gemini-3.6-flash"
+    } else {
+        "gpt-5.6-luna"
+    }
+}
+
 fn model_credential_error(
     model: &str,
     has_openai_credentials: bool,
@@ -4038,7 +4052,7 @@ impl MatchEvent for App {
                 "gpt-4o".into(),
                 "gpt-4o-mini".into(),
             ]),
-            "gpt-5.6-luna",
+            default_model_name(),
         );
         self.set_reasoning_effort_picker(cx, ReasoningEffort::Medium);
 
@@ -6788,10 +6802,11 @@ impl App {
             .icon_drop_down(cx, ids!(model_drop))
             .selected_label();
         let model = if model.trim().is_empty() {
-            "gpt-5.6-luna".to_owned()
+            default_model_name().to_owned()
         } else {
             model
         };
+        eprintln!("[commit_message_gen] Selected model: `{model}`");
         let has_antigravity_credentials =
             threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some();
         if let Some(error) =
@@ -7473,7 +7488,7 @@ impl App {
                 .icon_drop_down(cx, ids!(model_drop))
                 .selected_label();
             let model = if model.is_empty() {
-                "gpt-5.6-luna".to_string()
+                default_model_name().to_string()
             } else {
                 model
             };
@@ -7899,7 +7914,7 @@ impl App {
                 .icon_drop_down(cx, ids!(model_drop))
                 .selected_label();
             let model = if selected_model.is_empty() {
-                "gpt-5.6-luna".to_string()
+                default_model_name().to_string()
             } else {
                 selected_model
             };
@@ -7992,7 +8007,7 @@ impl App {
             .icon_drop_down(cx, ids!(model_drop))
             .selected_label();
         let model_name = if selected_model.is_empty() {
-            "gpt-5.6-luna".to_string()
+            default_model_name().to_string()
         } else {
             selected_model
         };
@@ -8923,6 +8938,7 @@ impl App {
                             }
                         }
                         Err(error) => {
+                            eprintln!("[commit_message_gen] Error: {error}");
                             self.git_feedback = Some((
                                 false,
                                 format!("Could not generate commit message: {error}"),

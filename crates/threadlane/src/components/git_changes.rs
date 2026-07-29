@@ -94,16 +94,16 @@ script_mod! {
                 width: Fill
                 height: 30
                 flow: Right
-                spacing: 5
+                spacing: 4
                 align: Align{y: 0.5}
                 padding: Inset{left: 2 right: 2}
 
                 select_btn := Button {
-                    width: 22
-                    height: 22
+                    width: 26
+                    height: Fill
                     padding: 0
                     spacing: 0
-                    text: "□"
+                    text: "[ ]"
                     align: Align{x: 0.5 y: 0.5}
                     draw_bg +: {
                         color: theme.color_transparent
@@ -111,17 +111,18 @@ script_mod! {
                         color_down: theme.color_primary_tint
                         border_color: theme.color_transparent
                         border_size: 0.0
+                        border_radius: 4.0
                     }
                     draw_text +: {
                         color: theme.color_muted_foreground
                         color_hover: theme.color_foreground
                         color_down: theme.color_primary_foreground
-                        text_style: theme.font_regular { font_size: 12.0 }
+                        text_style: theme.font_code { font_size: 9.5 }
                     }
                 }
                 status_lbl := Label {
                     width: 14
-                    height: 18
+                    height: Fill
                     align: Align{y: 0.5}
                     draw_text +: {
                         color: theme.color_primary
@@ -139,8 +140,8 @@ script_mod! {
                 }
                 path_btn := Button {
                     width: Fill
-                    height: 24
-                    padding: 0
+                    height: Fill
+                    padding: Inset{left: 2 right: 4}
                     spacing: 0
                     align: Align{x: 0.0 y: 0.5}
                     text: ""
@@ -179,6 +180,9 @@ pub struct GitChanges {
 
 impl GitChanges {
     pub fn set_files(&mut self, cx: &mut Cx, files: Vec<GitFile>) {
+        if self.files == files {
+            return;
+        }
         self.files = files;
         self.rebuild_rows();
         self.selected
@@ -276,10 +280,10 @@ impl Widget for GitChanges {
                     continue;
                 }
                 list.set_item_range(cx, 0, self.rows.len());
-                while let Some(index) = list.next_visible_item(cx) {
-                    match self.rows.get(index).copied() {
+                while let Some(row_index) = list.next_visible_item(cx) {
+                    match self.rows.get(row_index).copied() {
                         Some(GitChangesRow::Section { staged, count }) => {
-                            let row = list.item(cx, index, id!(Section));
+                            let row = list.item(cx, row_index, id!(Section));
                             row.view(cx, ids!(section_marker)).set_uniform(
                                 cx,
                                 id!(section_staged),
@@ -293,22 +297,29 @@ impl Widget for GitChanges {
                                 .set_text(cx, &count.to_string());
                             row.draw_all_unscoped(cx);
                         }
-                        Some(GitChangesRow::File { index, staged }) => {
-                            let Some(file) = self.files.get(index) else {
+                        Some(GitChangesRow::File {
+                            index: file_index,
+                            staged,
+                        }) => {
+                            let Some(file) = self.files.get(file_index) else {
                                 continue;
                             };
-                            let row = list.item(cx, index, id!(File));
-                            row.button(cx, ids!(select_btn)).set_text(
-                                cx,
-                                if self.selected.contains(&file.path) {
-                                    "[x]"
-                                } else {
-                                    "[ ]"
-                                },
-                            );
+                            let row = list.item(cx, row_index, id!(File));
+                            let target_check = if self.selected.contains(&file.path) {
+                                "[x]"
+                            } else {
+                                "[ ]"
+                            };
+                            let select_btn = row.button(cx, ids!(select_btn));
+                            if select_btn.text() != target_check {
+                                select_btn.set_text(cx, target_check);
+                            }
                             let status = file.status_for_section(staged);
                             let status_label = row.label(cx, ids!(status_lbl));
-                            status_label.set_text(cx, &status.to_string());
+                            let status_str = status.to_string();
+                            if status_label.text() != status_str {
+                                status_label.set_text(cx, &status_str);
+                            }
                             if let Some(mut status_label) = status_label.borrow_mut() {
                                 status_label.draw_text.set_uniform(
                                     cx,
@@ -321,7 +332,10 @@ impl Widget for GitChanges {
                                     &[if status == '?' { 1.0 } else { 0.0 }],
                                 );
                             }
-                            row.button(cx, ids!(path_btn)).set_text(cx, &file.path);
+                            let path_btn = row.button(cx, ids!(path_btn));
+                            if path_btn.text() != file.path {
+                                path_btn.set_text(cx, &file.path);
+                            }
                             row.draw_all_unscoped(cx);
                         }
                         None => {}

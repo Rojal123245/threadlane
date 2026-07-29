@@ -153,7 +153,6 @@ impl ProviderClient {
                             "role": "user",
                             "content": [{"type": "input_text", "text": prompt.as_str()}]
                         }],
-                        "max_output_tokens": 96,
                         "store": false,
                         "stream": true
                     }),
