@@ -2683,7 +2683,8 @@ script_mod! {
                                     git_state_icon := Icon {
                                         width: 14
                                         height: 14
-                                        icon_walk: Walk{width: 13 height: 13}
+                                        icon_walk: Walk{width: 12 height: 12}
+                                        align: Align{x: 0.5 y: 0.5}
                                         draw_icon +: {
                                             svg: crate_resource("self:resources/icons/git.svg")
                                             color: theme.color_primary
@@ -2691,12 +2692,12 @@ script_mod! {
                                     }
                                     git_state_label := ClippedLabel {
                                         width: Fill
-                                        height: 14
+                                        height: 16
                                         text: "SOURCE CONTROL"
                                         align: Align{y: 0.5}
                                         draw_text +: {
                                             color: theme.color_muted_foreground
-                                            text_style: theme.font_bold { font_size: 7.5 }
+                                            text_style: theme.font_code { font_size: 8.0 }
                                         }
                                     }
                                 }
@@ -2781,6 +2782,7 @@ script_mod! {
                                     git_changes_title := Label {
                                         width: Fill
                                         height: 16
+                                        align: Align{y: 0.5}
                                         text: "WORKING TREE"
                                         draw_text +: {
                                             color: theme.color_foreground
@@ -2790,6 +2792,7 @@ script_mod! {
                                     git_selection_label := ClippedLabel {
                                         width: Fit
                                         height: 16
+                                        align: Align{y: 0.5}
                                         draw_text +: {
                                             color: theme.color_muted_foreground
                                             text_style: theme.font_code { font_size: 7.5 }
@@ -2800,6 +2803,7 @@ script_mod! {
                                         height: 24
                                         text: ""
                                         icon_walk: Walk{width: 12 height: 12}
+                                        align: Align{x: 0.5 y: 0.5}
                                         draw_icon +: {
                                             svg: crate_resource("self:resources/icons/refresh.svg")
                                             color: theme.color_muted_foreground
@@ -2812,6 +2816,7 @@ script_mod! {
                                         height: 24
                                         text: ""
                                         icon_walk: Walk{width: 12 height: 12}
+                                        align: Align{x: 0.5 y: 0.5}
                                         draw_icon +: {
                                             svg: crate_resource("self:resources/icons/select-all.svg")
                                             color: theme.color_muted_foreground
