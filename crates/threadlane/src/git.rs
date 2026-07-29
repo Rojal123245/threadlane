@@ -41,6 +41,16 @@ impl GitFile {
             self.worktree_status
         }
     }
+
+    pub fn status_char(&self) -> char {
+        if self.index_status != ' ' && self.index_status != '?' {
+            self.index_status
+        } else if self.worktree_status != ' ' {
+            self.worktree_status
+        } else {
+            'M'
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -396,6 +406,25 @@ pub fn github_repository(remote: &str) -> Option<(String, String)> {
     Some((owner.to_owned(), repository.to_owned()))
 }
 
+pub fn github_compare_url(remote: &str, head: &str, base: Option<&str>) -> Option<String> {
+    let (owner, repo) = github_repository(remote)?;
+    let base = base.unwrap_or("main");
+    Some(format!(
+        "https://github.com/{owner}/{repo}/compare/{base}...{head}?expand=1"
+    ))
+}
+
+pub fn open_browser_url(cx: &mut makepad_widgets::Cx, url: &str) {
+    use makepad_widgets::{CxOsApi, OpenUrlInPlace};
+    cx.open_url(url, OpenUrlInPlace::No);
+    #[cfg(target_os = "macos")]
+    let _ = Command::new("open").arg(url).spawn();
+    #[cfg(target_os = "windows")]
+    let _ = Command::new("cmd").args(["/C", "start", "", url]).spawn();
+    #[cfg(target_os = "linux")]
+    let _ = Command::new("xdg-open").arg(url).spawn();
+}
+
 pub async fn create_github_pull_request(
     remote: &str,
     head: &str,
@@ -532,6 +561,10 @@ mod tests {
         assert_eq!(
             github_repository("https://github.com/owner/repo"),
             Some(("owner".to_owned(), "repo".to_owned()))
+        );
+        assert_eq!(
+            github_compare_url("git@github.com:owner/repo.git", "enhancements", Some("main")),
+            Some("https://github.com/owner/repo/compare/main...enhancements?expand=1".to_owned())
         );
     }
 

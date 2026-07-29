@@ -5,8 +5,7 @@ use crate::git::GitFile;
 
 #[derive(Clone, Copy, Debug)]
 enum GitChangesRow {
-    Section { staged: bool, count: usize },
-    File { index: usize, staged: bool },
+    File { index: usize },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -42,50 +41,6 @@ script_mod! {
                     draw_text +: {
                         color: theme.color_muted_foreground
                         text_style: theme.font_regular { font_size: 9.0 }
-                    }
-                }
-            }
-
-            Section := View {
-                width: Fill
-                height: 24
-                flow: Right
-                spacing: 5
-                align: Align{y: 0.5}
-                padding: Inset{left: 4 right: 4}
-                section_marker := View {
-                    width: 3
-                    height: 12
-                    show_bg: true
-                draw_bg +: {
-                    color: theme.color_primary
-                    staged_color: uniform(theme.color_success)
-                    section_staged: instance(0.0)
-                    border_radius: 2.0
-                    pixel: fn() {
-                        let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                        sdf.clear(theme.color_transparent)
-                        sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, 2.0)
-                        return sdf.fill(self.color.mix(self.staged_color, self.section_staged))
-                    }
-                }
-                }
-                section_lbl := Label {
-                    width: Fill
-                    height: 16
-                    align: Align{y: 0.5}
-                    draw_text +: {
-                        color: theme.color_muted_foreground
-                        text_style: theme.font_bold { font_size: 7.5 }
-                    }
-                }
-                section_count := Label {
-                    width: Fit
-                    height: 16
-                    align: Align{y: 0.5}
-                    draw_text +: {
-                        color: theme.color_muted_foreground
-                        text_style: theme.font_code { font_size: 7.5 }
                     }
                 }
             }
@@ -183,65 +138,35 @@ impl GitChanges {
         if self.files == files {
             return;
         }
+        for file in &files {
+            if !self.files.iter().any(|f| f.path == file.path) {
+                self.selected.insert(file.path.clone());
+            }
+        }
         self.files = files;
-        self.rebuild_rows();
         self.selected
             .retain(|path| self.files.iter().any(|file| &file.path == path));
+        self.rebuild_rows();
         self.view.redraw(cx);
     }
 
     fn rebuild_rows(&mut self) {
         self.rows.clear();
-        let staged = self
-            .files
-            .iter()
-            .enumerate()
-            .filter_map(|(index, file)| file.staged.then_some(index))
-            .collect::<Vec<_>>();
-        let unstaged = self
-            .files
-            .iter()
-            .enumerate()
-            .filter_map(|(index, file)| file.unstaged.then_some(index))
-            .collect::<Vec<_>>();
-        if !staged.is_empty() {
-            self.rows.push(GitChangesRow::Section {
-                staged: true,
-                count: staged.len(),
-            });
-            self.rows
-                .extend(staged.into_iter().map(|index| GitChangesRow::File {
-                    index,
-                    staged: true,
-                }));
-        }
-        if !unstaged.is_empty() {
-            self.rows.push(GitChangesRow::Section {
-                staged: false,
-                count: unstaged.len(),
-            });
-            self.rows
-                .extend(unstaged.into_iter().map(|index| GitChangesRow::File {
-                    index,
-                    staged: false,
-                }));
+        for index in 0..self.files.len() {
+            self.rows.push(GitChangesRow::File { index });
         }
     }
 
-    pub fn selected_files_for_stage(&self) -> Vec<String> {
+    pub fn selected_files(&self) -> Vec<String> {
         self.files
             .iter()
-            .filter(|file| file.unstaged && self.selected.contains(&file.path))
+            .filter(|file| self.selected.contains(&file.path))
             .map(|file| file.path.clone())
             .collect()
     }
 
-    pub fn selected_files_for_unstage(&self) -> Vec<String> {
-        self.files
-            .iter()
-            .filter(|file| file.staged && self.selected.contains(&file.path))
-            .map(|file| file.path.clone())
-            .collect()
+    pub fn all_files(&self) -> Vec<String> {
+        self.files.iter().map(|file| file.path.clone()).collect()
     }
 
     pub fn selected_count(&self) -> usize {
@@ -282,25 +207,7 @@ impl Widget for GitChanges {
                 list.set_item_range(cx, 0, self.rows.len());
                 while let Some(row_index) = list.next_visible_item(cx) {
                     match self.rows.get(row_index).copied() {
-                        Some(GitChangesRow::Section { staged, count }) => {
-                            let row = list.item(cx, row_index, id!(Section));
-                            row.view(cx, ids!(section_marker)).set_uniform(
-                                cx,
-                                id!(section_staged),
-                                &[if staged { 1.0 } else { 0.0 }],
-                            );
-                            row.label(cx, ids!(section_lbl)).set_text(
-                                cx,
-                                if staged { "STAGED CHANGES" } else { "CHANGES" },
-                            );
-                            row.label(cx, ids!(section_count))
-                                .set_text(cx, &count.to_string());
-                            row.draw_all_unscoped(cx);
-                        }
-                        Some(GitChangesRow::File {
-                            index: file_index,
-                            staged,
-                        }) => {
+                        Some(GitChangesRow::File { index: file_index }) => {
                             let Some(file) = self.files.get(file_index) else {
                                 continue;
                             };
@@ -314,7 +221,7 @@ impl Widget for GitChanges {
                             if select_btn.text() != target_check {
                                 select_btn.set_text(cx, target_check);
                             }
-                            let status = file.status_for_section(staged);
+                            let status = file.status_char();
                             let status_label = row.label(cx, ids!(status_lbl));
                             let status_str = status.to_string();
                             if status_label.text() != status_str {
@@ -324,7 +231,7 @@ impl Widget for GitChanges {
                                 status_label.draw_text.set_uniform(
                                     cx,
                                     id!(status_staged),
-                                    &[if staged { 1.0 } else { 0.0 }],
+                                    &[if file.staged { 1.0 } else { 0.0 }],
                                 );
                                 status_label.draw_text.set_uniform(
                                     cx,
@@ -352,7 +259,7 @@ impl Widget for GitChanges {
             let uid = self.widget_uid();
             let list = self.view.portal_list(cx, ids!(list));
             for (index, row) in list.items_with_actions(actions) {
-                let Some(GitChangesRow::File { index: file_index, .. }) =
+                let Some(GitChangesRow::File { index: file_index }) =
                     self.rows.get(index).copied()
                 else {
                     continue;

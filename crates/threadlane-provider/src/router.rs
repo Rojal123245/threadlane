@@ -136,18 +136,30 @@ impl ProviderClient {
     /// Generate a short commit subject from a Git diff without adding a message to the chat.
     pub async fn generate_commit_message(&self, model: &str, diff: &str) -> Result<String, String> {
         let model = model.to_owned();
+        let instructions = concat!(
+            "You are an expert software engineer generating a Git commit message.\n",
+            "Follow Conventional Commits format (`<type>: <description>` or `<type>(<scope>): <description>`).\n",
+            "Rules:\n",
+            "1. Use imperative, present tense: 'add', 'fix', 'refactor', 'update', 'remove' (not 'added', 'fixed').\n",
+            "2. Common types: feat, fix, refactor, style, perf, docs, test, chore.\n",
+            "3. Keep the entire commit subject under 72 characters.\n",
+            "4. Do not end the subject line with a period.\n",
+            "5. Output ONLY the raw commit subject line. Do NOT include quotes, backticks, bullet points, or markdown formatting."
+        );
         let prompt = Arc::new(format!(
-            "Generate one concise Git commit subject for the following diff. Use imperative mood, keep it under 72 characters, and return only the subject line with no quotes, Markdown, or explanation.\n\n{diff}"
+            "{instructions}\n\nHere is the diff of the changes:\n\n{diff}"
         ));
+        let instructions_str = instructions.to_string();
         let model_for_payload = model.clone();
         let payload = PayloadSource::lazy(model.clone(), move |format| {
             let prompt = Arc::clone(&prompt);
             let model = model_for_payload.clone();
+            let instructions_str = instructions_str.clone();
             Box::pin(async move {
                 match format {
                     PayloadFormat::Codex => serde_json::json!({
                         "model": model,
-                        "instructions": "You write concise, conventional Git commit subjects. Return only one subject line.",
+                        "instructions": instructions_str,
                         "input": [{
                             "type": "message",
                             "role": "user",
@@ -159,7 +171,7 @@ impl ProviderClient {
                     PayloadFormat::ChatCompletions => serde_json::json!({
                         "model": model,
                         "messages": [
-                            {"role": "system", "content": "You write concise, conventional Git commit subjects. Return only one subject line."},
+                            {"role": "system", "content": instructions_str},
                             {"role": "user", "content": prompt.as_str()}
                         ],
                         "max_tokens": 96,
@@ -194,7 +206,13 @@ impl ProviderClient {
         if let Some(error) = error {
             return Err(error);
         }
-        let text = text.trim().to_owned();
+        let text = text
+            .trim()
+            .trim_matches('`')
+            .trim_matches('"')
+            .trim_matches('\'')
+            .trim()
+            .to_owned();
         if text.is_empty() {
             Err("The model returned an empty commit message".to_owned())
         } else {

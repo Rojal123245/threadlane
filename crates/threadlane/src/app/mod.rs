@@ -2886,24 +2886,6 @@ script_mod! {
                                         height: Fill
                                     }
                                 }
-                                git_stage_row := View {
-                                    width: Fill
-                                    height: 28
-                                    flow: Right
-                                    spacing: 4
-                                    git_stage_btn := mod.components.HeaderChipButton {
-                                        width: Fill
-                                        height: 28
-                                        text: "Stage"
-                                        padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
-                                    }
-                                    git_unstage_btn := mod.components.HeaderChipButton {
-                                        width: Fill
-                                        height: 28
-                                        text: "Unstage"
-                                        padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
-                                    }
-                                }
                                 git_commit_section := View {
                                     width: Fill
                                     height: Fit
@@ -2924,16 +2906,6 @@ script_mod! {
                                                 text_style: theme.font_bold { font_size: 7.5 }
                                             }
                                         }
-                                        git_commit_source_label := ClippedLabel {
-                                            width: Fit
-                                            height: 16
-                                            text: ""
-                                            align: Align{y: 0.5}
-                                            draw_text +: {
-                                                color: theme.color_muted_foreground
-                                                text_style: theme.font_code { font_size: 7.0 }
-                                            }
-                                        }
                                         git_generate_commit_btn := mod.components.HeaderChipButton {
                                             width: Fit
                                             height: 24
@@ -2943,10 +2915,10 @@ script_mod! {
                                     }
                                     git_commit_message := TextInput {
                                         width: Fill
-                                        height: 28
+                                        height: 52
                                         empty_text: "Commit message (required)"
                                         submit_on_enter: true
-                                        padding: Inset{left: 8 right: 8}
+                                        padding: Inset{left: 8 right: 8 top: 8 bottom: 8}
                                         draw_bg +: {
                                             color: theme.color_background
                                             color_focus: theme.color_background
@@ -3000,33 +2972,6 @@ script_mod! {
                                             padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
                                         }
                                     }
-                                    git_pr_label := ClippedLabel {
-                                        width: Fill
-                                        height: 13
-                                        text: "PULL REQUEST"
-                                        draw_text +: {
-                                            color: theme.color_muted_foreground
-                                            text_style: theme.font_bold { font_size: 7.5 }
-                                        }
-                                    }
-                                    git_pr_title := TextInput {
-                                        width: Fill
-                                        height: 28
-                                        empty_text: "Pull request title"
-                                        padding: Inset{left: 8 right: 8}
-                                        draw_bg +: {
-                                            color: theme.color_background
-                                            color_focus: theme.color_background
-                                            border_color: theme.color_border
-                                            border_color_focus: theme.color_primary
-                                            border_radius: 6.0
-                                            border_size: 1.0
-                                        }
-                                        draw_text +: {
-                                            color: theme.color_foreground
-                                            color_empty: theme.color_muted_foreground
-                                        }
-                                    }
                                     git_pr_row := View {
                                         width: Fill
                                         height: 28
@@ -3035,30 +2980,24 @@ script_mod! {
                                         git_pr_btn := mod.components.HeaderChipButton {
                                             width: Fill
                                             height: 28
-                                            text: "Open PR"
+                                            text: "Create Pull Request"
                                             padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
                                             draw_bg +: {
-                                                color: theme.color_primary
+                                                color: theme.color_card
                                                 color_hover: theme.color_primary
                                                 color_focus: theme.color_primary
                                                 color_down: theme.color_primary
-                                                border_color: theme.color_primary
+                                                border_color: theme.color_border
                                                 border_color_hover: theme.color_primary
                                                 border_color_focus: theme.color_primary
                                                 border_color_down: theme.color_primary
                                             }
                                             draw_text +: {
-                                                color: theme.color_primary_foreground
+                                                color: theme.color_foreground
                                                 color_hover: theme.color_primary_foreground
                                                 color_focus: theme.color_primary_foreground
                                                 color_down: theme.color_primary_foreground
                                             }
-                                        }
-                                        git_draft_pr_btn := mod.components.HeaderChipButton {
-                                            width: Fill
-                                            height: 28
-                                            text: "Draft PR"
-                                            padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
                                         }
                                     }
                                 }
@@ -4550,13 +4489,7 @@ impl MatchEvent for App {
             }
         }
 
-        if self.ui.button(cx, ids!(git_stage_btn)).clicked(actions) {
-            self.start_git_stage_selected(cx, true);
-        }
 
-        if self.ui.button(cx, ids!(git_unstage_btn)).clicked(actions) {
-            self.start_git_stage_selected(cx, false);
-        }
 
         if self
             .ui
@@ -4592,11 +4525,7 @@ impl MatchEvent for App {
         }
 
         if self.ui.button(cx, ids!(git_pr_btn)).clicked(actions) {
-            self.start_github_pull_request(cx, false);
-        }
-
-        if self.ui.button(cx, ids!(git_draft_pr_btn)).clicked(actions) {
-            self.start_github_pull_request(cx, true);
+            self.open_github_pull_request_in_browser(cx);
         }
 
         if self.ui.button(cx, ids!(git_tab_btn)).clicked(actions) {
@@ -6410,14 +6339,6 @@ impl App {
             self.ui
                 .label(cx, ids!(git_state_label))
                 .set_text(cx, &state_text);
-            self.ui.label(cx, ids!(git_commit_source_label)).set_text(
-                cx,
-                if status.staged_changes {
-                    "STAGED"
-                } else {
-                    "WORKING TREE"
-                },
-            );
             let (feedback_error, feedback_success) = match self.git_feedback.as_ref() {
                 Some((is_success, message)) => {
                     if *is_success {
@@ -6488,9 +6409,13 @@ impl App {
                 cx,
                 !self.git_operation_pending
                     && !self.git_commit_message_pending
-                    && (status.staged_changes
+                    && (status.has_changes
                         || (has_remote && (status.ahead > 0 || status.behind > 0)))
                     && !self.git_diff_open,
+            );
+            self.ui.button(cx, ids!(git_commit_btn)).set_visible(
+                cx,
+                status.has_changes && !self.git_operation_pending,
             );
             self.ui.button(cx, ids!(git_push_btn)).set_visible(
                 cx,
@@ -6517,29 +6442,9 @@ impl App {
                 && status.has_upstream
                 && status.pr_ready
                 && !self.git_operation_pending
-                && !self.git_pr_pending
-                && !self.git_pr_created
                 && !self.git_diff_open;
-            if has_pr_changes
-                && self
-                    .ui
-                    .text_input(cx, ids!(git_pr_title))
-                    .text()
-                    .trim()
-                    .is_empty()
-            {
-                self.ui
-                    .text_input(cx, ids!(git_pr_title))
-                    .set_text(cx, &format!("Changes from {branch}"));
-            }
             self.ui
                 .view(cx, ids!(git_pr_row))
-                .set_visible(cx, has_pr_changes);
-            self.ui
-                .label(cx, ids!(git_pr_label))
-                .set_visible(cx, has_pr_changes);
-            self.ui
-                .text_input(cx, ids!(git_pr_title))
                 .set_visible(cx, has_pr_changes);
         }
         let has_agents = self.right_sidebar_agents_available;
@@ -6636,14 +6541,20 @@ impl App {
     }
 
     fn sync_git_commit_button(&self, cx: &mut Cx) {
-        let staged = self
+        let has_selection = self
+            .ui
+            .widget(cx, ids!(git_changes))
+            .borrow::<GitChanges>()
+            .is_some_and(|c| c.selected_count() > 0);
+        let has_changes = self
             .active_work_dir()
             .and_then(|work_dir| self.git_status.get(work_dir))
-            .is_some_and(|status| status.staged_changes);
+            .is_some_and(|status| status.has_changes);
         let message = self.ui.text_input(cx, ids!(git_commit_message)).text();
         self.ui.button(cx, ids!(git_commit_btn)).set_enabled(
             cx,
-            staged
+            has_changes
+                && has_selection
                 && !message.trim().is_empty()
                 && !self.git_operation_pending
                 && !self.git_commit_message_pending
@@ -6653,13 +6564,11 @@ impl App {
 
     fn sync_git_selection_ui(&self, cx: &mut Cx) {
         let changes_widget = self.ui.widget(cx, ids!(git_changes));
-        let Some(changes) = changes_widget.borrow_mut::<GitChanges>() else {
+        let Some(changes) = changes_widget.borrow::<GitChanges>() else {
             return;
         };
         let selected = changes.selected_count();
         let total = changes.file_count();
-        let stageable = changes.selected_files_for_stage().len();
-        let unstageable = changes.selected_files_for_unstage().len();
         drop(changes);
         self.ui
             .label(cx, ids!(git_selection_label))
@@ -6667,21 +6576,6 @@ impl App {
         self.ui
             .button(cx, ids!(git_select_all_btn))
             .set_visible(cx, total > 0);
-        self.ui
-            .button(cx, ids!(git_stage_btn))
-            .set_text(cx, "Stage");
-        self.ui
-            .button(cx, ids!(git_stage_btn))
-            .set_visible(cx, stageable > 0);
-        self.ui
-            .button(cx, ids!(git_unstage_btn))
-            .set_visible(cx, unstageable > 0);
-        self.ui.view(cx, ids!(git_stage_row)).set_visible(
-            cx,
-            !self.git_operation_pending
-                && !self.git_diff_open
-                && (stageable > 0 || unstageable > 0),
-        );
     }
 
     fn start_git_operation(
@@ -6863,7 +6757,28 @@ impl App {
     }
 
     fn start_git_commit(&mut self, cx: &mut Cx, message: String) {
+        let changes_widget = self.ui.widget(cx, ids!(git_changes));
+        let Some(changes) = changes_widget.borrow::<GitChanges>() else {
+            return;
+        };
+        let selected_paths = changes.selected_files();
+        let all_paths = changes.all_files();
+        if selected_paths.is_empty() {
+            self.git_feedback = Some((false, "Select at least one file to commit.".to_owned()));
+            self.sync_right_sidebar(cx);
+            return;
+        }
+        drop(changes);
+
         self.start_git_operation(cx, "commit".to_owned(), move |work_dir| {
+            for path in &selected_paths {
+                let _ = crate::git::stage_file(work_dir, path);
+            }
+            for path in &all_paths {
+                if !selected_paths.contains(path) {
+                    let _ = crate::git::unstage_file(work_dir, path);
+                }
+            }
             crate::git::commit_staged(work_dir, &message)
         });
     }
@@ -6882,55 +6797,7 @@ impl App {
         });
     }
 
-    fn start_git_stage_selected(&mut self, cx: &mut Cx, stage: bool) {
-        let changes_widget = self.ui.widget(cx, ids!(git_changes));
-        let Some(changes) = changes_widget.borrow_mut::<GitChanges>() else {
-            return;
-        };
-        let paths = if stage {
-            changes.selected_files_for_stage()
-        } else {
-            changes.selected_files_for_unstage()
-        };
-        if paths.is_empty() {
-            self.git_feedback = Some((
-                false,
-                if stage {
-                    "Select at least one unstaged file first."
-                } else {
-                    "Select at least one staged file first."
-                }
-                .to_owned(),
-            ));
-            self.sync_right_sidebar(cx);
-            return;
-        }
-        drop(changes);
-        self.start_git_operation(
-            cx,
-            if stage {
-                "stage selected files"
-            } else {
-                "unstage selected files"
-            }
-            .to_owned(),
-            move |work_dir| {
-                for path in &paths {
-                    if stage {
-                        crate::git::stage_file(work_dir, path)?;
-                    } else {
-                        crate::git::unstage_file(work_dir, path)?;
-                    }
-                }
-                Ok(())
-            },
-        );
-    }
-
-    fn start_github_pull_request(&mut self, cx: &mut Cx, draft: bool) {
-        if self.git_pr_pending {
-            return;
-        }
+    fn open_github_pull_request_in_browser(&mut self, cx: &mut Cx) {
         let Some(work_dir) = self.active_work_dir().map(Path::to_path_buf) else {
             return;
         };
@@ -6952,33 +6819,18 @@ impl App {
             self.sync_right_sidebar(cx);
             return;
         };
-        let title = self.ui.text_input(cx, ids!(git_pr_title)).text();
-        let title = if title.trim().is_empty() {
-            format!("Changes from {head}")
-        } else {
-            title
-        };
-        let base = crate::git::default_branch(&work_dir).unwrap_or_else(|| "main".to_owned());
-        let Some(tx) = self.tx.clone() else {
+        let base = crate::git::default_branch(&work_dir);
+        let Some(url) = crate::git::github_compare_url(&remote, &head, base.as_deref()) else {
+            self.git_feedback = Some((
+                false,
+                "Origin remote is not a GitHub repository.".to_owned(),
+            ));
+            self.sync_right_sidebar(cx);
             return;
         };
-        self.git_status_pending = false;
-        self.git_pr_pending = true;
-        self.next_git_request_id = self.next_git_request_id.wrapping_add(1);
-        let request_id = self.next_git_request_id;
-        self.git_pr_request_id = request_id;
+        crate::git::open_browser_url(cx, &url);
+        self.git_feedback = Some((true, "Opened Pull Request link in browser.".to_owned()));
         self.sync_right_sidebar(cx);
-        get_runtime().spawn(async move {
-            let result =
-                crate::git::create_github_pull_request(&remote, &head, &base, &title, "", draft)
-                    .await;
-            let _ = tx.send(GuiAgentEvent::GitHubPullRequestFinished {
-                request_id,
-                work_dir,
-                result,
-            });
-            SignalToUI::set_ui_signal();
-        });
     }
 
     fn checkout_git_branch(&mut self, cx: &mut Cx, branch: String) {
