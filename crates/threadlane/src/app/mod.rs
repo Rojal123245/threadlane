@@ -2622,6 +2622,7 @@ script_mod! {
                                     height: 28
                                     visible: false
                                     flow: Right
+                                    spacing: 4
                                     git_new_branch_name := mod.components.SearchInput {
                                         empty_text: "New branch name"
                                         margin: 0
@@ -2630,6 +2631,12 @@ script_mod! {
                                         width: Fit
                                         height: 28
                                         text: "Create"
+                                        padding: Inset{left: 7 right: 7 top: 4 bottom: 4}
+                                    }
+                                    git_cancel_branch_btn := mod.components.HeaderChipButton {
+                                        width: Fit
+                                        height: 28
+                                        text: "Cancel"
                                         padding: Inset{left: 7 right: 7 top: 4 bottom: 4}
                                     }
                                 }
@@ -4471,6 +4478,21 @@ impl MatchEvent for App {
 
         if self.ui.button(cx, ids!(git_pull_btn)).clicked(actions) {
             self.start_git_pull(cx);
+        }
+
+        let cancel_branch_requested = self
+            .ui
+            .button(cx, ids!(git_cancel_branch_btn))
+            .clicked(actions);
+        if cancel_branch_requested {
+            self.git_new_branch_open = false;
+            self.ui
+                .view(cx, ids!(git_new_branch_row))
+                .set_visible(cx, false);
+            self.ui
+                .text_input(cx, ids!(git_new_branch_name))
+                .set_text(cx, "");
+            self.sync_right_sidebar(cx);
         }
 
         let create_branch_requested = self
@@ -6756,6 +6778,13 @@ impl App {
     }
 
     fn start_git_create_branch(&mut self, cx: &mut Cx, name: String) {
+        self.git_new_branch_open = false;
+        self.ui
+            .view(cx, ids!(git_new_branch_row))
+            .set_visible(cx, false);
+        self.ui
+            .text_input(cx, ids!(git_new_branch_name))
+            .set_text(cx, "");
         self.start_git_operation(cx, format!("create branch `{name}`"), move |work_dir| {
             crate::git::create_branch(work_dir, &name)
         });
