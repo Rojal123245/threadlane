@@ -1621,9 +1621,6 @@ impl CodingAgent {
         Ok(loaded)
     }
 
-    pub fn work_dir(&self) -> &Path {
-        &self.work_dir
-    }
 
     /// Rediscover skills for this project, applying any persisted enable/disable
     /// overrides, and refresh the shared registry and the model-facing system prompt.

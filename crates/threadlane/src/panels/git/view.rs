@@ -2,6 +2,7 @@
 
 use crate::git::GitStatus;
 
+#[allow(dead_code)]
 pub fn format_git_branch_label(status: &GitStatus) -> String {
     if let Some(branch) = &status.branch {
         if status.detached {

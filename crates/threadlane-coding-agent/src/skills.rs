@@ -110,7 +110,7 @@ impl SkillSettings {
         }
     }
 
-    pub fn is_disabled(&self, skill_id: &str) -> bool {
+    fn is_disabled(&self, skill_id: &str) -> bool {
         self.disabled.contains(skill_id)
     }
 

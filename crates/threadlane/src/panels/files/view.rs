@@ -2,6 +2,7 @@
 
 use makepad_widgets::*;
 
-pub fn handle_file_tree_click(cx: &mut Cx, rel_path: &str) -> String {
+#[allow(dead_code)]
+pub fn handle_file_tree_click(_cx: &mut Cx, rel_path: &str) -> String {
     rel_path.to_string()
 }

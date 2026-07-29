@@ -476,7 +476,7 @@ const MAX_TOOL_OUTPUT_CHARS: usize = 3_000;
 const TRUNCATE_HEAD_CHARS: usize = 1_200;
 const TRUNCATE_TAIL_CHARS: usize = 1_200;
 
-pub fn truncate_tool_output(output: &str) -> String {
+fn truncate_tool_output(output: &str) -> String {
     let output_chars = output.chars().count();
     if output_chars <= MAX_TOOL_OUTPUT_CHARS {
         output.to_string()
@@ -560,7 +560,7 @@ fn consolidate_memory_impl(workspace_root: &Path, args: &Value) -> String {
     }
 }
 
-pub fn consolidate_memory_entries(
+fn consolidate_memory_entries(
     existing: &str,
     architecture: &[String],
     gotchas: &[String],

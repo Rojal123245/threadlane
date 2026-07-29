@@ -210,7 +210,8 @@ fn message_excerpt(message: &AgentMessage) -> Option<String> {
     }
 }
 
-pub fn extract_session_insights(
+#[cfg_attr(not(test), allow(dead_code))]
+fn extract_session_insights(
     messages: &[AgentMessage],
 ) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut verification = Vec::new();
@@ -330,7 +331,7 @@ mod tests {
             },
         ];
 
-        let (arch, gotchas, verify) = extract_session_insights(&msgs);
+        let (arch, _gotchas, verify) = extract_session_insights(&msgs);
         assert!(!arch.is_empty());
         assert!(!verify.is_empty());
         assert!(verify.contains(&"cargo test --workspace".to_string()));

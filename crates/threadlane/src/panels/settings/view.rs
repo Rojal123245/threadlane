@@ -1,6 +1,7 @@
 //! Settings modal presentation helpers.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[allow(dead_code)]
 pub enum SettingsTab {
     #[default]
     GoogleAntigravity,
@@ -11,6 +12,7 @@ pub enum SettingsTab {
     About,
 }
 
+#[allow(dead_code)]
 impl SettingsTab {
     pub fn title(&self) -> &'static str {
         match self {

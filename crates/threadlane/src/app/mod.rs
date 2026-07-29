@@ -3963,8 +3963,7 @@ pub struct App {
     git_operation_request_id: u64,
     #[rust]
     git_pr_pending: bool,
-    #[rust]
-    git_pr_request_id: u64,
+
     #[rust]
     git_pr_created: bool,
     #[rust]
@@ -8692,32 +8691,7 @@ impl App {
                     self.git_status.remove(&work_dir);
                     self.request_git_status();
                 }
-                GuiAgentEvent::GitHubPullRequestFinished {
-                    request_id,
-                    work_dir,
-                    result,
-                } => {
-                    if request_id != self.git_pr_request_id
-                        || self
-                            .active_work_dir()
-                            .is_none_or(|active| active != work_dir)
-                    {
-                        continue;
-                    }
-                    self.git_pr_pending = false;
-                    match result {
-                        Ok(url) => {
-                            self.git_pr_created = true;
-                            self.git_feedback = Some((true, "Pull request created.".to_owned()));
-                            let _ = robius_open::Uri::new(&url).open();
-                        }
-                        Err(error) => {
-                            let message = format!("Could not create pull request: {error}");
-                            self.git_feedback = Some((false, message));
-                        }
-                    }
-                    self.sync_right_sidebar(cx);
-                }
+
                 GuiAgentEvent::GitDiffLoaded {
                     request_id,
                     path,

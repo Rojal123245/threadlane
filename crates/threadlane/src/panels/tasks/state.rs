@@ -1,11 +1,13 @@
 //! Task sidebar panel state management.
 
 #[derive(Clone, Debug, Default)]
+#[allow(dead_code)]
 pub struct TaskSidebarUiState {
     pub selected_task_id: Option<String>,
     pub filter_active_only: bool,
 }
 
+#[allow(dead_code)]
 impl TaskSidebarUiState {
     pub fn select_task(&mut self, task_id: impl Into<String>) {
         self.selected_task_id = Some(task_id.into());

@@ -34,6 +34,7 @@ pub struct GitFile {
 }
 
 impl GitFile {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn status_for_section(&self, staged_section: bool) -> char {
         if staged_section {
             self.index_status
@@ -424,50 +425,6 @@ pub fn open_browser_url(cx: &mut makepad_widgets::Cx, url: &str) {
     cx.open_url(url, OpenUrlInPlace::No);
 }
 
-pub async fn create_github_pull_request(
-    remote: &str,
-    head: &str,
-    base: &str,
-    title: &str,
-    body: &str,
-    draft: bool,
-) -> Result<String, String> {
-    let token =
-        std::env::var("GITHUB_TOKEN").map_err(|_| "GITHUB_TOKEN is not configured".to_owned())?;
-    let (owner, repository) =
-        github_repository(remote).ok_or_else(|| "origin is not a GitHub repository".to_owned())?;
-    let response = reqwest::Client::new()
-        .post(format!(
-            "https://api.github.com/repos/{owner}/{repository}/pulls"
-        ))
-        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-        .header(reqwest::header::USER_AGENT, "threadlane")
-        .bearer_auth(token)
-        .json(&serde_json::json!({
-            "title": title.trim(),
-            "body": body,
-            "head": head,
-            "base": base,
-            "draft": draft,
-        }))
-        .send()
-        .await
-        .map_err(|error| error.to_string())?;
-    let status = response.status();
-    let payload: serde_json::Value = response.json().await.map_err(|error| error.to_string())?;
-    if !status.is_success() {
-        return Err(payload
-            .get("message")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("GitHub rejected the pull request")
-            .to_owned());
-    }
-    payload
-        .get("html_url")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| "GitHub response did not include a pull request URL".to_owned())
-}
 
 fn validate_branch_name(work_dir: &Path, name: &str) -> Result<String, GitError> {
     let name = name.trim();

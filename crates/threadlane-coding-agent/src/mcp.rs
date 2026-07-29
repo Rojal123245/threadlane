@@ -25,14 +25,7 @@ pub enum McpScope {
     Project,
 }
 
-impl McpScope {
-    pub fn display_name(self) -> &'static str {
-        match self {
-            McpScope::Global => "Global (~/.threadlane)",
-            McpScope::Project => "Project (.threadlane)",
-        }
-    }
-}
+
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -74,13 +67,11 @@ struct McpSettingsFile {
 
 #[derive(Debug, Clone, Default)]
 pub struct McpSettings {
+    #[allow(dead_code)]
     servers: Vec<McpServerConfig>,
 }
 
 impl McpSettings {
-    pub fn servers(&self) -> &[McpServerConfig] {
-        &self.servers
-    }
 
     pub fn load_global(global_dir: Option<&Path>) -> Vec<McpServerConfig> {
         let Some(dir) = global_dir else {
@@ -170,17 +161,16 @@ impl McpServerStatus {
 
 #[derive(Debug, Clone)]
 pub struct McpToolInfo {
-    pub server_id: String,
-    pub tool_name: String,
-    pub full_name: String,
-    pub definition: AgentToolDefinition,
+    tool_name: String,
+    full_name: String,
+    definition: AgentToolDefinition,
 }
 
 #[derive(Debug, Clone)]
 pub struct McpServerRecord {
     pub config: McpServerConfig,
     pub status: McpServerStatus,
-    pub tools: Vec<McpToolInfo>,
+    tools: Vec<McpToolInfo>,
 }
 
 pub struct McpManager {
@@ -391,7 +381,6 @@ impl McpManager {
                             );
 
                             mcp_tools.push(McpToolInfo {
-                                server_id: config.id.clone(),
                                 tool_name: name.to_string(),
                                 full_name,
                                 definition,
@@ -410,14 +399,14 @@ impl McpManager {
         }
     }
 
-    pub fn get_tools_sync(&self) -> Vec<AgentToolDefinition> {
+    fn get_tools_sync(&self) -> Vec<AgentToolDefinition> {
         self.cached_tool_defs
             .read()
             .map(|defs| defs.clone())
             .unwrap_or_default()
     }
 
-    pub async fn execute_tool(
+    async fn execute_tool(
         &self,
         full_name: &str,
         args: &str,
@@ -559,7 +548,7 @@ pub struct McpToolExecutor {
 }
 
 impl McpToolExecutor {
-    pub fn new(manager: Arc<McpManager>) -> Self {
+    pub(crate) fn new(manager: Arc<McpManager>) -> Self {
         Self { manager }
     }
 }
