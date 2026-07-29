@@ -15,6 +15,8 @@ pub mod composer_surface;
 pub mod context_menu;
 pub mod empty_row;
 pub mod flex_spacer;
+pub mod git_changes;
+pub mod git_diff;
 pub mod header_chip;
 pub mod icon_button;
 pub mod init;
@@ -56,6 +58,8 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     nav_button::script_mod(vm);
     empty_row::script_mod(vm);
     flex_spacer::script_mod(vm);
+    git_changes::script_mod(vm);
+    git_diff::script_mod(vm);
     panel_header::script_mod(vm);
     panel_surface::script_mod(vm);
     provider_card::script_mod(vm);

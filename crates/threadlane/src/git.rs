@@ -11,13 +11,36 @@ use std::process::Command;
 pub struct GitStatus {
     pub branch: Option<String>,
     pub detached: bool,
+    pub has_upstream: bool,
     pub has_changes: bool,
     pub staged_changes: bool,
     pub unstaged_changes: bool,
     pub ahead: usize,
     pub behind: usize,
+    pub pr_ready: bool,
     pub remote: Option<String>,
     pub branches: Vec<String>,
+    pub files: Vec<GitFile>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GitFile {
+    pub path: String,
+    pub status: String,
+    pub index_status: char,
+    pub worktree_status: char,
+    pub staged: bool,
+    pub unstaged: bool,
+}
+
+impl GitFile {
+    pub fn status_for_section(&self, staged_section: bool) -> char {
+        if staged_section {
+            self.index_status
+        } else {
+            self.worktree_status
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,9 +84,22 @@ fn command(work_dir: &Path, args: &[&str]) -> Result<String, GitError> {
 
 fn parse_status(_work_dir: &Path, porcelain: &str) -> GitStatus {
     let mut status = GitStatus::default();
-    let mut lines = porcelain.lines();
-    if let Some(header) = lines.next().and_then(|line| line.strip_prefix("## ")) {
-        let head = header.split("...").next().unwrap_or(header);
+    let records = if porcelain.contains('\0') {
+        porcelain
+            .split('\0')
+            .filter(|record| !record.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    } else {
+        porcelain.lines().map(str::to_owned).collect::<Vec<_>>()
+    };
+    let mut records = records.into_iter();
+    let header = records
+        .next()
+        .and_then(|line| line.strip_prefix("## ").map(str::to_owned));
+    if let Some(header) = header {
+        status.has_upstream = header.contains("...");
+        let head = header.split("...").next().unwrap_or(&header);
         if head == "HEAD" || head.starts_with("(no branch)") {
             status.detached = true;
         } else if !head.is_empty() {
@@ -85,7 +121,7 @@ fn parse_status(_work_dir: &Path, porcelain: &str) -> GitStatus {
         }
     }
 
-    for line in lines {
+    while let Some(line) = records.next() {
         let bytes = line.as_bytes();
         if bytes.len() < 2 {
             continue;
@@ -95,12 +131,42 @@ fn parse_status(_work_dir: &Path, porcelain: &str) -> GitStatus {
         status.staged_changes |= index != ' ' && index != '?';
         status.unstaged_changes |= worktree != ' ';
         status.has_changes = true;
+        let raw_path = line.get(3..).unwrap_or_default().trim();
+        // With -z, rename/copy records are followed by the old path as a
+        // separate record; the first path is already the new path we display.
+        // The line-based fallback keeps the legacy test format readable.
+        if (index == 'R' || index == 'C' || worktree == 'R' || worktree == 'C')
+            && porcelain.contains('\0')
+        {
+            let _old_path = records.next();
+        }
+        let path = raw_path
+            .rsplit_once(" -> ")
+            .map(|(_, new_path)| new_path)
+            .unwrap_or(raw_path)
+            .to_owned();
+        if !path.is_empty() {
+            let status_code = if index == '?' {
+                "?".to_owned()
+            } else {
+                let code = format!("{index}{worktree}");
+                code.trim().to_owned()
+            };
+            status.files.push(GitFile {
+                path,
+                status: status_code,
+                index_status: index,
+                worktree_status: worktree,
+                staged: index != ' ' && index != '?',
+                unstaged: index == '?' || worktree != ' ',
+            });
+        }
     }
     status
 }
 
 pub fn inspect(work_dir: &Path) -> Result<GitStatus, GitError> {
-    let porcelain = command(work_dir, &["status", "--porcelain=v1", "-b"])?;
+    let porcelain = command(work_dir, &["status", "--porcelain=v1", "-b", "-z"])?;
     let mut status = parse_status(work_dir, &porcelain);
     status.branches = command(
         work_dir,
@@ -114,6 +180,36 @@ pub fn inspect(work_dir: &Path) -> Result<GitStatus, GitError> {
         .ok()
         .map(|remote| remote.trim().to_owned())
         .filter(|remote| !remote.is_empty());
+    if status.remote.is_some() && status.branch.is_some() {
+        let has_upstream = command(
+            work_dir,
+            &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        )
+        .ok()
+        .map(|upstream| !upstream.trim().is_empty())
+        .unwrap_or(false);
+        if !has_upstream && status.ahead == 0 {
+            status.ahead = command(work_dir, &["rev-list", "--count", "HEAD"])
+                .ok()
+                .and_then(|count| count.trim().parse().ok())
+                .unwrap_or(0);
+        }
+    }
+    if let (Some(branch), Some(base)) = (status.branch.as_deref(), default_branch(work_dir)) {
+        if branch != base {
+            let local_base = command(work_dir, &["rev-list", "--count", &format!("{base}..HEAD")])
+                .or_else(|_| {
+                    command(
+                        work_dir,
+                        &["rev-list", "--count", &format!("origin/{base}..HEAD")],
+                    )
+                });
+            status.pr_ready = local_base
+                .ok()
+                .and_then(|count| count.trim().parse().ok())
+                .is_some_and(|count: usize| count > 0);
+        }
+    }
     Ok(status)
 }
 
@@ -129,7 +225,7 @@ pub fn checkout(work_dir: &Path, name: &str) -> Result<(), GitError> {
     Ok(())
 }
 
-pub fn commit_all(work_dir: &Path, message: &str) -> Result<(), GitError> {
+pub fn commit_staged(work_dir: &Path, message: &str) -> Result<(), GitError> {
     let message = message.trim();
     if message.is_empty() {
         return Err(GitError {
@@ -137,14 +233,202 @@ pub fn commit_all(work_dir: &Path, message: &str) -> Result<(), GitError> {
             message: "commit message cannot be empty".to_owned(),
         });
     }
-    command(work_dir, &["add", "--all"])?;
     command(work_dir, &["commit", "-m", message])?;
     Ok(())
 }
 
 pub fn push(work_dir: &Path) -> Result<(), GitError> {
-    command(work_dir, &["push"])?;
+    let has_upstream = command(
+        work_dir,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+    )
+    .ok()
+    .map(|upstream| !upstream.trim().is_empty())
+    .unwrap_or(false);
+    if has_upstream {
+        command(work_dir, &["push"])?;
+        return Ok(());
+    }
+    let branch = command(work_dir, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let branch = branch.trim();
+    if branch.is_empty() || branch == "HEAD" {
+        return Err(GitError {
+            work_dir: work_dir.to_path_buf(),
+            message: "cannot push a detached HEAD; check out a named branch first".to_owned(),
+        });
+    }
+    command(work_dir, &["push", "--set-upstream", "origin", branch])?;
     Ok(())
+}
+
+pub fn pull(work_dir: &Path) -> Result<(), GitError> {
+    command(work_dir, &["pull", "--ff-only"])?;
+    Ok(())
+}
+
+pub fn stage_file(work_dir: &Path, path: &str) -> Result<(), GitError> {
+    command(work_dir, &["add", "--", path])?;
+    Ok(())
+}
+
+pub fn unstage_file(work_dir: &Path, path: &str) -> Result<(), GitError> {
+    command(work_dir, &["restore", "--staged", "--", path])?;
+    Ok(())
+}
+
+pub fn diff_file(work_dir: &Path, path: &str) -> Result<String, GitError> {
+    let unstaged = command(work_dir, &["diff", "--", path]).unwrap_or_default();
+    let staged = command(work_dir, &["diff", "--cached", "--", path]).unwrap_or_default();
+    let mut diff = String::new();
+    if !staged.trim().is_empty() {
+        diff.push_str("# Staged changes\n");
+        diff.push_str(&staged);
+    }
+    if !unstaged.trim().is_empty() {
+        if !diff.is_empty() {
+            diff.push('\n');
+        }
+        diff.push_str("# Unstaged changes\n");
+        diff.push_str(&unstaged);
+    }
+    if diff.is_empty() && command(work_dir, &["ls-files", "--error-unmatch", "--", path]).is_err() {
+        let output = Command::new("git")
+            .args(["diff", "--no-index", "--", "/dev/null", path])
+            .current_dir(work_dir)
+            .output()
+            .map_err(|error| GitError {
+                work_dir: work_dir.to_path_buf(),
+                message: format!("could not start git: {error}"),
+            })?;
+        let new_file_diff = String::from_utf8_lossy(&output.stdout);
+        if !new_file_diff.trim().is_empty() {
+            diff.push_str("# New file\n");
+            diff.push_str(&new_file_diff);
+        }
+    }
+    if diff.is_empty() {
+        diff.push_str("No textual diff available for this file.\n");
+    }
+    Ok(diff)
+}
+
+/// Return the changes most likely to be included in the next commit.
+///
+/// When anything is staged, only the staged diff is returned. Otherwise the
+/// working-tree diff is combined with untracked files so message generation
+/// also works before the first staging step.
+pub fn commit_message_diff(work_dir: &Path) -> Result<String, GitError> {
+    let staged = command(work_dir, &["diff", "--cached", "--"])?;
+    if !staged.trim().is_empty() {
+        return Ok(staged);
+    }
+
+    let mut diff = command(work_dir, &["diff", "--"])?;
+    let untracked = command(work_dir, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    for path in untracked.split('\0').filter(|path| !path.is_empty()) {
+        let file_diff = diff_file(work_dir, path)?;
+        if !file_diff.trim().is_empty() {
+            if !diff.is_empty() {
+                diff.push('\n');
+            }
+            diff.push_str(&file_diff);
+        }
+    }
+    if diff.trim().is_empty() {
+        return Err(GitError {
+            work_dir: work_dir.to_path_buf(),
+            message: "no changes available for commit message generation".to_owned(),
+        });
+    }
+    Ok(diff)
+}
+
+pub fn default_branch(work_dir: &Path) -> Option<String> {
+    if let Some(branch) = command(
+        work_dir,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .ok()
+    .and_then(|value| value.trim().strip_prefix("origin/").map(str::to_owned))
+    {
+        return Some(branch);
+    }
+    for candidate in ["main", "master"] {
+        if command(
+            work_dir,
+            &[
+                "rev-parse",
+                "--verify",
+                &format!("refs/remotes/origin/{candidate}"),
+            ],
+        )
+        .is_ok()
+        {
+            return Some(candidate.to_owned());
+        }
+    }
+    Some("main".to_owned())
+}
+
+pub fn github_repository(remote: &str) -> Option<(String, String)> {
+    let normalized = remote.trim().trim_end_matches('/').trim_end_matches(".git");
+    let path = normalized
+        .strip_prefix("https://github.com/")
+        .or_else(|| normalized.strip_prefix("http://github.com/"))
+        .or_else(|| normalized.strip_prefix("git@github.com:"))
+        .or_else(|| normalized.strip_prefix("ssh://git@github.com/"))?;
+    let mut parts = path.split('/');
+    let owner = parts.next()?.trim();
+    let repository = parts.next()?.trim();
+    if owner.is_empty() || repository.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    Some((owner.to_owned(), repository.to_owned()))
+}
+
+pub async fn create_github_pull_request(
+    remote: &str,
+    head: &str,
+    base: &str,
+    title: &str,
+    body: &str,
+    draft: bool,
+) -> Result<String, String> {
+    let token =
+        std::env::var("GITHUB_TOKEN").map_err(|_| "GITHUB_TOKEN is not configured".to_owned())?;
+    let (owner, repository) =
+        github_repository(remote).ok_or_else(|| "origin is not a GitHub repository".to_owned())?;
+    let response = reqwest::Client::new()
+        .post(format!(
+            "https://api.github.com/repos/{owner}/{repository}/pulls"
+        ))
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .header(reqwest::header::USER_AGENT, "threadlane")
+        .bearer_auth(token)
+        .json(&serde_json::json!({
+            "title": title.trim(),
+            "body": body,
+            "head": head,
+            "base": base,
+            "draft": draft,
+        }))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    let status = response.status();
+    let payload: serde_json::Value = response.json().await.map_err(|error| error.to_string())?;
+    if !status.is_success() {
+        return Err(payload
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("GitHub rejected the pull request")
+            .to_owned());
+    }
+    payload
+        .get("html_url")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "GitHub response did not include a pull request URL".to_owned())
 }
 
 fn validate_branch_name(work_dir: &Path, name: &str) -> Result<String, GitError> {
@@ -162,19 +446,42 @@ fn validate_branch_name(work_dir: &Path, name: &str) -> Result<String, GitError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::process::Command;
+
+    fn run_git(work_dir: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(work_dir)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn parses_branch_and_change_state() {
         let status = parse_status(
             Path::new("/tmp/project"),
-            "## feature/demo...origin/feature/demo [ahead 2, behind 1]\nM  staged.rs\n M working.rs\n?? new.rs\n",
+            "## feature/demo...origin/feature/demo [ahead 2, behind 1]\nM  staged.rs\n M working.rs\nMM mixed.rs\n?? new.rs\n",
         );
         assert_eq!(status.branch.as_deref(), Some("feature/demo"));
         assert_eq!(status.ahead, 2);
         assert_eq!(status.behind, 1);
+        assert!(status.has_upstream);
         assert!(status.staged_changes);
         assert!(status.unstaged_changes);
         assert!(status.has_changes);
+        let mixed = status.files.iter().find(|file| file.path == "mixed.rs").unwrap();
+        assert_eq!(mixed.status, "MM");
+        assert_eq!(mixed.status_for_section(true), 'M');
+        assert_eq!(mixed.status_for_section(false), 'M');
+        assert!(mixed.staged);
+        assert!(mixed.unstaged);
     }
 
     #[test]
@@ -182,5 +489,74 @@ mod tests {
         let status = parse_status(Path::new("/tmp/project"), "## HEAD\n");
         assert!(status.detached);
         assert!(status.branch.is_none());
+    }
+
+    #[test]
+    fn normalizes_renamed_paths() {
+        let status = parse_status(
+            Path::new("/tmp/project"),
+            "## main\nR  old_name.rs -> new_name.rs\n",
+        );
+        assert_eq!(status.files[0].path, "new_name.rs");
+        assert_eq!(status.files[0].status, "R");
+    }
+
+    #[test]
+    fn parses_nul_delimited_paths_and_renames() {
+        let status = parse_status(
+            Path::new("/tmp/project"),
+            "## feature/demo\0?? line\nbreak.txt\0R  new name.txt\0old name.txt\0",
+        );
+        assert_eq!(status.files.len(), 2);
+        assert_eq!(status.files[0].path, "line\nbreak.txt");
+        assert_eq!(status.files[1].path, "new name.txt");
+        assert_eq!(status.files[1].status, "R");
+    }
+
+    #[test]
+    fn parses_github_remotes() {
+        assert_eq!(
+            github_repository("git@github.com:owner/repo.git"),
+            Some(("owner".to_owned(), "repo".to_owned()))
+        );
+        assert_eq!(
+            github_repository("https://github.com/owner/repo"),
+            Some(("owner".to_owned(), "repo".to_owned()))
+        );
+    }
+
+    #[test]
+    fn commit_message_diff_prefers_staged_changes_and_includes_untracked_files() {
+        let root = std::env::temp_dir().join(format!(
+            "threadlane-git-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        run_git(&root, &["init", "-q"]);
+        run_git(&root, &["config", "user.email", "threadlane@example.com"]);
+        run_git(&root, &["config", "user.name", "Threadlane"]);
+        fs::write(root.join("tracked.txt"), "original\n").unwrap();
+        run_git(&root, &["add", "tracked.txt"]);
+        run_git(&root, &["commit", "-qm", "initial"]);
+
+        fs::write(root.join("tracked.txt"), "staged\n").unwrap();
+        run_git(&root, &["add", "tracked.txt"]);
+        fs::write(root.join("tracked.txt"), "staged\nunstaged\n").unwrap();
+        fs::write(root.join("new.txt"), "new file\n").unwrap();
+
+        let staged = commit_message_diff(&root).unwrap();
+        assert!(staged.contains("+staged"));
+        assert!(!staged.contains("+unstaged"));
+        assert!(!staged.contains("new.txt"));
+
+        run_git(&root, &["restore", "--staged", "tracked.txt"]);
+        let working_tree = commit_message_diff(&root).unwrap();
+        assert!(working_tree.contains("+unstaged"));
+        assert!(working_tree.contains("new.txt"));
+        fs::remove_dir_all(root).unwrap();
     }
 }

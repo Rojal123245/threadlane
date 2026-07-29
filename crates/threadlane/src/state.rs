@@ -171,6 +171,21 @@ pub enum GuiAgentEvent {
         operation: String,
         result: Result<(), String>,
     },
+    GitHubPullRequestFinished {
+        request_id: u64,
+        work_dir: PathBuf,
+        result: Result<String, String>,
+    },
+    GitDiffLoaded {
+        request_id: u64,
+        path: String,
+        result: Result<String, String>,
+    },
+    GitCommitMessageGenerated {
+        request_id: u64,
+        work_dir: PathBuf,
+        result: Result<String, String>,
+    },
 }
 
 #[cfg(test)]

@@ -98,7 +98,7 @@ On first launch, use the in-app authorization flow or provide credentials throug
 
 ### Git and GitHub actions
 
-For an attached Git project, the composer shows the current branch with checkout and new-branch actions in its dropdown. The resizable right-side Git panel groups staged and unstaged files, supports per-file selection and scrollable diff previews, and exposes only applicable staging, commit, pull, push, and GitHub pull-request actions. Commit messages can be submitted with Enter, and Git operation feedback appears inline in the panel. Local operations use the configured `git` executable and its credential helpers. Pull-request creation currently requires a `GITHUB_TOKEN` environment variable; the token is sent only to GitHub's pull-request API and is never persisted by Threadlane.
+For an attached Git project, the composer shows the current branch with checkout and new-branch actions in its dropdown. The resizable right-side Git panel groups staged and unstaged files, supports per-file selection and scrollable diff previews, and exposes only applicable staging, commit, pull, push, and GitHub pull-request actions. The Generate action can use the relevant Git diff and the active model to suggest a commit subject without changing the chat or committing automatically. Commit messages can be submitted with Enter, and Git operation feedback appears inline in the panel. Local operations use the configured `git` executable and its credential helpers. Pull-request creation currently requires a `GITHUB_TOKEN` environment variable; the token is sent only to GitHub's pull-request API and is never persisted by Threadlane.
 
 ### Basic Workflow
 

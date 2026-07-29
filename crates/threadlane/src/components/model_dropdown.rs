@@ -34,6 +34,10 @@ script_mod! {
             svg: crate_resource("self:resources/icons/reasoning.svg")
             color: theme.color_primary
         }
+        draw_action_icon +: {
+            svg: crate_resource("self:resources/icons/plus.svg")
+            color: theme.color_primary
+        }
         draw_text +: {
             color: theme.color_foreground
             color_hover: theme.color_primary_foreground
@@ -300,10 +304,24 @@ script_mod! {
 
     mod.components.GitBranchDropDown = mod.components.IconDropDown {
         use_provider_icons: false
+        padding: Inset{left: 8 right: 22}
+        icon_walk: Walk{width: 14 height: 14 margin: Inset{right: 6}}
+        draw_icon +: {
+            svg: crate_resource("self:resources/icons/git.svg")
+            color: theme.color_primary
+            color_hover: theme.color_primary_foreground
+            color_focus: theme.color_primary_foreground
+            color_down: theme.color_primary_foreground
+        }
         popup_menu: mod.components.IconPopupMenu {
-            width: 220
+            width: 200
             menu_item: mod.components.IconPopupMenuItem {
                 use_provider_icons: false
+                icon_walk: Walk{width: 14 height: 14 margin: Inset{right: 6}}
+                draw_icon +: {
+                    svg: crate_resource("self:resources/icons/git.svg")
+                    color: theme.color_primary
+                }
             }
         }
     }
@@ -331,6 +349,8 @@ struct IconPopupMenuItem {
     draw_antigravity_icon: DrawSvg,
     #[live]
     draw_icon: DrawSvg,
+    #[live]
+    draw_action_icon: DrawSvg,
     #[live]
     use_provider_icons: bool,
     #[live]
@@ -364,7 +384,11 @@ impl IconPopupMenuItem {
                     self.draw_openai_icon.draw_walk(cx, self.icon_walk);
                 }
             } else {
-                self.draw_icon.draw_walk(cx, self.icon_walk);
+                if label == "＋ New branch…" {
+                    self.draw_action_icon.draw_walk(cx, self.icon_walk);
+                } else {
+                    self.draw_icon.draw_walk(cx, self.icon_walk);
+                }
             }
             self.draw_text
                 .draw_walk(cx, Walk::fit(), Align::default(), label);
@@ -574,6 +598,8 @@ pub struct IconDropDown {
     is_active: bool,
     #[live]
     selected_item: usize,
+    #[live(true)]
+    visible: bool,
     #[layout]
     layout: Layout,
     #[action_data]
@@ -694,6 +720,9 @@ impl Widget for IconDropDown {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if !self.visible {
+            return;
+        }
         self.animator_handle_event(cx, event);
         let uid = self.widget_uid();
 
@@ -783,12 +812,22 @@ impl Widget for IconDropDown {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
         self.draw_drop_down(cx, walk);
         DrawStep::done()
     }
 }
 
 impl IconDropDownRef {
+    pub fn set_visible(&self, cx: &mut Cx, visible: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.visible = visible;
+            inner.draw_bg.redraw(cx);
+        }
+    }
+
     pub fn set_labels(&self, cx: &mut Cx, labels: Vec<String>) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.labels = labels;

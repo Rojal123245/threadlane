@@ -132,6 +132,76 @@ impl ProviderClient {
             .stream_chat_completion(payload, prompt_cache_key, event_tx)
             .await;
     }
+
+    /// Generate a short commit subject from a Git diff without adding a message to the chat.
+    pub async fn generate_commit_message(&self, model: &str, diff: &str) -> Result<String, String> {
+        let model = model.to_owned();
+        let prompt = Arc::new(format!(
+            "Generate one concise Git commit subject for the following diff. Use imperative mood, keep it under 72 characters, and return only the subject line with no quotes, Markdown, or explanation.\n\n{diff}"
+        ));
+        let model_for_payload = model.clone();
+        let payload = PayloadSource::lazy(model.clone(), move |format| {
+            let prompt = Arc::clone(&prompt);
+            let model = model_for_payload.clone();
+            Box::pin(async move {
+                match format {
+                    PayloadFormat::Codex => serde_json::json!({
+                        "model": model,
+                        "instructions": "You write concise, conventional Git commit subjects. Return only one subject line.",
+                        "input": [{
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": prompt.as_str()}]
+                        }],
+                        "max_output_tokens": 96,
+                        "store": false,
+                        "stream": true
+                    }),
+                    PayloadFormat::ChatCompletions => serde_json::json!({
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": "You write concise, conventional Git commit subjects. Return only one subject line."},
+                            {"role": "user", "content": prompt.as_str()}
+                        ],
+                        "max_tokens": 96,
+                        "stream": true
+                    }),
+                }
+            })
+        });
+        let (event_tx, mut event_rx) = mpsc::channel(128);
+        let client = self.clone();
+        let stream_task = tokio::spawn(async move {
+            client
+                .stream_chat_completion(payload, None, event_tx)
+                .await;
+        });
+
+        let mut text = String::new();
+        let mut error = None;
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                StreamEvent::ContentToken(token) => text.push_str(&token),
+                StreamEvent::Error(message) => error = Some(message),
+                StreamEvent::Finished { .. }
+                | StreamEvent::ReasoningToken(_)
+                | StreamEvent::ToolCallStart { .. }
+                | StreamEvent::ToolCallArgsDelta { .. } => {}
+            }
+        }
+        if stream_task.await.is_err() && error.is_none() {
+            return Err("commit message generation stream terminated unexpectedly".to_owned());
+        }
+        if let Some(error) = error {
+            return Err(error);
+        }
+        let text = text.trim().to_owned();
+        if text.is_empty() {
+            Err("The model returned an empty commit message".to_owned())
+        } else {
+            Ok(text)
+        }
+    }
 }
 
 #[cfg(test)]

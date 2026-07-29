@@ -7,6 +7,8 @@ use crate::components::session_row::ProjectHeaderAction;
 use crate::components::task_sidebar::{
     task_header_state, TaskSidebar, TaskSidebarAction, TaskSidebarItem,
 };
+use crate::components::git_changes::{GitChanges, GitChangesAction};
+use crate::components::git_diff::GitDiffView;
 use crate::git::GitStatus;
 use crate::components::terminal_panel::ProjectTerminalWidgetRefExt;
 use crate::panels::chat::{
@@ -43,6 +45,7 @@ use threadlane_coding_agent::{
 };
 use threadlane_provider::auth;
 use threadlane_provider::openai::{fetch_available_models, OpenAIClient};
+use threadlane_provider::ProviderClient;
 
 use makepad_terminal_core::{Pty, TermKeyCode as TerminalKeyCode, Terminal};
 use std::collections::HashMap;
@@ -87,6 +90,32 @@ const ANTIGRAVITY_MODELS: &[&str] = &[
     "antigravity/gpt-oss-120b",
 ];
 const MAX_TERMINAL_OUTPUT: usize = 256 * 1024;
+const RIGHT_SIDEBAR_MIN_WIDTH: f64 = 220.0;
+const RIGHT_SIDEBAR_MAX_WIDTH: f64 = 520.0;
+const RIGHT_SIDEBAR_MIN_MAIN_WIDTH: f64 = 360.0;
+
+fn normalize_generated_commit_message(raw: &str) -> String {
+    let line = raw
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("```") )
+        .unwrap_or_default()
+        .trim_matches('`')
+        .trim();
+    let line = line
+        .strip_prefix("Commit message:")
+        .or_else(|| line.strip_prefix("Commit:") )
+        .unwrap_or(line)
+        .trim();
+    truncate_chars(line, 72)
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum RightSidebarTab {
+    #[default]
+    Git,
+    Agents,
+}
 
 fn append_antigravity_models(models: &mut Vec<String>) {
     for model in ANTIGRAVITY_MODELS {
@@ -2249,7 +2278,8 @@ script_mod! {
                                     flow: Right
                                     spacing: 6
                                     align: Align{y: 0.5}
-                                    clip_x: true
+                                    clip_x: false
+                                    clip_y: false
 
                                     composer_status := mod.components.ClippedLabel {
                                         width: Fit
@@ -2263,7 +2293,7 @@ script_mod! {
 
 
                                     git_branch_drop := mod.components.GitBranchDropDown {
-                                        width: 180
+                                        width: 132
                                         height: 28
                                         labels: ["Git"]
                                     }
@@ -2399,17 +2429,456 @@ script_mod! {
                                     }
                                 }
                             }
-
                             project_terminal := mod.components.ProjectTerminal {}
                             }
 
-                            task_sidebar_wrap := View {
+                            right_sidebar_resize_handle := View {
+                                width: 6
+                                height: Fill
+                                visible: false
+                                show_bg: true
+                                draw_bg +: {
+                                    color: theme.color_card
+                                    pixel: fn() {
+                                        let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                                        sdf.clear(theme.color_transparent)
+                                        sdf.rect(self.rect_size.x * 0.5 - 0.5, 0.0, 1.0, self.rect_size.y)
+                                        return sdf.fill(self.color)
+                                    }
+                                }
+                            }
+
+                            right_sidebar := View {
                                 width: 280
                                 height: Fill
                                 visible: false
-                                task_sidebar := mod.components.TaskSidebar {
+                                flow: Down
+                                spacing: 8
+
+                                right_sidebar_tabs := View {
+                                    width: Fill
+                                    height: 30
+                                    flow: Right
+                                    spacing: 4
+                                    git_tab_btn := mod.components.NavButton {
+                                        width: Fill
+                                        height: 28
+                                        text: "Git"
+                                        padding: Inset{left: 8 right: 8 top: 4 bottom: 4}
+                                        draw_icon +: {
+                                            svg: crate_resource("self:resources/icons/git.svg")
+                                        }
+                                    }
+                                    agents_tab_btn := mod.components.NavButton {
+                                        width: Fill
+                                        height: 28
+                                        text: "Agents"
+                                        padding: Inset{left: 8 right: 8 top: 4 bottom: 4}
+                                        draw_icon +: {
+                                            svg: crate_resource("self:resources/icons/subagent.svg")
+                                        }
+                                    }
+                                }
+
+                                git_actions := View {
                                     width: Fill
                                     height: Fill
+                                    visible: false
+                                    flow: Down
+                                    spacing: 7
+                                    padding: Inset{left: 10 top: 10 right: 10 bottom: 10}
+                                    draw_bg +: {
+                                        color: theme.color_input
+                                        border_color: theme.color_border
+                                        border_size: 1.0
+                                        border_radius: 8.0
+                                    }
+                                git_state_row := View {
+                                    width: Fill
+                                    height: 18
+                                    flow: Right
+                                    spacing: 6
+                                    align: Align{y: 0.5}
+                                    git_state_icon := Icon {
+                                        width: 14
+                                        height: 14
+                                        icon_walk: Walk{width: 13 height: 13}
+                                        draw_icon +: {
+                                            svg: crate_resource("self:resources/icons/git.svg")
+                                            color: theme.color_primary
+                                        }
+                                    }
+                                    git_state_label := ClippedLabel {
+                                        width: Fill
+                                        height: 14
+                                        text: "SOURCE CONTROL"
+                                        align: Align{y: 0.5}
+                                        draw_text +: {
+                                            color: theme.color_muted_foreground
+                                            text_style: theme.font_bold { font_size: 7.5 }
+                                        }
+                                    }
+                                }
+                                git_new_branch_row := View {
+                                    width: Fill
+                                    height: 28
+                                    visible: false
+                                    flow: Right
+                                    spacing: 4
+                                    git_new_branch_name := TextInput {
+                                        width: Fill
+                                        height: 28
+                                        empty_text: "New branch name"
+                                        padding: Inset{left: 8 right: 8}
+                                        draw_bg +: {
+                                            color: theme.color_background
+                                            color_focus: theme.color_background
+                                            border_color: theme.color_border
+                                            border_color_focus: theme.color_primary
+                                            border_radius: 6.0
+                                            border_size: 1.0
+                                        }
+                                        draw_text +: {
+                                            color: theme.color_foreground
+                                            color_empty: theme.color_muted_foreground
+                                        }
+                                    }
+                                    git_create_branch_btn := mod.components.HeaderChipButton {
+                                        width: Fit
+                                        height: 28
+                                        text: "Create"
+                                        padding: Inset{left: 7 right: 7 top: 4 bottom: 4}
+                                    }
+                                }
+                                    git_feedback_error_row := View {
+                                        width: Fill
+                                        height: 18
+                                        visible: false
+                                        flow: Right
+                                        spacing: 5
+                                        align: Align{y: 0.5}
+                                        git_feedback_error_dot := mod.components.StatusDot {
+                                            visible: true
+                                            draw_bg +: { color: theme.color_destructive }
+                                        }
+                                        git_feedback_error := ClippedLabel {
+                                            width: Fill
+                                            height: 16
+                                            align: Align{y: 0.5}
+                                            draw_text +: {
+                                                color: theme.color_destructive
+                                                text_style: theme.font_regular { font_size: 8.0 }
+                                            }
+                                        }
+                                    }
+                                    git_feedback_success_row := View {
+                                        width: Fill
+                                        height: 18
+                                        visible: false
+                                        flow: Right
+                                        spacing: 5
+                                        align: Align{y: 0.5}
+                                        git_feedback_success_dot := mod.components.StatusDot {
+                                            visible: true
+                                            draw_bg +: { color: theme.color_success }
+                                        }
+                                        git_feedback_success := ClippedLabel {
+                                            width: Fill
+                                            height: 16
+                                            align: Align{y: 0.5}
+                                            draw_text +: {
+                                                color: theme.color_success
+                                                text_style: theme.font_regular { font_size: 8.0 }
+                                            }
+                                        }
+                                    }
+                                git_changes_header := View {
+                                    width: Fill
+                                    height: 24
+                                    flow: Right
+                                    align: Align{y: 0.5}
+                                    git_changes_title := Label {
+                                        width: Fill
+                                        height: 16
+                                        text: "WORKING TREE"
+                                        draw_text +: {
+                                            color: theme.color_foreground
+                                            text_style: theme.font_bold { font_size: 8.0 }
+                                        }
+                                    }
+                                    git_selection_label := ClippedLabel {
+                                        width: Fit
+                                        height: 16
+                                        draw_text +: {
+                                            color: theme.color_muted_foreground
+                                            text_style: theme.font_code { font_size: 7.5 }
+                                        }
+                                    }
+                                    git_refresh_btn := mod.components.IconButton {
+                                        width: 24
+                                        height: 24
+                                        text: ""
+                                        icon_walk: Walk{width: 12 height: 12}
+                                        draw_icon +: {
+                                            svg: crate_resource("self:resources/icons/refresh.svg")
+                                            color: theme.color_muted_foreground
+                                            color_hover: theme.color_foreground
+                                            color_down: theme.color_primary_foreground
+                                        }
+                                    }
+                                    git_select_all_btn := mod.components.IconButton {
+                                        width: 24
+                                        height: 24
+                                        text: ""
+                                        icon_walk: Walk{width: 12 height: 12}
+                                        draw_icon +: {
+                                            svg: crate_resource("self:resources/icons/select-all.svg")
+                                            color: theme.color_muted_foreground
+                                            color_hover: theme.color_foreground
+                                            color_down: theme.color_primary_foreground
+                                        }
+                                    }
+                                }
+                                git_changes_wrap := View {
+                                    width: Fill
+                                    height: Fill
+                                    git_changes := mod.components.GitChanges {
+                                        width: Fill
+                                        height: Fill
+                                    }
+                                }
+                                git_diff_wrap := View {
+                                    width: Fill
+                                    height: Fill
+                                    visible: false
+                                    flow: Down
+                                    spacing: 5
+                                    git_diff_header := View {
+                                        width: Fill
+                                        height: 28
+                                        flow: Right
+                                        spacing: 5
+                                        git_diff_back_btn := mod.components.IconButton {
+                                            width: 26
+                                            height: 26
+                                            icon_walk: Walk{width: 13 height: 13}
+                                            draw_icon +: {
+                                                svg: crate_resource("self:resources/icons/back.svg")
+                                                color: theme.color_muted_foreground
+                                                color_hover: theme.color_foreground
+                                                color_down: theme.color_primary_foreground
+                                            }
+                                        }
+                                        git_diff_path := ClippedLabel {
+                                            width: Fill
+                                            height: 18
+                                            align: Align{y: 0.5}
+                                            draw_text +: {
+                                                color: theme.color_primary_foreground
+                                                text_style: theme.font_code { font_size: 8.5 }
+                                            }
+                                        }
+                                        git_diff_loading := View {
+                                            width: Fit
+                                            height: 18
+                                            visible: false
+                                            align: Align{y: 0.5}
+                                            loading_label := ClippedLabel {
+                                                width: Fit
+                                                height: 16
+                                                text: "Loading…"
+                                                align: Align{y: 0.5}
+                                                draw_text +: {
+                                                    color: theme.color_muted_foreground
+                                                    text_style: theme.font_regular { font_size: 8.0 }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    git_diff_text := mod.components.GitDiffView {
+                                        width: Fill
+                                        height: Fill
+                                    }
+                                }
+                                git_stage_row := View {
+                                    width: Fill
+                                    height: 28
+                                    flow: Right
+                                    spacing: 4
+                                    git_stage_btn := mod.components.HeaderChipButton {
+                                        width: Fill
+                                        height: 28
+                                        text: "Stage"
+                                        padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
+                                    }
+                                    git_unstage_btn := mod.components.HeaderChipButton {
+                                        width: Fill
+                                        height: 28
+                                        text: "Unstage"
+                                        padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
+                                    }
+                                }
+                                git_commit_header := View {
+                                    width: Fill
+                                    height: 24
+                                    flow: Right
+                                    align: Align{y: 0.5}
+                                    git_commit_label := ClippedLabel {
+                                        width: Fill
+                                        height: 16
+                                        text: "COMMIT MESSAGE"
+                                        align: Align{y: 0.5}
+                                        draw_text +: {
+                                            color: theme.color_muted_foreground
+                                            text_style: theme.font_bold { font_size: 7.5 }
+                                        }
+                                    }
+                                    git_commit_source_label := ClippedLabel {
+                                        width: Fit
+                                        height: 16
+                                        text: ""
+                                        align: Align{y: 0.5}
+                                        draw_text +: {
+                                            color: theme.color_muted_foreground
+                                            text_style: theme.font_code { font_size: 7.0 }
+                                        }
+                                    }
+                                    git_generate_commit_btn := mod.components.HeaderChipButton {
+                                        width: Fit
+                                        height: 24
+                                        text: "Generate"
+                                        padding: Inset{left: 7 right: 7 top: 3 bottom: 3}
+                                    }
+                                }
+                                git_commit_message := TextInput {
+                                        width: Fill
+                                        height: 28
+                                        empty_text: "Commit message (required)"
+                                        submit_on_enter: true
+                                        padding: Inset{left: 8 right: 8}
+                                        draw_bg +: {
+                                            color: theme.color_background
+                                            color_focus: theme.color_background
+                                            border_color: theme.color_border
+                                            border_color_focus: theme.color_primary
+                                            border_radius: 6.0
+                                            border_size: 1.0
+                                        }
+                                        draw_text +: {
+                                            color: theme.color_foreground
+                                            color_empty: theme.color_muted_foreground
+                                        }
+                                    }
+                                git_action_row := View {
+                                        width: Fill
+                                        height: 28
+                                        flow: Right
+                                        spacing: 4
+                                    git_commit_btn := mod.components.HeaderChipButton {
+                                            width: Fill
+                                            height: 28
+                                        text: "Commit"
+                                        padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
+                                        draw_bg +: {
+                                            color: theme.color_primary
+                                            color_hover: theme.color_primary
+                                            color_focus: theme.color_primary
+                                            color_down: theme.color_primary
+                                            border_color: theme.color_primary
+                                            border_color_hover: theme.color_primary
+                                            border_color_focus: theme.color_primary
+                                            border_color_down: theme.color_primary
+                                        }
+                                        draw_text +: {
+                                            color: theme.color_primary_foreground
+                                            color_hover: theme.color_primary_foreground
+                                            color_focus: theme.color_primary_foreground
+                                            color_down: theme.color_primary_foreground
+                                        }
+                                        }
+                                        git_push_btn := mod.components.HeaderChipButton {
+                                            width: Fill
+                                            height: 28
+                                            text: "Push"
+                                            padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
+                                        }
+                                        git_pull_btn := mod.components.HeaderChipButton {
+                                            width: Fill
+                                            height: 28
+                                            text: "Pull"
+                                            padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
+                                        }
+                                    }
+                                git_pr_label := ClippedLabel {
+                                    width: Fill
+                                    height: 13
+                                    text: "PULL REQUEST"
+                                    draw_text +: {
+                                        color: theme.color_muted_foreground
+                                        text_style: theme.font_bold { font_size: 7.5 }
+                                    }
+                                }
+                                git_pr_title := TextInput {
+                                    width: Fill
+                                    height: 28
+                                    empty_text: "Pull request title"
+                                    padding: Inset{left: 8 right: 8}
+                                    draw_bg +: {
+                                        color: theme.color_background
+                                        color_focus: theme.color_background
+                                        border_color: theme.color_border
+                                        border_color_focus: theme.color_primary
+                                        border_radius: 6.0
+                                        border_size: 1.0
+                                    }
+                                    draw_text +: {
+                                        color: theme.color_foreground
+                                        color_empty: theme.color_muted_foreground
+                                    }
+                                }
+                                    git_pr_row := View {
+                                        width: Fill
+                                        height: 28
+                                        flow: Right
+                                        spacing: 4
+                                        git_pr_btn := mod.components.HeaderChipButton {
+                                            width: Fill
+                                            height: 28
+                                            text: "Open PR"
+                                            padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
+                                            draw_bg +: {
+                                                color: theme.color_primary
+                                                color_hover: theme.color_primary
+                                                color_focus: theme.color_primary
+                                                color_down: theme.color_primary
+                                                border_color: theme.color_primary
+                                                border_color_hover: theme.color_primary
+                                                border_color_focus: theme.color_primary
+                                                border_color_down: theme.color_primary
+                                            }
+                                            draw_text +: {
+                                                color: theme.color_primary_foreground
+                                                color_hover: theme.color_primary_foreground
+                                                color_focus: theme.color_primary_foreground
+                                                color_down: theme.color_primary_foreground
+                                            }
+                                        }
+                                        git_draft_pr_btn := mod.components.HeaderChipButton {
+                                            width: Fill
+                                            height: 28
+                                            text: "Draft PR"
+                                            padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
+                                        }
+                                    }
+                                }
+                                task_sidebar_wrap := View {
+                                    width: Fill
+                                    height: Fill
+                                    visible: false
+                                    task_sidebar := mod.components.TaskSidebar {
+                                        width: Fill
+                                        height: Fill
+                                    }
                                 }
                             }
 
@@ -3209,7 +3678,47 @@ pub struct App {
     #[rust]
     next_git_request_id: u64,
     #[rust]
+    git_status_timer: Timer,
+    #[rust]
+    git_status_pending: bool,
+    #[rust]
     git_status: HashMap<PathBuf, GitStatus>,
+    #[rust]
+    git_new_branch_open: bool,
+    #[rust]
+    git_diff_open: bool,
+    #[rust]
+    git_diff_pending: bool,
+    #[rust]
+    git_operation_pending: bool,
+    #[rust]
+    git_operation_request_id: u64,
+    #[rust]
+    git_pr_pending: bool,
+    #[rust]
+    git_pr_request_id: u64,
+    #[rust]
+    git_pr_created: bool,
+    #[rust]
+    git_commit_message_pending: bool,
+    #[rust]
+    git_commit_message_request_id: u64,
+    #[rust]
+    git_commit_message_abort: Option<tokio::task::AbortHandle>,
+    #[rust]
+    right_sidebar_tab: RightSidebarTab,
+    #[rust]
+    right_sidebar_agents_available: bool,
+    #[rust]
+    right_sidebar_width: f64,
+    #[rust]
+    right_sidebar_resizing: bool,
+    #[rust]
+    right_sidebar_resize_start_x: f64,
+    #[rust]
+    right_sidebar_resize_start_width: f64,
+    #[rust]
+    git_feedback: Option<(bool, String)>,
 }
 
 impl ScriptHook for App {}
@@ -3217,6 +3726,8 @@ impl ScriptHook for App {}
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         self.terminal_poll_next_frame = NextFrame::default();
+        self.git_status_timer = cx.start_interval(2.0);
+        self.right_sidebar_width = 280.0;
         let (tx, rx) = channel::<GuiAgentEvent>();
         self.tx = Some(tx);
         self.rx = Some(Arc::new(Mutex::new(rx)));
@@ -3655,6 +4166,133 @@ impl MatchEvent for App {
             self.open_project_picker();
         }
 
+        if let Some(action) = actions.find_widget_action(
+            self.ui
+                .text_input(cx, ids!(git_commit_message))
+                .widget_uid(),
+        ) {
+            if let TextInputAction::Changed(_) = action.cast() {
+                self.sync_git_commit_button(cx);
+            }
+        }
+
+        if self
+            .ui
+            .button(cx, ids!(git_generate_commit_btn))
+            .clicked(actions)
+        {
+            if self.git_commit_message_pending {
+                self.cancel_git_commit_message_generation(cx);
+            } else {
+                self.start_git_commit_message_generation(cx);
+            }
+        }
+
+        let commit_requested = self.ui.button(cx, ids!(git_commit_btn)).clicked(actions)
+            || self
+                .ui
+                .text_input(cx, ids!(git_commit_message))
+                .returned(actions)
+                .is_some();
+        if commit_requested {
+            let message = self
+                .ui
+                .text_input(cx, ids!(git_commit_message))
+                .text();
+            if message.trim().is_empty() {
+                self.git_feedback = Some((false, "Enter a commit message first.".to_owned()));
+                self.sync_right_sidebar(cx);
+            } else {
+                self.start_git_commit(cx, message);
+            }
+        }
+
+        if self.ui.button(cx, ids!(git_push_btn)).clicked(actions) {
+            self.start_git_push(cx);
+        }
+
+        if self.ui.button(cx, ids!(git_pull_btn)).clicked(actions) {
+            self.start_git_pull(cx);
+        }
+
+        let create_branch_requested = self
+            .ui
+            .button(cx, ids!(git_create_branch_btn))
+            .clicked(actions)
+            || self
+                .ui
+                .text_input(cx, ids!(git_new_branch_name))
+                .returned(actions)
+                .is_some();
+        if create_branch_requested {
+            let name = self
+                .ui
+                .text_input(cx, ids!(git_new_branch_name))
+                .text();
+            if name.trim().is_empty() {
+                self.git_feedback = Some((false, "Enter a branch name first.".to_owned()));
+                self.sync_right_sidebar(cx);
+            } else {
+                self.start_git_create_branch(cx, name);
+            }
+        }
+
+        if self.ui.button(cx, ids!(git_stage_btn)).clicked(actions) {
+            self.start_git_stage_selected(cx, true);
+        }
+
+        if self.ui.button(cx, ids!(git_unstage_btn)).clicked(actions) {
+            self.start_git_stage_selected(cx, false);
+        }
+
+        if self.ui.button(cx, ids!(git_select_all_btn)).clicked(actions) {
+            let changes_widget = self.ui.widget(cx, ids!(git_changes));
+            if let Some(mut changes) = changes_widget.borrow_mut::<GitChanges>() {
+                changes.toggle_all(cx);
+            }
+            self.sync_git_selection_ui(cx);
+        }
+
+        if self.ui.button(cx, ids!(git_refresh_btn)).clicked(actions) {
+            self.git_feedback = None;
+            self.sync_right_sidebar(cx);
+            self.request_git_status();
+        }
+
+        if self.ui.button(cx, ids!(git_diff_back_btn)).clicked(actions) {
+            self.close_git_diff(cx);
+        }
+
+        let git_changes_uid = self.ui.widget(cx, ids!(git_changes)).widget_uid();
+        if let Some(action) = actions.find_widget_action(git_changes_uid) {
+            match action.cast::<GitChangesAction>() {
+                GitChangesAction::Open(path) => {
+                    self.start_git_diff(cx, path);
+                }
+                GitChangesAction::SelectionChanged => self.sync_git_selection_ui(cx),
+                GitChangesAction::None => {}
+            }
+        }
+
+        if self.ui.button(cx, ids!(git_pr_btn)).clicked(actions) {
+            self.start_github_pull_request(cx, false);
+        }
+
+        if self.ui.button(cx, ids!(git_draft_pr_btn)).clicked(actions) {
+            self.start_github_pull_request(cx, true);
+        }
+
+        if self.ui.button(cx, ids!(git_tab_btn)).clicked(actions) {
+            self.right_sidebar_tab = RightSidebarTab::Git;
+            self.sync_right_sidebar(cx);
+        }
+
+        if self.ui.button(cx, ids!(agents_tab_btn)).clicked(actions) {
+            self.right_sidebar_tab = RightSidebarTab::Agents;
+            self.task_sidebar_open = true;
+            self.sync_right_sidebar(cx);
+        }
+
         if self
             .ui
             .icon_drop_down(cx, ids!(git_branch_drop))
@@ -3665,8 +4303,32 @@ impl MatchEvent for App {
                 .ui
                 .icon_drop_down(cx, ids!(git_branch_drop))
                 .selected_label();
-            if branch != "Git" {
-                self.checkout_git_branch(branch);
+            if self.git_operation_pending || self.git_pr_pending {
+                self.sync_git_branch_picker(cx);
+            } else if branch == "＋ New branch…" {
+                self.right_sidebar_tab = RightSidebarTab::Git;
+                self.git_new_branch_open = true;
+                self.sync_right_sidebar(cx);
+                self.ui
+                    .view(cx, ids!(git_new_branch_row))
+                    .set_visible(cx, true);
+                self.ui
+                    .text_input(cx, ids!(git_new_branch_name))
+                    .set_text(cx, "");
+                self.ui
+                    .text_input(cx, ids!(git_new_branch_name))
+                    .set_key_focus(cx);
+            } else if branch == "Git" || branch == "detached HEAD" {
+                self.git_new_branch_open = false;
+                self.ui
+                    .view(cx, ids!(git_new_branch_row))
+                    .set_visible(cx, false);
+            } else {
+                self.git_new_branch_open = false;
+                self.ui
+                    .view(cx, ids!(git_new_branch_row))
+                    .set_visible(cx, false);
+                self.checkout_git_branch(cx, branch);
             }
         }
 
@@ -3698,6 +4360,7 @@ impl MatchEvent for App {
         }
 
         if self.ui.button(cx, ids!(task_sidebar_btn)).clicked(actions) {
+            self.right_sidebar_tab = RightSidebarTab::Agents;
             self.task_sidebar_open = !self.task_sidebar_open;
             self.sync_task_sidebar(cx);
         }
@@ -4041,9 +4704,65 @@ impl AppMain for App {
                 self.terminal_poll_next_frame = cx.new_next_frame();
             }
         }
+        if self.git_status_timer.is_event(event).is_some()
+            && !self.git_operation_pending
+            && !self.git_diff_pending
+            && !self.git_pr_pending
+            && self
+                .active_work_dir()
+                .is_some_and(|work_dir| self.git_status.contains_key(work_dir))
+        {
+            self.request_git_status();
+        }
         {
             let mut scope = Scope::with_data(&mut self.workspace_state);
             self.ui.handle_event(cx, event, &mut scope);
+        }
+        match event {
+            Event::MouseDown(pointer)
+                if pointer.button.is_primary()
+                    && self.right_sidebar_is_visible()
+                    && self
+                        .ui
+                        .view(cx, ids!(right_sidebar_resize_handle))
+                        .area()
+                        .rect(cx)
+                        .contains(pointer.abs) =>
+            {
+                self.right_sidebar_resizing = true;
+                self.right_sidebar_resize_start_x = pointer.abs.x;
+                self.right_sidebar_resize_start_width = self.right_sidebar_width;
+                cx.set_cursor(MouseCursor::ColResize);
+            }
+            Event::MouseMove(pointer)
+                if self.right_sidebar_resizing && self.right_sidebar_is_visible() =>
+            {
+                self.set_right_sidebar_width(
+                    cx,
+                    self.right_sidebar_resize_start_width
+                        + self.right_sidebar_resize_start_x
+                        - pointer.abs.x,
+                );
+                cx.set_cursor(MouseCursor::ColResize);
+            }
+            Event::MouseMove(pointer)
+                if self.right_sidebar_is_visible()
+                    && self
+                    .ui
+                    .view(cx, ids!(right_sidebar_resize_handle))
+                    .area()
+                    .rect(cx)
+                    .contains(pointer.abs) =>
+            {
+                cx.set_cursor(MouseCursor::ColResize);
+            }
+            Event::MouseUp(pointer) if pointer.button.is_primary() => {
+                self.right_sidebar_resizing = false;
+            }
+            Event::BackPressed { .. } if self.git_diff_open || self.git_diff_pending => {
+                self.close_git_diff(cx);
+            }
+            _ => {}
         }
         if self.starter_prompt_focus_pending
             && (matches!(event, Event::MouseUp(mouse_event) if mouse_event.button.is_primary())
@@ -5034,6 +5753,9 @@ impl App {
     }
 
     fn request_git_status(&mut self) {
+        if self.git_status_pending {
+            return;
+        }
         let Some(work_dir) = self.active_work_dir().map(Path::to_path_buf) else {
             return;
         };
@@ -5042,6 +5764,7 @@ impl App {
         let Some(tx) = self.tx.clone() else {
             return;
         };
+        self.git_status_pending = true;
         get_runtime().spawn_blocking(move || {
             let result = crate::git::inspect(&work_dir).map_err(|error| error.message);
             let _ = tx.send(GuiAgentEvent::GitStatusLoaded {
@@ -5062,37 +5785,677 @@ impl App {
             .as_ref()
             .map(|status| status.branches.clone())
             .unwrap_or_default();
-        if labels.is_empty() {
+        if status.is_none() {
             labels.push("Git".to_owned());
+        } else if !labels.iter().any(|label| label == "＋ New branch…") {
+            labels.push("＋ New branch…".to_owned());
         }
-        let selected = status
+        let selected_branch = status
             .as_ref()
             .and_then(|status| status.branch.as_ref())
-            .and_then(|branch| labels.iter().position(|label| label == branch))
-            .unwrap_or(0);
+            .cloned();
+        if let Some(branch) = selected_branch {
+            labels.retain(|label| label != &branch);
+            labels.push("＋ New branch…".to_owned());
+            labels.push(branch);
+        } else if status.is_some() {
+            labels.retain(|label| label != "＋ New branch…");
+            labels.push("＋ New branch…".to_owned());
+            labels.push("detached HEAD".to_owned());
+        }
+        let selected = labels.len().saturating_sub(1);
+        self.ui
+            .icon_drop_down(cx, ids!(git_branch_drop))
+            .set_visible(cx, status.is_some());
         let picker = self.ui.icon_drop_down(cx, ids!(git_branch_drop));
         picker.set_labels(cx, labels);
         picker.set_selected_item(cx, selected);
     }
 
-    fn checkout_git_branch(&mut self, branch: String) {
+    fn sync_right_sidebar(&mut self, cx: &mut Cx) {
+        if let Some(content_width) = self.content_row_width(cx) {
+            self.right_sidebar_width = self.right_sidebar_width.clamp(
+                RIGHT_SIDEBAR_MIN_WIDTH,
+                self.right_sidebar_max_width_for(content_width),
+            );
+        }
+        let status = self
+            .active_work_dir()
+            .and_then(|work_dir| self.git_status.get(work_dir));
+        let has_git = status.is_some();
+        if let Some(status) = status {
+            let branch = status
+                .branch
+                .as_deref()
+                .unwrap_or("detached HEAD");
+            let staged = status.files.iter().filter(|file| file.staged).count();
+            let changed = status.files.iter().filter(|file| file.unstaged).count();
+            let mut summary = Vec::new();
+            if staged > 0 {
+                summary.push(format!("{staged} staged"));
+            }
+            if changed > 0 {
+                summary.push(format!("{changed} changed"));
+            }
+            if status.remote.is_some() && status.branch.is_some() && !status.has_upstream {
+                summary.push("ready to publish".to_owned());
+            } else if status.ahead > 0 {
+                summary.push(format!("{} to push", status.ahead));
+            }
+            if status.behind > 0 {
+                summary.push(format!("{} to pull", status.behind));
+            }
+            let changes = if summary.is_empty() {
+                "clean".to_owned()
+            } else {
+                summary.join(" · ")
+            };
+            let state_text = if self.git_operation_pending {
+                format!("{branch} · working…")
+            } else if self.git_commit_message_pending {
+                format!("{branch} · generating…")
+            } else {
+                format!("{branch} · {changes}")
+            };
+            self.ui
+                .label(cx, ids!(git_state_label))
+                .set_text(cx, &state_text);
+            self.ui
+                .label(cx, ids!(git_commit_source_label))
+                .set_text(
+                    cx,
+                    if status.staged_changes {
+                        "STAGED"
+                    } else {
+                        "WORKING TREE"
+                    },
+                );
+            let (feedback_error, feedback_success) = match self.git_feedback.as_ref() {
+                Some((is_success, message)) => {
+                    if *is_success {
+                        self.ui
+                            .label(cx, ids!(git_feedback_success))
+                            .set_text(cx, message);
+                    } else {
+                        self.ui
+                            .label(cx, ids!(git_feedback_error))
+                            .set_text(cx, message);
+                    }
+                    (!*is_success, *is_success)
+                }
+                None => (false, false),
+            };
+            self.ui
+                .view(cx, ids!(git_feedback_error_row))
+                .set_visible(cx, feedback_error);
+            self.ui
+                .view(cx, ids!(git_feedback_success_row))
+                .set_visible(cx, feedback_success);
+            self.ui
+                .view(cx, ids!(git_new_branch_row))
+                .set_visible(cx, self.git_new_branch_open);
+            if let Some(mut changes) = self
+                .ui
+                .widget(cx, ids!(git_changes))
+                .borrow_mut::<GitChanges>()
+            {
+                changes.set_files(cx, status.files.clone());
+            }
+            self.sync_git_selection_ui(cx);
+            self.ui
+                .button(cx, ids!(git_commit_btn))
+                .set_visible(
+                    cx,
+                    status.staged_changes
+                        && !self.git_operation_pending
+                        && !self.git_commit_message_pending
+                        && !self.git_diff_open,
+                );
+            self.ui
+                .view(cx, ids!(git_commit_header))
+                .set_visible(cx, status.has_changes && !self.git_operation_pending && !self.git_diff_open);
+            self.ui
+                .widget(cx, ids!(git_commit_message))
+                .set_visible(cx, status.has_changes && !self.git_operation_pending && !self.git_diff_open);
+            self.ui
+                .button(cx, ids!(git_generate_commit_btn))
+                .set_visible(
+                    cx,
+                    status.has_changes
+                        && !self.git_operation_pending
+                        && !self.git_diff_open,
+                );
+            self.ui
+                .button(cx, ids!(git_generate_commit_btn))
+                .set_text(
+                    cx,
+                    if self.git_commit_message_pending {
+                        "Cancel"
+                    } else {
+                        "Generate"
+                    },
+                );
+            self.ui
+                .button(cx, ids!(git_generate_commit_btn))
+                .set_enabled(cx, true);
+            self.sync_git_commit_button(cx);
+            let has_remote = status.remote.is_some();
+            self.ui
+                .view(cx, ids!(git_action_row))
+                .set_visible(
+                    cx,
+                    !self.git_operation_pending
+                        && !self.git_commit_message_pending
+                        && (status.staged_changes
+                            || (has_remote && (status.ahead > 0 || status.behind > 0)))
+                        && !self.git_diff_open,
+                );
+            self.ui
+                .button(cx, ids!(git_push_btn))
+                .set_visible(cx, has_remote && status.ahead > 0 && !self.git_operation_pending);
+            self.ui.button(cx, ids!(git_push_btn)).set_text(
+                cx,
+                if status.has_upstream { "Push" } else { "Publish" },
+            );
+            self.ui
+                .button(cx, ids!(git_pull_btn))
+                .set_visible(cx, has_remote && status.behind > 0 && !self.git_operation_pending);
+            let has_github_remote = status
+                .remote
+                .as_deref()
+                .and_then(crate::git::github_repository)
+                .is_some();
+            let has_pr_changes = has_github_remote
+                && status.has_upstream
+                && status.pr_ready
+                && !self.git_operation_pending
+                && !self.git_pr_pending
+                && !self.git_pr_created
+                && !self.git_diff_open;
+            if has_pr_changes
+                && self
+                    .ui
+                    .text_input(cx, ids!(git_pr_title))
+                    .text()
+                    .trim()
+                    .is_empty()
+            {
+                self.ui
+                    .text_input(cx, ids!(git_pr_title))
+                    .set_text(cx, &format!("Changes from {branch}"));
+            }
+            self.ui
+                .view(cx, ids!(git_pr_row))
+                .set_visible(cx, has_pr_changes);
+            self.ui
+                .label(cx, ids!(git_pr_label))
+                .set_visible(cx, has_pr_changes);
+            self.ui
+                .text_input(cx, ids!(git_pr_title))
+                .set_visible(cx, has_pr_changes);
+        }
+        let has_agents = self.right_sidebar_agents_available;
+        let tab = if has_agents
+            && (self.right_sidebar_tab == RightSidebarTab::Agents || !has_git)
+        {
+            RightSidebarTab::Agents
+        } else {
+            RightSidebarTab::Git
+        };
+        let show_git_changes = has_git && tab == RightSidebarTab::Git && !self.git_diff_open;
+        let show_git_diff = has_git && tab == RightSidebarTab::Git && self.git_diff_open;
+        self.ui
+            .view(cx, ids!(right_sidebar))
+            .set_visible(cx, has_git || (has_agents && self.task_sidebar_open));
+        let right_sidebar_visible = has_git || (has_agents && self.task_sidebar_open);
+        self.ui
+            .view(cx, ids!(right_sidebar_resize_handle))
+            .set_visible(cx, right_sidebar_visible);
+        if let Some(mut sidebar) = self.ui.view(cx, ids!(right_sidebar)).borrow_mut() {
+            sidebar.walk.width = Size::Fixed(self.right_sidebar_width);
+            sidebar.redraw(cx);
+        }
+        self.ui
+            .button(cx, ids!(git_tab_btn))
+            .set_visible(cx, has_git);
+        self.ui
+            .button(cx, ids!(agents_tab_btn))
+            .set_visible(cx, has_agents);
+        self.ui
+            .view(cx, ids!(git_changes_header))
+            .set_visible(cx, show_git_changes);
+        self.ui
+            .view(cx, ids!(git_actions))
+            .set_visible(cx, has_git && tab == RightSidebarTab::Git);
+        self.ui
+            .view(cx, ids!(git_changes_wrap))
+            .set_visible(cx, show_git_changes);
+        self.ui
+            .view(cx, ids!(git_diff_wrap))
+            .set_visible(cx, show_git_diff);
+        self.ui
+            .view(cx, ids!(git_diff_loading))
+            .set_visible(cx, show_git_diff && self.git_diff_pending);
+        self.ui
+            .view(cx, ids!(task_sidebar_wrap))
+            .set_visible(cx, has_agents && tab == RightSidebarTab::Agents && self.task_sidebar_open);
+        crate::components::nav_button::set_selected(
+            cx,
+            &self.ui.button(cx, ids!(git_tab_btn)),
+            tab == RightSidebarTab::Git,
+        );
+        crate::components::nav_button::set_selected(
+            cx,
+            &self.ui.button(cx, ids!(agents_tab_btn)),
+            tab == RightSidebarTab::Agents,
+        );
+    }
+
+    fn set_right_sidebar_width(&mut self, cx: &mut Cx, width: f64) {
+        self.right_sidebar_width = width.clamp(
+            RIGHT_SIDEBAR_MIN_WIDTH,
+            self.right_sidebar_max_width(cx),
+        );
+        if let Some(mut sidebar) = self.ui.view(cx, ids!(right_sidebar)).borrow_mut() {
+            sidebar.walk.width = Size::Fixed(self.right_sidebar_width);
+            sidebar.redraw(cx);
+        }
+        self.ui
+            .view(cx, ids!(right_sidebar_resize_handle))
+            .redraw(cx);
+    }
+
+    fn content_row_width(&self, cx: &Cx) -> Option<f64> {
+        let width = self
+            .ui
+            .view(cx, ids!(content_row))
+            .area()
+            .rect(cx)
+            .size
+            .x;
+        (width > 0.0).then_some(width)
+    }
+
+    fn right_sidebar_max_width(&self, cx: &Cx) -> f64 {
+        self.content_row_width(cx)
+            .map(|width| self.right_sidebar_max_width_for(width))
+            .unwrap_or(RIGHT_SIDEBAR_MAX_WIDTH)
+    }
+
+    fn right_sidebar_max_width_for(&self, content_width: f64) -> f64 {
+        (content_width
+            - RIGHT_SIDEBAR_MIN_MAIN_WIDTH
+            - 10.0
+            - 6.0)
+            .clamp(RIGHT_SIDEBAR_MIN_WIDTH, RIGHT_SIDEBAR_MAX_WIDTH)
+    }
+
+    fn right_sidebar_is_visible(&self) -> bool {
+        self.active_work_dir()
+            .is_some_and(|work_dir| self.git_status.contains_key(work_dir))
+            || (self.right_sidebar_agents_available && self.task_sidebar_open)
+    }
+
+    fn sync_git_commit_button(&self, cx: &mut Cx) {
+        let staged = self
+            .active_work_dir()
+            .and_then(|work_dir| self.git_status.get(work_dir))
+            .is_some_and(|status| status.staged_changes);
+        let message = self.ui.text_input(cx, ids!(git_commit_message)).text();
+        self.ui
+            .button(cx, ids!(git_commit_btn))
+            .set_enabled(
+                cx,
+                staged
+                    && !message.trim().is_empty()
+                    && !self.git_operation_pending
+                    && !self.git_commit_message_pending
+                    && !self.git_diff_open,
+            );
+    }
+
+    fn sync_git_selection_ui(&self, cx: &mut Cx) {
+        let changes_widget = self.ui.widget(cx, ids!(git_changes));
+        let Some(changes) = changes_widget.borrow_mut::<GitChanges>()
+        else {
+            return;
+        };
+        let selected = changes.selected_count();
+        let total = changes.file_count();
+        let stageable = changes.selected_files_for_stage().len();
+        let unstageable = changes.selected_files_for_unstage().len();
+        drop(changes);
+        self.ui
+            .label(cx, ids!(git_selection_label))
+            .set_text(cx, &format!("{selected}/{total} selected"));
+        self.ui
+            .button(cx, ids!(git_select_all_btn))
+            .set_visible(cx, total > 0);
+        self.ui
+            .button(cx, ids!(git_stage_btn))
+            .set_text(cx, "Stage");
+        self.ui
+            .button(cx, ids!(git_stage_btn))
+            .set_visible(cx, stageable > 0);
+        self.ui
+            .button(cx, ids!(git_unstage_btn))
+            .set_visible(cx, unstageable > 0);
+        self.ui
+            .view(cx, ids!(git_stage_row))
+            .set_visible(
+                cx,
+                !self.git_operation_pending
+                    && !self.git_diff_open
+                    && (stageable > 0 || unstageable > 0),
+            );
+    }
+
+    fn start_git_operation(
+        &mut self,
+        cx: &mut Cx,
+        operation: String,
+        task: impl FnOnce(&Path) -> Result<(), crate::git::GitError> + Send + 'static,
+    ) {
+        if self.git_operation_pending {
+            return;
+        }
+        if self.git_commit_message_pending {
+            self.cancel_git_commit_message_generation(cx);
+        }
         let Some(work_dir) = self.active_work_dir().map(Path::to_path_buf) else {
             return;
         };
+        let Some(tx) = self.tx.clone() else {
+            return;
+        };
+        self.git_status_pending = false;
+        self.git_operation_pending = true;
+        self.git_new_branch_open = false;
+        self.git_diff_pending = false;
+        self.git_diff_open = false;
+        if operation == "commit"
+            || operation == "push"
+            || operation.starts_with("checkout ")
+            || operation.starts_with("create branch ")
+        {
+            self.git_pr_created = false;
+        }
+        self.git_feedback = None;
+        self.sync_right_sidebar(cx);
+        self.next_git_request_id = self.next_git_request_id.wrapping_add(1);
+        let request_id = self.next_git_request_id;
+        self.git_operation_request_id = request_id;
+        get_runtime().spawn_blocking(move || {
+            let result = task(&work_dir).map_err(|error| error.message);
+            let _ = tx.send(GuiAgentEvent::GitOperationFinished {
+                request_id,
+                work_dir,
+                operation,
+                result,
+            });
+            SignalToUI::set_ui_signal();
+        });
+    }
+
+    fn start_git_diff(&mut self, cx: &mut Cx, path: String) {
+        let Some(work_dir) = self.active_work_dir().map(Path::to_path_buf) else {
+            return;
+        };
+        self.git_status_pending = false;
         self.next_git_request_id = self.next_git_request_id.wrapping_add(1);
         let request_id = self.next_git_request_id;
         let Some(tx) = self.tx.clone() else {
             return;
         };
+        self.git_diff_pending = true;
+        self.git_diff_open = true;
+        self.git_feedback = None;
+        self.ui
+            .label(cx, ids!(git_diff_path))
+            .set_text(cx, &path);
+        if let Some(mut diff_view) = self
+            .ui
+            .widget(cx, ids!(git_diff_text))
+            .borrow_mut::<GitDiffView>()
+        {
+            diff_view.set_text(cx, "");
+        }
+        self.sync_right_sidebar(cx);
         get_runtime().spawn_blocking(move || {
-            let result = crate::git::checkout(&work_dir, &branch).map_err(|error| error.message);
-            let _ = tx.send(GuiAgentEvent::GitOperationFinished {
+            let result = crate::git::diff_file(&work_dir, &path).map_err(|error| error.message);
+            let _ = tx.send(GuiAgentEvent::GitDiffLoaded {
                 request_id,
-                work_dir,
-                operation: format!("checkout `{branch}`"),
+                path,
                 result,
             });
             SignalToUI::set_ui_signal();
+        });
+    }
+
+    fn close_git_diff(&mut self, cx: &mut Cx) {
+        self.git_status_pending = false;
+        self.next_git_request_id = self.next_git_request_id.wrapping_add(1);
+        self.git_diff_pending = false;
+        self.git_diff_open = false;
+        self.sync_right_sidebar(cx);
+    }
+
+    fn start_git_commit_message_generation(&mut self, cx: &mut Cx) {
+        if self.git_commit_message_pending || self.git_operation_pending || self.git_diff_open {
+            return;
+        }
+        if !self
+            .ui
+            .text_input(cx, ids!(git_commit_message))
+            .text()
+            .trim()
+            .is_empty()
+        {
+            self.git_feedback = Some((
+                false,
+                "Clear the commit message before generating a new one.".to_owned(),
+            ));
+            self.sync_right_sidebar(cx);
+            return;
+        }
+        let Some(work_dir) = self.active_work_dir().map(Path::to_path_buf) else {
+            return;
+        };
+        let diff = match crate::git::commit_message_diff(&work_dir) {
+            Ok(diff) => diff,
+            Err(error) => {
+                self.git_feedback = Some((false, error.message));
+                self.sync_right_sidebar(cx);
+                return;
+            }
+        };
+        const MAX_COMMIT_MESSAGE_DIFF_CHARS: usize = 24_000;
+        let diff = if diff.chars().count() > MAX_COMMIT_MESSAGE_DIFF_CHARS {
+            format!(
+                "{}\n\n[Diff truncated for message generation]",
+                truncate_chars(&diff, MAX_COMMIT_MESSAGE_DIFF_CHARS)
+            )
+        } else {
+            diff
+        };
+        let (api_key, account_id) = self.current_credentials(cx);
+        let model = self
+            .ui
+            .icon_drop_down(cx, ids!(model_drop))
+            .selected_label();
+        let model = if model.trim().is_empty() {
+            "gpt-5.6-luna".to_owned()
+        } else {
+            model
+        };
+        let has_antigravity_credentials =
+            threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some();
+        if let Some(error) = model_credential_error(
+            &model,
+            !api_key.is_empty(),
+            has_antigravity_credentials,
+        ) {
+            self.git_feedback = Some((false, error.to_owned()));
+            self.sync_right_sidebar(cx);
+            return;
+        }
+        let Some(tx) = self.tx.clone() else {
+            return;
+        };
+        self.git_commit_message_pending = true;
+        self.git_feedback = None;
+        self.git_commit_message_request_id = self.git_commit_message_request_id.wrapping_add(1);
+        let request_id = self.git_commit_message_request_id;
+        self.sync_right_sidebar(cx);
+        let task = get_runtime().spawn(async move {
+            let result = ProviderClient::new(api_key, account_id)
+                .generate_commit_message(&model, &diff)
+                .await;
+            let _ = tx.send(GuiAgentEvent::GitCommitMessageGenerated {
+                request_id,
+                work_dir,
+                result,
+            });
+            SignalToUI::set_ui_signal();
+        });
+        self.git_commit_message_abort = Some(task.abort_handle());
+    }
+
+    fn cancel_git_commit_message_generation(&mut self, cx: &mut Cx) {
+        if let Some(abort) = self.git_commit_message_abort.take() {
+            abort.abort();
+        }
+        self.git_commit_message_pending = false;
+        self.git_commit_message_request_id = self.git_commit_message_request_id.wrapping_add(1);
+        self.git_feedback = Some((true, "Commit message generation cancelled.".to_owned()));
+        self.sync_right_sidebar(cx);
+    }
+
+    fn start_git_commit(&mut self, cx: &mut Cx, message: String) {
+        self.start_git_operation(cx, "commit".to_owned(), move |work_dir| {
+            crate::git::commit_staged(work_dir, &message)
+        });
+    }
+
+    fn start_git_push(&mut self, cx: &mut Cx) {
+        self.start_git_operation(cx, "push".to_owned(), crate::git::push);
+    }
+
+    fn start_git_pull(&mut self, cx: &mut Cx) {
+        self.start_git_operation(cx, "pull".to_owned(), crate::git::pull);
+    }
+
+    fn start_git_create_branch(&mut self, cx: &mut Cx, name: String) {
+        self.start_git_operation(cx, format!("create branch `{name}`"), move |work_dir| {
+            crate::git::create_branch(work_dir, &name)
+        });
+    }
+
+    fn start_git_stage_selected(&mut self, cx: &mut Cx, stage: bool) {
+        let changes_widget = self.ui.widget(cx, ids!(git_changes));
+        let Some(changes) = changes_widget.borrow_mut::<GitChanges>()
+        else {
+            return;
+        };
+        let paths = if stage {
+            changes.selected_files_for_stage()
+        } else {
+            changes.selected_files_for_unstage()
+        };
+        if paths.is_empty() {
+            self.git_feedback = Some((
+                false,
+                if stage {
+                    "Select at least one unstaged file first."
+                } else {
+                    "Select at least one staged file first."
+                }
+                .to_owned(),
+            ));
+            self.sync_right_sidebar(cx);
+            return;
+        }
+        drop(changes);
+        self.start_git_operation(
+            cx,
+            if stage { "stage selected files" } else { "unstage selected files" }.to_owned(),
+            move |work_dir| {
+                for path in &paths {
+                    if stage {
+                        crate::git::stage_file(work_dir, path)?;
+                    } else {
+                        crate::git::unstage_file(work_dir, path)?;
+                    }
+                }
+                Ok(())
+            },
+        );
+    }
+
+    fn start_github_pull_request(&mut self, cx: &mut Cx, draft: bool) {
+        if self.git_pr_pending {
+            return;
+        }
+        let Some(work_dir) = self.active_work_dir().map(Path::to_path_buf) else {
+            return;
+        };
+        let Some(status) = self.git_status.get(&work_dir).cloned() else {
+            self.git_feedback = Some((false, "This project is not a Git repository.".to_owned()));
+            self.sync_right_sidebar(cx);
+            return;
+        };
+        let Some(remote) = status.remote else {
+            self.git_feedback = Some((
+                false,
+                "No origin remote is configured for this project.".to_owned(),
+            ));
+            self.sync_right_sidebar(cx);
+            return;
+        };
+        let Some(head) = status.branch else {
+            self.git_feedback = Some((
+                false,
+                "Pull requests require a named branch.".to_owned(),
+            ));
+            self.sync_right_sidebar(cx);
+            return;
+        };
+        let title = self
+            .ui
+            .text_input(cx, ids!(git_pr_title))
+            .text();
+        let title = if title.trim().is_empty() {
+            format!("Changes from {head}")
+        } else {
+            title
+        };
+        let base = crate::git::default_branch(&work_dir).unwrap_or_else(|| "main".to_owned());
+        let Some(tx) = self.tx.clone() else {
+            return;
+        };
+        self.git_status_pending = false;
+        self.git_pr_pending = true;
+        self.next_git_request_id = self.next_git_request_id.wrapping_add(1);
+        let request_id = self.next_git_request_id;
+        self.git_pr_request_id = request_id;
+        self.sync_right_sidebar(cx);
+        get_runtime().spawn(async move {
+            let result = crate::git::create_github_pull_request(
+                &remote, &head, &base, &title, "", draft,
+            )
+            .await;
+            let _ = tx.send(GuiAgentEvent::GitHubPullRequestFinished {
+                request_id,
+                work_dir,
+                result,
+            });
+            SignalToUI::set_ui_signal();
+        });
+    }
+
+    fn checkout_git_branch(&mut self, cx: &mut Cx, branch: String) {
+        self.start_git_operation(cx, format!("checkout `{branch}`"), move |work_dir| {
+            crate::git::checkout(work_dir, &branch)
         });
     }
 
@@ -5124,6 +6487,7 @@ impl App {
             .map(|runtime| runtime.plan.clone())
             .unwrap_or_default();
         let (visible, count) = task_header_state(&plan, &items);
+        self.right_sidebar_agents_available = visible;
         self.ui
             .button(cx, ids!(task_sidebar_btn))
             .set_visible(cx, visible);
@@ -5133,9 +6497,6 @@ impl App {
         if !visible {
             self.task_sidebar_open = false;
         }
-        self.ui
-            .view(cx, ids!(task_sidebar_wrap))
-            .set_visible(cx, visible && self.task_sidebar_open);
         if let Some(mut sidebar) = self
             .ui
             .widget(cx, ids!(task_sidebar))
@@ -5148,6 +6509,7 @@ impl App {
                 active_key.as_ref().map(|key| key.session_id.clone()),
             );
         }
+        self.sync_right_sidebar(cx);
     }
 
     fn observe_session_task_event(
@@ -5784,6 +7146,32 @@ impl App {
 
     fn select_workspace_ui(&mut self, cx: &mut Cx, work_dir: PathBuf, session_id: String) {
         self.save_active_draft(cx);
+        self.git_operation_pending = false;
+        self.git_pr_pending = false;
+        self.git_pr_created = false;
+        self.git_status_pending = false;
+        self.git_new_branch_open = false;
+        if let Some(abort) = self.git_commit_message_abort.take() {
+            abort.abort();
+        }
+        self.git_commit_message_pending = false;
+        self.git_commit_message_request_id = self.git_commit_message_request_id.wrapping_add(1);
+        self.git_diff_open = false;
+        self.git_diff_pending = false;
+        self.git_feedback = None;
+        self.ui
+            .text_input(cx, ids!(git_commit_message))
+            .set_text(cx, "");
+        self.ui
+            .text_input(cx, ids!(git_pr_title))
+            .set_text(cx, "");
+        if let Some(mut changes) = self
+            .ui
+            .widget(cx, ids!(git_changes))
+            .borrow_mut::<GitChanges>()
+        {
+            changes.clear_selection(cx);
+        }
         self.select_workspace(work_dir, session_id);
         if let Some(key) = self.workspace_state.active_key() {
             let home_dir = std::env::var_os("HOME").map(PathBuf::from);
@@ -5807,6 +7195,7 @@ impl App {
         self.refresh_attachment_ui(cx);
         self.sync_terminal_project(cx);
         self.sync_git_branch_picker(cx);
+        self.sync_right_sidebar(cx);
         self.request_git_status();
         self.sync_task_sidebar(cx);
     }
@@ -6745,6 +8134,9 @@ impl App {
                         self.sync_task_sidebar(cx);
                     }
                     self.refresh_registered_sessions();
+                    if self.active_work_dir().is_some_and(|active| active == work_dir) {
+                        self.request_git_status();
+                    }
                 }
 
                 GuiAgentEvent::SessionTitleGenerated => {
@@ -6884,10 +8276,20 @@ impl App {
                     if request_id != self.next_git_request_id {
                         continue;
                     }
-                    if let Ok(status) = result {
-                        self.git_status.insert(work_dir, status);
+                    self.git_status_pending = false;
+                    match result {
+                        Ok(status) => {
+                            self.git_status.insert(work_dir, status);
+                        }
+                        Err(_) => {
+                            // Never leave actionable controls backed by a
+                            // status snapshot that Git can no longer verify.
+                            self.git_status.remove(&work_dir);
+                            self.git_feedback = None;
+                        }
                     }
                     self.sync_git_branch_picker(cx);
+                    self.sync_right_sidebar(cx);
                 }
                 GuiAgentEvent::GitOperationFinished {
                     request_id,
@@ -6895,21 +8297,143 @@ impl App {
                     operation,
                     result,
                 } => {
+                    if request_id != self.git_operation_request_id
+                        || self
+                            .active_work_dir()
+                            .is_none_or(|active| active != work_dir)
+                    {
+                        continue;
+                    }
+                    self.git_operation_pending = false;
+                    match result {
+                        Ok(()) => {
+                            if operation == "commit" {
+                                self.ui
+                                    .text_input(cx, ids!(git_commit_message))
+                                    .set_text(cx, "");
+                            }
+                            let message = format!("Git {operation} completed.");
+                            self.git_feedback = Some((true, message));
+                        }
+                        Err(error) => {
+                            let message = format!("Git {operation} failed: {error}");
+                            self.git_feedback = Some((false, message));
+                        }
+                    }
+                    self.sync_right_sidebar(cx);
+                    self.git_status.remove(&work_dir);
+                    self.request_git_status();
+                }
+                GuiAgentEvent::GitHubPullRequestFinished {
+                    request_id,
+                    work_dir,
+                    result,
+                } => {
+                    if request_id != self.git_pr_request_id
+                        || self
+                            .active_work_dir()
+                            .is_none_or(|active| active != work_dir)
+                    {
+                        continue;
+                    }
+                    self.git_pr_pending = false;
+                    match result {
+                        Ok(url) => {
+                            self.git_pr_created = true;
+                            self.ui
+                                .text_input(cx, ids!(git_pr_title))
+                                .set_text(cx, "");
+                            self.git_feedback = Some((true, "Pull request created.".to_owned()));
+                            let _ = robius_open::Uri::new(&url).open();
+                        }
+                        Err(error) => {
+                            let message = format!("Could not create pull request: {error}");
+                            self.git_feedback = Some((false, message));
+                        }
+                    }
+                    self.sync_right_sidebar(cx);
+                }
+                GuiAgentEvent::GitDiffLoaded {
+                    request_id,
+                    path,
+                    result,
+                } => {
                     if request_id != self.next_git_request_id {
                         continue;
                     }
+                    self.git_diff_pending = false;
                     match result {
-                        Ok(()) => self.push_chat(
-                            MsgRole::System,
-                            format!("Git {operation} completed."),
-                        ),
-                        Err(error) => self.push_chat(
-                            MsgRole::System,
-                            format!("Git {operation} failed: {error}"),
-                        ),
+                        Ok(diff) => {
+                            self.git_diff_open = true;
+                            self.ui
+                                .label(cx, ids!(git_diff_path))
+                                .set_text(cx, &path);
+                            if let Some(mut diff_view) = self
+                                .ui
+                                .widget(cx, ids!(git_diff_text))
+                                .borrow_mut::<GitDiffView>()
+                            {
+                                diff_view.set_text(cx, &diff);
+                            }
+                            self.sync_right_sidebar(cx);
+                        }
+                        Err(error) => {
+                            self.git_diff_open = false;
+                            let message = format!("Could not load diff for `{path}`: {error}");
+                            self.git_feedback = Some((false, message));
+                            self.sync_right_sidebar(cx);
+                        }
                     }
-                    self.git_status.remove(&work_dir);
-                    self.request_git_status();
+                }
+                GuiAgentEvent::GitCommitMessageGenerated {
+                    request_id,
+                    work_dir,
+                    result,
+                } => {
+                    if request_id != self.git_commit_message_request_id
+                        || self
+                            .active_work_dir()
+                            .is_none_or(|active| active != work_dir)
+                    {
+                        continue;
+                    }
+                    self.git_commit_message_abort = None;
+                    self.git_commit_message_pending = false;
+                    match result {
+                        Ok(raw) => {
+                            let message = normalize_generated_commit_message(&raw);
+                            if message.is_empty() {
+                                self.git_feedback = Some((
+                                    false,
+                                    "The model returned an empty commit message.".to_owned(),
+                                ));
+                            } else if self
+                                .ui
+                                .text_input(cx, ids!(git_commit_message))
+                                .text()
+                                .trim()
+                                .is_empty()
+                            {
+                                self.ui
+                                    .text_input(cx, ids!(git_commit_message))
+                                    .set_text(cx, &message);
+                                self.git_feedback =
+                                    Some((true, "Commit message generated.".to_owned()));
+                            } else {
+                                self.git_feedback = Some((
+                                    true,
+                                    "Commit message kept; generation finished.".to_owned(),
+                                ));
+                            }
+                        }
+                        Err(error) => {
+                            self.git_feedback = Some((
+                                false,
+                                format!("Could not generate commit message: {error}"),
+                            ));
+                        }
+                    }
+                    self.sync_right_sidebar(cx);
                 }
                 GuiAgentEvent::BackgroundTask(event) => {
                     let _ = event.into_parts();
@@ -6959,12 +8483,24 @@ mod workspace_header_tests {
         compact_workspace_path, extension_reload_matches, extension_reload_status,
         model_credential_error, ordered_model_options, project_name, session_reload_count,
         task_sidebar_items, truncate_terminal_output, InputOrigin, ANTIGRAVITY_MODELS,
-        MAX_TERMINAL_OUTPUT,
+        MAX_TERMINAL_OUTPUT, normalize_generated_commit_message,
     };
     use crate::workspace::WorkspaceUiState;
     use std::path::{Path, PathBuf};
     use threadlane_agent::ImageAttachment;
     use threadlane_coding_agent::{ExtensionScope, TaskKind, TaskRecord, TaskStatus};
+
+    #[test]
+    fn generated_commit_messages_are_normalized_to_one_subject_line() {
+        assert_eq!(
+            normalize_generated_commit_message("```\nCommit: Fix branch picker\n```"),
+            "Fix branch picker"
+        );
+        assert_eq!(
+            normalize_generated_commit_message("feat: add generated commit messages\nDetails"),
+            "feat: add generated commit messages"
+        );
+    }
 
     #[test]
     fn task_sidebar_items_preserve_session_navigation_and_cancel_policy() {
