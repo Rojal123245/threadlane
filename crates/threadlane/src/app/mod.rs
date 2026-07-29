@@ -48,39 +48,12 @@ use threadlane_provider::auth;
 use threadlane_provider::openai::{fetch_available_models, OpenAIClient};
 use threadlane_provider::ProviderClient;
 
+use crate::panels::terminal::{ProjectTerminalGroup, ProjectTerminalSession};
 use makepad_terminal_core::{Pty, TermKeyCode as TerminalKeyCode, Terminal};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
-
-struct ProjectTerminalSession {
-    pty: Pty,
-    emulator: Terminal,
-}
-
-impl ProjectTerminalSession {
-    fn terminate(self) {
-        let Self { pty, emulator } = self;
-        drop(pty);
-        drop(emulator);
-    }
-}
-
-#[derive(Default)]
-struct ProjectTerminalGroup {
-    sessions: Vec<ProjectTerminalSession>,
-    active: usize,
-    error: Option<String>,
-}
-
-impl ProjectTerminalGroup {
-    fn terminate(self) {
-        for session in self.sessions {
-            session.terminate();
-        }
-    }
-}
 
 const ANTIGRAVITY_MODELS: &[&str] = &[
     "antigravity/gemini-3.6-flash",
@@ -1307,34 +1280,9 @@ script_mod! {
         flow: Overlay
         align: Align{x: 0.5 y: 0.5}
 
-        modal_backdrop := GaussRoundedView {
-            width: Fill
-            height: Fill
-            draw_bg +: {
-                blur_level: 5.2
-                corner_radius: 0.0
-                border_width: 0.0
-                tint_color: theme.color_background
-                tint_alpha: 0.16
-                surface_alpha: 0.62
-                fallback_color: theme.color_background
-                shadow_radius: 0.0
-                shadow_offset: vec2(0.0 0.0)
-            }
-        }
+        modal_backdrop := mod.components.ModalDialogBackdrop {}
 
-        modal_card := RoundedView {
-            width: 780
-            height: 520
-            flow: Right
-            padding: 0
-            spacing: 0
-            draw_bg +: {
-                color: theme.color_background
-                border_radius: 12.0
-                border_size: 1.0
-                border_color: theme.color_card
-            }
+        modal_card := mod.components.ModalDialogCard {
 
             settings_nav := View {
                 width: 180
@@ -2674,24 +2622,9 @@ script_mod! {
                                     height: 28
                                     visible: false
                                     flow: Right
-                                    spacing: 4
-                                    git_new_branch_name := TextInput {
-                                        width: Fill
-                                        height: 28
+                                    git_new_branch_name := mod.components.SearchInput {
                                         empty_text: "New branch name"
-                                        padding: Inset{left: 8 right: 8}
-                                        draw_bg +: {
-                                            color: theme.color_background
-                                            color_focus: theme.color_background
-                                            border_color: theme.color_border
-                                            border_color_focus: theme.color_primary
-                                            border_radius: 6.0
-                                            border_size: 1.0
-                                        }
-                                        draw_text +: {
-                                            color: theme.color_foreground
-                                            color_empty: theme.color_muted_foreground
-                                        }
+                                        margin: 0
                                     }
                                     git_create_branch_btn := mod.components.HeaderChipButton {
                                         width: Fit
