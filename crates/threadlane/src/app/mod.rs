@@ -3972,6 +3972,8 @@ pub struct App {
     #[rust]
     git_diff_pending: bool,
     #[rust]
+    git_diff_request_id: u64,
+    #[rust]
     git_operation_pending: bool,
     #[rust]
     git_operation_request_id: u64,
@@ -6451,10 +6453,7 @@ impl App {
                     .set_visible(cx, has_github_remote);
                 self.ui
                     .button(cx, ids!(git_pr_btn))
-                    .set_enabled(
-                        cx,
-                        status.pr_ready && !self.git_operation_pending,
-                    );
+                    .set_enabled(cx, status.pr_ready && !self.git_operation_pending);
             }
         }
         let has_agents = self.right_sidebar_agents_available;
@@ -6608,6 +6607,7 @@ impl App {
         };
         self.git_status_pending = false;
         self.git_operation_pending = true;
+        self.git_diff_request_id = self.git_diff_request_id.wrapping_add(1);
         self.git_new_branch_open = false;
         self.git_diff_pending = false;
         self.git_diff_open = false;
@@ -6640,8 +6640,8 @@ impl App {
             return;
         };
         self.git_status_pending = false;
-        self.next_git_request_id = self.next_git_request_id.wrapping_add(1);
-        let request_id = self.next_git_request_id;
+        self.git_diff_request_id = self.git_diff_request_id.wrapping_add(1);
+        let request_id = self.git_diff_request_id;
         let Some(tx) = self.tx.clone() else {
             return;
         };
@@ -6670,7 +6670,7 @@ impl App {
 
     fn close_git_diff(&mut self, cx: &mut Cx) {
         self.git_status_pending = false;
-        self.next_git_request_id = self.next_git_request_id.wrapping_add(1);
+        self.git_diff_request_id = self.git_diff_request_id.wrapping_add(1);
         self.git_diff_pending = false;
         self.git_diff_open = false;
         self.sync_right_sidebar(cx);
@@ -7547,12 +7547,12 @@ impl App {
         self.git_commit_message_pending = false;
         self.git_commit_message_request_id = self.git_commit_message_request_id.wrapping_add(1);
         self.git_diff_open = false;
+        self.git_diff_request_id = self.git_diff_request_id.wrapping_add(1);
         self.git_diff_pending = false;
         self.git_feedback = None;
         self.ui
             .text_input(cx, ids!(git_commit_message))
             .set_text(cx, "");
-        self.ui.text_input(cx, ids!(git_pr_title)).set_text(cx, "");
         if let Some(mut changes) = self
             .ui
             .widget(cx, ids!(git_changes))
@@ -8731,7 +8731,6 @@ impl App {
                     match result {
                         Ok(url) => {
                             self.git_pr_created = true;
-                            self.ui.text_input(cx, ids!(git_pr_title)).set_text(cx, "");
                             self.git_feedback = Some((true, "Pull request created.".to_owned()));
                             let _ = robius_open::Uri::new(&url).open();
                         }
@@ -8747,10 +8746,10 @@ impl App {
                     path,
                     result,
                 } => {
-                    if request_id != self.next_git_request_id {
+                    self.git_diff_pending = false;
+                    if request_id != self.git_diff_request_id {
                         continue;
                     }
-                    self.git_diff_pending = false;
                     match result {
                         Ok(diff) => {
                             self.git_diff_open = true;

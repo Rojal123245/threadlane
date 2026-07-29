@@ -316,8 +316,9 @@ pub fn diff_file(work_dir: &Path, path: &str) -> Result<String, GitError> {
         diff.push_str(&unstaged);
     }
     if diff.is_empty() && command(work_dir, &["ls-files", "--error-unmatch", "--", path]).is_err() {
+        let null_source = if cfg!(windows) { "NUL" } else { "/dev/null" };
         let output = Command::new("git")
-            .args(["diff", "--no-index", "--", "/dev/null", path])
+            .args(["diff", "--no-index", "--", null_source, path])
             .current_dir(work_dir)
             .output()
             .map_err(|error| GitError {
@@ -421,10 +422,6 @@ pub fn github_compare_url(remote: &str, head: &str, base: Option<&str>) -> Optio
 pub fn open_browser_url(cx: &mut makepad_widgets::Cx, url: &str) {
     use makepad_widgets::{CxOsApi, OpenUrlInPlace};
     cx.open_url(url, OpenUrlInPlace::No);
-    #[cfg(target_os = "windows")]
-    let _ = Command::new("cmd").args(["/C", "start", "", url]).spawn();
-    #[cfg(target_os = "linux")]
-    let _ = Command::new("xdg-open").arg(url).spawn();
 }
 
 pub async fn create_github_pull_request(

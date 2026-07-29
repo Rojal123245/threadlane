@@ -668,10 +668,6 @@ fn task_activity_label(status: TaskStatus, activity: &str) -> String {
     }
 }
 
-fn has_session_target(session_file: Option<&PathBuf>) -> bool {
-    session_file.is_some()
-}
-
 #[derive(Script, ScriptHook, Widget)]
 pub struct TaskSidebar {
     #[source]
@@ -934,11 +930,6 @@ impl Widget for TaskSidebar {
             }
             if let Some(finger_up) = row.as_view().finger_up(actions) {
                 if finger_up.is_over && finger_up.is_primary_hit() && finger_up.was_tap() {
-                    // A task can outlive its session file (for example after cleanup). Do not
-                    // emit a navigation action that the caller cannot resolve.
-                    if !has_session_target(task.session_file.as_ref()) {
-                        continue;
-                    }
                     cx.widget_action(
                         self.widget_uid(),
                         TaskSidebarAction::OpenSession {
@@ -1085,8 +1076,6 @@ mod tests {
             task_activity_label(TaskStatus::Running, "Reading events"),
             "Working · Reading events"
         );
-        assert!(!has_session_target(None));
-        assert!(has_session_target(Some(&PathBuf::from("session.json"))));
     }
 
     #[test]

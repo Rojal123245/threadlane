@@ -314,7 +314,7 @@ script_mod! {
             color_down: theme.color_primary_foreground
         }
         popup_menu: mod.components.IconPopupMenu {
-            width: 200
+            width: 132
             menu_item: mod.components.IconPopupMenuItem {
                 use_provider_icons: false
                 icon_walk: Walk{width: 14 height: 14 margin: Inset{right: 6}}
