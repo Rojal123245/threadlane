@@ -384,7 +384,7 @@ impl IconPopupMenuItem {
                     self.draw_openai_icon.draw_walk(cx, self.icon_walk);
                 }
             } else {
-                if label == "＋ New branch…" {
+                if label == "New branch…" || label == "＋ New branch…" {
                     self.draw_action_icon.draw_walk(cx, self.icon_walk);
                 } else {
                     self.draw_icon.draw_walk(cx, self.icon_walk);

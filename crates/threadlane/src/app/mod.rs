@@ -4636,7 +4636,7 @@ impl MatchEvent for App {
                 .selected_label();
             if self.git_operation_pending || self.git_pr_pending {
                 self.sync_git_branch_picker(cx);
-            } else if branch == "＋ New branch…" {
+            } else if branch == "New branch…" || branch == "＋ New branch…" {
                 self.right_sidebar_tab = RightSidebarTab::Git;
                 self.git_new_branch_open = true;
                 self.sync_right_sidebar(cx);
@@ -6347,24 +6347,25 @@ impl App {
             .as_ref()
             .map(|status| status.branches.clone())
             .unwrap_or_default();
-        if status.is_none() {
-            labels.push("Git".to_owned());
-        } else if !labels.iter().any(|label| label == "＋ New branch…") {
-            labels.push("＋ New branch…".to_owned());
-        }
+
+        labels.retain(|label| label != "New branch…" && label != "＋ New branch…");
+
         let selected_branch = status
             .as_ref()
             .and_then(|status| status.branch.as_ref())
             .cloned();
+
         if let Some(branch) = selected_branch {
             labels.retain(|label| label != &branch);
-            labels.push("＋ New branch…".to_owned());
+            labels.push("New branch…".to_owned());
             labels.push(branch);
         } else if status.is_some() {
-            labels.retain(|label| label != "＋ New branch…");
-            labels.push("＋ New branch…".to_owned());
+            labels.push("New branch…".to_owned());
             labels.push("detached HEAD".to_owned());
+        } else {
+            labels.push("Git".to_owned());
         }
+
         let selected = labels.len().saturating_sub(1);
         self.ui
             .icon_drop_down(cx, ids!(git_branch_drop))
