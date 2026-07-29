@@ -1,6 +1,4 @@
-pub mod ast;
 pub mod hashline;
-pub mod rag;
 
 use serde_json::{json, Value};
 use std::fs;
@@ -105,18 +103,7 @@ fn tool_definitions() -> Vec<Value> {
                 }
             }
         }),
-        json!({
-            "name": "search_codebase",
-            "description": "Search the codebase using AST-indexed nodes and RAG retrieval. Returns relevant line-anchored AST code blocks (functions, structs, traits, impls) for a query without reading full files.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "Natural language or symbol query (e.g. 'where are prompt cache keys clamped?' or 'compaction logic')" },
-                    "top_k": { "type": "integer", "description": "Optional maximum number of AST snippet matches to return (default: 5)." }
-                },
-                "required": ["query"]
-            }
-        }),
+
         json!({
             "name": "read_memory",
             "description": "Read the persistent project memory stored in .threadlane/memory.md.",
@@ -517,14 +504,7 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
             let raw_path = args.get("path").and_then(|v| v.as_str());
             get_repo_map_impl(workspace_root, raw_path)
         }
-        "search_codebase" => {
-            let query = match args.get("query").and_then(|v| v.as_str()) {
-                Some(q) => q,
-                None => return "Error: 'query' parameter is required".into(),
-            };
-            let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
-            rag::search_codebase_impl(workspace_root, query, top_k)
-        }
+
         "read_memory" => read_memory_impl(workspace_root),
         "save_memory" => save_memory_impl(workspace_root, &args),
         "consolidate_memory" => consolidate_memory_impl(workspace_root, &args),
@@ -744,31 +724,31 @@ fn walk_repo_skeleton(dir: &Path, root: &Path, depth: usize, out: &mut Vec<Strin
                 };
 
                 let mut symbols = Vec::new();
-                if ext == "rs" {
-                    let snippets = ast::parse_rust_ast(rel, &content);
-                    for s in snippets {
-                        symbols.push(format!("  L{}: {}", s.start_line, s.signature));
-                    }
-                } else {
-                    for (idx, line) in content.lines().enumerate() {
-                        let trimmed = line.trim();
-                        if trimmed.starts_with("pub fn ")
-                            || trimmed.starts_with("pub struct ")
-                            || trimmed.starts_with("pub enum ")
-                            || trimmed.starts_with("pub trait ")
-                            || trimmed.starts_with("pub mod ")
-                            || trimmed.starts_with("fn ")
-                            || trimmed.starts_with("class ")
-                            || trimmed.starts_with("def ")
-                            || (ext == "toml" && trimmed.starts_with('[') && trimmed.ends_with(']'))
-                        {
-                            let sig = if trimmed.len() > 100 {
-                                format!("{}...", &trimmed[..97])
-                            } else {
-                                trimmed.to_string()
-                            };
-                            symbols.push(format!("  L{}: {sig}", idx + 1));
-                        }
+                for (idx, line) in content.lines().enumerate() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("pub fn ")
+                        || trimmed.starts_with("pub struct ")
+                        || trimmed.starts_with("pub enum ")
+                        || trimmed.starts_with("pub trait ")
+                        || trimmed.starts_with("pub mod ")
+                        || trimmed.starts_with("pub type ")
+                        || trimmed.starts_with("pub const ")
+                        || trimmed.starts_with("fn ")
+                        || trimmed.starts_with("struct ")
+                        || trimmed.starts_with("enum ")
+                        || trimmed.starts_with("trait ")
+                        || trimmed.starts_with("mod ")
+                        || trimmed.starts_with("impl ")
+                        || trimmed.starts_with("class ")
+                        || trimmed.starts_with("def ")
+                        || (ext == "toml" && trimmed.starts_with('[') && trimmed.ends_with(']'))
+                    {
+                        let sig = if trimmed.len() > 100 {
+                            format!("{}...", &trimmed[..97])
+                        } else {
+                            trimmed.to_string()
+                        };
+                        symbols.push(format!("  L{}: {sig}", idx + 1));
                     }
                 }
 
@@ -1018,29 +998,6 @@ mod tests {
         assert_eq!(truncated, output);
     }
 
-    #[test]
-    fn test_search_codebase_tool() {
-        let dir = tempdir().unwrap();
-        let root = dir.path();
-        let src_dir = root.join("src");
-        fs::create_dir_all(&src_dir).unwrap();
-
-        let rs_file = src_dir.join("compaction.rs");
-        fs::write(
-            &rs_file,
-            "pub fn compact_messages_to_token_budget() {\n    // compaction logic\n}\n",
-        )
-        .unwrap();
-
-        let res = execute_tool_in_workspace(
-            "search_codebase",
-            r#"{"query": "compaction logic"}"#,
-            root,
-        );
-        assert!(res.contains("src/compaction.rs"));
-        assert!(res.contains("compact_messages_to_token_budget"));
-    }
-
     #[cfg(unix)]
     #[test]
     fn test_code_tools_skip_symlinked_directories_outside_workspace() {
@@ -1055,14 +1012,8 @@ mod tests {
         .unwrap();
         symlink(outside.path(), dir.path().join("linked")).unwrap();
 
-        let search = execute_tool_in_workspace(
-            "search_codebase",
-            r#"{"query":"external_secret_symbol"}"#,
-            dir.path(),
-        );
         let map = execute_tool_in_workspace("get_repo_map", "{}", dir.path());
 
-        assert!(!search.contains("external_secret_symbol"));
         assert!(!map.contains("external_secret_symbol"));
     }
 
