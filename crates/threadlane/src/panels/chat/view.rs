@@ -620,6 +620,8 @@ pub struct ChatList {
     #[rust]
     cached_base_rows: Vec<DisplayRow>,
     #[rust]
+    cached_messages: Vec<ChatMessage>,
+    #[rust]
     cached_base_revision: u64,
     #[rust]
     cached_msg_count: usize,
@@ -627,6 +629,8 @@ pub struct ChatList {
     cached_streaming_kind: Option<StreamingKind>,
     #[rust]
     cached_streaming_text_len: usize,
+    #[rust]
+    cached_streaming_text: String,
     #[rust]
     cached_has_streaming_row: bool,
     #[rust]
@@ -711,53 +715,60 @@ impl Widget for SubagentRail {
 
 impl Widget for ChatList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        let Some(data) = scope
-            .data
-            .get::<AppState>()
-            .and_then(AppState::active_workspace)
-            .map(|workspace| workspace.chat.clone())
-        else {
-            return DrawStep::done();
-        };
 
-        // Rebuild display rows only when the message list or streaming shape changes.
-        let msg_count = data.messages.len();
-        let streaming_text_len = data.streaming_text.len();
-        let base_changed = msg_count != self.cached_msg_count
-            || data.revision != self.cached_base_revision;
-        let streaming_kind_changed = data.streaming_kind != self.cached_streaming_kind;
-        let has_streaming_row = data.streaming_kind == Some(StreamingKind::Assistant)
-            && !data.streaming_text.is_empty();
-        let streaming_shape_changed = streaming_kind_changed
-            || (data.streaming_kind == Some(StreamingKind::Assistant)
-                && has_streaming_row != self.cached_has_streaming_row)
-            || (data.streaming_kind != Some(StreamingKind::Assistant)
-                && streaming_text_len != self.cached_streaming_text_len);
+        let is_empty = {
+            let Some(data) = scope
+                .data
+                .get::<AppState>()
+                .and_then(AppState::active_workspace)
+                .map(|workspace| &workspace.chat)
+            else {
+                return DrawStep::done();
+            };
 
-        if base_changed || streaming_shape_changed {
-            if base_changed {
-                self.cached_base_rows = display_rows(&data.messages, None, "");
-                self.cached_base_revision = data.revision;
-            }
+            // Rebuild display rows only when the message list or streaming shape changes.
+            let msg_count = data.messages.len();
+            let streaming_text_len = data.streaming_text.len();
+            let base_changed = msg_count != self.cached_msg_count
+                || data.revision != self.cached_base_revision;
+            let streaming_kind_changed = data.streaming_kind != self.cached_streaming_kind;
+            let has_streaming_row = data.streaming_kind == Some(StreamingKind::Assistant)
+                && !data.streaming_text.is_empty();
+            let streaming_shape_changed = streaming_kind_changed
+                || (data.streaming_kind == Some(StreamingKind::Assistant)
+                    && has_streaming_row != self.cached_has_streaming_row)
+                || (data.streaming_kind != Some(StreamingKind::Assistant)
+                    && streaming_text_len != self.cached_streaming_text_len);
 
-            if data.streaming_kind == Some(StreamingKind::Assistant) {
-                self.cached_rows = self.cached_base_rows.clone();
-                if has_streaming_row {
-                    self.cached_rows.push(DisplayRow::StreamingAssistant);
+            if base_changed || streaming_shape_changed {
+                if base_changed {
+                    self.cached_base_rows = display_rows(&data.messages, None, "");
+                    self.cached_base_revision = data.revision;
+                    self.cached_messages = data.messages.clone();
                 }
-            } else {
-                self.cached_rows =
-                    display_rows(&data.messages, data.streaming_kind, &data.streaming_text);
+
+                if data.streaming_kind == Some(StreamingKind::Assistant) {
+                    self.cached_rows = self.cached_base_rows.clone();
+                    if has_streaming_row {
+                        self.cached_rows.push(DisplayRow::StreamingAssistant);
+                    }
+                } else {
+                    self.cached_rows =
+                        display_rows(&data.messages, data.streaming_kind, &data.streaming_text);
+                }
+
+                self.cached_msg_count = msg_count;
+                self.cached_streaming_kind = data.streaming_kind;
+                self.cached_has_streaming_row = has_streaming_row;
+            }
+            if streaming_text_len != self.cached_streaming_text_len {
+                self.cached_streaming_text = data.streaming_text.clone();
+                self.cached_streaming_text_len = streaming_text_len;
             }
 
-            self.cached_msg_count = msg_count;
-            self.cached_streaming_kind = data.streaming_kind;
-            self.cached_has_streaming_row = has_streaming_row;
-        }
-        self.cached_streaming_text_len = streaming_text_len;
+            self.cached_messages.is_empty() && self.cached_streaming_text.is_empty()
+        };
         let rows = &self.cached_rows;
-
-        let is_empty = data.messages.is_empty() && data.streaming_text.is_empty();
 
         // Toggle the empty-state overlay — it lives as a sibling to the PortalList
         // so it can use height: Fill and truly center its content.
@@ -802,7 +813,7 @@ impl Widget for ChatList {
                                 cx,
                                 item_id,
                                 id!(AssistantMsg),
-                                &data.streaming_text,
+                                &self.cached_streaming_text,
                             );
                         }
                         DisplayRow::ActivityGroup(group) => {
@@ -828,7 +839,7 @@ impl Widget for ChatList {
                             item_widget.draw_all_unscoped(cx);
                         }
                         DisplayRow::SubagentTool(tool) => {
-                            let Some(message) = data.messages.get(tool.message_index) else {
+                            let Some(message) = self.cached_messages.get(tool.message_index) else {
                                 continue;
                             };
                             let ChatMessage::Tool { status, .. } = message else {
@@ -854,7 +865,7 @@ impl Widget for ChatList {
                             item_widget.draw_all_unscoped(cx);
                         }
                         DisplayRow::Tool(tool) => {
-                            let Some(message) = data.messages.get(tool.message_index) else {
+                            let Some(message) = self.cached_messages.get(tool.message_index) else {
                                 continue;
                             };
                             let ChatMessage::Tool {
@@ -952,7 +963,7 @@ impl Widget for ChatList {
                             item_widget.draw_all_unscoped(cx);
                         }
                         DisplayRow::Message(message_index) => {
-                            let Some(message) = data.messages.get(*message_index) else {
+                            let Some(message) = self.cached_messages.get(*message_index) else {
                                 continue;
                             };
                             match message {
