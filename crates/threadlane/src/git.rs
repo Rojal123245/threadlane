@@ -151,7 +151,11 @@ fn parse_status(_work_dir: &Path, porcelain: &str) -> GitStatus {
         status.staged_changes |= index != ' ' && index != '?';
         status.unstaged_changes |= worktree != ' ';
         status.has_changes = true;
-        let raw_path = line.get(3..).unwrap_or_default().trim();
+        let raw_path = if porcelain.contains('\0') {
+            line.get(3..).unwrap_or_default()
+        } else {
+            line.get(3..).unwrap_or_default().trim()
+        };
         // With -z, rename/copy records are followed by the old path as a
         // separate record; the first path is already the new path we display.
         // The line-based fallback keeps the legacy test format readable.
@@ -417,8 +421,6 @@ pub fn github_compare_url(remote: &str, head: &str, base: Option<&str>) -> Optio
 pub fn open_browser_url(cx: &mut makepad_widgets::Cx, url: &str) {
     use makepad_widgets::{CxOsApi, OpenUrlInPlace};
     cx.open_url(url, OpenUrlInPlace::No);
-    #[cfg(target_os = "macos")]
-    let _ = Command::new("open").arg(url).spawn();
     #[cfg(target_os = "windows")]
     let _ = Command::new("cmd").args(["/C", "start", "", url]).spawn();
     #[cfg(target_os = "linux")]
@@ -550,6 +552,15 @@ mod tests {
         assert_eq!(status.files[0].path, "line\nbreak.txt");
         assert_eq!(status.files[1].path, "new name.txt");
         assert_eq!(status.files[1].status, "R");
+    }
+
+    #[test]
+    fn preserves_leading_and_trailing_whitespace_in_nul_paths() {
+        let status = parse_status(
+            Path::new("/tmp/project"),
+            "## feature/demo\0??  leading.txt \0",
+        );
+        assert_eq!(status.files[0].path, " leading.txt ");
     }
 
     #[test]

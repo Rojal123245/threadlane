@@ -6451,7 +6451,10 @@ impl App {
                     .set_visible(cx, has_github_remote);
                 self.ui
                     .button(cx, ids!(git_pr_btn))
-                    .set_enabled(cx, status.has_upstream && !self.git_operation_pending);
+                    .set_enabled(
+                        cx,
+                        status.pr_ready && !self.git_operation_pending,
+                    );
             }
         }
         let has_agents = self.right_sidebar_agents_available;
@@ -6779,11 +6782,11 @@ impl App {
 
         self.start_git_operation(cx, "commit".to_owned(), move |work_dir| {
             for path in &selected_paths {
-                let _ = crate::git::stage_file(work_dir, path);
+                crate::git::stage_file(work_dir, path)?;
             }
             for path in &all_paths {
                 if !selected_paths.contains(path) {
-                    let _ = crate::git::unstage_file(work_dir, path);
+                    crate::git::unstage_file(work_dir, path)?;
                 }
             }
             crate::git::commit_staged(work_dir, &message)
