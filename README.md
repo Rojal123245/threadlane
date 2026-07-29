@@ -96,6 +96,10 @@ cargo run -p threadlane
 
 On first launch, use the in-app authorization flow or provide credentials through the supported provider configuration. Threadlane persists device-flow credentials under `~/.threadlane/auth.json`.
 
+### Git and GitHub actions
+
+For an attached Git project, the composer shows the current branch with checkout and new-branch actions in its dropdown. The resizable right-side Git panel groups staged and unstaged files, supports per-file selection and scrollable diff previews, and exposes only applicable staging, commit, pull, push, and GitHub pull-request actions. The Generate action can use the relevant Git diff and the active model to suggest a commit subject without changing the chat or committing automatically. Commit messages can be submitted with Enter, and Git operation feedback appears inline in the panel. Local operations use the configured `git` executable and its credential helpers. The GitHub pull-request action opens a compare URL in the browser; complete the pull-request form interactively on GitHub, with no `GITHUB_TOKEN` required by Threadlane.
+
 ### Basic Workflow
 
 1. Attach or select a project from the sidebar.

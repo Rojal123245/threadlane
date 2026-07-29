@@ -1,5 +1,6 @@
 //! Project-scoped supervisor task list shown beside the active chat.
 
+use crate::components::nav_button::set_selected;
 use makepad_widgets::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -75,6 +76,21 @@ script_mod! {
             }
         }
 
+        details_btn := Button {
+            width: 22
+            height: 22
+            padding: 0
+            spacing: 0
+            text: "…"
+            align: Align{x: 0.5 y: 0.5}
+            draw_text +: {
+                color: theme.color_muted_foreground
+                color_hover: theme.color_primary
+                color_down: theme.color_primary_foreground
+            }
+        }
+
+
         cancel_btn := mod.components.IconButton {
             width: 22
             height: 22
@@ -117,6 +133,80 @@ script_mod! {
         }
     }
 
+    mod.components.TaskSidebarFilterButton = Button {
+        width: Fill
+        height: Fill
+        padding: 0
+        spacing: 0
+        align: Align{x: 0.5 y: 0.5}
+        draw_bg +: {
+            color: theme.color_input
+            color_hover: theme.color_card
+            color_focus: theme.color_card
+            color_down: theme.color_primary
+            border_color: theme.color_input
+            border_color_hover: theme.color_border
+            border_color_focus: theme.color_primary
+            border_color_down: theme.color_primary
+            border_size: 1.0
+            border_radius: 5.0
+        }
+        draw_text +: {
+            color: theme.color_muted_foreground
+            color_hover: theme.color_foreground
+            color_focus: theme.color_foreground
+            color_down: theme.color_primary_foreground
+            text_style: theme.font_bold { font_size: 8.5 }
+        }
+        animator: Animator{
+            selected: {
+                default: @off
+                off: AnimatorState{
+                    from: {all: Forward {duration: 0.}}
+                    apply: {
+                        draw_bg: {
+                            color: theme.color_input
+                            color_hover: theme.color_card
+                            color_focus: theme.color_card
+                            color_down: theme.color_primary
+                            border_color: theme.color_input
+                            border_color_hover: theme.color_border
+                            border_color_focus: theme.color_primary
+                            border_color_down: theme.color_primary
+                        }
+                        draw_text: {
+                            color: theme.color_muted_foreground
+                            color_hover: theme.color_foreground
+                            color_focus: theme.color_foreground
+                            color_down: theme.color_primary_foreground
+                        }
+                    }
+                }
+                on: AnimatorState{
+                    from: {all: Forward {duration: 0.}}
+                    apply: {
+                        draw_bg: {
+                            color: theme.color_primary
+                            color_hover: theme.color_primary
+                            color_focus: theme.color_primary
+                            color_down: theme.color_primary
+                            border_color: theme.color_primary
+                            border_color_hover: theme.color_primary
+                            border_color_focus: theme.color_primary
+                            border_color_down: theme.color_primary
+                        }
+                        draw_text: {
+                            color: theme.color_primary_foreground
+                            color_hover: theme.color_primary_foreground
+                            color_focus: theme.color_primary_foreground
+                            color_down: theme.color_primary_foreground
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     mod.components.TaskSidebar = set_type_default() do mod.components.TaskSidebarBase {
         width: 280
         height: Fill
@@ -140,7 +230,7 @@ script_mod! {
                 height: 22
                 padding: 0
                 align: Align{y: 0.5}
-                text: "Tasks"
+                text: "Plan & Agents"
                 draw_text +: {
                     color: theme.color_foreground
                     text_style: theme.font_bold { font_size: 11.0 }
@@ -156,6 +246,33 @@ script_mod! {
             height: 1
             show_bg: true
             draw_bg +: { color: theme.color_card }
+        }
+
+        filter_bar := View {
+            width: Fill
+            height: 44
+            flow: Right
+            align: Align{y: 0.5}
+            padding: Inset{left: 10 right: 10 top: 6 bottom: 6}
+
+            filter_track := RoundedView {
+                width: Fill
+                height: Fill
+                flow: Right
+                spacing: 2
+                padding: Inset{left: 3 right: 3 top: 3 bottom: 3}
+                draw_bg +: {
+                    color: theme.color_input
+                    border_color: theme.color_border
+                    border_size: 1.0
+                    border_radius: 7.0
+                }
+
+                all_filter := mod.components.TaskSidebarFilterButton { text: "All" }
+                active_filter := mod.components.TaskSidebarFilterButton { text: "Active" }
+                completed_filter := mod.components.TaskSidebarFilterButton { text: "Done" }
+                failed_filter := mod.components.TaskSidebarFilterButton { text: "Failed" }
+            }
         }
 
         list := PortalList {
@@ -175,7 +292,7 @@ script_mod! {
                     height: 18
                     padding: 0
                     align: Align{y: 0.5}
-                    text: "CURRENT PLAN"
+                    text: "PLAN PROGRESS"
                     draw_text +: {
                         color: theme.color_primary
                         text_style: theme.font_bold { font_size: 7.5 }
@@ -217,6 +334,22 @@ script_mod! {
                     }
                 }
             }
+            TaskDetail := View {
+                width: Fill
+                height: 38
+                padding: Inset{left: 28 right: 12}
+                detail_lbl := mod.components.ClippedLabel {
+                    width: Fill
+                    height: 30
+                    padding: 0
+                    align: Align{y: 0.5}
+                    draw_text +: {
+                        color: theme.color_muted_foreground
+                        text_style: theme.font_code { font_size: 8.0 }
+                    }
+                }
+            }
+
 
             TaskQueued := mod.components.TaskSidebarRowBase {}
             TaskRunning := mod.components.TaskSidebarRowBase {
@@ -249,7 +382,7 @@ pub struct TaskSidebarItem {
     pub started_at_ms: u128,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum TaskSidebarAction {
     Close,
     OpenSession {
@@ -257,8 +390,35 @@ pub enum TaskSidebarAction {
         session_file: Option<PathBuf>,
     },
     Cancel(String),
+    SetFilter(TaskSidebarFilter),
+    ToggleSession(String),
+    ToggleTask(String),
     #[default]
     None,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TaskSidebarFilter {
+    #[default]
+    All,
+    Active,
+    Completed,
+    Failed,
+}
+
+/// The two deliberately explicit sections make the sidebar model useful to callers and tests,
+/// while rows remain a compact portal-list representation.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PlanSection {
+    pub items: Vec<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentSessionGroup {
+    pub session_id: String,
+    pub label: String,
+    pub current: bool,
+    pub items: Vec<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -271,6 +431,7 @@ enum TaskSidebarRow {
         current: bool,
     },
     Task(usize),
+    TaskDetail(usize),
 }
 
 fn status_rank(status: TaskStatus) -> u8 {
@@ -283,14 +444,28 @@ fn status_rank(status: TaskStatus) -> u8 {
     }
 }
 
-fn sidebar_rows(
-    plan: &SessionPlan,
+fn task_matches_filter(status: TaskStatus, filter: TaskSidebarFilter) -> bool {
+    match filter {
+        TaskSidebarFilter::All => true,
+        TaskSidebarFilter::Active => matches!(
+            status,
+            TaskStatus::Idle | TaskStatus::Running | TaskStatus::Waiting
+        ),
+        TaskSidebarFilter::Completed => status == TaskStatus::Completed,
+        TaskSidebarFilter::Failed => status == TaskStatus::Failed,
+    }
+}
+
+fn sidebar_groups(
     items: &[TaskSidebarItem],
     current_session_id: Option<&str>,
-) -> Vec<TaskSidebarRow> {
+    filter: TaskSidebarFilter,
+) -> Vec<AgentSessionGroup> {
     let mut grouped: HashMap<&str, Vec<usize>> = HashMap::new();
     for (index, item) in items.iter().enumerate() {
-        grouped.entry(&item.session_id).or_default().push(index);
+        if task_matches_filter(item.status, filter) {
+            grouped.entry(&item.session_id).or_default().push(index);
+        }
     }
     for indices in grouped.values_mut() {
         indices.sort_by(|left, right| {
@@ -300,46 +475,87 @@ fn sidebar_rows(
                 .then_with(|| items[*left].id.cmp(&items[*right].id))
         });
     }
-
-    let mut sessions = grouped
+    let mut groups = grouped
         .into_iter()
-        .map(|(session_id, indices)| {
-            let current = current_session_id == Some(session_id);
-            let newest = indices
-                .iter()
-                .map(|index| items[*index].started_at_ms)
-                .max()
-                .unwrap_or_default();
-            (session_id, current, newest, indices)
+        .map(|(session_id, indices)| AgentSessionGroup {
+            current: current_session_id == Some(session_id),
+            label: indices
+                .first()
+                .map(|i| items[*i].session_label.clone())
+                .unwrap_or_default(),
+            session_id: session_id.to_owned(),
+            items: indices,
         })
         .collect::<Vec<_>>();
-    sessions.sort_by(|left, right| {
-        right
-            .1
-            .cmp(&left.1)
-            .then_with(|| right.2.cmp(&left.2))
-            .then_with(|| left.0.cmp(right.0))
+    groups.sort_by(|a, b| {
+        b.current.cmp(&a.current).then_with(|| {
+            let at = a
+                .items
+                .first()
+                .map(|i| items[*i].started_at_ms)
+                .unwrap_or_default();
+            let bt = b
+                .items
+                .first()
+                .map(|i| items[*i].started_at_ms)
+                .unwrap_or_default();
+            bt.cmp(&at).then_with(|| a.session_id.cmp(&b.session_id))
+        })
     });
+    groups
+}
 
-    let mut rows = Vec::with_capacity(
-        items.len() + sessions.len() + plan.items.len() + usize::from(!plan.items.is_empty()),
-    );
-    if !plan.items.is_empty() {
+#[cfg(test)]
+fn sidebar_rows(
+    plan: &SessionPlan,
+    items: &[TaskSidebarItem],
+    current_session_id: Option<&str>,
+) -> Vec<TaskSidebarRow> {
+    sidebar_rows_filtered(
+        plan,
+        items,
+        current_session_id,
+        TaskSidebarFilter::All,
+        &HashMap::new(),
+    )
+}
+
+fn sidebar_rows_filtered(
+    plan: &SessionPlan,
+    items: &[TaskSidebarItem],
+    current_session_id: Option<&str>,
+    filter: TaskSidebarFilter,
+    expanded: &HashMap<String, bool>,
+) -> Vec<TaskSidebarRow> {
+    let plan_section = PlanSection {
+        items: (0..plan.items.len()).collect(),
+    };
+    let groups = sidebar_groups(items, current_session_id, filter);
+    let mut rows = Vec::with_capacity(items.len() + groups.len() + plan_section.items.len() + 1);
+    if !plan_section.items.is_empty() {
         rows.push(TaskSidebarRow::PlanHeader);
-        rows.extend((0..plan.items.len()).map(TaskSidebarRow::PlanItem));
+        rows.extend(plan_section.items.into_iter().map(TaskSidebarRow::PlanItem));
     }
-    for (session_id, current, _, indices) in sessions {
-        let label = if current {
-            "CURRENT CHAT".to_owned()
+    for group in groups {
+        let label = if group.current {
+            format!("CURRENT SESSION · {}", group.label.to_uppercase())
         } else {
-            items[indices[0]].session_label.to_uppercase()
+            group.label.to_uppercase()
         };
         rows.push(TaskSidebarRow::SessionHeader {
-            session_id: session_id.to_owned(),
+            session_id: group.session_id.clone(),
             label,
-            current,
+            current: group.current,
         });
-        rows.extend(indices.into_iter().map(TaskSidebarRow::Task));
+        if expanded.get(&group.session_id).copied().unwrap_or(true) {
+            rows.extend(group.items.into_iter().flat_map(|index| {
+                let mut rows = vec![TaskSidebarRow::Task(index)];
+                if expanded.get(&items[index].id).copied().unwrap_or(false) {
+                    rows.push(TaskSidebarRow::TaskDetail(index));
+                }
+                rows
+            }));
+        }
     }
     rows
 }
@@ -358,11 +574,18 @@ fn plan_progress(plan: &SessionPlan) -> (usize, usize) {
     )
 }
 
+fn active_plan_items(plan: &SessionPlan) -> usize {
+    plan.items
+        .iter()
+        .filter(|item| item.status == PlanItemStatus::InProgress)
+        .count()
+}
+
 pub fn task_header_state(plan: &SessionPlan, items: &[TaskSidebarItem]) -> (bool, String) {
     if plan.items.is_empty() && items.is_empty() {
         return (false, String::new());
     }
-    let active = items
+    let active_tasks = items
         .iter()
         .filter(|item| {
             matches!(
@@ -371,6 +594,7 @@ pub fn task_header_state(plan: &SessionPlan, items: &[TaskSidebarItem]) -> (bool
             )
         })
         .count();
+    let active = active_tasks + active_plan_items(plan);
     let count = match active {
         0 => String::new(),
         1..=99 => active.to_string(),
@@ -409,6 +633,41 @@ fn status_label(status: TaskStatus) -> &'static str {
     }
 }
 
+fn elapsed_label(started_at_ms: u128) -> String {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(started_at_ms);
+    let seconds = now_ms.saturating_sub(started_at_ms) / 1_000;
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3_600 {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{}h", seconds / 3_600)
+    }
+}
+
+fn plan_progress_label(plan: &SessionPlan) -> String {
+    let (completed, total) = plan_progress(plan);
+    let Some(current) = plan
+        .items
+        .iter()
+        .find(|item| item.status == PlanItemStatus::InProgress)
+    else {
+        return format!("{completed}/{total}");
+    };
+    format!("{completed}/{total} · {}", current.step)
+}
+
+fn task_activity_label(status: TaskStatus, activity: &str) -> String {
+    if activity.is_empty() {
+        status_label(status).to_owned()
+    } else {
+        format!("{} · {activity}", status_label(status))
+    }
+}
+
 #[derive(Script, ScriptHook, Widget)]
 pub struct TaskSidebar {
     #[source]
@@ -423,9 +682,35 @@ pub struct TaskSidebar {
     rows: Vec<TaskSidebarRow>,
     #[rust]
     current_session_id: Option<String>,
+    #[rust]
+    expanded_sessions: HashMap<String, bool>,
+    #[rust]
+    filter: TaskSidebarFilter,
 }
 
 impl TaskSidebar {
+    fn sync_filter_buttons(&mut self, cx: &mut Cx) {
+        set_selected(
+            cx,
+            &self.view.button(cx, ids!(all_filter)),
+            self.filter == TaskSidebarFilter::All,
+        );
+        set_selected(
+            cx,
+            &self.view.button(cx, ids!(active_filter)),
+            self.filter == TaskSidebarFilter::Active,
+        );
+        set_selected(
+            cx,
+            &self.view.button(cx, ids!(completed_filter)),
+            self.filter == TaskSidebarFilter::Completed,
+        );
+        set_selected(
+            cx,
+            &self.view.button(cx, ids!(failed_filter)),
+            self.filter == TaskSidebarFilter::Failed,
+        );
+    }
     pub fn set_content(
         &mut self,
         cx: &mut Cx,
@@ -437,10 +722,65 @@ impl TaskSidebar {
         {
             return;
         }
-        self.rows = sidebar_rows(&plan, &items, current_session_id.as_deref());
+        self.rows = sidebar_rows_filtered(
+            &plan,
+            &items,
+            current_session_id.as_deref(),
+            self.filter,
+            &self.expanded_sessions,
+        );
         self.plan = plan;
         self.items = items;
         self.current_session_id = current_session_id;
+        self.view.redraw(cx);
+        self.sync_filter_buttons(cx);
+    }
+
+    pub fn set_filter(&mut self, cx: &mut Cx, filter: TaskSidebarFilter) {
+        if self.filter == filter {
+            return;
+        }
+        self.filter = filter;
+        self.rows = sidebar_rows_filtered(
+            &self.plan,
+            &self.items,
+            self.current_session_id.as_deref(),
+            self.filter,
+            &self.expanded_sessions,
+        );
+        self.view.redraw(cx);
+        self.sync_filter_buttons(cx);
+    }
+
+    pub fn toggle_session(&mut self, cx: &mut Cx, session_id: &str) {
+        let expanded = self
+            .expanded_sessions
+            .entry(session_id.to_owned())
+            .or_insert(true);
+        *expanded = !*expanded;
+        self.rows = sidebar_rows_filtered(
+            &self.plan,
+            &self.items,
+            self.current_session_id.as_deref(),
+            self.filter,
+            &self.expanded_sessions,
+        );
+        self.view.redraw(cx);
+    }
+
+    pub fn toggle_task(&mut self, cx: &mut Cx, task_id: &str) {
+        let expanded = self
+            .expanded_sessions
+            .entry(task_id.to_owned())
+            .or_insert(false);
+        *expanded = !*expanded;
+        self.rows = sidebar_rows_filtered(
+            &self.plan,
+            &self.items,
+            self.current_session_id.as_deref(),
+            self.filter,
+            &self.expanded_sessions,
+        );
         self.view.redraw(cx);
     }
 }
@@ -457,9 +797,8 @@ impl Widget for TaskSidebar {
                     match sidebar_row {
                         TaskSidebarRow::PlanHeader => {
                             let row = list.item(cx, row_index, id!(PlanHeader));
-                            let (completed, total) = plan_progress(&self.plan);
-                            row.label(cx, ids!(progress_lbl))
-                                .set_text(cx, &format!("{completed}/{total}"));
+                            let progress = plan_progress_label(&self.plan);
+                            row.label(cx, ids!(progress_lbl)).set_text(cx, &progress);
                             row.draw_all_unscoped(cx);
                         }
                         TaskSidebarRow::PlanItem(item_index) => {
@@ -481,15 +820,40 @@ impl Widget for TaskSidebar {
                             };
                             let row = list.item(cx, row_index, task_template(task.status));
                             row.label(cx, ids!(summary_lbl)).set_text(cx, &task.summary);
-                            row.label(cx, ids!(agent_lbl)).set_text(cx, &task.agent);
-                            let activity = if task.activity.is_empty() {
-                                status_label(task.status)
-                            } else {
-                                &task.activity
-                            };
-                            row.label(cx, ids!(activity_lbl)).set_text(cx, activity);
+                            row.label(cx, ids!(agent_lbl))
+                                .set_text(cx, &format!("Agent: {}", task.agent));
+                            let activity = format!(
+                                "{} · {}",
+                                task_activity_label(task.status, &task.activity),
+                                elapsed_label(task.started_at_ms)
+                            );
+                            row.label(cx, ids!(activity_lbl)).set_text(cx, &activity);
                             row.button(cx, ids!(cancel_btn))
                                 .set_visible(cx, task.cancellable);
+                            row.draw_all_unscoped(cx);
+                        }
+                        TaskSidebarRow::TaskDetail(item_index) => {
+                            let Some(task) = self.items.get(*item_index) else {
+                                continue;
+                            };
+                            let row = list.item(cx, row_index, id!(TaskDetail));
+                            let detail = if task.activity.is_empty() {
+                                format!(
+                                    "{} · {} · {}",
+                                    task.agent,
+                                    status_label(task.status),
+                                    elapsed_label(task.started_at_ms)
+                                )
+                            } else {
+                                format!(
+                                    "{} · {} · {}\n{}",
+                                    task.agent,
+                                    status_label(task.status),
+                                    elapsed_label(task.started_at_ms),
+                                    task.activity
+                                )
+                            };
+                            row.label(cx, ids!(detail_lbl)).set_text(cx, &detail);
                             row.draw_all_unscoped(cx);
                         }
                     }
@@ -508,14 +872,55 @@ impl Widget for TaskSidebar {
             cx.widget_action(self.widget_uid(), TaskSidebarAction::Close);
             return;
         }
+        let selected_filter = if self.view.button(cx, ids!(all_filter)).clicked(actions) {
+            Some(TaskSidebarFilter::All)
+        } else if self.view.button(cx, ids!(active_filter)).clicked(actions) {
+            Some(TaskSidebarFilter::Active)
+        } else if self
+            .view
+            .button(cx, ids!(completed_filter))
+            .clicked(actions)
+        {
+            Some(TaskSidebarFilter::Completed)
+        } else if self.view.button(cx, ids!(failed_filter)).clicked(actions) {
+            Some(TaskSidebarFilter::Failed)
+        } else {
+            None
+        };
+        if let Some(filter) = selected_filter {
+            self.set_filter(cx, filter);
+            cx.widget_action(self.widget_uid(), TaskSidebarAction::SetFilter(filter));
+            return;
+        }
         let list = self.view.portal_list(cx, ids!(list));
         for (row_index, row) in list.items_with_actions(actions) {
-            let Some(TaskSidebarRow::Task(item_index)) = self.rows.get(row_index) else {
+            let Some(sidebar_row) = self.rows.get(row_index) else {
+                continue;
+            };
+            if let TaskSidebarRow::SessionHeader { session_id, .. } = sidebar_row {
+                if let Some(finger_up) = row.as_view().finger_up(actions) {
+                    if finger_up.is_over && finger_up.is_primary_hit() && finger_up.was_tap() {
+                        let session_id = session_id.clone();
+                        cx.widget_action(
+                            self.widget_uid(),
+                            TaskSidebarAction::ToggleSession(session_id),
+                        );
+                    }
+                }
+                continue;
+            }
+            let TaskSidebarRow::Task(item_index) = sidebar_row else {
                 continue;
             };
             let Some(task) = self.items.get(*item_index) else {
                 continue;
             };
+            if row.button(cx, ids!(details_btn)).clicked(actions) {
+                let task_id = task.id.clone();
+                self.toggle_task(cx, &task_id);
+                cx.widget_action(self.widget_uid(), TaskSidebarAction::ToggleTask(task_id));
+                continue;
+            }
             if row.button(cx, ids!(cancel_btn)).clicked(actions) {
                 cx.widget_action(
                     self.widget_uid(),
@@ -635,7 +1040,90 @@ mod tests {
         assert!(matches!(rows[0], TaskSidebarRow::PlanHeader));
         assert!(matches!(rows[1], TaskSidebarRow::PlanItem(0)));
         assert_eq!(plan_progress(&plan), (1, 3));
-        assert_eq!(task_header_state(&plan, &[]), (true, String::new()));
+        assert_eq!(active_plan_items(&plan), 1);
+        assert_eq!(task_header_state(&plan, &[]), (true, "1".into()));
+    }
+
+    #[test]
+    fn header_count_combines_active_plan_and_agent_work() {
+        let plan = SessionPlan {
+            explanation: None,
+            items: vec![PlanItem {
+                step: "Implement".into(),
+                status: PlanItemStatus::InProgress,
+            }],
+        };
+        let items = vec![item("task", "chat-a", TaskStatus::Running, 1)];
+
+        assert_eq!(task_header_state(&plan, &items), (true, "2".into()));
+        assert_eq!(
+            task_header_state(&SessionPlan::default(), &items),
+            (true, "1".into())
+        );
+    }
+
+    #[test]
+    fn progress_and_activity_labels_include_current_context() {
+        let plan = SessionPlan {
+            explanation: None,
+            items: vec![PlanItem {
+                step: "Implement sidebar".into(),
+                status: PlanItemStatus::InProgress,
+            }],
+        };
+        assert_eq!(plan_progress_label(&plan), "0/1 · Implement sidebar");
+        assert_eq!(
+            task_activity_label(TaskStatus::Running, "Reading events"),
+            "Working · Reading events"
+        );
+    }
+
+    #[test]
+    fn filters_keep_failed_tasks_separate_from_cancelled_tasks() {
+        assert!(task_matches_filter(
+            TaskStatus::Running,
+            TaskSidebarFilter::Active
+        ));
+        assert!(task_matches_filter(
+            TaskStatus::Completed,
+            TaskSidebarFilter::Completed
+        ));
+        assert!(task_matches_filter(
+            TaskStatus::Failed,
+            TaskSidebarFilter::Failed
+        ));
+        assert!(!task_matches_filter(
+            TaskStatus::Cancelled,
+            TaskSidebarFilter::Failed
+        ));
+    }
+
+    #[test]
+    fn collapsed_session_rows_preserve_stable_session_identity() {
+        let items = vec![
+            item("a", "session-a", TaskStatus::Running, 2),
+            item("b", "session-b", TaskStatus::Running, 1),
+        ];
+        let mut expanded = HashMap::new();
+        expanded.insert("session-a".to_owned(), false);
+        let rows = sidebar_rows_filtered(
+            &SessionPlan::default(),
+            &items,
+            Some("session-b"),
+            TaskSidebarFilter::All,
+            &expanded,
+        );
+
+        assert!(matches!(
+            rows.iter().find(|row| matches!(row, TaskSidebarRow::SessionHeader { session_id, .. } if session_id == "session-a")),
+            Some(_)
+        ));
+        assert!(!rows
+            .iter()
+            .any(|row| matches!(row, TaskSidebarRow::Task(index) if items[*index].id == "a")));
+        assert!(rows
+            .iter()
+            .any(|row| matches!(row, TaskSidebarRow::Task(index) if items[*index].id == "b")));
     }
 
     #[test]

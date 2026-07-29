@@ -241,12 +241,12 @@ pub fn extract_session_insights(
                     }
                 }
             }
-            AgentMessage::Assistant { content: Some(text), .. } => {
-                if text.contains("Makepad") && text.contains("theme") {
-                    let line = "UI components in crates/threadlane/src must reference theme tokens from crates/threadlane/src/theme/mod.rs.";
-                    if !architecture.contains(&line.to_string()) {
-                        architecture.push(line.to_string());
-                    }
+            AgentMessage::Assistant { content: Some(text), .. }
+                if text.contains("Makepad") && text.contains("theme") =>
+            {
+                let line = "UI components in crates/threadlane/src must reference theme tokens from crates/threadlane/src/theme/mod.rs.";
+                if !architecture.contains(&line.to_string()) {
+                    architecture.push(line.to_string());
                 }
             }
             _ => {}
