@@ -3728,6 +3728,7 @@ impl MatchEvent for App {
                         sidebar.toggle_session(cx, &session_id);
                     }
                 }
+                TaskSidebarAction::ToggleTask(_) => {}
                 TaskSidebarAction::None => {}
             }
         }

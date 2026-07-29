@@ -1,5 +1,6 @@
 //! Project-scoped supervisor task list shown beside the active chat.
 
+use crate::components::nav_button::set_selected;
 use makepad_widgets::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -75,8 +76,22 @@ script_mod! {
             }
         }
 
-        cancel_btn := mod.components.IconButton {
+        details_btn := Button {
+            width: 22
+            height: 22
+            padding: 0
+            spacing: 0
+            text: "…"
+            align: Align{x: 0.5 y: 0.5}
+            draw_text +: {
+                color: theme.color_muted_foreground
+                color_hover: theme.color_primary
+                color_down: theme.color_primary_foreground
+            }
+        }
 
+
+        cancel_btn := mod.components.IconButton {
             width: 22
             height: 22
             visible: false
@@ -114,6 +129,80 @@ script_mod! {
             draw_text +: {
                 color: theme.color_card_foreground
                 text_style +: { font_size: 9.0 }
+            }
+        }
+    }
+
+    mod.components.TaskSidebarFilterButton = Button {
+        width: Fill
+        height: Fill
+        padding: 0
+        spacing: 0
+        align: Align{x: 0.5 y: 0.5}
+        draw_bg +: {
+            color: theme.color_input
+            color_hover: theme.color_card
+            color_focus: theme.color_card
+            color_down: theme.color_primary
+            border_color: theme.color_input
+            border_color_hover: theme.color_border
+            border_color_focus: theme.color_primary
+            border_color_down: theme.color_primary
+            border_size: 1.0
+            border_radius: 5.0
+        }
+        draw_text +: {
+            color: theme.color_muted_foreground
+            color_hover: theme.color_foreground
+            color_focus: theme.color_foreground
+            color_down: theme.color_primary_foreground
+            text_style: theme.font_bold { font_size: 8.5 }
+        }
+        animator: Animator{
+            selected: {
+                default: @off
+                off: AnimatorState{
+                    from: {all: Forward {duration: 0.}}
+                    apply: {
+                        draw_bg: {
+                            color: theme.color_input
+                            color_hover: theme.color_card
+                            color_focus: theme.color_card
+                            color_down: theme.color_primary
+                            border_color: theme.color_input
+                            border_color_hover: theme.color_border
+                            border_color_focus: theme.color_primary
+                            border_color_down: theme.color_primary
+                        }
+                        draw_text: {
+                            color: theme.color_muted_foreground
+                            color_hover: theme.color_foreground
+                            color_focus: theme.color_foreground
+                            color_down: theme.color_primary_foreground
+                        }
+                    }
+                }
+                on: AnimatorState{
+                    from: {all: Forward {duration: 0.}}
+                    apply: {
+                        draw_bg: {
+                            color: theme.color_primary
+                            color_hover: theme.color_primary
+                            color_focus: theme.color_primary
+                            color_down: theme.color_primary
+                            border_color: theme.color_primary
+                            border_color_hover: theme.color_primary
+                            border_color_focus: theme.color_primary
+                            border_color_down: theme.color_primary
+                        }
+                        draw_text: {
+                            color: theme.color_primary_foreground
+                            color_hover: theme.color_primary_foreground
+                            color_focus: theme.color_primary_foreground
+                            color_down: theme.color_primary_foreground
+                        }
+                    }
+                }
             }
         }
     }
@@ -161,14 +250,29 @@ script_mod! {
 
         filter_bar := View {
             width: Fill
-            height: 28
+            height: 44
             flow: Right
-            spacing: 3
-            padding: Inset{left: 8 right: 8}
-            all_filter := Button { width: Fill text: "ALL" }
-            active_filter := Button { width: Fill text: "ACTIVE" }
-            completed_filter := Button { width: Fill text: "DONE" }
-            failed_filter := Button { width: Fill text: "FAILED" }
+            align: Align{y: 0.5}
+            padding: Inset{left: 10 right: 10 top: 6 bottom: 6}
+
+            filter_track := RoundedView {
+                width: Fill
+                height: Fill
+                flow: Right
+                spacing: 2
+                padding: Inset{left: 3 right: 3 top: 3 bottom: 3}
+                draw_bg +: {
+                    color: theme.color_input
+                    border_color: theme.color_border
+                    border_size: 1.0
+                    border_radius: 7.0
+                }
+
+                all_filter := mod.components.TaskSidebarFilterButton { text: "All" }
+                active_filter := mod.components.TaskSidebarFilterButton { text: "Active" }
+                completed_filter := mod.components.TaskSidebarFilterButton { text: "Done" }
+                failed_filter := mod.components.TaskSidebarFilterButton { text: "Failed" }
+            }
         }
 
         list := PortalList {
@@ -230,6 +334,21 @@ script_mod! {
                     }
                 }
             }
+            TaskDetail := View {
+                width: Fill
+                height: 38
+                padding: Inset{left: 28 right: 12}
+                detail_lbl := mod.components.ClippedLabel {
+                    width: Fill
+                    height: 30
+                    padding: 0
+                    align: Align{y: 0.5}
+                    draw_text +: {
+                        color: theme.color_muted_foreground
+                        text_style: theme.font_code { font_size: 8.0 }
+                    }
+                }
+            }
 
 
             TaskQueued := mod.components.TaskSidebarRowBase {}
@@ -273,6 +392,7 @@ pub enum TaskSidebarAction {
     Cancel(String),
     SetFilter(TaskSidebarFilter),
     ToggleSession(String),
+    ToggleTask(String),
     #[default]
     None,
 }
@@ -311,6 +431,7 @@ enum TaskSidebarRow {
         current: bool,
     },
     Task(usize),
+    TaskDetail(usize),
 }
 
 fn status_rank(status: TaskStatus) -> u8 {
@@ -427,7 +548,13 @@ fn sidebar_rows_filtered(
             current: group.current,
         });
         if expanded.get(&group.session_id).copied().unwrap_or(true) {
-            rows.extend(group.items.into_iter().map(TaskSidebarRow::Task));
+            rows.extend(group.items.into_iter().flat_map(|index| {
+                let mut rows = vec![TaskSidebarRow::Task(index)];
+                if expanded.get(&items[index].id).copied().unwrap_or(false) {
+                    rows.push(TaskSidebarRow::TaskDetail(index));
+                }
+                rows
+            }));
         }
     }
     rows
@@ -566,6 +693,28 @@ pub struct TaskSidebar {
 }
 
 impl TaskSidebar {
+    fn sync_filter_buttons(&mut self, cx: &mut Cx) {
+        set_selected(
+            cx,
+            &self.view.button(cx, ids!(all_filter)),
+            self.filter == TaskSidebarFilter::All,
+        );
+        set_selected(
+            cx,
+            &self.view.button(cx, ids!(active_filter)),
+            self.filter == TaskSidebarFilter::Active,
+        );
+        set_selected(
+            cx,
+            &self.view.button(cx, ids!(completed_filter)),
+            self.filter == TaskSidebarFilter::Completed,
+        );
+        set_selected(
+            cx,
+            &self.view.button(cx, ids!(failed_filter)),
+            self.filter == TaskSidebarFilter::Failed,
+        );
+    }
     pub fn set_content(
         &mut self,
         cx: &mut Cx,
@@ -588,6 +737,7 @@ impl TaskSidebar {
         self.items = items;
         self.current_session_id = current_session_id;
         self.view.redraw(cx);
+        self.sync_filter_buttons(cx);
     }
 
     pub fn set_filter(&mut self, cx: &mut Cx, filter: TaskSidebarFilter) {
@@ -603,6 +753,7 @@ impl TaskSidebar {
             &self.expanded_sessions,
         );
         self.view.redraw(cx);
+        self.sync_filter_buttons(cx);
     }
 
     pub fn toggle_session(&mut self, cx: &mut Cx, session_id: &str) {
@@ -610,6 +761,22 @@ impl TaskSidebar {
             .expanded_sessions
             .entry(session_id.to_owned())
             .or_insert(true);
+        *expanded = !*expanded;
+        self.rows = sidebar_rows_filtered(
+            &self.plan,
+            &self.items,
+            self.current_session_id.as_deref(),
+            self.filter,
+            &self.expanded_sessions,
+        );
+        self.view.redraw(cx);
+    }
+
+    pub fn toggle_task(&mut self, cx: &mut Cx, task_id: &str) {
+        let expanded = self
+            .expanded_sessions
+            .entry(task_id.to_owned())
+            .or_insert(false);
         *expanded = !*expanded;
         self.rows = sidebar_rows_filtered(
             &self.plan,
@@ -667,6 +834,30 @@ impl Widget for TaskSidebar {
                             row.label(cx, ids!(activity_lbl)).set_text(cx, &activity);
                             row.button(cx, ids!(cancel_btn))
                                 .set_visible(cx, task.cancellable);
+                            row.draw_all_unscoped(cx);
+                        }
+                        TaskSidebarRow::TaskDetail(item_index) => {
+                            let Some(task) = self.items.get(*item_index) else {
+                                continue;
+                            };
+                            let row = list.item(cx, row_index, id!(TaskDetail));
+                            let detail = if task.activity.is_empty() {
+                                format!(
+                                    "{} · {} · {}",
+                                    task.agent,
+                                    status_label(task.status),
+                                    elapsed_label(task.started_at_ms)
+                                )
+                            } else {
+                                format!(
+                                    "{} · {} · {}\n{}",
+                                    task.agent,
+                                    status_label(task.status),
+                                    elapsed_label(task.started_at_ms),
+                                    task.activity
+                                )
+                            };
+                            row.label(cx, ids!(detail_lbl)).set_text(cx, &detail);
                             row.draw_all_unscoped(cx);
                         }
                     }
@@ -728,6 +919,12 @@ impl Widget for TaskSidebar {
             let Some(task) = self.items.get(*item_index) else {
                 continue;
             };
+            if row.button(cx, ids!(details_btn)).clicked(actions) {
+                let task_id = task.id.clone();
+                self.toggle_task(cx, &task_id);
+                cx.widget_action(self.widget_uid(), TaskSidebarAction::ToggleTask(task_id));
+                continue;
+            }
             if row.button(cx, ids!(cancel_btn)).clicked(actions) {
                 cx.widget_action(
                     self.widget_uid(),
