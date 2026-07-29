@@ -6274,32 +6274,8 @@ impl App {
     fn sync_git_branch_picker(&self, cx: &mut Cx) {
         let status = self
             .active_work_dir()
-            .and_then(|work_dir| self.git_status.get(work_dir))
-            .cloned();
-        let mut labels = status
-            .as_ref()
-            .map(|status| status.branches.clone())
-            .unwrap_or_default();
-
-        labels.retain(|label| label != "New branch…" && label != "＋ New branch…");
-
-        let selected_branch = status
-            .as_ref()
-            .and_then(|status| status.branch.as_ref())
-            .cloned();
-
-        if let Some(branch) = selected_branch {
-            labels.retain(|label| label != &branch);
-            labels.push("New branch…".to_owned());
-            labels.push(branch);
-        } else if status.is_some() {
-            labels.push("New branch…".to_owned());
-            labels.push("detached HEAD".to_owned());
-        } else {
-            labels.push("Git".to_owned());
-        }
-
-        let selected = labels.len().saturating_sub(1);
+            .and_then(|work_dir| self.git_status.get(work_dir));
+        let (labels, selected) = crate::panels::git::view::git_branch_picker_labels(status);
         self.ui
             .icon_drop_down(cx, ids!(git_branch_drop))
             .set_visible(cx, status.is_some());
@@ -6320,36 +6296,11 @@ impl App {
             .and_then(|work_dir| self.git_status.get(work_dir));
         let _has_git = status.is_some();
         if let Some(status) = status {
-            let branch = status.branch.as_deref().unwrap_or("detached HEAD");
-            let staged = status.files.iter().filter(|file| file.staged).count();
-            let changed = status.files.iter().filter(|file| file.unstaged).count();
-            let mut summary = Vec::new();
-            if staged > 0 {
-                summary.push(format!("{staged} staged"));
-            }
-            if changed > 0 {
-                summary.push(format!("{changed} changed"));
-            }
-            if status.remote.is_some() && status.branch.is_some() && !status.has_upstream {
-                summary.push("ready to publish".to_owned());
-            } else if status.ahead > 0 {
-                summary.push(format!("{} to push", status.ahead));
-            }
-            if status.behind > 0 {
-                summary.push(format!("{} to pull", status.behind));
-            }
-            let changes = if summary.is_empty() {
-                "clean".to_owned()
-            } else {
-                summary.join(" · ")
-            };
-            let state_text = if self.git_operation_pending {
-                format!("{branch} · working…")
-            } else if self.git_commit_message_pending {
-                format!("{branch} · generating…")
-            } else {
-                format!("{branch} · {changes}")
-            };
+            let state_text = crate::panels::git::view::format_git_summary_text(
+                status,
+                self.git_operation_pending,
+                self.git_commit_message_pending,
+            );
             self.ui
                 .label(cx, ids!(git_state_label))
                 .set_text(cx, &state_text);
