@@ -5888,7 +5888,7 @@ impl App {
         {
             let chip = self.ui.button(cx, path);
             if let Some(name) = names.get(index) {
-                chip.set_text(cx, &format!("{name}  ×"));
+                chip.set_text(cx, &format!("{} ×", truncate_chars(name, 24)));
                 chip.set_visible(cx, true);
             } else {
                 chip.set_visible(cx, false);
