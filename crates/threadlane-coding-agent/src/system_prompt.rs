@@ -129,11 +129,14 @@ pub(crate) fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> Stri
         if available_tool_names.contains("get_repo_map") {
             add_tool_guideline("Use `get_repo_map` to get a compact skeleton of the workspace files and top-level exported symbols without pulling full file bodies into context.");
         }
-        if available_tool_names.contains("read_memory") || available_tool_names.contains("save_memory") || available_tool_names.contains("consolidate_memory") {
-            add_tool_guideline("Use `save_memory` or `consolidate_memory` to store persistent project facts, architectural decisions, gotchas, or verification commands into `.threadlane/memory.md` so future sessions benefit.");
+        if available_tool_names.contains("manage_memory")
+            || available_tool_names.contains("read_memory")
+            || available_tool_names.contains("save_memory")
+            || available_tool_names.contains("consolidate_memory")
+        {
+            add_tool_guideline("Use `manage_memory` (with action 'save' or 'consolidate') to store persistent project facts, architectural decisions, gotchas, or verification commands into `.threadlane/memory.md` so future sessions benefit.");
         }
         if available_tool_names.contains("write_file")
-            || available_tool_names.contains("edit_file")
             || available_tool_names.contains("edit_file_hashline")
         {
             add_tool_guideline("Keep edits focused, preserve existing user work, and follow the project's established style.");

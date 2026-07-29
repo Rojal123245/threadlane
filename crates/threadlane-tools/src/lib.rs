@@ -32,19 +32,7 @@ fn tool_definitions() -> Vec<Value> {
                 "required": ["path", "content"]
             }
         }),
-        json!({
-            "name": "edit_file",
-            "description": "Replace exact target string with replacement string in a file.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "Path to the file" },
-                    "target": { "type": "string", "description": "Exact text substring to be replaced" },
-                    "replacement": { "type": "string", "description": "New text to substitute in place of target" }
-                },
-                "required": ["path", "target", "replacement"]
-            }
-        }),
+
         json!({
             "name": "edit_file_hashline",
             "description": "Edit a file using hash-anchored lines obtained from read_file. Supports line and range replace, insert_after, and delete operations. Format of start_anchor/end_anchor is 'line_number:hash' (e.g. '12:a3f'). Always batch multiple edits for the same file in one tool call.",
@@ -105,47 +93,42 @@ fn tool_definitions() -> Vec<Value> {
         }),
 
         json!({
-            "name": "read_memory",
-            "description": "Read the persistent project memory stored in .threadlane/memory.md.",
-            "parameters": {
-                "type": "object",
-                "properties": {}
-            }
-        }),
-        json!({
-            "name": "save_memory",
-            "description": "Save or append project architectural insights, conventions, build instructions, or gotchas into .threadlane/memory.md so future sessions benefit.",
+            "name": "manage_memory",
+            "description": "Manage persistent project architectural insights, conventions, build instructions, or gotchas in .threadlane/memory.md. Actions: 'read' (reads memory.md), 'save' (saves or appends content to memory.md), 'consolidate' (consolidates structured entries under ## Architecture, ## Gotchas, ## Verification Commands).",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "content": { "type": "string", "description": "Memory content or note to write to .threadlane/memory.md" },
-                    "mode": { "type": "string", "enum": ["append", "overwrite"], "description": "Mode: 'append' (default) adds to memory.md; 'overwrite' replaces memory.md content." }
-                },
-                "required": ["content"]
-            }
-        }),
-        json!({
-            "name": "consolidate_memory",
-            "description": "Automatically consolidate and merge new findings into .threadlane/memory.md under structured sections (## Architecture, ## Gotchas, ## Verification Commands). Deduplicates items.",
-            "parameters": {
-                "type": "object",
-                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["read", "save", "consolidate"],
+                        "description": "Memory management action: 'read', 'save', or 'consolidate'."
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Memory note/content to write when action is 'save'."
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["append", "overwrite"],
+                        "description": "Mode when action is 'save': 'append' (default) adds to memory.md; 'overwrite' replaces memory.md content."
+                    },
                     "architecture": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "List of architectural decisions or patterns to merge"
+                        "description": "List of architectural decisions or patterns to merge when action is 'consolidate'."
                     },
                     "gotchas": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "List of gotchas, pitfalls, or non-obvious rules to merge"
+                        "description": "List of gotchas, pitfalls, or non-obvious rules to merge when action is 'consolidate'."
                     },
                     "verification": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "List of build, test, or verification commands to merge"
+                        "description": "List of build, test, or verification commands to merge when action is 'consolidate'."
                     }
-                }
+                },
+                "required": ["action"]
             }
         }),
     ]
@@ -376,42 +359,7 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
                 Err(e) => format!("Error writing to file '{raw_path}': {e}"),
             }
         }
-        "edit_file" => {
-            let raw_path = match args.get("path").and_then(|v| v.as_str()) {
-                Some(p) => p,
-                None => return "Error: 'path' parameter is required".into(),
-            };
-            let validated_path = match validate_path_in_workspace(raw_path, workspace_root) {
-                Ok(p) => p,
-                Err(err) => return err,
-            };
 
-            let target = match args.get("target").and_then(|v| v.as_str()) {
-                Some(t) => t,
-                None => return "Error: 'target' parameter is required".into(),
-            };
-            let replacement = match args.get("replacement").and_then(|v| v.as_str()) {
-                Some(r) => r,
-                None => return "Error: 'replacement' parameter is required".into(),
-            };
-
-            match fs::read_to_string(&validated_path) {
-                Ok(content) => {
-                    if !content.contains(target) {
-                        return format!("Target string not found in '{raw_path}'");
-                    }
-                    let new_content = content.replace(target, replacement);
-                    match fs::write(&validated_path, new_content) {
-                        Ok(_) => {
-                            let diag = run_post_edit_diagnostics(workspace_root, raw_path);
-                            format!("Successfully replaced target in '{raw_path}'{diag}")
-                        }
-                        Err(e) => format!("Error writing file '{raw_path}': {e}"),
-                    }
-                }
-                Err(e) => format!("Error reading file '{raw_path}': {e}"),
-            }
-        }
         "edit_file_hashline" => {
             let raw_path = match args.get("path").and_then(|v| v.as_str()) {
                 Some(p) => p,
@@ -505,6 +453,18 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
             get_repo_map_impl(workspace_root, raw_path)
         }
 
+        "manage_memory" => {
+            let action = match args.get("action").and_then(|v| v.as_str()) {
+                Some(a) => a,
+                None => return "Error: 'action' parameter is required ('read', 'save', 'consolidate')".into(),
+            };
+            match action {
+                "read" => read_memory_impl(workspace_root),
+                "save" => save_memory_impl(workspace_root, &args),
+                "consolidate" => consolidate_memory_impl(workspace_root, &args),
+                unknown => format!("Error: Unknown action '{unknown}' for manage_memory"),
+            }
+        }
         "read_memory" => read_memory_impl(workspace_root),
         "save_memory" => save_memory_impl(workspace_root, &args),
         "consolidate_memory" => consolidate_memory_impl(workspace_root, &args),
@@ -1035,21 +995,34 @@ mod tests {
     }
 
     #[test]
-    fn test_consolidate_memory_tool() {
+    fn test_manage_memory_tool() {
         let dir = tempdir().unwrap();
         let root = dir.path();
 
-        let payload = json!({
+        let save_payload = json!({
+            "action": "save",
+            "content": "Rule: Always check cargo diff"
+        })
+        .to_string();
+        let save_res = execute_tool_in_workspace("manage_memory", &save_payload, root);
+        assert!(save_res.contains("Successfully saved memory to .threadlane/memory.md"));
+
+        let read_payload = json!({ "action": "read" }).to_string();
+        let read_res = execute_tool_in_workspace("manage_memory", &read_payload, root);
+        assert!(read_res.contains("Rule: Always check cargo diff"));
+
+        let consolidate_payload = json!({
+            "action": "consolidate",
             "architecture": ["Use Makepad UI components"],
             "gotchas": ["cargo check requires unsandboxed bypass on macOS"],
             "verification": ["cargo test --workspace"]
         })
         .to_string();
 
-        let res = execute_tool_in_workspace("consolidate_memory", &payload, root);
+        let res = execute_tool_in_workspace("manage_memory", &consolidate_payload, root);
         assert!(res.contains("Successfully consolidated memory entries"));
 
-        let mem_content = execute_tool_in_workspace("read_memory", "{}", root);
+        let mem_content = execute_tool_in_workspace("manage_memory", &read_payload, root);
         assert!(mem_content.contains("## Architecture"));
         assert!(mem_content.contains("Use Makepad UI components"));
         assert!(mem_content.contains("## Gotchas"));
