@@ -139,7 +139,7 @@ impl McpSettings {
         };
         let bytes = serde_json::to_vec_pretty(&file_data)
             .map_err(|e| format!("Failed to serialize MCP settings: {e}"))?;
-        fs::write(&file_path, bytes).map_err(|e| format!("Failed to write MCP settings: {e}"))
+        fs::write(file_path, bytes).map_err(|e| format!("Failed to write MCP settings: {e}"))
     }
 }
 
@@ -209,7 +209,7 @@ impl McpManager {
 
         for config in project_configs
             .into_iter()
-            .chain(global_configs.into_iter())
+            .chain(global_configs)
         {
             if seen_ids.insert(config.id.clone()) {
                 all_configs.push(config);

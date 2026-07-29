@@ -13,6 +13,7 @@ pub struct FileTreeNode {
 }
 
 #[derive(Clone, Debug, Default)]
+#[allow(dead_code)]
 pub enum FileTreeAction {
     FileClicked(String),
     FolderToggled(String),
@@ -192,8 +193,8 @@ impl FileTree {
             };
             let mut entries: Vec<_> = read_dir.filter_map(|res| res.ok()).collect();
             entries.sort_by(|a, b| {
-                let a_is_dir = a.file_type().map_or(false, |t| t.is_dir());
-                let b_is_dir = b.file_type().map_or(false, |t| t.is_dir());
+                let a_is_dir = a.file_type().is_ok_and(|t| t.is_dir());
+                let b_is_dir = b.file_type().is_ok_and(|t| t.is_dir());
                 if a_is_dir != b_is_dir {
                     b_is_dir.cmp(&a_is_dir) // Directories first
                 } else {
@@ -211,7 +212,7 @@ impl FileTree {
                     continue;
                 }
                 let path = entry.path();
-                let is_dir = entry.file_type().map_or(false, |t| t.is_dir());
+                let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
                 let rel_path = path
                     .strip_prefix(root)
                     .map(|p| p.to_string_lossy().to_string())
