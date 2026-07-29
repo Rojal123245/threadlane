@@ -4,6 +4,7 @@ use crate::context::ProjectContext;
 use crate::extension_broker::{
     BrokerError, BrokerRequest, CapabilityDispatcher, CapabilityHandler, BROKER_API_VERSION,
 };
+use crate::mcp::{McpManager, McpToolExecutor};
 use crate::packages::default_global_threadlane_dir;
 use crate::plan::{SessionPlanStore, UpdatePlanToolExecutor};
 use crate::skills::{LoadSkillToolExecutor, SkillManager, SkillRegistry};
@@ -1335,6 +1336,7 @@ pub struct CodingAgent {
     broker_dispatcher: Arc<CapabilityDispatcher>,
     managed_processes: ManagedProcessRegistry,
     agent_work: AgentWorkScheduler,
+    mcp_manager: Arc<McpManager>,
     plan_store: SessionPlanStore,
     prompt_templates: Option<Vec<crate::prompt_templates::PromptTemplate>>,
     #[cfg(test)]
@@ -1632,6 +1634,10 @@ impl CodingAgent {
         self.skills = skills;
     }
 
+    pub async fn refresh_mcp(&self) {
+        self.mcp_manager.discover_and_connect().await;
+    }
+
     pub fn new(options: CodingAgentOptions) -> Self {
         let project_context = ProjectContext::discover(&options.work_dir);
         let mut skill_manager = SkillManager::new();
@@ -1775,6 +1781,20 @@ impl CodingAgent {
         {
             eprintln!("WASI tool registration failed: {error}");
         }
+        let mcp_manager = Arc::new(McpManager::new(
+            default_global_threadlane_dir(),
+            Some(options.work_dir.clone()),
+        ));
+        let manager_clone = mcp_manager.clone();
+        threadlane_agent::get_runtime().spawn(async move {
+            manager_clone.discover_and_connect().await;
+        });
+        if let Err(error) = agent
+            .loop_engine
+            .register_tool_executor(Arc::new(McpToolExecutor::new(mcp_manager.clone())))
+        {
+            eprintln!("MCP tool registration failed: {error}");
+        }
         agent.loop_engine.work_dir = Some(options.work_dir.clone());
 
         let mut system_prompt_config = options.system_prompt.clone();
@@ -1834,6 +1854,7 @@ impl CodingAgent {
             broker_dispatcher,
             managed_processes,
             agent_work,
+            mcp_manager,
             plan_store,
             prompt_templates: None,
             #[cfg(test)]

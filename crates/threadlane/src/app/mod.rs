@@ -2,15 +2,15 @@
 //!
 //! Chat, sessions, and command palette panels are modularized under `crate::panels`.
 
+use crate::components::git_changes::{GitChanges, GitChangesAction};
+use crate::components::git_diff::GitDiffView;
 use crate::components::model_dropdown::IconDropDownWidgetRefExt;
 use crate::components::session_row::ProjectHeaderAction;
 use crate::components::task_sidebar::{
     task_header_state, TaskSidebar, TaskSidebarAction, TaskSidebarItem,
 };
-use crate::components::git_changes::{GitChanges, GitChangesAction};
-use crate::components::git_diff::GitDiffView;
-use crate::git::GitStatus;
 use crate::components::terminal_panel::ProjectTerminalWidgetRefExt;
+use crate::git::GitStatus;
 use crate::panels::chat::{
     accepts_generation_event, concise_status, draft_for_cancellation, submitted_draft, ChatList,
     ChatListWidgetRefExt, ComposerState, ComposerStatus, GenerationEvent, StarterPromptAction,
@@ -98,13 +98,13 @@ fn normalize_generated_commit_message(raw: &str) -> String {
     let line = raw
         .lines()
         .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with("```") )
+        .find(|line| !line.is_empty() && !line.starts_with("```"))
         .unwrap_or_default()
         .trim_matches('`')
         .trim();
     let line = line
         .strip_prefix("Commit message:")
-        .or_else(|| line.strip_prefix("Commit:") )
+        .or_else(|| line.strip_prefix("Commit:"))
         .unwrap_or(line)
         .trim();
     truncate_chars(line, 72)
@@ -1370,6 +1370,10 @@ script_mod! {
                     text: "Skills"
                 }
 
+                settings_nav_mcp_btn := mod.components.NavButton {
+                    text: "MCP Servers"
+                }
+
                 settings_nav_about_btn := mod.components.NavButton {
                     text: "About"
                 }
@@ -1740,6 +1744,169 @@ script_mod! {
                     }
 
                     skill_status_lbl := Label {
+                        width: Fill
+                        height: Fit
+                        padding: 0
+                        text: ""
+                        draw_text +: {
+                            color: theme.color_primary
+                            text_style +: { font_size: 9.5 }
+                        }
+                    }
+                }
+
+                mcp_page := View {
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    spacing: 12
+                    visible: false
+
+                    mcp_header := View {
+                        width: Fill
+                        height: 28
+                        flow: Right
+                        spacing: 6
+                        align: Align{y: 0.5}
+
+                        mcp_page_title := Label {
+                            width: Fill
+                            height: 28
+                            padding: 0
+                            align: Align{y: 0.5}
+                            text: "MCP Servers"
+                            draw_text +: {
+                                color: theme.color_foreground
+                                text_style: theme.font_bold { font_size: 18.0 }
+                            }
+                        }
+
+                        mcp_scope_global_btn := SettingsActionButton {
+                            height: 24
+                            padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
+                            text: "Global"
+                        }
+                        mcp_scope_project_btn := SettingsActionButton {
+                            height: 24
+                            padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
+                            text: "Project"
+                            draw_bg +: {
+                                color: theme.color_primary
+                                border_color: theme.color_primary
+                            }
+                        }
+                        mcp_refresh_btn := mod.components.IconButton {
+                            draw_icon +: {
+                                svg: crate_resource("self:resources/icons/refresh.svg")
+                            }
+                        }
+                    }
+
+                    mcp_page_desc := Label {
+                        width: Fill
+                        height: Fit
+                        padding: 0
+                        text: "Model Context Protocol servers providing external tools over stdio."
+                        draw_text +: {
+                            color: theme.color_muted_foreground
+                            text_style +: { font_size: 10.0 }
+                        }
+                    }
+
+                    mcp_add_card := RoundedView {
+                        width: Fill
+                        height: Fit
+                        flow: Down
+                        padding: Inset{left: 12 top: 10 right: 12 bottom: 10}
+                        spacing: 8
+                        draw_bg +: {
+                            color: theme.color_card
+                            border_radius: 8.0
+                            border_size: 1.0
+                            border_color: theme.color_input
+                        }
+
+                        mcp_add_title := Label {
+                            width: Fill
+                            height: Fit
+                            text: "Add MCP Server"
+                            draw_text +: {
+                                color: theme.color_foreground
+                                text_style: theme.font_bold { font_size: 11.0 }
+                            }
+                        }
+
+                        mcp_add_inputs := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 8
+                            align: Align{y: 0.5}
+
+                            mcp_name_input := TextInput {
+                                width: 140
+                                height: 28
+                                padding: Inset{left: 8 right: 8}
+                                empty_text: "Name (e.g. fs)"
+                                draw_bg +: {
+                                    color: theme.color_input
+                                    color_focus: theme.color_input
+                                    border_color: theme.color_secondary
+                                    border_color_focus: theme.color_primary
+                                    border_radius: 5.0
+                                    border_size: 1.0
+                                }
+                                draw_text +: {
+                                    color: theme.color_foreground
+                                    color_empty: theme.color_muted_foreground
+                                }
+                            }
+
+                            mcp_command_input := TextInput {
+                                width: Fill
+                                height: 28
+                                padding: Inset{left: 8 right: 8}
+                                empty_text: "Command (e.g. npx -y @modelcontextprotocol/server-filesystem /path)"
+                                draw_bg +: {
+                                    color: theme.color_input
+                                    color_focus: theme.color_input
+                                    border_color: theme.color_secondary
+                                    border_color_focus: theme.color_primary
+                                    border_radius: 5.0
+                                    border_size: 1.0
+                                }
+                                draw_text +: {
+                                    color: theme.color_foreground
+                                    color_empty: theme.color_muted_foreground
+                                }
+                            }
+
+                            mcp_submit_add_btn := SettingsActionButton {
+                                height: 28
+                                padding: Inset{left: 12 right: 12 top: 4 bottom: 4}
+                                text: "Add"
+                                draw_bg +: {
+                                    color: theme.color_primary
+                                    border_color: theme.color_primary
+                                }
+                            }
+                        }
+                    }
+
+                    mcp_list := PortalList {
+                        width: Fill
+                        height: Fill
+                        flow: Down
+                        spacing: 8
+
+                        McpRow := mod.components.CapabilityRowWithRemove {}
+
+                        McpEmptyRow := mod.components.CapabilityEmptyRow {
+                            empty_lbl: { text: "No MCP servers configured." }
+                        }
+                    }
+
+                    mcp_status_lbl := Label {
                         width: Fill
                         height: Fit
                         padding: 0
@@ -2901,6 +3068,7 @@ enum SettingsPage {
     OpenAi,
     Capabilities,
     Skills,
+    McpServers,
     About,
 }
 
@@ -2908,6 +3076,7 @@ enum SettingsPage {
 enum ProviderSettingsModalAction {
     ShowExtensions,
     ShowSkills,
+    ShowMcpServers,
     Add(ExtensionScope),
     Refresh,
     SetEnabled {
@@ -2920,6 +3089,17 @@ enum ProviderSettingsModalAction {
         enabled: bool,
     },
     RefreshSkills,
+    SetMcpEnabled {
+        row: usize,
+        enabled: bool,
+    },
+    RemoveMcpServer(usize),
+    RefreshMcpServers,
+    AddMcpServer {
+        scope: threadlane_coding_agent::McpScope,
+        name: String,
+        command: String,
+    },
     #[default]
     None,
 }
@@ -2940,6 +3120,8 @@ struct ProviderSettingsModal {
     extension_rows: Vec<crate::state::CapabilityExtensionRow>,
     #[rust]
     skill_rows: Vec<crate::state::CapabilitySkillRow>,
+    #[rust]
+    mcp_rows: Vec<crate::state::CapabilityMcpRow>,
     #[rust]
     install_scope_global: bool,
 }
@@ -3010,6 +3192,14 @@ impl Widget for ProviderSettingsModal {
             }
             if self
                 .view
+                .button(cx, ids!(settings_nav_mcp_btn))
+                .clicked(actions)
+            {
+                self.set_page(cx, SettingsPage::McpServers);
+                cx.widget_action(uid, ProviderSettingsModalAction::ShowMcpServers);
+            }
+            if self
+                .view
                 .button(cx, ids!(settings_nav_about_btn))
                 .clicked(actions)
             {
@@ -3027,9 +3217,46 @@ impl Widget for ProviderSettingsModal {
                 .view
                 .button(cx, ids!(capability_scope_project_btn))
                 .clicked(actions)
+                || self
+                    .view
+                    .button(cx, ids!(mcp_scope_project_btn))
+                    .clicked(actions)
             {
                 self.install_scope_global = false;
                 self.sync_install_scope(cx);
+            }
+            if self
+                .view
+                .button(cx, ids!(capability_scope_global_btn))
+                .clicked(actions)
+                || self
+                    .view
+                    .button(cx, ids!(mcp_scope_global_btn))
+                    .clicked(actions)
+            {
+                self.install_scope_global = true;
+                self.sync_install_scope(cx);
+            }
+            if self
+                .view
+                .button(cx, ids!(mcp_submit_add_btn))
+                .clicked(actions)
+            {
+                let name = self.view.text_input(cx, ids!(mcp_name_input)).text();
+                let command = self.view.text_input(cx, ids!(mcp_command_input)).text();
+                let scope = if self.install_scope_global {
+                    threadlane_coding_agent::McpScope::Global
+                } else {
+                    threadlane_coding_agent::McpScope::Project
+                };
+                cx.widget_action(
+                    uid,
+                    ProviderSettingsModalAction::AddMcpServer {
+                        scope,
+                        name,
+                        command,
+                    },
+                );
             }
             if self
                 .view
@@ -3052,6 +3279,9 @@ impl Widget for ProviderSettingsModal {
             {
                 cx.widget_action(uid, ProviderSettingsModalAction::RefreshSkills);
             }
+            if self.view.button(cx, ids!(mcp_refresh_btn)).clicked(actions) {
+                cx.widget_action(uid, ProviderSettingsModalAction::RefreshMcpServers);
+            }
             let list = self.view.portal_list(cx, ids!(capability_list));
             for (row, item) in list.items_with_actions(actions) {
                 if let Some(enabled) = item.check_box(cx, ids!(enabled_toggle)).changed(actions) {
@@ -3071,6 +3301,18 @@ impl Widget for ProviderSettingsModal {
                         uid,
                         ProviderSettingsModalAction::SetSkillEnabled { row, enabled },
                     );
+                }
+            }
+            let mcp_list = self.view.portal_list(cx, ids!(mcp_list));
+            for (row, item) in mcp_list.items_with_actions(actions) {
+                if let Some(enabled) = item.check_box(cx, ids!(enabled_toggle)).changed(actions) {
+                    cx.widget_action(
+                        uid,
+                        ProviderSettingsModalAction::SetMcpEnabled { row, enabled },
+                    );
+                }
+                if item.button(cx, ids!(remove_btn)).clicked(actions) {
+                    cx.widget_action(uid, ProviderSettingsModalAction::RemoveMcpServer(row));
                 }
             }
         }
@@ -3100,8 +3342,6 @@ impl Widget for ProviderSettingsModal {
             };
             while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
                 if let Some(mut list) = item.as_portal_list().borrow_mut() {
-                    // Only one settings page is visible at a time, so the single
-                    // PortalList encountered in the walk belongs to the active page.
                     if self.page == SettingsPage::Skills {
                         list.set_item_range(cx, 0, self.skill_rows.len().max(1));
                         while let Some(row_index) = list.next_visible_item(cx) {
@@ -3128,7 +3368,33 @@ impl Widget for ProviderSettingsModal {
                             );
                             item.draw_all_unscoped(cx);
                         }
-                    } else {
+                    } else if self.page == SettingsPage::McpServers {
+                        list.set_item_range(cx, 0, self.mcp_rows.len().max(1));
+                        while let Some(row_index) = list.next_visible_item(cx) {
+                            if self.mcp_rows.is_empty() {
+                                if row_index == 0 {
+                                    list.item(cx, row_index, id!(McpEmptyRow))
+                                        .draw_all_unscoped(cx);
+                                }
+                                continue;
+                            }
+                            let Some(row) = self.mcp_rows.get(row_index) else {
+                                continue;
+                            };
+                            let item = list.item(cx, row_index, id!(McpRow));
+                            item.label(cx, ids!(name_lbl)).set_text(cx, &row.name);
+                            item.label(cx, ids!(scope_lbl))
+                                .set_text(cx, &row.scope_status());
+                            item.label(cx, ids!(path_lbl))
+                                .set_text(cx, &row.transport_detail);
+                            item.check_box(cx, ids!(enabled_toggle)).set_active(
+                                cx,
+                                row.enabled,
+                                Animate::No,
+                            );
+                            item.draw_all_unscoped(cx);
+                        }
+                    } else if self.page == SettingsPage::Capabilities {
                         list.set_item_range(cx, 0, self.extension_rows.len().max(1));
                         while let Some(row_index) = list.next_visible_item(cx) {
                             if self.extension_rows.is_empty() {
@@ -3173,14 +3439,32 @@ impl ProviderSettingsModal {
         }
     }
 
+    fn redraw_capability_overlay(&mut self, cx: &mut Cx) {
+        if let Some(draw_list) = &self.draw_list {
+            draw_list.redraw(cx);
+        }
+        self.view.redraw(cx);
+    }
+
     fn set_extension_rows(&mut self, cx: &mut Cx, rows: Vec<crate::state::CapabilityExtensionRow>) {
         self.extension_rows = rows;
-        self.view.widget(cx, ids!(capability_list)).redraw(cx);
+        self.redraw_capability_overlay(cx);
     }
 
     fn set_skill_rows(&mut self, cx: &mut Cx, rows: Vec<crate::state::CapabilitySkillRow>) {
         self.skill_rows = rows;
-        self.view.widget(cx, ids!(skill_list)).redraw(cx);
+        self.redraw_capability_overlay(cx);
+    }
+
+    fn set_mcp_rows(&mut self, cx: &mut Cx, rows: Vec<crate::state::CapabilityMcpRow>) {
+        self.mcp_rows = rows;
+        self.redraw_capability_overlay(cx);
+    }
+
+    fn set_mcp_status(&mut self, cx: &mut Cx, status: &str) {
+        self.view
+            .label(cx, ids!(mcp_status_lbl))
+            .set_text(cx, status);
     }
 
     fn set_skill_status(&mut self, cx: &mut Cx, status: &str) {
@@ -3226,6 +3510,8 @@ impl ProviderSettingsModal {
                 ids!(capability_scope_project_btn),
                 !self.install_scope_global,
             ),
+            (ids!(mcp_scope_global_btn), self.install_scope_global),
+            (ids!(mcp_scope_project_btn), !self.install_scope_global),
         ] {
             let mut button = self.view.button(cx, button_id);
             let color = if selected {
@@ -3259,6 +3545,7 @@ impl ProviderSettingsModal {
         let openai_selected = self.page == SettingsPage::OpenAi;
         let capabilities_selected = self.page == SettingsPage::Capabilities;
         let skills_selected = self.page == SettingsPage::Skills;
+        let mcp_selected = self.page == SettingsPage::McpServers;
         let about_selected = self.page == SettingsPage::About;
 
         for (button_id, selected) in [
@@ -3266,6 +3553,7 @@ impl ProviderSettingsModal {
             (ids!(settings_nav_openai_btn), openai_selected),
             (ids!(settings_nav_capabilities_btn), capabilities_selected),
             (ids!(settings_nav_skills_btn), skills_selected),
+            (ids!(settings_nav_mcp_btn), mcp_selected),
             (ids!(settings_nav_about_btn), about_selected),
         ] {
             let button = self.view.button(cx, button_id);
@@ -3288,6 +3576,9 @@ impl ProviderSettingsModal {
             .button(cx, ids!(settings_nav_skills_btn))
             .set_visible(cx, true);
         self.view
+            .button(cx, ids!(settings_nav_mcp_btn))
+            .set_visible(cx, true);
+        self.view
             .button(cx, ids!(settings_nav_about_btn))
             .set_visible(cx, true);
         self.view
@@ -3302,6 +3593,9 @@ impl ProviderSettingsModal {
         self.view
             .widget(cx, ids!(skills_page))
             .set_visible(cx, skills_selected);
+        self.view
+            .widget(cx, ids!(mcp_page))
+            .set_visible(cx, mcp_selected);
         self.view
             .widget(cx, ids!(about_page))
             .set_visible(cx, about_selected);
@@ -4195,10 +4489,7 @@ impl MatchEvent for App {
                 .returned(actions)
                 .is_some();
         if commit_requested {
-            let message = self
-                .ui
-                .text_input(cx, ids!(git_commit_message))
-                .text();
+            let message = self.ui.text_input(cx, ids!(git_commit_message)).text();
             if message.trim().is_empty() {
                 self.git_feedback = Some((false, "Enter a commit message first.".to_owned()));
                 self.sync_right_sidebar(cx);
@@ -4225,10 +4516,7 @@ impl MatchEvent for App {
                 .returned(actions)
                 .is_some();
         if create_branch_requested {
-            let name = self
-                .ui
-                .text_input(cx, ids!(git_new_branch_name))
-                .text();
+            let name = self.ui.text_input(cx, ids!(git_new_branch_name)).text();
             if name.trim().is_empty() {
                 self.git_feedback = Some((false, "Enter a branch name first.".to_owned()));
                 self.sync_right_sidebar(cx);
@@ -4245,7 +4533,11 @@ impl MatchEvent for App {
             self.start_git_stage_selected(cx, false);
         }
 
-        if self.ui.button(cx, ids!(git_select_all_btn)).clicked(actions) {
+        if self
+            .ui
+            .button(cx, ids!(git_select_all_btn))
+            .clicked(actions)
+        {
             let changes_widget = self.ui.widget(cx, ids!(git_changes));
             if let Some(mut changes) = changes_widget.borrow_mut::<GitChanges>() {
                 changes.toggle_all(cx);
@@ -4343,6 +4635,8 @@ impl MatchEvent for App {
                 | ProviderSettingsModalAction::Refresh => self.refresh_capability_state(cx),
                 ProviderSettingsModalAction::ShowSkills
                 | ProviderSettingsModalAction::RefreshSkills => self.refresh_skill_state(cx),
+                ProviderSettingsModalAction::ShowMcpServers
+                | ProviderSettingsModalAction::RefreshMcpServers => self.refresh_mcp_state(cx),
                 ProviderSettingsModalAction::Add(scope) => {
                     self.open_extension_picker(scope);
                 }
@@ -4354,6 +4648,19 @@ impl MatchEvent for App {
                 }
                 ProviderSettingsModalAction::SetSkillEnabled { row, enabled } => {
                     self.set_skill_enabled(cx, row, enabled);
+                }
+                ProviderSettingsModalAction::SetMcpEnabled { row, enabled } => {
+                    self.set_mcp_enabled(cx, row, enabled);
+                }
+                ProviderSettingsModalAction::RemoveMcpServer(row) => {
+                    self.remove_mcp_server(cx, row);
+                }
+                ProviderSettingsModalAction::AddMcpServer {
+                    scope,
+                    name,
+                    command,
+                } => {
+                    self.add_mcp_server(cx, scope, name, command);
                 }
                 ProviderSettingsModalAction::None => {}
             }
@@ -4739,8 +5046,7 @@ impl AppMain for App {
             {
                 self.set_right_sidebar_width(
                     cx,
-                    self.right_sidebar_resize_start_width
-                        + self.right_sidebar_resize_start_x
+                    self.right_sidebar_resize_start_width + self.right_sidebar_resize_start_x
                         - pointer.abs.x,
                 );
                 cx.set_cursor(MouseCursor::ColResize);
@@ -4748,11 +5054,11 @@ impl AppMain for App {
             Event::MouseMove(pointer)
                 if self.right_sidebar_is_visible()
                     && self
-                    .ui
-                    .view(cx, ids!(right_sidebar_resize_handle))
-                    .area()
-                    .rect(cx)
-                    .contains(pointer.abs) =>
+                        .ui
+                        .view(cx, ids!(right_sidebar_resize_handle))
+                        .area()
+                        .rect(cx)
+                        .contains(pointer.abs) =>
             {
                 cx.set_cursor(MouseCursor::ColResize);
             }
@@ -4853,6 +5159,7 @@ impl App {
     fn open_providers_modal(&mut self, cx: &mut Cx) {
         let mut show_extensions = false;
         let mut show_skills = false;
+        let mut show_mcp = false;
         if let Some(mut modal) = self
             .ui
             .widget(cx, ids!(providers_modal))
@@ -4860,6 +5167,7 @@ impl App {
         {
             show_extensions = modal.page == SettingsPage::Capabilities;
             show_skills = modal.page == SettingsPage::Skills;
+            show_mcp = modal.page == SettingsPage::McpServers;
             modal.open(cx);
         }
         if show_extensions {
@@ -4868,11 +5176,15 @@ impl App {
         if show_skills {
             self.refresh_skill_state(cx);
         }
+        if show_mcp {
+            self.refresh_mcp_state(cx);
+        }
     }
 
     fn open_capabilities_modal(&mut self, cx: &mut Cx) {
         self.refresh_skill_state(cx);
         self.refresh_capability_state(cx);
+        self.refresh_mcp_state(cx);
         if let Some(mut modal) = self
             .ui
             .widget(cx, ids!(providers_modal))
@@ -4916,6 +5228,222 @@ impl App {
         {
             modal.set_skill_rows(cx, self.capability_state.skills.clone());
             modal.set_skill_status(cx, "");
+        }
+    }
+
+    fn refresh_mcp_state(&mut self, _cx: &mut Cx) {
+        let global_dir = threadlane_coding_agent::default_global_threadlane_dir();
+        let work_dir = self.active_work_dir().map(Path::to_path_buf);
+        if let Some(tx) = self.tx.clone() {
+            get_runtime().spawn(async move {
+                let records = threadlane_coding_agent::McpManager::new(global_dir, work_dir)
+                    .discover_and_connect()
+                    .await;
+                let _ = tx.send(GuiAgentEvent::McpRefreshCompleted(records));
+                SignalToUI::set_ui_signal();
+            });
+        }
+    }
+
+    fn refresh_live_session_mcp(&self) {
+        let agents: Vec<_> = self
+            .session_runtimes
+            .values()
+            .map(|runtime| runtime.agent.clone())
+            .collect();
+        get_runtime().spawn(async move {
+            for agent in agents {
+                agent.lock().await.refresh_mcp().await;
+            }
+        });
+    }
+
+    fn set_mcp_enabled(&mut self, cx: &mut Cx, row: usize, enabled: bool) {
+        let Some(selected) = self.capability_state.mcp_servers.get(row).cloned() else {
+            self.refresh_mcp_state(cx);
+            return;
+        };
+        let global_dir = threadlane_coding_agent::default_global_threadlane_dir();
+        let work_dir = self.active_work_dir().map(Path::to_path_buf);
+        let mut configs = match selected.scope {
+            threadlane_coding_agent::McpScope::Global => {
+                threadlane_coding_agent::McpSettings::load_global(global_dir.as_deref())
+            }
+            threadlane_coding_agent::McpScope::Project => {
+                threadlane_coding_agent::McpSettings::load_project(work_dir.as_deref())
+            }
+        };
+        if let Some(cfg) = configs.iter_mut().find(|c| c.id == selected.id) {
+            cfg.enabled = enabled;
+            let _ = match selected.scope {
+                threadlane_coding_agent::McpScope::Global => {
+                    threadlane_coding_agent::McpSettings::save_global(
+                        global_dir.as_deref().unwrap(),
+                        &configs,
+                    )
+                }
+                threadlane_coding_agent::McpScope::Project => {
+                    threadlane_coding_agent::McpSettings::save_project(
+                        work_dir.as_deref().unwrap(),
+                        &configs,
+                    )
+                }
+            };
+        }
+        self.refresh_live_session_mcp();
+        self.refresh_mcp_state(cx);
+    }
+
+    fn remove_mcp_server(&mut self, cx: &mut Cx, row: usize) {
+        let Some(selected) = self.capability_state.mcp_servers.get(row).cloned() else {
+            self.refresh_mcp_state(cx);
+            return;
+        };
+        let global_dir = threadlane_coding_agent::default_global_threadlane_dir();
+        let work_dir = self.active_work_dir().map(Path::to_path_buf);
+        let mut configs = match selected.scope {
+            threadlane_coding_agent::McpScope::Global => {
+                threadlane_coding_agent::McpSettings::load_global(global_dir.as_deref())
+            }
+            threadlane_coding_agent::McpScope::Project => {
+                threadlane_coding_agent::McpSettings::load_project(work_dir.as_deref())
+            }
+        };
+        configs.retain(|c| c.id != selected.id);
+        let _ = match selected.scope {
+            threadlane_coding_agent::McpScope::Global => {
+                threadlane_coding_agent::McpSettings::save_global(
+                    global_dir.as_deref().unwrap(),
+                    &configs,
+                )
+            }
+            threadlane_coding_agent::McpScope::Project => {
+                threadlane_coding_agent::McpSettings::save_project(
+                    work_dir.as_deref().unwrap(),
+                    &configs,
+                )
+            }
+        };
+        self.refresh_live_session_mcp();
+        self.refresh_mcp_state(cx);
+    }
+
+    fn add_mcp_server(
+        &mut self,
+        cx: &mut Cx,
+        scope: threadlane_coding_agent::McpScope,
+        name: String,
+        command: String,
+    ) {
+        let name = name.trim().to_string();
+        let command = command.trim().to_string();
+        if name.is_empty() || command.is_empty() {
+            if let Some(mut modal) = self
+                .ui
+                .widget(cx, ids!(providers_modal))
+                .borrow_mut::<ProviderSettingsModal>()
+            {
+                modal.set_mcp_status(
+                    cx,
+                    "Please provide both a server name and a command or URL.",
+                );
+            }
+            return;
+        }
+        if command.starts_with("http://") || command.starts_with("https://") {
+            if let Some(mut modal) = self
+                .ui
+                .widget(cx, ids!(providers_modal))
+                .borrow_mut::<ProviderSettingsModal>()
+            {
+                modal.set_mcp_status(
+                    cx,
+                    "HTTP/SSE MCP servers are not supported yet; use a stdio command.",
+                );
+            }
+            return;
+        }
+
+        let global_dir = threadlane_coding_agent::default_global_threadlane_dir();
+        let work_dir = self.active_work_dir().map(Path::to_path_buf);
+
+        if scope == threadlane_coding_agent::McpScope::Project && work_dir.is_none() {
+            if let Some(mut modal) = self
+                .ui
+                .widget(cx, ids!(providers_modal))
+                .borrow_mut::<ProviderSettingsModal>()
+            {
+                modal.set_mcp_status(cx, "Attach a project to add project-scoped MCP servers.");
+            }
+            return;
+        };
+
+        let mut configs = match scope {
+            threadlane_coding_agent::McpScope::Global => {
+                threadlane_coding_agent::McpSettings::load_global(global_dir.as_deref())
+            }
+            threadlane_coding_agent::McpScope::Project => {
+                threadlane_coding_agent::McpSettings::load_project(work_dir.as_deref())
+            }
+        };
+
+        let id = name.to_lowercase().replace(' ', "_");
+
+        let mut parts = command.split_whitespace();
+        let cmd = parts.next().unwrap_or("").to_string();
+        let args: Vec<String> = parts.map(String::from).collect();
+        let transport = threadlane_coding_agent::McpTransport::Stdio {
+            command: cmd,
+            args,
+            env: std::collections::HashMap::new(),
+        };
+
+        let new_config = threadlane_coding_agent::McpServerConfig {
+            id,
+            name: name.clone(),
+            transport,
+            enabled: true,
+            scope,
+        };
+
+        configs.retain(|c| c.id != new_config.id);
+        configs.push(new_config);
+
+        let save_result = match scope {
+            threadlane_coding_agent::McpScope::Global => {
+                threadlane_coding_agent::McpSettings::save_global(
+                    global_dir.as_deref().unwrap(),
+                    &configs,
+                )
+            }
+            threadlane_coding_agent::McpScope::Project => {
+                threadlane_coding_agent::McpSettings::save_project(
+                    work_dir.as_deref().unwrap(),
+                    &configs,
+                )
+            }
+        };
+        match save_result {
+            Ok(()) => {
+                self.refresh_live_session_mcp();
+                self.refresh_mcp_state(cx);
+                if let Some(mut modal) = self
+                    .ui
+                    .widget(cx, ids!(providers_modal))
+                    .borrow_mut::<ProviderSettingsModal>()
+                {
+                    modal.set_mcp_status(cx, &format!("Added MCP server '{}'.", name));
+                }
+            }
+            Err(e) => {
+                if let Some(mut modal) = self
+                    .ui
+                    .widget(cx, ids!(providers_modal))
+                    .borrow_mut::<ProviderSettingsModal>()
+                {
+                    modal.set_mcp_status(cx, &format!("Failed to save MCP server: {e}"));
+                }
+            }
         }
     }
 
@@ -5824,10 +6352,7 @@ impl App {
             .and_then(|work_dir| self.git_status.get(work_dir));
         let has_git = status.is_some();
         if let Some(status) = status {
-            let branch = status
-                .branch
-                .as_deref()
-                .unwrap_or("detached HEAD");
+            let branch = status.branch.as_deref().unwrap_or("detached HEAD");
             let staged = status.files.iter().filter(|file| file.staged).count();
             let changed = status.files.iter().filter(|file| file.unstaged).count();
             let mut summary = Vec::new();
@@ -5860,16 +6385,14 @@ impl App {
             self.ui
                 .label(cx, ids!(git_state_label))
                 .set_text(cx, &state_text);
-            self.ui
-                .label(cx, ids!(git_commit_source_label))
-                .set_text(
-                    cx,
-                    if status.staged_changes {
-                        "STAGED"
-                    } else {
-                        "WORKING TREE"
-                    },
-                );
+            self.ui.label(cx, ids!(git_commit_source_label)).set_text(
+                cx,
+                if status.staged_changes {
+                    "STAGED"
+                } else {
+                    "WORKING TREE"
+                },
+            );
             let (feedback_error, feedback_success) = match self.git_feedback.as_ref() {
                 Some((is_success, message)) => {
                     if *is_success {
@@ -5902,64 +6425,64 @@ impl App {
                 changes.set_files(cx, status.files.clone());
             }
             self.sync_git_selection_ui(cx);
-            self.ui
-                .button(cx, ids!(git_commit_btn))
-                .set_visible(
-                    cx,
-                    status.staged_changes
-                        && !self.git_operation_pending
-                        && !self.git_commit_message_pending
-                        && !self.git_diff_open,
-                );
-            self.ui
-                .view(cx, ids!(git_commit_header))
-                .set_visible(cx, status.has_changes && !self.git_operation_pending && !self.git_diff_open);
-            self.ui
-                .widget(cx, ids!(git_commit_message))
-                .set_visible(cx, status.has_changes && !self.git_operation_pending && !self.git_diff_open);
-            self.ui
-                .button(cx, ids!(git_generate_commit_btn))
-                .set_visible(
-                    cx,
-                    status.has_changes
-                        && !self.git_operation_pending
-                        && !self.git_diff_open,
-                );
+            self.ui.button(cx, ids!(git_commit_btn)).set_visible(
+                cx,
+                status.staged_changes
+                    && !self.git_operation_pending
+                    && !self.git_commit_message_pending
+                    && !self.git_diff_open,
+            );
+            self.ui.view(cx, ids!(git_commit_header)).set_visible(
+                cx,
+                status.has_changes && !self.git_operation_pending && !self.git_diff_open,
+            );
+            self.ui.widget(cx, ids!(git_commit_message)).set_visible(
+                cx,
+                status.has_changes && !self.git_operation_pending && !self.git_diff_open,
+            );
             self.ui
                 .button(cx, ids!(git_generate_commit_btn))
-                .set_text(
+                .set_visible(
                     cx,
-                    if self.git_commit_message_pending {
-                        "Cancel"
-                    } else {
-                        "Generate"
-                    },
+                    status.has_changes && !self.git_operation_pending && !self.git_diff_open,
                 );
+            self.ui.button(cx, ids!(git_generate_commit_btn)).set_text(
+                cx,
+                if self.git_commit_message_pending {
+                    "Cancel"
+                } else {
+                    "Generate"
+                },
+            );
             self.ui
                 .button(cx, ids!(git_generate_commit_btn))
                 .set_enabled(cx, true);
             self.sync_git_commit_button(cx);
             let has_remote = status.remote.is_some();
-            self.ui
-                .view(cx, ids!(git_action_row))
-                .set_visible(
-                    cx,
-                    !self.git_operation_pending
-                        && !self.git_commit_message_pending
-                        && (status.staged_changes
-                            || (has_remote && (status.ahead > 0 || status.behind > 0)))
-                        && !self.git_diff_open,
-                );
-            self.ui
-                .button(cx, ids!(git_push_btn))
-                .set_visible(cx, has_remote && status.ahead > 0 && !self.git_operation_pending);
+            self.ui.view(cx, ids!(git_action_row)).set_visible(
+                cx,
+                !self.git_operation_pending
+                    && !self.git_commit_message_pending
+                    && (status.staged_changes
+                        || (has_remote && (status.ahead > 0 || status.behind > 0)))
+                    && !self.git_diff_open,
+            );
+            self.ui.button(cx, ids!(git_push_btn)).set_visible(
+                cx,
+                has_remote && status.ahead > 0 && !self.git_operation_pending,
+            );
             self.ui.button(cx, ids!(git_push_btn)).set_text(
                 cx,
-                if status.has_upstream { "Push" } else { "Publish" },
+                if status.has_upstream {
+                    "Push"
+                } else {
+                    "Publish"
+                },
             );
-            self.ui
-                .button(cx, ids!(git_pull_btn))
-                .set_visible(cx, has_remote && status.behind > 0 && !self.git_operation_pending);
+            self.ui.button(cx, ids!(git_pull_btn)).set_visible(
+                cx,
+                has_remote && status.behind > 0 && !self.git_operation_pending,
+            );
             let has_github_remote = status
                 .remote
                 .as_deref()
@@ -5995,9 +6518,7 @@ impl App {
                 .set_visible(cx, has_pr_changes);
         }
         let has_agents = self.right_sidebar_agents_available;
-        let tab = if has_agents
-            && (self.right_sidebar_tab == RightSidebarTab::Agents || !has_git)
-        {
+        let tab = if has_agents && (self.right_sidebar_tab == RightSidebarTab::Agents || !has_git) {
             RightSidebarTab::Agents
         } else {
             RightSidebarTab::Git
@@ -6036,9 +6557,10 @@ impl App {
         self.ui
             .view(cx, ids!(git_diff_loading))
             .set_visible(cx, show_git_diff && self.git_diff_pending);
-        self.ui
-            .view(cx, ids!(task_sidebar_wrap))
-            .set_visible(cx, has_agents && tab == RightSidebarTab::Agents && self.task_sidebar_open);
+        self.ui.view(cx, ids!(task_sidebar_wrap)).set_visible(
+            cx,
+            has_agents && tab == RightSidebarTab::Agents && self.task_sidebar_open,
+        );
         crate::components::nav_button::set_selected(
             cx,
             &self.ui.button(cx, ids!(git_tab_btn)),
@@ -6052,10 +6574,8 @@ impl App {
     }
 
     fn set_right_sidebar_width(&mut self, cx: &mut Cx, width: f64) {
-        self.right_sidebar_width = width.clamp(
-            RIGHT_SIDEBAR_MIN_WIDTH,
-            self.right_sidebar_max_width(cx),
-        );
+        self.right_sidebar_width =
+            width.clamp(RIGHT_SIDEBAR_MIN_WIDTH, self.right_sidebar_max_width(cx));
         if let Some(mut sidebar) = self.ui.view(cx, ids!(right_sidebar)).borrow_mut() {
             sidebar.walk.width = Size::Fixed(self.right_sidebar_width);
             sidebar.redraw(cx);
@@ -6066,13 +6586,7 @@ impl App {
     }
 
     fn content_row_width(&self, cx: &Cx) -> Option<f64> {
-        let width = self
-            .ui
-            .view(cx, ids!(content_row))
-            .area()
-            .rect(cx)
-            .size
-            .x;
+        let width = self.ui.view(cx, ids!(content_row)).area().rect(cx).size.x;
         (width > 0.0).then_some(width)
     }
 
@@ -6083,10 +6597,7 @@ impl App {
     }
 
     fn right_sidebar_max_width_for(&self, content_width: f64) -> f64 {
-        (content_width
-            - RIGHT_SIDEBAR_MIN_MAIN_WIDTH
-            - 10.0
-            - 6.0)
+        (content_width - RIGHT_SIDEBAR_MIN_MAIN_WIDTH - 10.0 - 6.0)
             .clamp(RIGHT_SIDEBAR_MIN_WIDTH, RIGHT_SIDEBAR_MAX_WIDTH)
     }
 
@@ -6102,22 +6613,19 @@ impl App {
             .and_then(|work_dir| self.git_status.get(work_dir))
             .is_some_and(|status| status.staged_changes);
         let message = self.ui.text_input(cx, ids!(git_commit_message)).text();
-        self.ui
-            .button(cx, ids!(git_commit_btn))
-            .set_enabled(
-                cx,
-                staged
-                    && !message.trim().is_empty()
-                    && !self.git_operation_pending
-                    && !self.git_commit_message_pending
-                    && !self.git_diff_open,
-            );
+        self.ui.button(cx, ids!(git_commit_btn)).set_enabled(
+            cx,
+            staged
+                && !message.trim().is_empty()
+                && !self.git_operation_pending
+                && !self.git_commit_message_pending
+                && !self.git_diff_open,
+        );
     }
 
     fn sync_git_selection_ui(&self, cx: &mut Cx) {
         let changes_widget = self.ui.widget(cx, ids!(git_changes));
-        let Some(changes) = changes_widget.borrow_mut::<GitChanges>()
-        else {
+        let Some(changes) = changes_widget.borrow_mut::<GitChanges>() else {
             return;
         };
         let selected = changes.selected_count();
@@ -6140,14 +6648,12 @@ impl App {
         self.ui
             .button(cx, ids!(git_unstage_btn))
             .set_visible(cx, unstageable > 0);
-        self.ui
-            .view(cx, ids!(git_stage_row))
-            .set_visible(
-                cx,
-                !self.git_operation_pending
-                    && !self.git_diff_open
-                    && (stageable > 0 || unstageable > 0),
-            );
+        self.ui.view(cx, ids!(git_stage_row)).set_visible(
+            cx,
+            !self.git_operation_pending
+                && !self.git_diff_open
+                && (stageable > 0 || unstageable > 0),
+        );
     }
 
     fn start_git_operation(
@@ -6210,9 +6716,7 @@ impl App {
         self.git_diff_pending = true;
         self.git_diff_open = true;
         self.git_feedback = None;
-        self.ui
-            .label(cx, ids!(git_diff_path))
-            .set_text(cx, &path);
+        self.ui.label(cx, ids!(git_diff_path)).set_text(cx, &path);
         if let Some(mut diff_view) = self
             .ui
             .widget(cx, ids!(git_diff_text))
@@ -6290,11 +6794,9 @@ impl App {
         };
         let has_antigravity_credentials =
             threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some();
-        if let Some(error) = model_credential_error(
-            &model,
-            !api_key.is_empty(),
-            has_antigravity_credentials,
-        ) {
+        if let Some(error) =
+            model_credential_error(&model, !api_key.is_empty(), has_antigravity_credentials)
+        {
             self.git_feedback = Some((false, error.to_owned()));
             self.sync_right_sidebar(cx);
             return;
@@ -6353,8 +6855,7 @@ impl App {
 
     fn start_git_stage_selected(&mut self, cx: &mut Cx, stage: bool) {
         let changes_widget = self.ui.widget(cx, ids!(git_changes));
-        let Some(changes) = changes_widget.borrow_mut::<GitChanges>()
-        else {
+        let Some(changes) = changes_widget.borrow_mut::<GitChanges>() else {
             return;
         };
         let paths = if stage {
@@ -6378,7 +6879,12 @@ impl App {
         drop(changes);
         self.start_git_operation(
             cx,
-            if stage { "stage selected files" } else { "unstage selected files" }.to_owned(),
+            if stage {
+                "stage selected files"
+            } else {
+                "unstage selected files"
+            }
+            .to_owned(),
             move |work_dir| {
                 for path in &paths {
                     if stage {
@@ -6413,17 +6919,11 @@ impl App {
             return;
         };
         let Some(head) = status.branch else {
-            self.git_feedback = Some((
-                false,
-                "Pull requests require a named branch.".to_owned(),
-            ));
+            self.git_feedback = Some((false, "Pull requests require a named branch.".to_owned()));
             self.sync_right_sidebar(cx);
             return;
         };
-        let title = self
-            .ui
-            .text_input(cx, ids!(git_pr_title))
-            .text();
+        let title = self.ui.text_input(cx, ids!(git_pr_title)).text();
         let title = if title.trim().is_empty() {
             format!("Changes from {head}")
         } else {
@@ -6440,10 +6940,9 @@ impl App {
         self.git_pr_request_id = request_id;
         self.sync_right_sidebar(cx);
         get_runtime().spawn(async move {
-            let result = crate::git::create_github_pull_request(
-                &remote, &head, &base, &title, "", draft,
-            )
-            .await;
+            let result =
+                crate::git::create_github_pull_request(&remote, &head, &base, &title, "", draft)
+                    .await;
             let _ = tx.send(GuiAgentEvent::GitHubPullRequestFinished {
                 request_id,
                 work_dir,
@@ -7162,9 +7661,7 @@ impl App {
         self.ui
             .text_input(cx, ids!(git_commit_message))
             .set_text(cx, "");
-        self.ui
-            .text_input(cx, ids!(git_pr_title))
-            .set_text(cx, "");
+        self.ui.text_input(cx, ids!(git_pr_title)).set_text(cx, "");
         if let Some(mut changes) = self
             .ui
             .widget(cx, ids!(git_changes))
@@ -8134,7 +8631,10 @@ impl App {
                         self.sync_task_sidebar(cx);
                     }
                     self.refresh_registered_sessions();
-                    if self.active_work_dir().is_some_and(|active| active == work_dir) {
+                    if self
+                        .active_work_dir()
+                        .is_some_and(|active| active == work_dir)
+                    {
                         self.request_git_status();
                     }
                 }
@@ -8340,9 +8840,7 @@ impl App {
                     match result {
                         Ok(url) => {
                             self.git_pr_created = true;
-                            self.ui
-                                .text_input(cx, ids!(git_pr_title))
-                                .set_text(cx, "");
+                            self.ui.text_input(cx, ids!(git_pr_title)).set_text(cx, "");
                             self.git_feedback = Some((true, "Pull request created.".to_owned()));
                             let _ = robius_open::Uri::new(&url).open();
                         }
@@ -8365,9 +8863,7 @@ impl App {
                     match result {
                         Ok(diff) => {
                             self.git_diff_open = true;
-                            self.ui
-                                .label(cx, ids!(git_diff_path))
-                                .set_text(cx, &path);
+                            self.ui.label(cx, ids!(git_diff_path)).set_text(cx, &path);
                             if let Some(mut diff_view) = self
                                 .ui
                                 .widget(cx, ids!(git_diff_text))
@@ -8435,6 +8931,17 @@ impl App {
                     }
                     self.sync_right_sidebar(cx);
                 }
+                GuiAgentEvent::McpRefreshCompleted(records) => {
+                    self.capability_state.refresh_mcp_records(records);
+                    if let Some(mut modal) = self
+                        .ui
+                        .widget(cx, ids!(providers_modal))
+                        .borrow_mut::<ProviderSettingsModal>()
+                    {
+                        modal.set_mcp_rows(cx, self.capability_state.mcp_servers.clone());
+                        modal.set_mcp_status(cx, "");
+                    }
+                }
                 GuiAgentEvent::BackgroundTask(event) => {
                     let _ = event.into_parts();
                     self.refresh_registered_sessions();
@@ -8481,9 +8988,9 @@ mod workspace_header_tests {
     use super::{
         aggregate_extension_reload_results, append_antigravity_models, clear_composer_for_dispatch,
         compact_workspace_path, extension_reload_matches, extension_reload_status,
-        model_credential_error, ordered_model_options, project_name, session_reload_count,
-        task_sidebar_items, truncate_terminal_output, InputOrigin, ANTIGRAVITY_MODELS,
-        MAX_TERMINAL_OUTPUT, normalize_generated_commit_message,
+        model_credential_error, normalize_generated_commit_message, ordered_model_options,
+        project_name, session_reload_count, task_sidebar_items, truncate_terminal_output,
+        InputOrigin, ANTIGRAVITY_MODELS, MAX_TERMINAL_OUTPUT,
     };
     use crate::workspace::WorkspaceUiState;
     use std::path::{Path, PathBuf};
