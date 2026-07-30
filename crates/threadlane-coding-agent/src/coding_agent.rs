@@ -66,6 +66,7 @@ struct SubagentRunContext {
     extensions: Arc<WasiExtensionManager>,
     parent_event_tx: broadcast::Sender<AgentEvent>,
     parent_leaf_id: Option<String>,
+    journal: Option<SubagentLaneJournal>,
     #[cfg(test)]
     scheduler_observer: Option<AgentWorkObserver>,
     semaphore: Arc<tokio::sync::Semaphore>,
@@ -97,6 +98,7 @@ enum SubagentLaneStatus {
 #[derive(Clone, Debug)]
 struct CompletedSubagentLane {
     lane_name: String,
+    run_id: String,
     parent_leaf_id: Option<String>,
     task: String,
     agent: String,
@@ -1850,7 +1852,6 @@ impl CodingAgent {
         Ok(loaded)
     }
 
-
     /// Rediscover skills for this project, applying any persisted enable/disable
     /// overrides, and refresh the shared registry and the model-facing system prompt.
     pub fn refresh_skills(&mut self) {
@@ -1934,6 +1935,7 @@ impl CodingAgent {
         let runner_work_dir = options.work_dir.clone();
         let runner_extensions = wasi_extensions.clone();
         let runner_event_tx = agent.loop_engine.event_tx.clone();
+        let runner_session_file = session_tree.file_path.clone();
         let runner_semaphore = Arc::new(tokio::sync::Semaphore::new(SUBAGENT_CONCURRENCY_LIMIT));
         let dispatch_parent_leaf = Arc::new(std::sync::Mutex::new(None));
         let completed_subagent_lanes = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1948,11 +1950,16 @@ impl CodingAgent {
             let work_dir = runner_work_dir.clone();
             let extensions = runner_extensions.clone();
             let event_tx = runner_event_tx.clone();
+            let session_file = runner_session_file.clone();
             let semaphore = runner_semaphore.clone();
             let parent_leaf_id = runner_parent_leaf.lock().ok().and_then(|leaf| leaf.clone());
             let completed_lanes = runner_completed_lanes.clone();
             Box::pin(async move {
                 let model = state.lock().await.model.clone();
+                let journal = session_file
+                    .as_deref()
+                    .map(SubagentLaneJournal::load)
+                    .transpose()?;
                 #[cfg(test)]
                 let observer = observer
                     .and_then(|observer| observer.lock().ok().and_then(|value| value.clone()));
@@ -1967,16 +1974,27 @@ impl CodingAgent {
                         extensions,
                         parent_event_tx: event_tx,
                         parent_leaf_id,
+                        journal: journal.clone(),
                         #[cfg(test)]
                         scheduler_observer: observer,
                         semaphore,
                     },
                 )
                 .await?;
+                let lanes_to_finish = lanes.clone();
                 completed_lanes
                     .lock()
                     .map_err(|_| "Completed subagent lane sink is unavailable".to_string())?
                     .extend(lanes);
+                if let Some(journal) = journal {
+                    for lane in lanes_to_finish {
+                        let outcome = match lane.status {
+                            SubagentLaneStatus::Completed => OpOutcome::Completed,
+                            SubagentLaneStatus::Failed => OpOutcome::Failed,
+                        };
+                        journal.finish(&lane.lane_name, &lane.run_id, outcome, lane.error)?;
+                    }
+                }
                 Ok(serde_json::json!({
                     "message": output,
                     "output": output,
@@ -2599,6 +2617,8 @@ async fn run_subagents_with_context(
         let lane_task = task.task.clone();
         let lane_agent = task.agent.clone();
         async move {
+            let lane_name = format!("subagent-{run_id}:{task_index}");
+            let lane_run_id = lane_name.clone();
             let parent_leaf_id = context.parent_leaf_id.clone();
             let _permit = context
                 .semaphore
@@ -2606,13 +2626,22 @@ async fn run_subagents_with_context(
                 .acquire_owned()
                 .await
                 .map_err(|_| "Subagent concurrency limiter closed".to_string())?;
-            let _ = event_tx.send(AgentEvent::SubagentStarted { run_id, task_index });
-            let result = timeout(
-                SUBAGENT_TIMEOUT,
-                run_subagent_task(config, task.task, context, run_id, task_index),
-            )
-            .await
-            .map_err(|_| "Subagent timed out".to_string())?;
+            let start = match context.journal.as_ref() {
+                Some(journal) => journal.start(&lane_name, &lane_run_id, &task.task),
+                None => Ok(()),
+            };
+            let result = match start {
+                Ok(()) => {
+                    let _ = event_tx.send(AgentEvent::SubagentStarted { run_id, task_index });
+                    timeout(
+                        SUBAGENT_TIMEOUT,
+                        run_subagent_task(config, task.task, context, run_id, task_index),
+                    )
+                    .await
+                    .map_err(|_| "Subagent timed out".to_string())?
+                }
+                Err(error) => Err(error),
+            };
             let (succeeded, error) = match &result {
                 Ok(result) if result.error.is_none() => (true, None),
                 Ok(result) => (false, result.error.clone()),
@@ -2625,7 +2654,8 @@ async fn run_subagents_with_context(
                 error,
             });
             let lane = CompletedSubagentLane {
-                lane_name: format!("subagent-{run_id}:{task_index}"),
+                lane_name,
+                run_id: lane_run_id,
                 parent_leaf_id,
                 task: lane_task,
                 agent: lane_agent,
@@ -2700,32 +2730,8 @@ async fn run_subagent_task(
         .model
         .clone()
         .unwrap_or_else(|| context.parent_model.clone());
-    #[cfg(test)]
-    if let Some(observer) = context.scheduler_observer.as_ref() {
-        let scheduler = AgentWorkScheduler::default();
-        scheduler.set_test_observer(observer.clone());
-        scheduler.schedule(AgentWork::QueueMessage("test subagent follow-up".into()));
-        let observed_model = model.clone();
-        let mut agent = Agent::new(context.api_key.clone(), context.account_id.clone(), model);
-        let _ = scheduler.run(&mut agent).await;
-        return Ok(SubagentResult {
-            output: format!("test subagent result ({observed_model})"),
-            thinking: Vec::new(),
-            inner_tools: Vec::new(),
-            error: None,
-            messages: vec![
-                AgentMessage::User {
-                    content: task.clone(),
-                },
-                AgentMessage::Assistant {
-                    content: Some("test subagent result".into()),
-                    tool_calls: None,
-                    stop_reason: None,
-                    deferred_handle: None,
-                },
-            ],
-        });
-    }
+    let lane_name = format!("subagent-{run_id}:{task_index}");
+    let journal_run_id = lane_name.clone();
     let mut agent = Agent::new(
         context.api_key.clone(),
         context.account_id.clone(),
@@ -2743,6 +2749,23 @@ async fn run_subagent_task(
     );
     agent.set_system_prompt(system_prompt).await;
     agent.loop_engine.work_dir = Some(context.work_dir.clone());
+    if let Some(journal) = context.journal.clone() {
+        let lane_name = lane_name.clone();
+        let journal_run_id = journal_run_id.clone();
+        agent.loop_engine.tool_intent_recorder =
+            Some(Arc::new(move |tool_call_id, tool_name, arguments| {
+                let effective_args = serde_json::from_str(arguments).map_err(|error| {
+                    format!("Failed to parse child tool intent arguments: {error}")
+                })?;
+                journal.tool_started(
+                    &lane_name,
+                    &journal_run_id,
+                    tool_call_id,
+                    tool_name,
+                    effective_args,
+                )
+            }));
+    }
 
     let policy = Arc::new(tokio::sync::Mutex::new(
         if config.tools.as_ref().is_some_and(|tools| {
@@ -2776,6 +2799,53 @@ async fn run_subagent_task(
         broker_dispatcher,
     }));
 
+    #[cfg(test)]
+    if let Some(observer) = context.scheduler_observer.as_ref() {
+        if config
+            .tools
+            .as_ref()
+            .map_or(true, |tools| tools.iter().any(|tool| tool == "list_dir"))
+        {
+            let tool_results = agent
+                .loop_engine
+                .execute_tools(&[threadlane_provider::openai::ToolCall {
+                    id: "test-child-tool".into(),
+                    r#type: "function".into(),
+                    function: threadlane_provider::openai::ToolCallFunction {
+                        name: "list_dir".into(),
+                        arguments: "{}".into(),
+                    },
+                    thought_signature: None,
+                }])
+                .await;
+            if tool_results[0].is_error {
+                return Err(tool_results[0].content.clone());
+            }
+        }
+        let scheduler = AgentWorkScheduler::default();
+        scheduler.set_test_observer(observer.clone());
+        scheduler.schedule(AgentWork::QueueMessage("test subagent follow-up".into()));
+        let observed_model = model.clone();
+        let _ = scheduler.run(&mut agent).await;
+        return Ok(SubagentResult {
+            output: format!("test subagent result ({observed_model})"),
+            thinking: Vec::new(),
+            inner_tools: Vec::new(),
+            error: None,
+            messages: vec![
+                AgentMessage::User {
+                    content: task.clone(),
+                },
+                AgentMessage::Assistant {
+                    content: Some("test subagent result".into()),
+                    tool_calls: None,
+                    stop_reason: None,
+                    deferred_handle: None,
+                },
+            ],
+        });
+    }
+
     // The GUI subscribes only to the parent agent. Relay child lifecycle,
     // reasoning, and tool events so users can see subagent progress live.
     // Assistant text stays local and is returned below as one labelled result.
@@ -2790,10 +2860,45 @@ async fn run_subagent_task(
         }
     });
 
+    // Persist only completed child turns; partial stream deltas stay in memory.
+    let mut checkpoint_events = agent.subscribe();
+    let checkpoint_state = agent.loop_engine.state.clone();
+    let checkpoint_journal = context.journal.clone();
+    let checkpoint_lane_name = lane_name.clone();
+    let checkpoint_run_id = journal_run_id.clone();
+    let checkpoint_task = tokio::spawn(async move {
+        let mut checkpoint_cursor = 0;
+        while let Ok(event) = checkpoint_events.recv().await {
+            if matches!(&event, AgentEvent::TurnEnd { .. }) {
+                let messages = checkpoint_state.lock().await.messages.clone();
+                if let Some(journal) = checkpoint_journal.as_ref() {
+                    journal.checkpoint(
+                        &checkpoint_lane_name,
+                        &checkpoint_run_id,
+                        &messages[checkpoint_cursor..],
+                    )?;
+                }
+                checkpoint_cursor = messages.len();
+            }
+            if matches!(&event, AgentEvent::AgentEnd { .. }) {
+                break;
+            }
+        }
+        Ok::<usize, String>(checkpoint_cursor)
+    });
+
     // Preserve provider and tool-loop errors in the command result as well.
     let mut events = agent.subscribe();
     agent.prompt(&task).await;
     while agent_work.run(&mut agent).await {}
+
+    let checkpoint_cursor = checkpoint_task
+        .await
+        .map_err(|error| format!("Child turn checkpoint task failed: {error}"))??;
+    let messages = agent.loop_engine.state.lock().await.messages.clone();
+    if let Some(journal) = context.journal.as_ref() {
+        journal.checkpoint(&lane_name, &journal_run_id, &messages[checkpoint_cursor..])?;
+    }
 
     let mut error = None;
     while let Ok(event) = events.try_recv() {
@@ -3969,6 +4074,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn subagent_intents_are_durable_before_child_execution() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("session.jsonl");
+        let mut options = coding_agent_options(dir.path().to_path_buf());
+        options.session_file = Some(session_file.clone());
+        let coding_agent = CodingAgent::new(options);
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        coding_agent.set_subagent_work_observer(observed.clone());
+
+        let results = coding_agent
+            .agent
+            .loop_engine
+            .execute_tools(&[provider_tool_call(
+                "subagent-call",
+                "subagent",
+                serde_json::json!({
+                    "tasks": [{"agent": "scout", "task": "inspect the project"}],
+                    "parallel": false
+                }),
+            )])
+            .await;
+
+        assert!(!results[0].is_error, "{}", results[0].content);
+        assert_eq!(
+            *observed.lock().unwrap(),
+            vec![AgentWork::QueueMessage("test subagent follow-up".into())]
+        );
+        let records = load_op_records_from_file(&session_file).unwrap();
+        assert!(matches!(
+            records.first(),
+            Some(OpRecord::OperationStarted { kind, .. }) if kind == "subagent"
+        ));
+        assert!(matches!(
+            records.get(1),
+            Some(OpRecord::TaskAttempt { task, .. }) if task == "inspect the project"
+        ));
+    }
+
+    #[tokio::test]
+    async fn subagent_tool_intent_failure_blocks_child_executor() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("missing/session.jsonl");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let (parent_event_tx, _) = broadcast::channel(8);
+        let result = run_subagent_task(
+            AgentConfig {
+                name: "scout".into(),
+                description: "deterministic test scout".into(),
+                tools: None,
+                model: None,
+                system_prompt: "Test scout.".into(),
+                source: crate::agents::AgentSource::Project,
+                file_path: dir.path().to_path_buf(),
+            },
+            "inspect the project".into(),
+            SubagentRunContext {
+                api_key: "test-key".into(),
+                account_id: None,
+                parent_model: "test-model".into(),
+                work_dir: dir.path().to_path_buf(),
+                extensions: Arc::new(WasiExtensionManager::for_project_session(
+                    dir.path(),
+                    "test-session",
+                )),
+                parent_event_tx,
+                parent_leaf_id: None,
+                journal: Some(SubagentLaneJournal::load(&session_file).unwrap()),
+                scheduler_observer: Some(observed.clone()),
+                semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+            },
+            1,
+            0,
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(error) if error.contains("Failed to append subagent lane journal"))
+        );
+        assert!(observed.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn completed_subagents_persist_as_passive_sibling_branches() {
         let dir = tempfile::tempdir().unwrap();
         let session_file = dir.path().join("session.jsonl");
@@ -3976,11 +4163,9 @@ mod tests {
         options.session_file = Some(session_file.clone());
         let mut coding_agent = CodingAgent::new(options);
         coding_agent.set_subagent_work_observer(Arc::new(Mutex::new(Vec::new())));
-        let parent = coding_agent
-            .session_tree
-            .add_message(AgentMessage::User {
-                content: "parent".into(),
-            });
+        let parent = coding_agent.session_tree.add_message(AgentMessage::User {
+            content: "parent".into(),
+        });
         *coding_agent.dispatch_parent_leaf.lock().unwrap() = Some(parent.clone());
 
         let results = coding_agent
