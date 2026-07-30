@@ -94,7 +94,14 @@ pub fn reduce_harness_activity(activities: &mut Vec<HarnessActivity>, activity: 
         .iter_mut()
         .find(|existing| existing.key == activity.key)
     {
-        *existing = activity;
+        if !matches!(
+            existing.status,
+            HarnessActivityStatus::Recovered
+                | HarnessActivityStatus::Aborted
+                | HarnessActivityStatus::Cancelled
+        ) {
+            *existing = activity;
+        }
     } else {
         activities.push(activity);
     }
@@ -1158,6 +1165,30 @@ mod tests {
         assert_eq!(activities[0].status, HarnessActivityStatus::Retrying);
         assert_eq!(activities[0].detail, "Retrying recovery");
         assert_eq!(activities[1].key, "lane-b");
+    }
+
+    #[test]
+    fn harness_activity_ignores_delayed_updates_after_terminal_statuses() {
+        for terminal in [
+            HarnessActivityStatus::Recovered,
+            HarnessActivityStatus::Aborted,
+            HarnessActivityStatus::Cancelled,
+        ] {
+            let mut activities = vec![
+                harness_activity("lane-a", terminal),
+                harness_activity("lane-b", HarnessActivityStatus::Working),
+            ];
+
+            reduce_harness_activity(
+                &mut activities,
+                harness_activity("lane-a", HarnessActivityStatus::Recovering),
+            );
+
+            assert_eq!(activities.len(), 2);
+            assert_eq!(activities[0].key, "lane-a");
+            assert_eq!(activities[0].status, terminal);
+            assert_eq!(activities[1].key, "lane-b");
+        }
     }
 
     #[test]

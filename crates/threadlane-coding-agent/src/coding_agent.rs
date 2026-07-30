@@ -2610,6 +2610,18 @@ impl CodingAgent {
                         status: SubagentRecoveryStatus::Started,
                         detail: Some("Recovering interrupted task".into()),
                     });
+                let retrying = |error: String| {
+                    let _ = self
+                        .agent
+                        .loop_engine
+                        .event_tx
+                        .send(AgentEvent::SubagentRecovery {
+                            run_id: lane.run_id.clone(),
+                            status: SubagentRecoveryStatus::Retrying,
+                            detail: Some("Recovery needs retry".into()),
+                        });
+                    error
+                };
                 if let Some((marker_id, status, error)) =
                     markers.get(&(lane.lane.clone(), lane.run_id.clone()))
                 {
@@ -2655,13 +2667,17 @@ impl CodingAgent {
                                 .is_some_and(|message| !recorded.contains(&message))
                         })
                         .collect::<Vec<_>>();
-                    journal.checkpoint(&lane.lane, &lane.run_id, &persisted)?;
+                    journal
+                        .checkpoint(&lane.lane, &lane.run_id, &persisted)
+                        .map_err(&retrying)?;
                     let outcome = match status.as_str() {
                         "aborted" => OpOutcome::Aborted,
                         "failed" => OpOutcome::Failed,
                         _ => OpOutcome::Completed,
                     };
-                    journal.finish(&lane.lane, &lane.run_id, outcome, error.clone())?;
+                    journal
+                        .finish(&lane.lane, &lane.run_id, outcome, error.clone())
+                        .map_err(&retrying)?;
                     let (status, detail) = match status.as_str() {
                         "aborted" => (SubagentRecoveryStatus::Aborted, "Recovery was aborted"),
                         "failed" => (SubagentRecoveryStatus::Retrying, "Recovery needs retry"),
@@ -2680,7 +2696,9 @@ impl CodingAgent {
                     continue;
                 }
 
-                let claimed_safe_tools = journal.claim_safe_replays(&lane.safe_tools)?;
+                let claimed_safe_tools = journal
+                    .claim_safe_replays(&lane.safe_tools)
+                    .map_err(&retrying)?;
                 let safe_results = self.replay_safe_tools(&claimed_safe_tools).await;
                 let safe_messages = safe_results
                     .iter()
@@ -2714,7 +2732,9 @@ impl CodingAgent {
                     .collect::<Vec<_>>();
                 let mut tool_messages = unsafe_messages;
                 tool_messages.extend(safe_messages.clone());
-                journal.checkpoint(&lane.lane, &lane.run_id, &tool_messages)?;
+                journal
+                    .checkpoint(&lane.lane, &lane.run_id, &tool_messages)
+                    .map_err(&retrying)?;
 
                 if !unsafe_tool_ids.is_empty() {
                     let error =
@@ -2735,8 +2755,11 @@ impl CodingAgent {
                     messages.extend(lane.messages.clone());
                     messages.extend(safe_messages);
                     self.session_tree
-                        .append_passive_branch(lane.source_leaf_id.as_deref(), messages)?;
-                    journal.finish(&lane.lane, &lane.run_id, OpOutcome::Aborted, error)?;
+                        .append_passive_branch(lane.source_leaf_id.as_deref(), messages)
+                        .map_err(&retrying)?;
+                    journal
+                        .finish(&lane.lane, &lane.run_id, OpOutcome::Aborted, error)
+                        .map_err(&retrying)?;
                     let _ = self
                         .agent
                         .loop_engine
@@ -2829,8 +2852,11 @@ impl CodingAgent {
                 });
                 messages.extend(resumed_messages);
                 self.session_tree
-                    .append_passive_branch(lane.source_leaf_id.as_deref(), messages)?;
-                journal.finish(&lane.lane, &lane.run_id, outcome, error)?;
+                    .append_passive_branch(lane.source_leaf_id.as_deref(), messages)
+                    .map_err(&retrying)?;
+                journal
+                    .finish(&lane.lane, &lane.run_id, outcome, error)
+                    .map_err(&retrying)?;
                 let (status, detail) = if status == "completed" {
                     (SubagentRecoveryStatus::Recovered, "Recovery complete")
                 } else {
@@ -4774,6 +4800,53 @@ mod tests {
                 ))
                 .count(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_failure_after_started_emits_retrying() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("session.jsonl");
+        let op_log_file = session_file.with_extension("oplog.jsonl");
+        let op_log_backup = dir.path().join("oplog-backup.jsonl");
+        let journal = SubagentLaneJournal::load(&session_file).unwrap();
+        let identity = journal.start("subagent-1:0", "inspect", None).unwrap();
+        journal
+            .tool_started(
+                &identity.lane_name,
+                &identity.run_id,
+                "unsafe-call",
+                "run_command",
+                serde_json::json!({"command": "pwd"}),
+            )
+            .unwrap();
+
+        let mut options = coding_agent_options(dir.path().to_path_buf());
+        options.session_file = Some(session_file.clone());
+        let mut coding_agent = CodingAgent::new(options);
+        let mut events = coding_agent.agent.subscribe();
+        std::fs::rename(&op_log_file, &op_log_backup).unwrap();
+        std::fs::create_dir(&op_log_file).unwrap();
+
+        let error = coding_agent
+            .recover_interrupted_subagent_lanes()
+            .await
+            .unwrap_err();
+        std::fs::remove_dir(&op_log_file).unwrap();
+        std::fs::rename(&op_log_backup, &op_log_file).unwrap();
+        assert!(error.contains("Failed to append subagent lane journal"));
+        let recovery_statuses = std::iter::from_fn(|| events.try_recv().ok())
+            .filter_map(|event| match event {
+                AgentEvent::SubagentRecovery { status, .. } => Some(status),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            recovery_statuses,
+            vec![
+                threadlane_agent::SubagentRecoveryStatus::Started,
+                threadlane_agent::SubagentRecoveryStatus::Retrying,
+            ]
         );
     }
 
