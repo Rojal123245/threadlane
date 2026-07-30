@@ -148,7 +148,9 @@ pub(crate) fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> Stri
             add_tool_guideline("If a hashline mismatch occurs, re-read the relevant file range with `read_file` to obtain updated line hashes before retrying.");
         }
         if available_tool_names.contains("subagent") {
-            add_tool_guideline("SUBAGENT DELEGATION RULES: Use `subagent` judiciously and only when necessary.");
+            add_tool_guideline(
+                "SUBAGENT DELEGATION RULES: Use `subagent` judiciously and only when necessary.",
+            );
             add_tool_guideline("Do NOT spawn subagents for simple requests, single-file edits, or direct questions—handle them directly.");
             add_tool_guideline("Phase-Ordered Execution: Subagents MUST follow a sequential lifecycle (Research -> Implementation -> Review). NEVER spawn a `reviewer` or `tester` subagent concurrently with or before code changes exist.");
             add_tool_guideline("Parallel subagents are reserved ONLY for independent read-only exploration across multiple files.");
@@ -299,9 +301,7 @@ mod tests {
 
     #[test]
     fn test_run_command_guideline_presence() {
-        let tools = vec![
-            tool("run_command", "Run shell command."),
-        ];
+        let tools = vec![tool("run_command", "Run shell command.")];
         let prompt = build_system_prompt(SystemPromptBuildOptions {
             config: &SystemPromptConfig::default(),
             work_dir: Path::new("/workspace"),
@@ -376,7 +376,9 @@ mod tests {
             loaded_extension_count: 0,
         });
 
-        assert!(prompt.contains("SUBAGENT DELEGATION RULES: Use `subagent` judiciously and only when necessary."));
+        assert!(prompt.contains(
+            "SUBAGENT DELEGATION RULES: Use `subagent` judiciously and only when necessary."
+        ));
         assert!(prompt.contains("NEVER spawn a `reviewer` or `tester` subagent concurrently with or before code changes exist."));
         assert!(!prompt.contains("ALWAYS use the `subagent` tool to fan out work"));
     }

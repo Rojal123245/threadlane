@@ -252,7 +252,9 @@ impl FileTree {
 impl Widget for FileTree {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let count_str = format!("{} items", self.visible_nodes.len());
-        self.view.label(cx, ids!(count_lbl)).set_text(cx, &count_str);
+        self.view
+            .label(cx, ids!(count_lbl))
+            .set_text(cx, &count_str);
 
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {

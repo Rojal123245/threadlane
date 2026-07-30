@@ -176,7 +176,9 @@ pub fn compact_messages_with_strategy(
     strategy: CompactionStrategy,
 ) -> Vec<AgentMessage> {
     match strategy {
-        CompactionStrategy::TokenBudget => compact_messages_to_token_budget(messages, target_tokens),
+        CompactionStrategy::TokenBudget => {
+            compact_messages_to_token_budget(messages, target_tokens)
+        }
         CompactionStrategy::SemanticKeyframes => {
             if messages.len() <= 2 {
                 return messages.to_vec();
@@ -185,7 +187,11 @@ pub fn compact_messages_with_strategy(
             for (idx, msg) in messages.iter().enumerate() {
                 if idx == 0 && matches!(msg, AgentMessage::System { .. }) {
                     keyframes.push(msg.clone());
-                } else if matches!(msg, AgentMessage::User { .. } | AgentMessage::UserWithImages { .. }) && keyframes.len() <= 2 {
+                } else if matches!(
+                    msg,
+                    AgentMessage::User { .. } | AgentMessage::UserWithImages { .. }
+                ) && keyframes.len() <= 2
+                {
                     keyframes.push(msg.clone());
                 }
             }
@@ -194,7 +200,10 @@ pub fn compact_messages_with_strategy(
 
             let recent = compact_messages_to_token_budget(messages, remaining_budget);
             let mut result = keyframes;
-            let mut result_json: Vec<String> = result.iter().filter_map(|m| serde_json::to_string(m).ok()).collect();
+            let mut result_json: Vec<String> = result
+                .iter()
+                .filter_map(|m| serde_json::to_string(m).ok())
+                .collect();
             for msg in recent {
                 if let Ok(json) = serde_json::to_string(&msg) {
                     if !result_json.contains(&json) {
@@ -263,7 +272,11 @@ pub fn prepare_token_optimal_context(
     target_tokens: usize,
 ) -> Vec<AgentMessage> {
     let pruned = prune_historical_tool_outputs(messages, 3);
-    compact_messages_with_strategy(&pruned, target_tokens, CompactionStrategy::SemanticKeyframes)
+    compact_messages_with_strategy(
+        &pruned,
+        target_tokens,
+        CompactionStrategy::SemanticKeyframes,
+    )
 }
 
 fn build_checkpoint(messages: &[AgentMessage]) -> String {
@@ -317,16 +330,19 @@ fn message_excerpt(message: &AgentMessage) -> Option<String> {
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-fn extract_session_insights(
-    messages: &[AgentMessage],
-) -> (Vec<String>, Vec<String>, Vec<String>) {
+fn extract_session_insights(messages: &[AgentMessage]) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut verification = Vec::new();
     let mut gotchas = Vec::new();
     let mut architecture = Vec::new();
 
     for msg in messages {
         match msg {
-            AgentMessage::Tool { name, content, is_error, .. } => {
+            AgentMessage::Tool {
+                name,
+                content,
+                is_error,
+                ..
+            } => {
                 if name == "run_command" {
                     if content.contains("cargo test") && !content.contains("error:") {
                         let line = "cargo test --workspace";
@@ -341,16 +357,20 @@ fn extract_session_insights(
                         }
                     }
                 }
-                if *is_error || content.contains("Access denied") || content.contains("Operation not permitted") {
+                if *is_error
+                    || content.contains("Access denied")
+                    || content.contains("Operation not permitted")
+                {
                     let line = "Command execution in restricted environments may require BypassSandbox mode.";
                     if !gotchas.contains(&line.to_string()) {
                         gotchas.push(line.to_string());
                     }
                 }
             }
-            AgentMessage::Assistant { content: Some(text), .. }
-                if text.contains("Makepad") && text.contains("theme") =>
-            {
+            AgentMessage::Assistant {
+                content: Some(text),
+                ..
+            } if text.contains("Makepad") && text.contains("theme") => {
                 let line = "UI components in crates/threadlane/src must reference theme tokens from crates/threadlane/src/theme/mod.rs.";
                 if !architecture.contains(&line.to_string()) {
                     architecture.push(line.to_string());
@@ -450,18 +470,25 @@ mod tests {
     #[test]
     fn test_semantic_keyframe_compaction() {
         let msgs = vec![
-            AgentMessage::System { content: "System Goal".into() },
-            AgentMessage::User { content: "Initial User Goal".into() },
+            AgentMessage::System {
+                content: "System Goal".into(),
+            },
+            AgentMessage::User {
+                content: "Initial User Goal".into(),
+            },
             AgentMessage::Assistant {
                 content: Some("Intermediate reasoning".into()),
                 tool_calls: None,
                 stop_reason: None,
                 deferred_handle: None,
             },
-            AgentMessage::User { content: "Latest prompt".into() },
+            AgentMessage::User {
+                content: "Latest prompt".into(),
+            },
         ];
 
-        let compacted = compact_messages_with_strategy(&msgs, 200, CompactionStrategy::SemanticKeyframes);
+        let compacted =
+            compact_messages_with_strategy(&msgs, 200, CompactionStrategy::SemanticKeyframes);
         assert!(!compacted.is_empty());
         assert_eq!(compacted[0].role_str(), "system");
     }
@@ -469,8 +496,12 @@ mod tests {
     #[test]
     fn test_prune_historical_tool_outputs_and_optimal_context() {
         let mut msgs = vec![
-            AgentMessage::System { content: "system prompt".into() },
-            AgentMessage::User { content: "initial goal prompt".into() },
+            AgentMessage::System {
+                content: "system prompt".into(),
+            },
+            AgentMessage::User {
+                content: "initial goal prompt".into(),
+            },
         ];
 
         for i in 0..10 {
@@ -493,7 +524,9 @@ mod tests {
 
         let full_count = pruned
             .iter()
-            .filter(|m| matches!(m, AgentMessage::Tool { content, .. } if content.contains("aaaaa")))
+            .filter(
+                |m| matches!(m, AgentMessage::Tool { content, .. } if content.contains("aaaaa")),
+            )
             .count();
         assert_eq!(full_count, 3);
 

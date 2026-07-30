@@ -86,10 +86,7 @@ enum SessionRecord {
         items: Vec<PlanItem>,
     },
     #[serde(rename = "global_fact")]
-    GlobalFact {
-        key: String,
-        value: String,
-    },
+    GlobalFact { key: String, value: String },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -140,7 +137,11 @@ impl SessionTree {
         self.global_facts.get(key).map(|s| s.as_str())
     }
 
-    pub fn set_fact(&mut self, key: impl Into<String>, value: impl Into<String>) -> std::io::Result<()> {
+    pub fn set_fact(
+        &mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> std::io::Result<()> {
         let key = key.into();
         let value = value.into();
 
@@ -906,12 +907,18 @@ mod tests {
         let n1 = tree.add_message(AgentMessage::User {
             content: "root".into(),
         });
-        let n2 = tree.add_message_at_leaf(Some(&n1), AgentMessage::User {
-            content: "lane_a_1".into(),
-        });
-        let n3 = tree.add_message_at_leaf(Some(&n1), AgentMessage::User {
-            content: "lane_b_1".into(),
-        });
+        let n2 = tree.add_message_at_leaf(
+            Some(&n1),
+            AgentMessage::User {
+                content: "lane_a_1".into(),
+            },
+        );
+        let n3 = tree.add_message_at_leaf(
+            Some(&n1),
+            AgentMessage::User {
+                content: "lane_b_1".into(),
+            },
+        );
 
         let branch_a = tree.get_branch_messages(Some(&n2));
         assert_eq!(branch_a.len(), 2);
@@ -951,18 +958,22 @@ mod tests {
         assert_eq!(
             serde_json::to_value(tree.get_branch_messages(branch.last().map(String::as_str)))
                 .unwrap(),
-            serde_json::to_value([vec![AgentMessage::User {
-                content: "parent".into()
-            }], expected].concat())
+            serde_json::to_value(
+                [
+                    vec![AgentMessage::User {
+                        content: "parent".into()
+                    }],
+                    expected
+                ]
+                .concat()
+            )
             .unwrap()
         );
         let loaded = SessionTree::load_from_file(&path).unwrap();
         assert_eq!(loaded.active_node_id(), Some(parent.as_str()));
         assert_eq!(
-            serde_json::to_value(
-                loaded.get_branch_messages(branch.last().map(String::as_str))
-            )
-            .unwrap(),
+            serde_json::to_value(loaded.get_branch_messages(branch.last().map(String::as_str)))
+                .unwrap(),
             serde_json::to_value(tree.get_branch_messages(branch.last().map(String::as_str)))
                 .unwrap()
         );

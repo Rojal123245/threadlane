@@ -183,9 +183,7 @@ impl ProviderClient {
         let (event_tx, mut event_rx) = mpsc::channel(128);
         let client = self.clone();
         let stream_task = tokio::spawn(async move {
-            client
-                .stream_chat_completion(payload, None, event_tx)
-                .await;
+            client.stream_chat_completion(payload, None, event_tx).await;
         });
 
         let mut text = String::new();

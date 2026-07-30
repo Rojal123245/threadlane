@@ -261,8 +261,7 @@ impl Widget for GitChanges {
             let uid = self.widget_uid();
             let list = self.view.portal_list(cx, ids!(list));
             for (index, row) in list.items_with_actions(actions) {
-                let Some(GitChangesRow::File { index: file_index }) =
-                    self.rows.get(index).copied()
+                let Some(GitChangesRow::File { index: file_index }) = self.rows.get(index).copied()
                 else {
                     continue;
                 };

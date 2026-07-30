@@ -350,7 +350,10 @@ pub fn commit_message_diff(work_dir: &Path) -> Result<String, GitError> {
     }
 
     let mut diff = command(work_dir, &["diff", "--"])?;
-    let untracked = command(work_dir, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    let untracked = command(
+        work_dir,
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+    )?;
     for path in untracked.split('\0').filter(|path| !path.is_empty()) {
         let file_diff = diff_file(work_dir, path)?;
         if !file_diff.trim().is_empty() {
@@ -425,7 +428,6 @@ pub fn open_browser_url(cx: &mut makepad_widgets::Cx, url: &str) {
     cx.open_url(url, OpenUrlInPlace::No);
 }
 
-
 fn validate_branch_name(work_dir: &Path, name: &str) -> Result<String, GitError> {
     let name = name.trim();
     if name.is_empty() {
@@ -471,7 +473,11 @@ mod tests {
         assert!(status.staged_changes);
         assert!(status.unstaged_changes);
         assert!(status.has_changes);
-        let mixed = status.files.iter().find(|file| file.path == "mixed.rs").unwrap();
+        let mixed = status
+            .files
+            .iter()
+            .find(|file| file.path == "mixed.rs")
+            .unwrap();
         assert_eq!(mixed.status, "MM");
         assert_eq!(mixed.status_for_section(true), 'M');
         assert_eq!(mixed.status_for_section(false), 'M');
@@ -528,7 +534,11 @@ mod tests {
             Some(("owner".to_owned(), "repo".to_owned()))
         );
         assert_eq!(
-            github_compare_url("git@github.com:owner/repo.git", "enhancements", Some("main")),
+            github_compare_url(
+                "git@github.com:owner/repo.git",
+                "enhancements",
+                Some("main")
+            ),
             Some("https://github.com/owner/repo/compare/main...enhancements?expand=1".to_owned())
         );
     }

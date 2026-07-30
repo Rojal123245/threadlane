@@ -4516,8 +4516,6 @@ impl MatchEvent for App {
             }
         }
 
-
-
         if self
             .ui
             .button(cx, ids!(git_select_all_btn))
@@ -4661,7 +4659,6 @@ impl MatchEvent for App {
                 ProviderSettingsModalAction::None => {}
             }
         }
-
 
         let task_sidebar_uid = self.ui.widget(cx, ids!(task_sidebar)).widget_uid();
         if let Some(action) = actions.find_widget_action(task_sidebar_uid) {
@@ -5153,12 +5150,16 @@ fn format_capabilities_summary(skills: &[SkillMetadata], agents: &[AgentConfig])
 
 impl App {
     fn enqueue_steer_interrupt(&mut self, _cx: &mut Cx, input_text: &str) {
-        let Some(key) = self.workspace_state.active_key().cloned() else { return; };
+        let Some(key) = self.workspace_state.active_key().cloned() else {
+            return;
+        };
         if let Some(runtime) = self.session_runtimes.get(&key) {
             runtime.work_handle.queue_follow_up(input_text.to_string());
         }
         if let Some(workspace) = self.workspace_state.active_workspace_mut() {
-            workspace.chat.push_chat(MsgRole::User, input_text.to_string());
+            workspace
+                .chat
+                .push_chat(MsgRole::User, input_text.to_string());
         }
     }
 
@@ -6393,12 +6394,13 @@ impl App {
 
                 self.sync_git_commit_button(cx);
 
-                self.ui.button(cx, ids!(git_commit_btn)).set_visible(cx, true);
+                self.ui
+                    .button(cx, ids!(git_commit_btn))
+                    .set_visible(cx, true);
 
-                self.ui.button(cx, ids!(git_push_btn)).set_visible(
-                    cx,
-                    has_remote && (status.ahead > 0 || !status.has_upstream),
-                );
+                self.ui
+                    .button(cx, ids!(git_push_btn))
+                    .set_visible(cx, has_remote && (status.ahead > 0 || !status.has_upstream));
                 self.ui.button(cx, ids!(git_push_btn)).set_enabled(
                     cx,
                     (status.ahead > 0 || !status.has_upstream) && !self.git_operation_pending,
@@ -6412,14 +6414,12 @@ impl App {
                     },
                 );
 
-                self.ui.button(cx, ids!(git_pull_btn)).set_visible(
-                    cx,
-                    has_remote && status.behind > 0,
-                );
-                self.ui.button(cx, ids!(git_pull_btn)).set_enabled(
-                    cx,
-                    status.behind > 0 && !self.git_operation_pending,
-                );
+                self.ui
+                    .button(cx, ids!(git_pull_btn))
+                    .set_visible(cx, has_remote && status.behind > 0);
+                self.ui
+                    .button(cx, ids!(git_pull_btn))
+                    .set_enabled(cx, status.behind > 0 && !self.git_operation_pending);
 
                 let has_github_remote = status
                     .remote
@@ -6442,9 +6442,7 @@ impl App {
         let show_git_changes = show_git && !self.git_diff_open;
         let show_git_diff = show_git && self.git_diff_open;
 
-        self.ui
-            .view(cx, ids!(right_sidebar))
-            .set_visible(cx, true);
+        self.ui.view(cx, ids!(right_sidebar)).set_visible(cx, true);
         self.ui
             .view(cx, ids!(right_sidebar_resize_handle))
             .set_visible(cx, true);
@@ -6482,11 +6480,7 @@ impl App {
             .set_visible(cx, show_file_tree);
 
         if show_file_tree {
-            if let Some(mut tree) = self
-                .ui
-                .widget(cx, ids!(file_tree))
-                .borrow_mut::<FileTree>()
-            {
+            if let Some(mut tree) = self.ui.widget(cx, ids!(file_tree)).borrow_mut::<FileTree>() {
                 tree.set_work_dir(cx, self.active_work_dir().map(Path::to_path_buf));
             }
         }
@@ -7662,9 +7656,7 @@ impl App {
             .and_then(|key| self.session_runtimes.get(key))
             .is_some_and(|runtime| runtime.generation.is_some());
         let show_stop = presentation.show_stop(has_generation);
-        self.ui
-            .button(cx, ids!(send_btn))
-            .set_visible(cx, true);
+        self.ui.button(cx, ids!(send_btn)).set_visible(cx, true);
         self.ui
             .button(cx, ids!(stop_btn))
             .set_visible(cx, show_stop);

@@ -32,7 +32,6 @@ fn tool_definitions() -> Vec<Value> {
                 "required": ["path", "content"]
             }
         }),
-
         json!({
             "name": "edit_file_hashline",
             "description": "Edit a file using hash-anchored lines obtained from read_file. Supports line and range replace, insert_after, and delete operations. Format of start_anchor/end_anchor is 'line_number:hash' (e.g. '12:a3f'). Always batch multiple edits for the same file in one tool call.",
@@ -91,7 +90,6 @@ fn tool_definitions() -> Vec<Value> {
                 }
             }
         }),
-
         json!({
             "name": "manage_memory",
             "description": "Manage persistent project architectural insights, conventions, build instructions, or gotchas in .threadlane/memory.md. Actions: 'read' (reads memory.md), 'save' (saves or appends content to memory.md), 'consolidate' (consolidates structured entries under ## Architecture, ## Gotchas, ## Verification Commands).",
@@ -456,7 +454,10 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
         "manage_memory" => {
             let action = match args.get("action").and_then(|v| v.as_str()) {
                 Some(a) => a,
-                None => return "Error: 'action' parameter is required ('read', 'save', 'consolidate')".into(),
+                None => {
+                    return "Error: 'action' parameter is required ('read', 'save', 'consolidate')"
+                        .into()
+                }
             };
             match action {
                 "read" => read_memory_impl(workspace_root),
@@ -508,7 +509,10 @@ fn save_memory_impl(workspace_root: &Path, args: &Value) -> String {
         Some(c) => c,
         None => return "Error: 'content' parameter is required".into(),
     };
-    let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("append");
+    let mode = args
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("append");
 
     let dir = workspace_root.join(".threadlane");
     if let Err(e) = fs::create_dir_all(&dir) {
@@ -914,7 +918,9 @@ mod tests {
         let initial_read = execute_tool_in_workspace("read_memory", "{}", root);
         assert!(initial_read.contains("No persistent memory found"));
 
-        let payload = json!({"content": "## Architectural Decision\nUse Makepad with threadlane state."}).to_string();
+        let payload =
+            json!({"content": "## Architectural Decision\nUse Makepad with threadlane state."})
+                .to_string();
         let save_res = execute_tool_in_workspace("save_memory", &payload, root);
         assert!(save_res.contains("Successfully saved memory"));
 
@@ -980,13 +986,12 @@ mod tests {
     #[test]
     fn test_consolidate_memory_preserves_unmanaged_content() {
         let existing = "# Project Memory\n\nPersonal notes with\nmultiple lines.\n\n## Other Notes\n- Keep this.\n\n## Architecture\n- Existing architecture\n";
-        assert_eq!(consolidate_memory_entries(existing, &[], &[], &[]), existing.trim());
-        let merged = consolidate_memory_entries(
-            existing,
-            &["New architecture".to_string()],
-            &[],
-            &[],
+        assert_eq!(
+            consolidate_memory_entries(existing, &[], &[], &[]),
+            existing.trim()
         );
+        let merged =
+            consolidate_memory_entries(existing, &["New architecture".to_string()], &[], &[]);
 
         assert!(merged.contains("Personal notes with\nmultiple lines."));
         assert!(merged.contains("## Other Notes\n- Keep this."));

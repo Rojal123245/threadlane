@@ -276,6 +276,8 @@ pub struct RecoveryResult {
 pub struct InterruptedSubagentLane {
     pub lane: String,
     pub run_id: String,
+    pub source_leaf_id: Option<String>,
+    pub started_seq: u64,
     pub task: String,
     pub messages: Vec<AgentMessage>,
     pub safe_tools: Vec<OpRecord>,
@@ -287,6 +289,7 @@ pub fn interrupted_subagent_lanes(records: &[OpRecord]) -> Vec<InterruptedSubage
         lane: String,
         run_id: String,
         started_seq: u64,
+        source_leaf_id: Option<String>,
         task: String,
         messages: Vec<(u64, AgentMessage)>,
         tools: Vec<OpRecord>,
@@ -300,12 +303,20 @@ pub fn interrupted_subagent_lanes(records: &[OpRecord]) -> Vec<InterruptedSubage
 
     for (_, record) in ordered {
         match record {
-            OpRecord::OperationStarted { id, lane, seq, .. } if lane.starts_with("subagent-") => {
+            OpRecord::OperationStarted {
+                id,
+                lane,
+                seq,
+                source_leaf_id,
+                kind,
+                ..
+            } if kind == "subagent" => {
                 let index = occurrences.len();
                 occurrences.push(Occurrence {
                     lane: lane.clone(),
                     run_id: id.clone(),
                     started_seq: *seq,
+                    source_leaf_id: source_leaf_id.clone(),
                     task: String::new(),
                     messages: Vec::new(),
                     tools: Vec::new(),
@@ -429,6 +440,8 @@ pub fn interrupted_subagent_lanes(records: &[OpRecord]) -> Vec<InterruptedSubage
             InterruptedSubagentLane {
                 lane: occurrence.lane,
                 run_id: occurrence.run_id,
+                source_leaf_id: occurrence.source_leaf_id,
+                started_seq: occurrence.started_seq,
                 task: occurrence.task,
                 messages: messages.into_iter().map(|(_, message)| message).collect(),
                 safe_tools,
@@ -448,7 +461,10 @@ pub fn interrupted_subagent_lanes(records: &[OpRecord]) -> Vec<InterruptedSubage
 
 /// Reconciles open operations and interrupted tool turns from operation records.
 /// Returns RecoveryResult detailing recovered open operations and safe tools to replay.
-pub fn reconcile_op_log_recovery(session_tree: &mut SessionTree, records: &[OpRecord]) -> RecoveryResult {
+pub fn reconcile_op_log_recovery(
+    session_tree: &mut SessionTree,
+    records: &[OpRecord],
+) -> RecoveryResult {
     let mut open_operations: HashSet<String> = HashSet::new();
     let mut tool_intents: Vec<&OpRecord> = Vec::new();
 
@@ -519,7 +535,9 @@ pub fn reconcile_op_log_recovery(session_tree: &mut SessionTree, records: &[OpRe
                     let synthetic_msg = AgentMessage::Tool {
                         tool_call_id: tool_call_id.clone(),
                         name: tool_name.clone(),
-                        content: format!("[Recovered tool result for read-only operation '{tool_name}']"),
+                        content: format!(
+                            "[Recovered tool result for read-only operation '{tool_name}']"
+                        ),
                         is_error: false,
                     };
                     let anchor = if session_tree.nodes.contains_key(assistant_entry_id) {
@@ -983,9 +1001,24 @@ mod tests {
     #[test]
     fn test_priority_steer_queue_ordering() {
         let mut queue = LaneQueue::default();
-        queue.enqueue_steer_with_priority(AgentMessage::User { content: "normal".into() }, SteerPriority::Normal);
-        queue.enqueue_steer_with_priority(AgentMessage::User { content: "low".into() }, SteerPriority::Low);
-        queue.enqueue_steer_with_priority(AgentMessage::User { content: "high interrupt".into() }, SteerPriority::High);
+        queue.enqueue_steer_with_priority(
+            AgentMessage::User {
+                content: "normal".into(),
+            },
+            SteerPriority::Normal,
+        );
+        queue.enqueue_steer_with_priority(
+            AgentMessage::User {
+                content: "low".into(),
+            },
+            SteerPriority::Low,
+        );
+        queue.enqueue_steer_with_priority(
+            AgentMessage::User {
+                content: "high interrupt".into(),
+            },
+            SteerPriority::High,
+        );
 
         let popped1 = queue.pop_steer().unwrap();
         let popped2 = queue.pop_steer().unwrap();

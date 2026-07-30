@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 
 pub fn classify_tool_replay_safety(tool_name: &str) -> ToolReplaySafety {
     match tool_name {
-        "view_file" | "read_file" | "list_dir" | "grep_search" | "read_url_content" | "search_web"
-        | "list_permissions" => ToolReplaySafety::Safe,
+        "view_file" | "read_file" | "list_dir" | "grep_search" | "read_url_content"
+        | "search_web" | "list_permissions" => ToolReplaySafety::Safe,
         _ => ToolReplaySafety::Never,
     }
 }
@@ -173,10 +173,25 @@ mod tests {
 
     #[test]
     fn test_classify_tool_replay_safety() {
-        assert_eq!(classify_tool_replay_safety("view_file"), ToolReplaySafety::Safe);
-        assert_eq!(classify_tool_replay_safety("list_dir"), ToolReplaySafety::Safe);
-        assert_eq!(classify_tool_replay_safety("grep_search"), ToolReplaySafety::Safe);
-        assert_eq!(classify_tool_replay_safety("replace_file_content"), ToolReplaySafety::Never);
-        assert_eq!(classify_tool_replay_safety("run_command"), ToolReplaySafety::Never);
+        assert_eq!(
+            classify_tool_replay_safety("view_file"),
+            ToolReplaySafety::Safe
+        );
+        assert_eq!(
+            classify_tool_replay_safety("list_dir"),
+            ToolReplaySafety::Safe
+        );
+        assert_eq!(
+            classify_tool_replay_safety("grep_search"),
+            ToolReplaySafety::Safe
+        );
+        assert_eq!(
+            classify_tool_replay_safety("replace_file_content"),
+            ToolReplaySafety::Never
+        );
+        assert_eq!(
+            classify_tool_replay_safety("run_command"),
+            ToolReplaySafety::Never
+        );
     }
 }

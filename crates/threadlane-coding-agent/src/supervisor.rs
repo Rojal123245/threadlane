@@ -1,4 +1,6 @@
-use crate::coding_agent::{abort_open_subagent_operations, CodingAgent, CodingAgentOptions};
+use crate::coding_agent::{
+    abort_open_subagent_operations, CodingAgent, CodingAgentOptions, SubagentCancellationGuard,
+};
 use crate::packages::ExtensionScope;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -168,6 +170,7 @@ struct TaskRuntime {
     status: TaskStatus,
     prompt_lock: Arc<tokio::sync::Mutex<()>>,
     run_handle: Option<tokio::task::AbortHandle>,
+    cancellation_guard: Option<SubagentCancellationGuard>,
     recovery_loaded: bool,
 }
 
@@ -752,6 +755,7 @@ impl HarnessSupervisor {
             status: TaskStatus::Idle,
             prompt_lock: Arc::new(tokio::sync::Mutex::new(())),
             run_handle: None,
+            cancellation_guard: None,
             recovery_loaded: false,
         };
 
@@ -965,6 +969,12 @@ impl HarnessSupervisor {
 
         let handle = tokio::spawn(async move {
             let _guard = prompt_lock.lock().await;
+            let cancellation_guard = runtimes_map
+                .lock()
+                .unwrap()
+                .get_mut(&tid)
+                .and_then(|runtime| runtime.cancellation_guard.take());
+            drop(cancellation_guard);
             let mut agent = agent_arc.lock().await;
             let should_restore = {
                 let mut runtimes = runtimes_map.lock().unwrap();
@@ -1136,24 +1146,32 @@ impl HarnessSupervisor {
                     .map(|session_file| (task.session_id, session_file, run_id))
             })
         };
-        if let Some((session_id, session_file, run_id)) = active_run {
-            abort_open_subagent_operations(&session_file)?;
-            if let Some(run_id) = run_id {
-                let _ = self.finish_recovered_operations(
-                    &session_id,
-                    &session_file,
-                    &[run_id],
-                    threadlane_agent::OpOutcome::Aborted,
-                );
+        let cancellation_guard =
+            if let Some((session_id, session_file, run_id)) = active_run {
+                let guard = abort_open_subagent_operations(&session_file)?;
+                if let Some(run_id) = run_id {
+                    let _ = self.finish_recovered_operations(
+                        &session_id,
+                        &session_file,
+                        &[run_id],
+                        threadlane_agent::OpOutcome::Aborted,
+                    );
+                }
+                Some(guard)
+            } else {
+                None
+            };
+        let handle = {
+            let mut runtimes = self.runtimes.lock().unwrap();
+            if let Some(runtime) = runtimes.get_mut(task_id) {
+                runtime.cancellation_guard = cancellation_guard;
+                runtime.run_handle.take()
+            } else {
+                drop(cancellation_guard);
+                None
             }
-        }
-        if let Some(handle) = self
-            .runtimes
-            .lock()
-            .unwrap()
-            .get_mut(task_id)
-            .and_then(|runtime| runtime.run_handle.take())
-        {
+        };
+        if let Some(handle) = handle {
             handle.abort();
         }
         let finished_at_ms = now_ms();
@@ -1312,9 +1330,7 @@ fn observe_subagent_lane(
     event: &AgentEvent,
 ) {
     let AgentEvent::SubagentQueued {
-        run_id,
-        task_index,
-        ..
+        run_id, task_index, ..
     } = event
     else {
         return;
@@ -1430,7 +1446,7 @@ mod tests {
     use threadlane_agent::TokenUsage;
 
     #[tokio::test]
-    async fn tool_started_is_durable_before_execution() {
+    async fn recovery_replay_does_not_record_a_main_lane_intent() {
         let dir = tempfile::tempdir().unwrap();
         let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
         let session_file = dir.path().join("session.jsonl");
@@ -1493,9 +1509,10 @@ mod tests {
             &session_file.with_extension("oplog.jsonl"),
         )
         .unwrap();
+        assert_eq!(records.len(), 1);
         assert!(matches!(
             records.last(),
-            Some(OpRecord::ToolStarted { tool_call_id, .. }) if tool_call_id == "call-1"
+            Some(OpRecord::OperationStarted { id, .. }) if id == "run-1"
         ));
     }
 
@@ -1714,6 +1731,83 @@ mod tests {
                 "expected one terminal record for {run_id}",
             );
         }
+    }
+
+    #[tokio::test]
+    async fn cancellation_guard_stays_installed_until_the_next_submission() {
+        let global_dir = tempfile::tempdir().unwrap();
+        let project_dir = tempfile::tempdir().unwrap();
+        let supervisor = HarnessSupervisor::new(global_dir.path().to_path_buf());
+        let project = supervisor.register_project(project_dir.path()).unwrap();
+        let task_id = supervisor
+            .create_task(
+                &project.id,
+                None,
+                CodingAgentOptions {
+                    api_key: "test_key".into(),
+                    account_id: None,
+                    model: "gpt-4o".into(),
+                    work_dir: project_dir.path().to_path_buf(),
+                    session_file: None,
+                    system_prompt: Default::default(),
+                },
+            )
+            .unwrap();
+
+        supervisor.cancel_task(&task_id).unwrap();
+        assert!(supervisor
+            .runtimes
+            .lock()
+            .unwrap()
+            .get(&task_id)
+            .unwrap()
+            .cancellation_guard
+            .is_some());
+
+        let prompt_lock = supervisor
+            .runtimes
+            .lock()
+            .unwrap()
+            .get(&task_id)
+            .unwrap()
+            .prompt_lock
+            .clone();
+        let held_prompt = prompt_lock.lock().await;
+        supervisor
+            .submit_input(&task_id, "/subagent".into())
+            .unwrap();
+        tokio::task::yield_now().await;
+        assert!(supervisor
+            .runtimes
+            .lock()
+            .unwrap()
+            .get(&task_id)
+            .unwrap()
+            .cancellation_guard
+            .is_some());
+        drop(held_prompt);
+        for _ in 0..100 {
+            if supervisor
+                .runtimes
+                .lock()
+                .unwrap()
+                .get(&task_id)
+                .unwrap()
+                .cancellation_guard
+                .is_none()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(supervisor
+            .runtimes
+            .lock()
+            .unwrap()
+            .get(&task_id)
+            .unwrap()
+            .cancellation_guard
+            .is_none());
     }
 
     #[test]

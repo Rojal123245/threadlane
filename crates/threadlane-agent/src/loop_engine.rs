@@ -943,6 +943,23 @@ impl AgentLoop {
     }
 
     pub async fn execute_tools(&self, tool_calls: &[ToolCall]) -> Vec<AgentToolResult> {
+        self.execute_tools_with_intent_recorder(tool_calls, self.tool_intent_recorder.clone())
+            .await
+    }
+
+    pub async fn execute_tools_without_intent_recording(
+        &self,
+        tool_calls: &[ToolCall],
+    ) -> Vec<AgentToolResult> {
+        self.execute_tools_with_intent_recorder(tool_calls, None)
+            .await
+    }
+
+    async fn execute_tools_with_intent_recorder(
+        &self,
+        tool_calls: &[ToolCall],
+        intent_recorder: Option<ToolIntentRecorder>,
+    ) -> Vec<AgentToolResult> {
         let mut results = Vec::new();
         let tool_routes = self.tool_execution_routes().await;
         let allowed_tool_names = self.allowed_tool_names.clone();
@@ -950,7 +967,12 @@ impl AgentLoop {
         if self.tool_execution_mode == ToolExecutionMode::Sequential {
             for tc in tool_calls {
                 let res = self
-                    .execute_single_tool(tc, tool_routes.clone(), allowed_tool_names.clone())
+                    .execute_single_tool(
+                        tc,
+                        tool_routes.clone(),
+                        allowed_tool_names.clone(),
+                        intent_recorder.clone(),
+                    )
                     .await;
                 results.push(res);
             }
@@ -962,7 +984,7 @@ impl AgentLoop {
                 let context = ToolRunContext {
                     before_hook: self.before_tool_call_hook.clone(),
                     after_hook: self.after_tool_call_hook.clone(),
-                    intent_recorder: self.tool_intent_recorder.clone(),
+                    intent_recorder: intent_recorder.clone(),
                     event_tx: self.event_tx.clone(),
                     state: self.state.clone(),
                     tool_routes: tool_routes.clone(),
@@ -1006,13 +1028,14 @@ impl AgentLoop {
         tc: &ToolCall,
         tool_routes: Vec<ToolExecutorRoute>,
         allowed_tool_names: Option<HashSet<String>>,
+        intent_recorder: Option<ToolIntentRecorder>,
     ) -> AgentToolResult {
         Self::run_tool_with_hooks(
             tc.clone(),
             ToolRunContext {
                 before_hook: self.before_tool_call_hook.clone(),
                 after_hook: self.after_tool_call_hook.clone(),
-                intent_recorder: self.tool_intent_recorder.clone(),
+                intent_recorder,
                 event_tx: self.event_tx.clone(),
                 state: self.state.clone(),
                 tool_routes,
