@@ -8906,15 +8906,17 @@ mod workspace_header_tests {
             AgentEvent::SubagentStarted {
                 run_id: 7,
                 task_index: 0,
+                journal_run_id: "subagent-run-41".into(),
             },
             AgentEvent::SubagentRecovery {
-                run_id: "subagent-7:0".into(),
+                run_id: "subagent-run-41".into(),
                 status: SubagentRecoveryStatus::Retrying,
                 detail: Some("Recovery needs retry".into()),
             },
             AgentEvent::SubagentFinished {
                 run_id: 7,
                 task_index: 0,
+                journal_run_id: "subagent-run-41".into(),
                 succeeded: true,
                 error: None,
             },
@@ -8923,7 +8925,7 @@ mod workspace_header_tests {
         }
 
         assert_eq!(chat.harness_activities.len(), 1);
-        assert_eq!(chat.harness_activities[0].key, "subagent-7:0");
+        assert_eq!(chat.harness_activities[0].key, "subagent-run-41");
         assert_eq!(
             chat.harness_activities[0].status,
             HarnessActivityStatus::Recovered

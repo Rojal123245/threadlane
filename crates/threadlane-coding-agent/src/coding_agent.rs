@@ -3231,7 +3231,11 @@ async fn run_subagents_with_context(
             };
             let result = match start {
                 Ok(identity) => {
-                    let _ = event_tx.send(AgentEvent::SubagentStarted { run_id, task_index });
+                    let _ = event_tx.send(AgentEvent::SubagentStarted {
+                        run_id,
+                        task_index,
+                        journal_run_id: identity.run_id.clone(),
+                    });
                     #[cfg(test)]
                     if let Some(observer) = context.child_work_observer.as_ref() {
                         observer();
@@ -3271,6 +3275,7 @@ async fn run_subagents_with_context(
             let _ = event_tx.send(AgentEvent::SubagentFinished {
                 run_id,
                 task_index,
+                journal_run_id: identity.run_id.clone(),
                 succeeded,
                 error,
             });

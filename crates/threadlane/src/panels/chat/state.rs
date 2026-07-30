@@ -121,8 +121,18 @@ pub fn reduce_harness_event(data: &mut ChatData, event: AgentEvent) {
             status: HarnessActivityStatus::Queued,
             detail: "Queued".into(),
         },
-        AgentEvent::SubagentStarted { run_id, task_index } => {
-            let key = subagent_activity_key(run_id, task_index);
+        AgentEvent::SubagentStarted {
+            run_id,
+            task_index,
+            journal_run_id,
+        } => {
+            let queued_key = subagent_activity_key(run_id, task_index);
+            migrate_harness_activity_key(
+                &mut data.harness_activities,
+                &queued_key,
+                &journal_run_id,
+            );
+            let key = journal_run_id;
             let (task, agent) = harness_activity_identity(&data.harness_activities, &key);
             HarnessActivity {
                 key,
@@ -135,10 +145,17 @@ pub fn reduce_harness_event(data: &mut ChatData, event: AgentEvent) {
         AgentEvent::SubagentFinished {
             run_id,
             task_index,
+            journal_run_id,
             succeeded,
             error,
         } => {
-            let key = subagent_activity_key(run_id, task_index);
+            let queued_key = subagent_activity_key(run_id, task_index);
+            migrate_harness_activity_key(
+                &mut data.harness_activities,
+                &queued_key,
+                &journal_run_id,
+            );
+            let key = journal_run_id;
             let (task, agent) = harness_activity_identity(&data.harness_activities, &key);
             let (status, detail) = subagent_finished_status(succeeded, error.as_deref());
             HarnessActivity {
@@ -184,6 +201,14 @@ pub fn reduce_harness_event(data: &mut ChatData, event: AgentEvent) {
 
 fn subagent_activity_key(run_id: u64, task_index: usize) -> String {
     format!("subagent-{run_id}:{task_index}")
+}
+
+fn migrate_harness_activity_key(activities: &mut [HarnessActivity], from: &str, to: &str) {
+    if from != to {
+        if let Some(activity) = activities.iter_mut().find(|activity| activity.key == from) {
+            activity.key = to.into();
+        }
+    }
 }
 
 fn harness_activity_identity(activities: &[HarnessActivity], key: &str) -> (String, String) {
@@ -1317,6 +1342,7 @@ mod tests {
             AgentEvent::SubagentFinished {
                 run_id: 4,
                 task_index: 1,
+                journal_run_id: "subagent-run-4".into(),
                 succeeded: false,
                 error: Some("provider unavailable".into()),
             },
@@ -1351,6 +1377,7 @@ mod tests {
                 AgentEvent::SubagentFinished {
                     run_id: 5,
                     task_index,
+                    journal_run_id: format!("subagent-run-{task_index}"),
                     succeeded: false,
                     error: Some(error.into()),
                 },

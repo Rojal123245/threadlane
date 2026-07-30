@@ -52,10 +52,12 @@ pub enum AgentEvent {
     SubagentStarted {
         run_id: u64,
         task_index: usize,
+        journal_run_id: String,
     },
     SubagentFinished {
         run_id: u64,
         task_index: usize,
+        journal_run_id: String,
         succeeded: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,

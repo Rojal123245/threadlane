@@ -1382,7 +1382,9 @@ fn apply_subagent_event(
             );
             true
         }
-        AgentEvent::SubagentStarted { run_id, task_index } => {
+        AgentEvent::SubagentStarted {
+            run_id, task_index, ..
+        } => {
             let id = format!("subagent-{run_id}:{task_index}");
             let Some(task) = tasks.get_mut(&id) else {
                 return false;
@@ -1417,6 +1419,7 @@ fn apply_subagent_event(
             task_index,
             succeeded,
             error,
+            ..
         } => {
             let id = format!("subagent-{run_id}:{task_index}");
             let Some(task) = tasks.get_mut(&id) else {
@@ -1845,6 +1848,7 @@ mod tests {
             &AgentEvent::SubagentStarted {
                 run_id: 7,
                 task_index: 1,
+                journal_run_id: "subagent-run-1".into(),
             },
         ));
         assert_eq!(tasks["subagent-7:1"].status, TaskStatus::Running);
@@ -1913,6 +1917,7 @@ mod tests {
             &AgentEvent::SubagentFinished {
                 run_id: 9,
                 task_index: 0,
+                journal_run_id: "subagent-run-2".into(),
                 succeeded: false,
                 error: Some("provider failed".into()),
             },
