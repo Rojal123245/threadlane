@@ -119,6 +119,13 @@ struct SubagentLaneJournal {
     records: Arc<std::sync::Mutex<Vec<OpRecord>>>,
 }
 
+#[derive(Clone)]
+enum InterruptedSubagentRecoveryState {
+    Pending,
+    Complete,
+    Failed(String),
+}
+
 impl SubagentLaneJournal {
     fn load(session_file: &Path) -> Result<Self, String> {
         let records = load_op_records_from_file(session_file)
@@ -1553,6 +1560,7 @@ pub struct CodingAgent {
     dispatch_parent_leaf: Arc<std::sync::Mutex<Option<String>>>,
     completed_subagent_lanes: Arc<std::sync::Mutex<Vec<CompletedSubagentLane>>>,
     interrupted_subagent_journal: Option<SubagentLaneJournal>,
+    interrupted_subagent_recovery: InterruptedSubagentRecoveryState,
     #[cfg(test)]
     subagent_work_observer: SubagentObserverState,
 }
@@ -1942,11 +1950,14 @@ impl CodingAgent {
         session_tree
             .model
             .get_or_insert_with(|| effective_model.clone());
-        let interrupted_subagent_journal = session_tree.file_path.as_deref().and_then(|path| {
-            SubagentLaneJournal::load(path)
-                .map_err(|error| eprintln!("Failed to load interrupted subagent journal: {error}"))
-                .ok()
-        });
+        let (interrupted_subagent_journal, interrupted_subagent_recovery) =
+            match session_tree.file_path.as_deref() {
+                Some(path) => match SubagentLaneJournal::load(path) {
+                    Ok(journal) => (Some(journal), InterruptedSubagentRecoveryState::Pending),
+                    Err(error) => (None, InterruptedSubagentRecoveryState::Failed(error)),
+                },
+                None => (None, InterruptedSubagentRecoveryState::Complete),
+            };
         let plan_store =
             SessionPlanStore::new(session_tree.plan().clone(), session_tree.file_path.clone());
         let mut agent = Agent::new(&options.api_key, options.account_id, &effective_model);
@@ -2153,6 +2164,7 @@ impl CodingAgent {
             dispatch_parent_leaf,
             completed_subagent_lanes,
             interrupted_subagent_journal,
+            interrupted_subagent_recovery,
             #[cfg(test)]
             subagent_work_observer,
         }
@@ -2332,97 +2344,180 @@ impl CodingAgent {
     }
 
     async fn recover_interrupted_subagent_lanes(&mut self) -> Result<usize, String> {
-        let Some(journal) = self.interrupted_subagent_journal.clone() else {
-            return Ok(0);
-        };
-        let records = journal.records.lock().map_err(|error| error.to_string())?.clone();
-        let existing_runs = self
-            .session_tree
-            .nodes
-            .values()
-            .filter_map(|node| match &node.message {
-                AgentMessage::Custom {
-                    custom_type,
-                    payload,
-                } if custom_type == "subagent_lane" => payload
-                    .get("run_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                _ => None,
-            })
-            .collect::<HashSet<_>>();
-        let mut recovered = 0;
+        match &self.interrupted_subagent_recovery {
+            InterruptedSubagentRecoveryState::Complete => return Ok(0),
+            InterruptedSubagentRecoveryState::Failed(error) => return Err(error.clone()),
+            InterruptedSubagentRecoveryState::Pending => {}
+        }
 
-        for lane in threadlane_agent::interrupted_subagent_lanes(&records) {
-            if existing_runs.contains(&lane.run_id) {
-                continue;
-            }
-
-            let safe_results = self.replay_safe_tools(&lane.safe_tools).await;
-            let safe_messages = safe_results
-                .iter()
-                .cloned()
-                .map(|result| AgentMessage::Tool {
-                    tool_call_id: result.tool_call_id,
-                    name: result.name,
-                    content: result.content,
-                    is_error: result.is_error,
-                })
-                .collect::<Vec<_>>();
-            let unsafe_tool_ids = lane
-                .unsafe_tools
-                .iter()
-                .filter_map(|record| match record {
-                    OpRecord::ToolStarted { tool_call_id, .. } => Some(tool_call_id.clone()),
+        let result: Result<usize, String> = async {
+            let journal = self
+                .interrupted_subagent_journal
+                .clone()
+                .ok_or_else(|| "Interrupted subagent journal is unavailable".to_string())?;
+            let records = journal.records.lock().map_err(|error| error.to_string())?.clone();
+            let markers = self
+                .session_tree
+                .nodes
+                .values()
+                .filter_map(|node| match &node.message {
+                    AgentMessage::Custom {
+                        custom_type,
+                        payload,
+                    } if custom_type == "subagent_lane" => payload
+                        .get("run_id")
+                        .and_then(Value::as_str)
+                        .map(|run_id| {
+                            (
+                                run_id.to_owned(),
+                                (
+                                    node.id.clone(),
+                                    payload
+                                        .get("status")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("completed")
+                                        .to_owned(),
+                                    payload
+                                        .get("error")
+                                        .and_then(Value::as_str)
+                                        .map(str::to_owned),
+                                ),
+                            )
+                        }),
                     _ => None,
                 })
-                .collect::<HashSet<_>>();
-            let unsafe_messages = lane
-                .messages
-                .iter()
-                .filter(|message| {
-                    matches!(
-                        message,
-                        AgentMessage::Tool { tool_call_id, .. }
-                            if unsafe_tool_ids.contains(tool_call_id)
-                    )
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            let (status, outcome, error) = if !unsafe_messages.is_empty() {
-                (
-                    "aborted",
-                    OpOutcome::Aborted,
-                    Some("Interrupted unsafe tool execution was not replayed".into()),
-                )
-            } else if let Some(result) = safe_results.iter().find(|result| result.is_error) {
-                ("failed", OpOutcome::Failed, Some(result.content.clone()))
-            } else {
-                ("completed", OpOutcome::Completed, None)
-            };
-            let mut messages = Vec::with_capacity(1 + lane.messages.len() + safe_messages.len());
-            messages.push(AgentMessage::Custom {
-                custom_type: "subagent_lane".into(),
-                payload: serde_json::json!({
-                    "lane": lane.lane,
-                    "run_id": lane.run_id,
-                    "agent": "recovered",
-                    "task": lane.task,
-                    "status": status,
-                    "error": error,
-                }),
-            });
-            messages.extend(lane.messages.clone());
-            messages.extend(safe_messages.clone());
-            self.session_tree.append_passive_branch(None, messages)?;
+                .collect::<HashMap<_, _>>();
+            let mut recovered = 0;
 
-            let mut tool_messages = unsafe_messages;
-            tool_messages.extend(safe_messages);
-            journal.checkpoint(&lane.lane, &lane.run_id, &tool_messages)?;
-            journal.finish(&lane.lane, &lane.run_id, outcome, error)?;
-            recovered += 1;
+            for lane in threadlane_agent::interrupted_subagent_lanes(&records) {
+                if let Some((marker_id, status, error)) = markers.get(&lane.run_id) {
+                    let recorded = records
+                        .iter()
+                        .filter_map(|record| match record {
+                            OpRecord::WriteDeferred {
+                                lane: recorded_lane,
+                                run_id,
+                                target,
+                                ..
+                            } if recorded_lane == &lane.lane && run_id == &lane.run_id => {
+                                serde_json::to_value(target).ok()
+                            }
+                            _ => None,
+                        })
+                        .collect::<HashSet<_>>();
+                    let persisted = self
+                        .session_tree
+                        .nodes
+                        .values()
+                        .filter(|node| {
+                            let mut parent = node.parent_id.as_deref();
+                            while let Some(parent_id) = parent {
+                                if parent_id == marker_id {
+                                    return true;
+                                }
+                                parent = self
+                                    .session_tree
+                                    .nodes
+                                    .get(parent_id)
+                                    .and_then(|parent| parent.parent_id.as_deref());
+                            }
+                            false
+                        })
+                        .filter_map(|node| {
+                            (!matches!(node.message, AgentMessage::Custom { .. }))
+                                .then_some(node.message.clone())
+                        })
+                        .filter(|message| {
+                            serde_json::to_value(message)
+                                .ok()
+                                .is_some_and(|message| !recorded.contains(&message))
+                        })
+                        .collect::<Vec<_>>();
+                    journal.checkpoint(&lane.lane, &lane.run_id, &persisted)?;
+                    let outcome = match status.as_str() {
+                        "aborted" => OpOutcome::Aborted,
+                        "failed" => OpOutcome::Failed,
+                        _ => OpOutcome::Completed,
+                    };
+                    journal.finish(&lane.lane, &lane.run_id, outcome, error.clone())?;
+                    recovered += 1;
+                    continue;
+                }
+
+                let safe_results = self.replay_safe_tools(&lane.safe_tools).await;
+                let safe_messages = safe_results
+                    .iter()
+                    .cloned()
+                    .map(|result| AgentMessage::Tool {
+                        tool_call_id: result.tool_call_id,
+                        name: result.name,
+                        content: result.content,
+                        is_error: result.is_error,
+                    })
+                    .collect::<Vec<_>>();
+                let unsafe_tool_ids = lane
+                    .unsafe_tools
+                    .iter()
+                    .filter_map(|record| match record {
+                        OpRecord::ToolStarted { tool_call_id, .. } => Some(tool_call_id.clone()),
+                        _ => None,
+                    })
+                    .collect::<HashSet<_>>();
+                let unsafe_messages = lane
+                    .messages
+                    .iter()
+                    .filter(|message| {
+                        matches!(
+                            message,
+                            AgentMessage::Tool { tool_call_id, .. }
+                                if unsafe_tool_ids.contains(tool_call_id)
+                        )
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let (status, outcome, error) = if !unsafe_tool_ids.is_empty() {
+                    (
+                        "aborted",
+                        OpOutcome::Aborted,
+                        Some("Interrupted unsafe tool execution was not replayed".into()),
+                    )
+                } else if let Some(result) = safe_results.iter().find(|result| result.is_error) {
+                    ("failed", OpOutcome::Failed, Some(result.content.clone()))
+                } else {
+                    ("completed", OpOutcome::Completed, None)
+                };
+                let mut messages =
+                    Vec::with_capacity(1 + lane.messages.len() + safe_messages.len());
+                messages.push(AgentMessage::Custom {
+                    custom_type: "subagent_lane".into(),
+                    payload: serde_json::json!({
+                        "lane": lane.lane,
+                        "run_id": lane.run_id,
+                        "agent": "recovered",
+                        "task": lane.task,
+                        "status": status,
+                        "error": error,
+                    }),
+                });
+                messages.extend(lane.messages.clone());
+                messages.extend(safe_messages.clone());
+                self.session_tree.append_passive_branch(None, messages)?;
+
+                let mut tool_messages = unsafe_messages;
+                tool_messages.extend(safe_messages);
+                journal.checkpoint(&lane.lane, &lane.run_id, &tool_messages)?;
+                journal.finish(&lane.lane, &lane.run_id, outcome, error)?;
+                recovered += 1;
+            }
+            Ok(recovered)
         }
-        Ok(recovered)
+        .await;
+
+        self.interrupted_subagent_recovery = match &result {
+            Ok(_) => InterruptedSubagentRecoveryState::Complete,
+            Err(error) => InterruptedSubagentRecoveryState::Failed(error.clone()),
+        };
+        result
     }
 
     async fn repair_interrupted_history(&mut self) -> bool {
@@ -3546,8 +3641,6 @@ mod tests {
     async fn safe_subagent_recovery_replays_tool_once() {
         let dir = tempfile::tempdir().unwrap();
         let session_file = dir.path().join("session.jsonl");
-        let recovered_file = dir.path().join("recovered.txt");
-        std::fs::write(&recovered_file, "replayed content").unwrap();
         let journal = SubagentLaneJournal::load(&session_file).unwrap();
         journal.start("subagent-1:0", "run-1", "inspect").unwrap();
         journal
@@ -3559,19 +3652,27 @@ mod tests {
                 }],
             )
             .unwrap();
-        journal
-            .tool_started(
-                "subagent-1:0",
-                "run-1",
-                "call-1",
-                "read_file",
-                serde_json::json!({"path": recovered_file}),
-            )
-            .unwrap();
+        append_subagent_tool_record(
+            &session_file,
+            "subagent-1:0",
+            "run-1",
+            "call-1",
+            "test_child_tool",
+            threadlane_agent::ToolReplaySafety::Safe,
+            4,
+        );
 
         let mut options = coding_agent_options(dir.path().to_path_buf());
         options.session_file = Some(session_file.clone());
         let mut coding_agent = CodingAgent::new(options);
+        let executor_count = Arc::new(AtomicU64::new(0));
+        coding_agent
+            .agent
+            .loop_engine
+            .register_tool_executor(Arc::new(CountingSafeToolExecutor {
+                count: executor_count.clone(),
+            }))
+            .unwrap();
         let parent = coding_agent.session_tree.add_message(AgentMessage::User {
             content: "parent".into(),
         });
@@ -3584,6 +3685,7 @@ mod tests {
             1
         );
         assert_eq!(coding_agent.session_tree.active_node_id(), Some(parent.as_str()));
+        assert_eq!(executor_count.load(Ordering::SeqCst), 1);
         assert!(coding_agent.session_tree.nodes.values().any(|node| {
             matches!(
                 &node.message,
@@ -3631,6 +3733,225 @@ mod tests {
             0
         );
         assert_eq!(std::fs::read_to_string(&session_file).unwrap(), after_first_recovery);
+        assert_eq!(executor_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn materialized_open_subagent_recovery_resumes_without_replaying_safe_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("session.jsonl");
+        let journal = SubagentLaneJournal::load(&session_file).unwrap();
+        journal.start("subagent-1:0", "run-1", "inspect").unwrap();
+        let safe_tool = append_subagent_tool_record(
+            &session_file,
+            "subagent-1:0",
+            "run-1",
+            "call-1",
+            "test_child_tool",
+            threadlane_agent::ToolReplaySafety::Safe,
+            3,
+        );
+        let seeded_records = load_op_records_from_file(&session_file).unwrap();
+        let executor_count = Arc::new(AtomicU64::new(0));
+
+        let mut first_options = coding_agent_options(dir.path().to_path_buf());
+        first_options.session_file = Some(session_file.clone());
+        let mut first_agent = CodingAgent::new(first_options);
+        first_agent
+            .agent
+            .loop_engine
+            .register_tool_executor(Arc::new(CountingSafeToolExecutor {
+                count: executor_count.clone(),
+            }))
+            .unwrap();
+        let safe_message = first_agent
+            .replay_safe_tools(&[safe_tool])
+            .await
+            .into_iter()
+            .map(|result| AgentMessage::Tool {
+                tool_call_id: result.tool_call_id,
+                name: result.name,
+                content: result.content,
+                is_error: result.is_error,
+            })
+            .next()
+            .unwrap();
+        assert_eq!(executor_count.load(Ordering::SeqCst), 1);
+        first_agent
+            .session_tree
+            .append_passive_branch(
+                None,
+                vec![
+                    AgentMessage::Custom {
+                        custom_type: "subagent_lane".into(),
+                        payload: serde_json::json!({
+                            "lane": "subagent-1:0",
+                            "run_id": "run-1",
+                            "agent": "recovered",
+                            "task": "inspect",
+                            "status": "completed",
+                            "error": null,
+                        }),
+                    },
+                    AgentMessage::User {
+                        content: "deferred".into(),
+                    },
+                    safe_message,
+                ],
+            )
+            .unwrap();
+        for record in seeded_records {
+            append_op_record_to_file(&session_file, &record).unwrap();
+        }
+        drop(first_agent);
+
+        let mut resumed_options = coding_agent_options(dir.path().to_path_buf());
+        resumed_options.session_file = Some(session_file.clone());
+        let mut resumed_agent = CodingAgent::new(resumed_options);
+        resumed_agent
+            .agent
+            .loop_engine
+            .register_tool_executor(Arc::new(CountingSafeToolExecutor {
+                count: executor_count.clone(),
+            }))
+            .unwrap();
+        assert_eq!(
+            resumed_agent
+                .recover_interrupted_subagent_lanes()
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(executor_count.load(Ordering::SeqCst), 1);
+        let records = load_op_records_from_file(&session_file).unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(record, OpRecord::WriteDeferred { .. }))
+                .count(),
+            2
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(
+                    record,
+                    OpRecord::OperationFinished { run_id, .. } if run_id == "run-1"
+                ))
+                .count(),
+            1
+        );
+        let after_resume = std::fs::read_to_string(&session_file).unwrap();
+        drop(resumed_agent);
+
+        let mut restarted_options = coding_agent_options(dir.path().to_path_buf());
+        restarted_options.session_file = Some(session_file.clone());
+        let mut restarted_agent = CodingAgent::new(restarted_options);
+        restarted_agent
+            .agent
+            .loop_engine
+            .register_tool_executor(Arc::new(CountingSafeToolExecutor {
+                count: executor_count.clone(),
+            }))
+            .unwrap();
+        assert_eq!(
+            restarted_agent
+                .recover_interrupted_subagent_lanes()
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(executor_count.load(Ordering::SeqCst), 1);
+        assert_eq!(std::fs::read_to_string(&session_file).unwrap(), after_resume);
+    }
+
+    #[tokio::test]
+    async fn journal_load_failure_blocks_normal_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut options = coding_agent_options(dir.path().to_path_buf());
+        options.session_file = Some(dir.path().to_path_buf());
+        let mut coding_agent = CodingAgent::new(options);
+
+        let first_error = coding_agent
+            .handle_input_with_images("/subagent", Vec::new())
+            .await
+            .unwrap()
+            .unwrap_err();
+        let second_error = coding_agent
+            .handle_input_with_images("/subagent", Vec::new())
+            .await
+            .unwrap()
+            .unwrap_err();
+
+        assert!(first_error.contains("Failed to load subagent lane journal"));
+        assert_eq!(second_error, first_error);
+        assert!(coding_agent.session_tree.nodes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mixed_subagent_recovery_aborts_unsafe_tool_after_safe_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("session.jsonl");
+        let journal = SubagentLaneJournal::load(&session_file).unwrap();
+        journal.start("subagent-1:0", "run-1", "inspect").unwrap();
+        append_subagent_tool_record(
+            &session_file,
+            "subagent-1:0",
+            "run-1",
+            "safe-call",
+            "test_child_tool",
+            threadlane_agent::ToolReplaySafety::Safe,
+            3,
+        );
+        append_subagent_tool_record(
+            &session_file,
+            "subagent-1:0",
+            "run-1",
+            "unsafe-call",
+            "run_command",
+            threadlane_agent::ToolReplaySafety::Never,
+            4,
+        );
+
+        let mut options = coding_agent_options(dir.path().to_path_buf());
+        options.session_file = Some(session_file.clone());
+        let mut coding_agent = CodingAgent::new(options);
+        let safe_executor_count = Arc::new(AtomicU64::new(0));
+        coding_agent
+            .agent
+            .loop_engine
+            .register_tool_executor(Arc::new(CountingSafeToolExecutor {
+                count: safe_executor_count.clone(),
+            }))
+            .unwrap();
+        let unsafe_executor_count = Arc::new(AtomicU64::new(0));
+        let observed_unsafe_count = unsafe_executor_count.clone();
+        coding_agent.set_tool_intent_recorder(Some(Arc::new(move |_, name, _| {
+            if name == "run_command" {
+                observed_unsafe_count.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        })));
+
+        assert_eq!(
+            coding_agent
+                .recover_interrupted_subagent_lanes()
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(safe_executor_count.load(Ordering::SeqCst), 1);
+        assert_eq!(unsafe_executor_count.load(Ordering::SeqCst), 0);
+        assert!(load_op_records_from_file(&session_file).unwrap().iter().any(|record| {
+            matches!(
+                record,
+                OpRecord::OperationFinished {
+                    run_id,
+                    outcome: OpOutcome::Aborted,
+                    ..
+                } if run_id == "run-1"
+            )
+        }));
     }
 
     #[tokio::test]
@@ -4292,6 +4613,60 @@ mod tests {
             },
             thought_signature: None,
         }
+    }
+
+    struct CountingSafeToolExecutor {
+        count: Arc<AtomicU64>,
+    }
+
+    #[async_trait]
+    impl ToolExecutor for CountingSafeToolExecutor {
+        fn executor_id(&self) -> &str {
+            "threadlane.test.recovery_safe_tool"
+        }
+
+        fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
+            vec![AgentToolDefinition {
+                name: "test_child_tool".into(),
+                description: None,
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+            }]
+        }
+
+        async fn execute_tool(&self, name: &str, _args: &str) -> Option<Result<String, String>> {
+            (name == "test_child_tool").then(|| {
+                self.count.fetch_add(1, Ordering::SeqCst);
+                Ok("safe executor result".into())
+            })
+        }
+    }
+
+    fn append_subagent_tool_record(
+        session_file: &Path,
+        lane: &str,
+        run_id: &str,
+        tool_call_id: &str,
+        tool_name: &str,
+        replay: threadlane_agent::ToolReplaySafety,
+        seq: u64,
+    ) -> OpRecord {
+        let record = OpRecord::ToolStarted {
+            id: format!("tool-{tool_call_id}"),
+            seq,
+            lane: lane.into(),
+            timestamp: seq,
+            run_id: run_id.into(),
+            assistant_entry_id: String::new(),
+            tool_index: 0,
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+            effective_args: serde_json::json!({}),
+            result_entry_id: format!("result-{tool_call_id}"),
+            replay,
+        };
+        append_op_record_to_file(session_file, &record).unwrap();
+        record
     }
 
     #[tokio::test]
