@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
-use threadlane_agent::AgentMessage;
+use threadlane_agent::{AgentEvent, AgentMessage, SubagentRecoveryStatus};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum MsgRole {
@@ -104,6 +104,114 @@ pub fn reduce_harness_activity(activities: &mut Vec<HarnessActivity>, activity: 
         }
     } else {
         activities.push(activity);
+    }
+}
+
+pub fn reduce_harness_event(data: &mut ChatData, event: AgentEvent) {
+    let activity = match event {
+        AgentEvent::SubagentQueued {
+            run_id,
+            task_index,
+            agent,
+            task,
+        } => HarnessActivity {
+            key: subagent_activity_key(run_id, task_index),
+            task,
+            agent,
+            status: HarnessActivityStatus::Queued,
+            detail: "Queued".into(),
+        },
+        AgentEvent::SubagentStarted { run_id, task_index } => {
+            let key = subagent_activity_key(run_id, task_index);
+            let (task, agent) = harness_activity_identity(&data.harness_activities, &key);
+            HarnessActivity {
+                key,
+                task,
+                agent,
+                status: HarnessActivityStatus::Working,
+                detail: "Working".into(),
+            }
+        }
+        AgentEvent::SubagentFinished {
+            run_id,
+            task_index,
+            succeeded,
+            error,
+        } => {
+            let key = subagent_activity_key(run_id, task_index);
+            let (task, agent) = harness_activity_identity(&data.harness_activities, &key);
+            let (status, detail) = subagent_finished_status(succeeded, error.as_deref());
+            HarnessActivity {
+                key,
+                task,
+                agent,
+                status,
+                detail,
+            }
+        }
+        AgentEvent::SubagentRecovery {
+            run_id,
+            status,
+            detail,
+        } => {
+            let (task, agent) = harness_activity_identity(&data.harness_activities, &run_id);
+            let (status, fallback) = match status {
+                SubagentRecoveryStatus::Started => {
+                    (HarnessActivityStatus::Recovering, "Recovering interrupted task")
+                }
+                SubagentRecoveryStatus::Recovered => {
+                    (HarnessActivityStatus::Recovered, "Recovered prior work")
+                }
+                SubagentRecoveryStatus::Retrying => {
+                    (HarnessActivityStatus::Retrying, "Recovery needs retry")
+                }
+                SubagentRecoveryStatus::Aborted => {
+                    (HarnessActivityStatus::Aborted, "Recovery was aborted")
+                }
+            };
+            HarnessActivity {
+                key: run_id,
+                task,
+                agent,
+                status,
+                detail: detail.unwrap_or_else(|| fallback.into()),
+            }
+        }
+        _ => return,
+    };
+    reduce_harness_activity(&mut data.harness_activities, activity);
+}
+
+fn subagent_activity_key(run_id: u64, task_index: usize) -> String {
+    format!("subagent-{run_id}:{task_index}")
+}
+
+fn harness_activity_identity(activities: &[HarnessActivity], key: &str) -> (String, String) {
+    activities
+        .iter()
+        .find(|activity| activity.key == key)
+        .map(|activity| (activity.task.clone(), activity.agent.clone()))
+        .unwrap_or_else(|| ("Subagent task".into(), "subagent".into()))
+}
+
+fn subagent_finished_status(
+    succeeded: bool,
+    error: Option<&str>,
+) -> (HarnessActivityStatus, String) {
+    if succeeded {
+        return (HarnessActivityStatus::Recovered, "Completed".into());
+    }
+    let error = error.unwrap_or("Subagent failed");
+    let normalized = error.to_ascii_lowercase();
+    if normalized.contains("unsafe") {
+        (HarnessActivityStatus::Aborted, "Unsafe interruption".into())
+    } else if normalized.contains("cancel") {
+        (HarnessActivityStatus::Cancelled, "Cancelled".into())
+    } else {
+        (
+            HarnessActivityStatus::Retrying,
+            normalize_whitespace_bounded(error, 160),
+        )
     }
 }
 
@@ -1097,6 +1205,7 @@ pub use crate::path_utils::truncate_chars;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use threadlane_agent::AgentEvent;
 
     fn harness_activity(key: &str, status: HarnessActivityStatus) -> HarnessActivity {
         HarnessActivity {
@@ -1189,6 +1298,67 @@ mod tests {
             assert_eq!(activities[0].status, terminal);
             assert_eq!(activities[1].key, "lane-b");
         }
+    }
+
+    #[test]
+    fn harness_activity_event_keeps_provider_failures_retryable() {
+        let mut data = ChatData::default();
+        reduce_harness_event(
+            &mut data,
+            AgentEvent::SubagentQueued {
+                run_id: 4,
+                task_index: 1,
+                agent: "reviewer".into(),
+                task: "Review the patch".into(),
+            },
+        );
+        reduce_harness_event(
+            &mut data,
+            AgentEvent::SubagentFinished {
+                run_id: 4,
+                task_index: 1,
+                succeeded: false,
+                error: Some("provider unavailable".into()),
+            },
+        );
+
+        assert_eq!(data.harness_activities.len(), 1);
+        assert_eq!(
+            data.harness_activities[0].status,
+            HarnessActivityStatus::Retrying
+        );
+        assert_eq!(data.harness_activities[0].detail, "provider unavailable");
+    }
+
+    #[test]
+    fn harness_activity_event_distinguishes_cancelled_and_unsafe_failures() {
+        let mut data = ChatData::default();
+        for (task_index, error) in [
+            (0, "parent is cancelling"),
+            (1, "unsafe tool interruption"),
+        ] {
+            reduce_harness_event(
+                &mut data,
+                AgentEvent::SubagentQueued {
+                    run_id: 5,
+                    task_index,
+                    agent: "scout".into(),
+                    task: "Inspect the repository".into(),
+                },
+            );
+            reduce_harness_event(
+                &mut data,
+                AgentEvent::SubagentFinished {
+                    run_id: 5,
+                    task_index,
+                    succeeded: false,
+                    error: Some(error.into()),
+                },
+            );
+        }
+
+        assert_eq!(data.harness_activities[0].status, HarnessActivityStatus::Cancelled);
+        assert_eq!(data.harness_activities[1].status, HarnessActivityStatus::Aborted);
     }
 
     #[test]

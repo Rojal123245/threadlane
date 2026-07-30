@@ -17,6 +17,7 @@ use crate::panels::chat::{
     ChatListWidgetRefExt, ComposerState, ComposerStatus, GenerationEvent, StarterPromptAction,
     SubagentRail, ToolFoldHeader,
 };
+use crate::panels::chat::state::reduce_harness_event;
 use crate::panels::command_palette::*;
 
 use crate::panels::sessions::{
@@ -8431,12 +8432,15 @@ impl App {
                     self.sync_task_sidebar(cx);
                 }
             }
-            AgentEvent::TurnStart { .. }
-            | AgentEvent::MessageStart { .. }
-            | AgentEvent::SubagentQueued { .. }
+            event @ (AgentEvent::SubagentQueued { .. }
             | AgentEvent::SubagentStarted { .. }
             | AgentEvent::SubagentFinished { .. }
-            | AgentEvent::SubagentRecovery { .. } => {}
+            | AgentEvent::SubagentRecovery { .. }) => {
+                let Some(key) = target_key else { return };
+                reduce_harness_event(&mut self.workspace_state.workspace_mut(key).chat, event);
+            }
+            AgentEvent::TurnStart { .. }
+            | AgentEvent::MessageStart { .. } => {}
         }
     }
 
@@ -8842,12 +8846,13 @@ mod workspace_header_tests {
         aggregate_extension_reload_results, append_antigravity_models, clear_composer_for_dispatch,
         compact_workspace_path, extension_reload_matches, extension_reload_status,
         model_credential_error, normalize_generated_commit_message, ordered_model_options,
-        project_name, session_reload_count, task_sidebar_items, truncate_terminal_output,
-        InputOrigin, ANTIGRAVITY_MODELS, MAX_TERMINAL_OUTPUT,
+        project_name, reduce_harness_event, session_reload_count, task_sidebar_items,
+        truncate_terminal_output, InputOrigin, ANTIGRAVITY_MODELS, MAX_TERMINAL_OUTPUT,
     };
+    use crate::panels::chat::state::HarnessActivityStatus;
     use crate::workspace::WorkspaceUiState;
     use std::path::{Path, PathBuf};
-    use threadlane_agent::ImageAttachment;
+    use threadlane_agent::{AgentEvent, ImageAttachment, SubagentRecoveryStatus};
     use threadlane_coding_agent::{ExtensionScope, TaskKind, TaskRecord, TaskStatus};
 
     #[test]
@@ -8886,6 +8891,43 @@ mod workspace_header_tests {
         assert_eq!(items[0].session_label, "Architecture review");
         assert_eq!(items[0].session_file.as_ref(), Some(&session_file));
         assert!(items[0].cancellable);
+    }
+
+    #[test]
+    fn harness_event_routing_keeps_one_lane_at_its_latest_terminal_status() {
+        let mut chat = crate::panels::chat::ChatData::default();
+        for event in [
+            AgentEvent::SubagentQueued {
+                run_id: 7,
+                task_index: 0,
+                agent: "scout".into(),
+                task: "Inspect the repository".into(),
+            },
+            AgentEvent::SubagentStarted {
+                run_id: 7,
+                task_index: 0,
+            },
+            AgentEvent::SubagentRecovery {
+                run_id: "subagent-7:0".into(),
+                status: SubagentRecoveryStatus::Retrying,
+                detail: Some("Recovery needs retry".into()),
+            },
+            AgentEvent::SubagentFinished {
+                run_id: 7,
+                task_index: 0,
+                succeeded: true,
+                error: None,
+            },
+        ] {
+            reduce_harness_event(&mut chat, event);
+        }
+
+        assert_eq!(chat.harness_activities.len(), 1);
+        assert_eq!(chat.harness_activities[0].key, "subagent-7:0");
+        assert_eq!(
+            chat.harness_activities[0].status,
+            HarnessActivityStatus::Recovered
+        );
     }
 
     #[test]
