@@ -361,19 +361,27 @@ fn display_rows_with_harness(
         let DisplayRow::SubagentTool(row) = row else {
             continue;
         };
-        let row_activities = activities
-            .iter()
-            .enumerate()
-            .filter(|(_, activity)| {
-                row.rail_items.iter().any(|item| {
-                    item.key.as_deref() == Some(activity.key.as_str())
-                })
-            })
-            .map(|(index, activity)| {
+        let mut row_activities = Vec::new();
+        for (index, activity) in activities.iter().enumerate() {
+            if row
+                .rail_items
+                .iter()
+                .any(|item| item.key.as_deref() == Some(activity.key.as_str()))
+            {
                 matched[index] = true;
-                activity.clone()
-            })
-            .collect::<Vec<_>>();
+                row_activities.push(activity.clone());
+            }
+        }
+        for item in row.rail_items.iter_mut().filter(|item| item.key.is_none()) {
+            let Some((index, activity)) = activities.iter().enumerate().find(|(index, activity)| {
+                !matched[*index] && item.task == activity.task && item.agent == activity.agent
+            }) else {
+                continue;
+            };
+            item.key = Some(activity.key.clone());
+            matched[index] = true;
+            row_activities.push(activity.clone());
+        }
         if !row_activities.is_empty() {
             super::state::merge_harness_activities(&mut row.rail_items, &row_activities);
             row.preview = harness_activity_preview(&row_activities);
@@ -1440,6 +1448,42 @@ mod tests {
         assert_eq!(row.rail_items[1].key.as_deref(), Some("lane-b"));
         assert_eq!(row.rail_items[1].status, "Recovering");
         assert_eq!(row.preview, "Recovering · 2 tasks");
+    }
+
+    #[test]
+    fn cancelled_live_subagent_activity_updates_the_existing_tool_row() {
+        let arguments = serde_json::json!({
+            "parallel": true,
+            "tasks": [{"agent": "scout", "task": "Inspect the repository"}]
+        })
+        .to_string();
+        let message = ChatMessage::Tool {
+            id: "delegate".into(),
+            name: "subagent".into(),
+            arguments,
+            output: String::new(),
+            status: ToolStatus::Running,
+            presentation: super::super::state::tool_presentation("subagent", "{}"),
+            result_preview: String::new(),
+            result_metadata: String::new(),
+            started_at: Instant::now(),
+        };
+        let activities = vec![super::super::state::HarnessActivity {
+            key: "subagent-run-1".into(),
+            task: "Inspect the repository".into(),
+            agent: "scout".into(),
+            status: super::super::state::HarnessActivityStatus::Cancelled,
+            detail: "Cancelled".into(),
+        }];
+
+        let rows = display_rows_with_harness(&[message], None, "", &activities);
+
+        assert_eq!(rows.len(), 1);
+        let DisplayRow::SubagentTool(row) = &rows[0] else {
+            panic!("expected one delegation row");
+        };
+        assert_eq!(row.rail_items[0].status, "Cancelled");
+        assert_eq!(row.preview, "Cancelled · 1 task");
     }
 
     #[test]

@@ -583,6 +583,18 @@ impl ChatData {
     /// commit any partial stream and explicitly finalize running tool rows.
     pub fn mark_generation_stopped(&mut self) {
         self.flush_streaming();
+        for activity in &mut self.harness_activities {
+            if matches!(
+                activity.status,
+                HarnessActivityStatus::Queued
+                    | HarnessActivityStatus::Working
+                    | HarnessActivityStatus::Recovering
+                    | HarnessActivityStatus::Retrying
+            ) {
+                activity.status = HarnessActivityStatus::Cancelled;
+                activity.detail = "Cancelled".into();
+            }
+        }
         for message in &mut self.messages {
             let ChatMessage::Tool {
                 name,
@@ -1527,6 +1539,25 @@ mod tests {
             &data.messages[1],
             ChatMessage::Thinking { text } if text == "partial reasoning"
         ));
+    }
+
+    #[test]
+    fn mark_generation_stopped_cancels_harness_activities() {
+        let mut data = ChatData::default();
+        data.harness_activities.push(HarnessActivity {
+            key: "subagent-run-1".into(),
+            task: "Inspect the repository".into(),
+            agent: "scout".into(),
+            status: HarnessActivityStatus::Working,
+            detail: "Working".into(),
+        });
+
+        data.mark_generation_stopped();
+
+        assert_eq!(
+            data.harness_activities[0].status,
+            HarnessActivityStatus::Cancelled
+        );
     }
 
     #[test]
