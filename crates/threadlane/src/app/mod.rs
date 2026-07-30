@@ -8894,7 +8894,7 @@ mod workspace_header_tests {
     }
 
     #[test]
-    fn harness_event_routing_keeps_one_lane_at_its_latest_terminal_status() {
+    fn partial_journal_start_and_recovery_share_one_harness_activity() {
         let mut chat = crate::panels::chat::ChatData::default();
         for event in [
             AgentEvent::SubagentQueued {
@@ -8903,22 +8903,17 @@ mod workspace_header_tests {
                 agent: "scout".into(),
                 task: "Inspect the repository".into(),
             },
-            AgentEvent::SubagentStarted {
-                run_id: 7,
-                task_index: 0,
-                journal_run_id: "subagent-run-41".into(),
-            },
-            AgentEvent::SubagentRecovery {
-                run_id: "subagent-run-41".into(),
-                status: SubagentRecoveryStatus::Retrying,
-                detail: Some("Recovery needs retry".into()),
-            },
             AgentEvent::SubagentFinished {
                 run_id: 7,
                 task_index: 0,
                 journal_run_id: "subagent-run-41".into(),
-                succeeded: true,
-                error: None,
+                succeeded: false,
+                error: Some("Failed to append subagent lane journal".into()),
+            },
+            AgentEvent::SubagentRecovery {
+                run_id: "subagent-run-41".into(),
+                status: SubagentRecoveryStatus::Recovered,
+                detail: Some("Recovered prior work".into()),
             },
         ] {
             reduce_harness_event(&mut chat, event);

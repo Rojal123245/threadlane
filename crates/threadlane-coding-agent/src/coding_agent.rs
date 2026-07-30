@@ -124,6 +124,12 @@ struct SubagentLaneIdentity {
     started_seq: u64,
 }
 
+#[derive(Debug)]
+struct SubagentStartError {
+    identity: Option<SubagentLaneIdentity>,
+    error: String,
+}
+
 struct SubagentJournalState {
     records: Vec<OpRecord>,
     cancellation_count: usize,
@@ -133,6 +139,8 @@ struct SubagentJournalState {
 struct SubagentLaneJournal {
     op_log_file: PathBuf,
     state: Arc<std::sync::Mutex<SubagentJournalState>>,
+    #[cfg(test)]
+    fail_next_task_attempt: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -160,7 +168,12 @@ impl SubagentLaneJournal {
             .get(&op_log_file)
             .and_then(std::sync::Weak::upgrade)
         {
-            return Ok(Self { op_log_file, state });
+            return Ok(Self {
+                op_log_file,
+                state,
+                #[cfg(test)]
+                fail_next_task_attempt: Arc::new(AtomicBool::new(false)),
+            });
         }
         let records = load_op_records_from_file(&op_log_file)
             .map_err(|error| format!("Failed to load subagent lane journal: {error}"))?;
@@ -169,7 +182,12 @@ impl SubagentLaneJournal {
             cancellation_count: 0,
         }));
         registry.insert(op_log_file.clone(), Arc::downgrade(&state));
-        Ok(Self { op_log_file, state })
+        Ok(Self {
+            op_log_file,
+            state,
+            #[cfg(test)]
+            fail_next_task_attempt: Arc::new(AtomicBool::new(false)),
+        })
     }
 
     fn next_seq(records: &[OpRecord]) -> u64 {
@@ -196,15 +214,26 @@ impl SubagentLaneJournal {
             .clone())
     }
 
+    #[cfg(test)]
+    fn fail_next_task_attempt(&self) {
+        self.fail_next_task_attempt.store(true, Ordering::SeqCst);
+    }
+
     fn start(
         &self,
         lane_hint: &str,
         task: &str,
         source_leaf_id: Option<&str>,
-    ) -> Result<SubagentLaneIdentity, String> {
-        let mut state = self.state.lock().map_err(|error| error.to_string())?;
+    ) -> Result<SubagentLaneIdentity, SubagentStartError> {
+        let mut state = self.state.lock().map_err(|error| SubagentStartError {
+            identity: None,
+            error: error.to_string(),
+        })?;
         if state.cancellation_count > 0 {
-            return Err("Subagent start rejected because the parent is cancelling".into());
+            return Err(SubagentStartError {
+                identity: None,
+                error: "Subagent start rejected because the parent is cancelling".into(),
+            });
         }
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -213,6 +242,12 @@ impl SubagentLaneJournal {
         let started_seq = Self::next_seq(&state.records);
         let run_id = format!("subagent-run-{started_seq}");
         let lane_name = format!("{lane_hint}@{started_seq}");
+        let identity = SubagentLaneIdentity {
+            lane_name: lane_name.clone(),
+            run_id: run_id.clone(),
+            source_leaf_id: source_leaf_id.map(str::to_owned),
+            started_seq,
+        };
         let operation = OpRecord::OperationStarted {
             id: run_id.clone(),
             seq: started_seq,
@@ -222,7 +257,19 @@ impl SubagentLaneJournal {
             kind: "subagent".to_string(),
             system_prompt_override: None,
         };
-        self.append_locked(&mut state, operation)?;
+        self.append_locked(&mut state, operation)
+            .map_err(|error| SubagentStartError {
+                identity: None,
+                error,
+            })?;
+
+        #[cfg(test)]
+        if self.fail_next_task_attempt.swap(false, Ordering::SeqCst) {
+            return Err(SubagentStartError {
+                identity: Some(identity),
+                error: "Failed to append subagent lane journal: test task-attempt failure".into(),
+            });
+        }
 
         let attempt = OpRecord::TaskAttempt {
             id: format!("attempt-{run_id}-1"),
@@ -233,13 +280,12 @@ impl SubagentLaneJournal {
             task: task.to_string(),
             attempt: 1,
         };
-        self.append_locked(&mut state, attempt)?;
-        Ok(SubagentLaneIdentity {
-            lane_name,
-            run_id,
-            source_leaf_id: source_leaf_id.map(str::to_owned),
-            started_seq,
-        })
+        self.append_locked(&mut state, attempt)
+            .map_err(|error| SubagentStartError {
+                identity: Some(identity.clone()),
+                error,
+            })?;
+        Ok(identity)
     }
 
     fn tool_started(
@@ -3256,14 +3302,14 @@ async fn run_subagents_with_context(
                     .map_err(|_| "Subagent timed out".to_string())
                     .map(|result| (result, identity))?
                 }
-                Err(error) => (
+                Err(SubagentStartError { identity, error }) => (
                     Err(error),
-                    SubagentLaneIdentity {
+                    identity.unwrap_or_else(|| SubagentLaneIdentity {
                         lane_name: lane_hint.clone(),
                         run_id: lane_hint,
                         source_leaf_id: parent_leaf_id.clone(),
                         started_seq: 0,
-                    },
+                    }),
                 ),
             };
             let (result, identity) = result;
@@ -4011,7 +4057,7 @@ mod tests {
                 .unwrap();
         assert!(matches!(
             racing_start,
-            Err(error) if error.contains("parent is cancelling")
+            Err(error) if error.error.contains("parent is cancelling")
         ));
         journal
             .finish(
@@ -5705,6 +5751,64 @@ mod tests {
             records.get(1),
             Some(OpRecord::TaskAttempt { task, .. }) if task == "inspect the project"
         ));
+    }
+
+    #[tokio::test]
+    async fn partial_journal_start_finishes_with_the_persisted_run_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("session.jsonl");
+        let journal = SubagentLaneJournal::load(&session_file).unwrap();
+        journal.fail_next_task_attempt();
+        let (parent_event_tx, mut events) = broadcast::channel(8);
+
+        let (_, _, lanes) = run_subagents_with_context(
+            vec![AgentRunTask {
+                agent: "scout".into(),
+                task: "inspect the project".into(),
+                instructions: None,
+                tools: None,
+                model: None,
+            }],
+            false,
+            SubagentRunContext {
+                api_key: "test-key".into(),
+                account_id: None,
+                parent_model: "test-model".into(),
+                work_dir: dir.path().to_path_buf(),
+                extensions: Arc::new(WasiExtensionManager::for_project_session(
+                    dir.path(),
+                    "test-session",
+                )),
+                parent_event_tx,
+                parent_leaf_id: None,
+                journal: Some(journal.clone()),
+                scheduler_observer: None,
+                child_work_observer: None,
+                child_tool_observer: None,
+                semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(lanes[0].status, SubagentLaneStatus::Failed));
+
+        let persisted_run_id = journal
+            .records()
+            .unwrap()
+            .into_iter()
+            .find_map(|record| match record {
+                OpRecord::OperationStarted { id, .. } => Some(id),
+                _ => None,
+            })
+            .unwrap();
+        let finished_run_id = std::iter::from_fn(|| events.try_recv().ok()).find_map(|event| {
+            match event {
+                AgentEvent::SubagentFinished { journal_run_id, .. } => Some(journal_run_id),
+                _ => None,
+            }
+        });
+
+        assert_eq!(finished_run_id.as_deref(), Some(persisted_run_id.as_str()));
     }
 
     #[tokio::test]
