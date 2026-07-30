@@ -17,7 +17,9 @@ use crate::panels::chat::{
     ChatListWidgetRefExt, ComposerState, ComposerStatus, GenerationEvent, StarterPromptAction,
     SubagentRail, ToolFoldHeader,
 };
-use crate::panels::chat::state::reduce_harness_event;
+use crate::panels::chat::state::{
+    harness_activities_from_oplog, reduce_harness_event, HarnessActivity,
+};
 use crate::panels::command_palette::*;
 
 use crate::panels::sessions::{
@@ -41,7 +43,10 @@ use base64::Engine as _;
 use makepad_widgets::text::selection::Cursor;
 use makepad_widgets::*;
 use robius_file_picker::FileDialog;
-use threadlane_agent::{get_runtime, AgentEvent, ImageAttachment, ReasoningEffort, SessionPlan};
+use threadlane_agent::{
+    get_runtime, load_op_records_from_file, AgentEvent, ImageAttachment, ReasoningEffort,
+    SessionPlan,
+};
 use threadlane_coding_agent::{
     default_global_threadlane_dir, discover_agents, AgentConfig, AgentScope, CapabilityCatalog,
     CodingAgent, CodingAgentOptions, CodingAgentWorkHandle, ExtensionManager, ExtensionScope,
@@ -85,6 +90,13 @@ fn normalize_generated_commit_message(raw: &str) -> String {
         .unwrap_or(line)
         .trim();
     truncate_chars(line, 72)
+}
+
+fn restore_harness_activities(session_file: &Path) -> Vec<HarnessActivity> {
+    let oplog_file = session_file.with_extension("oplog.jsonl");
+    load_op_records_from_file(&oplog_file)
+        .map(|records| harness_activities_from_oplog(&records))
+        .unwrap_or_default()
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -4233,10 +4245,12 @@ impl MatchEvent for App {
             .unwrap_or_else(|| SessionKey::project_draft(work_dir));
         if let Some(entry) = initial_entry {
             let messages = coding_agent.session_tree.get_active_branch_messages();
-            self.workspace_state
-                .workspace_mut(SessionKey::new(entry.work_dir, entry.id))
-                .chat
-                .replace_from_agent_messages(&messages);
+            let session_file = entry.session_file.clone();
+            let workspace = self
+                .workspace_state
+                .workspace_mut(SessionKey::new(entry.work_dir, entry.id));
+            workspace.chat.replace_from_agent_messages(&messages);
+            workspace.chat.harness_activities = restore_harness_activities(&session_file);
         }
         self.session_runtimes.insert(
             initial_key,
@@ -7809,6 +7823,10 @@ impl App {
                 .workspace_mut(key.clone())
                 .chat
                 .replace_from_agent_messages(&messages);
+            self.workspace_state
+                .workspace_mut(key.clone())
+                .chat
+                .harness_activities = restore_harness_activities(&entry.session_file);
         }
 
         if let Some((model, reasoning_effort)) = self
@@ -8856,12 +8874,13 @@ mod workspace_header_tests {
         compact_workspace_path, extension_reload_matches, extension_reload_status,
         model_credential_error, normalize_generated_commit_message, ordered_model_options,
         project_name, reduce_harness_event, session_reload_count, task_sidebar_items,
-        truncate_terminal_output, InputOrigin, ANTIGRAVITY_MODELS, MAX_TERMINAL_OUTPUT,
+        restore_harness_activities, truncate_terminal_output, InputOrigin, ANTIGRAVITY_MODELS,
+        MAX_TERMINAL_OUTPUT,
     };
     use crate::panels::chat::state::HarnessActivityStatus;
     use crate::workspace::WorkspaceUiState;
     use std::path::{Path, PathBuf};
-    use threadlane_agent::{AgentEvent, ImageAttachment, SubagentRecoveryStatus};
+    use threadlane_agent::{AgentEvent, ImageAttachment, OpOutcome, OpRecord, SubagentRecoveryStatus};
     use threadlane_coding_agent::{ExtensionScope, TaskKind, TaskRecord, TaskStatus};
 
     #[test]
@@ -8874,6 +8893,57 @@ mod workspace_header_tests {
             normalize_generated_commit_message("feat: add generated commit messages\nDetails"),
             "feat: add generated commit messages"
         );
+    }
+
+    #[test]
+    fn restore_harness_activities_reads_the_session_oplog() {
+        let session_file = std::env::temp_dir().join(format!(
+            "threadlane-harness-restore-{}.jsonl",
+            std::process::id()
+        ));
+        let oplog_file = session_file.with_extension("oplog.jsonl");
+        let records = [
+            OpRecord::OperationStarted {
+                id: "run-restore".into(),
+                seq: 1,
+                lane: "subagent-lane".into(),
+                timestamp: 1,
+                source_leaf_id: None,
+                kind: "subagent".into(),
+                system_prompt_override: None,
+            },
+            OpRecord::TaskAttempt {
+                id: "attempt-restore".into(),
+                seq: 2,
+                lane: "subagent-lane".into(),
+                timestamp: 2,
+                run_id: "run-restore".into(),
+                task: "Inspect persisted history".into(),
+                attempt: 1,
+            },
+            OpRecord::OperationFinished {
+                id: "finish-restore".into(),
+                seq: 3,
+                lane: "subagent-lane".into(),
+                timestamp: 3,
+                run_id: "run-restore".into(),
+                outcome: OpOutcome::Aborted,
+                error: None,
+            },
+        ];
+        let contents = records
+            .iter()
+            .map(|record| serde_json::to_string(record).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&oplog_file, contents).unwrap();
+
+        let activities = restore_harness_activities(&session_file);
+
+        assert_eq!(activities.len(), 1);
+        assert_eq!(activities[0].key, "run-restore");
+        assert_eq!(activities[0].status, HarnessActivityStatus::Cancelled);
+        let _ = std::fs::remove_file(oplog_file);
     }
 
     #[test]
