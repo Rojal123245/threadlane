@@ -65,6 +65,7 @@ struct SubagentRunContext {
     work_dir: PathBuf,
     extensions: Arc<WasiExtensionManager>,
     parent_event_tx: broadcast::Sender<AgentEvent>,
+    parent_leaf_id: Option<String>,
     #[cfg(test)]
     scheduler_observer: Option<AgentWorkObserver>,
     semaphore: Arc<tokio::sync::Semaphore>,
@@ -85,6 +86,23 @@ pub struct AgentRunTask {
     instructions: Option<String>,
     tools: Option<Vec<String>>,
     model: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+enum SubagentLaneStatus {
+    Completed,
+    Failed,
+}
+
+#[derive(Clone, Debug)]
+struct CompletedSubagentLane {
+    lane_name: String,
+    parent_leaf_id: Option<String>,
+    task: String,
+    agent: String,
+    status: SubagentLaneStatus,
+    messages: Vec<AgentMessage>,
+    error: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -1351,6 +1369,8 @@ pub struct CodingAgent {
     mcp_manager: Arc<McpManager>,
     plan_store: SessionPlanStore,
     prompt_templates: Option<Vec<crate::prompt_templates::PromptTemplate>>,
+    dispatch_parent_leaf: Arc<std::sync::Mutex<Option<String>>>,
+    completed_subagent_lanes: Arc<std::sync::Mutex<Vec<CompletedSubagentLane>>>,
     #[cfg(test)]
     subagent_work_observer: SubagentObserverState,
 }
@@ -1771,6 +1791,10 @@ impl CodingAgent {
         let runner_extensions = wasi_extensions.clone();
         let runner_event_tx = agent.loop_engine.event_tx.clone();
         let runner_semaphore = Arc::new(tokio::sync::Semaphore::new(SUBAGENT_CONCURRENCY_LIMIT));
+        let dispatch_parent_leaf = Arc::new(std::sync::Mutex::new(None));
+        let completed_subagent_lanes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runner_parent_leaf = dispatch_parent_leaf.clone();
+        let runner_completed_lanes = completed_subagent_lanes.clone();
         let agent_runner: AgentRunner = Arc::new(move |tasks, parallel| {
             #[cfg(test)]
             let observer = runner_observer.clone();
@@ -1781,12 +1805,14 @@ impl CodingAgent {
             let extensions = runner_extensions.clone();
             let event_tx = runner_event_tx.clone();
             let semaphore = runner_semaphore.clone();
+            let parent_leaf_id = runner_parent_leaf.lock().ok().and_then(|leaf| leaf.clone());
+            let completed_lanes = runner_completed_lanes.clone();
             Box::pin(async move {
                 let model = state.lock().await.model.clone();
                 #[cfg(test)]
                 let observer = observer
                     .and_then(|observer| observer.lock().ok().and_then(|value| value.clone()));
-                let (output, thinking) = run_subagents_with_context(
+                let (output, thinking, lanes) = run_subagents_with_context(
                     tasks,
                     parallel,
                     SubagentRunContext {
@@ -1796,12 +1822,17 @@ impl CodingAgent {
                         work_dir,
                         extensions,
                         parent_event_tx: event_tx,
+                        parent_leaf_id,
                         #[cfg(test)]
                         scheduler_observer: observer,
                         semaphore,
                     },
                 )
                 .await?;
+                completed_lanes
+                    .lock()
+                    .map_err(|_| "Completed subagent lane sink is unavailable".to_string())?
+                    .extend(lanes);
                 Ok(serde_json::json!({
                     "message": output,
                     "output": output,
@@ -1919,6 +1950,8 @@ impl CodingAgent {
             mcp_manager,
             plan_store,
             prompt_templates: None,
+            dispatch_parent_leaf,
+            completed_subagent_lanes,
             #[cfg(test)]
             subagent_work_observer,
         }
@@ -2057,6 +2090,45 @@ impl CodingAgent {
         }
     }
 
+    fn commit_completed_subagent_lanes(&mut self) -> Result<(), String> {
+        let lanes = {
+            let mut completed = self
+                .completed_subagent_lanes
+                .lock()
+                .map_err(|_| "Completed subagent lane sink is unavailable".to_string())?;
+            std::mem::take(&mut *completed)
+        };
+        for (index, lane) in lanes.iter().enumerate() {
+            let status = match lane.status {
+                SubagentLaneStatus::Completed => "completed",
+                SubagentLaneStatus::Failed => "failed",
+            };
+            let mut messages = Vec::with_capacity(lane.messages.len() + 1);
+            messages.push(AgentMessage::Custom {
+                custom_type: "subagent_lane".into(),
+                payload: serde_json::json!({
+                    "lane": lane.lane_name,
+                    "agent": lane.agent,
+                    "task": lane.task,
+                    "status": status,
+                    "error": lane.error,
+                }),
+            });
+            messages.extend(lane.messages.clone());
+            if let Err(error) = self
+                .session_tree
+                .append_passive_branch(lane.parent_leaf_id.as_deref(), messages)
+            {
+                self.completed_subagent_lanes
+                    .lock()
+                    .map_err(|_| "Completed subagent lane sink is unavailable".to_string())?
+                    .extend_from_slice(&lanes[index..]);
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
     async fn repair_interrupted_history(&mut self) -> bool {
         let repaired_branch = {
             let mut state = self.agent.loop_engine.state.lock().await;
@@ -2094,6 +2166,8 @@ impl CodingAgent {
         images: Vec<ImageAttachment>,
     ) -> Option<Result<String, String>> {
         self.repair_interrupted_history().await;
+        *self.dispatch_parent_leaf.lock().unwrap() =
+            self.session_tree.active_node_id().map(str::to_owned);
         let trimmed = input.trim();
 
         // 1. Expand prompt templates (e.g. /review, /component Button) if match
@@ -2129,13 +2203,20 @@ impl CodingAgent {
                             "Use the following Skill instructions for '{}':\n\n{}",
                             skill_name, instructions
                         );
-                        self.session_tree
+                        let parent_leaf = self
+                            .session_tree
                             .add_message(AgentMessage::user(input, images.clone()));
+                        *self.dispatch_parent_leaf.lock().unwrap() = Some(parent_leaf);
                         self.agent
                             .prompt_message(AgentMessage::user(prompt, images.clone()))
                             .await;
                         self.dispatch_assistant_message_hooks().await;
                         self.run_scheduled_agent_work().await;
+                        if let Err(error) = self.commit_completed_subagent_lanes() {
+                            *self.dispatch_parent_leaf.lock().unwrap() = None;
+                            return Some(Err(error));
+                        }
+                        *self.dispatch_parent_leaf.lock().unwrap() = None;
                         return Some(Ok(format!("Loaded skill '{}'", skill_name)));
                     }
                     Err(err) => return Some(Err(format!("Skill Error: {}", err))),
@@ -2154,23 +2235,23 @@ impl CodingAgent {
                     tools: None,
                     model: None,
                 };
+                let parent_leaf = self
+                    .session_tree
+                    .add_message(AgentMessage::user(input, images.clone()));
+                *self.dispatch_parent_leaf.lock().unwrap() = Some(parent_leaf);
                 let result = match (self.agent_runner)(vec![task], false).await {
                     Ok(result) => result,
-                    Err(err) => return Some(Err(format!("Subagent Error: {err}"))),
+                    Err(err) => {
+                        *self.dispatch_parent_leaf.lock().unwrap() = None;
+                        return Some(Err(format!("Subagent Error: {err}")));
+                    }
                 };
                 let output = result["output"].as_str().unwrap_or_default().to_string();
-                let thinking =
-                    match serde_json::from_value::<Vec<AgentMessage>>(result["thinking"].clone()) {
-                        Ok(thinking) => thinking,
-                        Err(err) => {
-                            return Some(Err(format!("Subagent Error: invalid thinking: {err}")))
-                        }
-                    };
-                self.session_tree
-                    .add_message(AgentMessage::user(input, images.clone()));
-                for message in thinking {
-                    self.session_tree.add_message(message);
+                if let Err(error) = self.commit_completed_subagent_lanes() {
+                    *self.dispatch_parent_leaf.lock().unwrap() = None;
+                    return Some(Err(error));
                 }
+                *self.dispatch_parent_leaf.lock().unwrap() = None;
                 self.session_tree.add_message(AgentMessage::Assistant {
                     content: Some(output.clone()),
                     tool_calls: None,
@@ -2185,8 +2266,10 @@ impl CodingAgent {
                 .wasi_extensions
                 .execute_command_with_effects(cmd_name, &cmd_args)
             {
-                self.session_tree
+                let parent_leaf = self
+                    .session_tree
                     .add_message(AgentMessage::user(input, images.clone()));
+                *self.dispatch_parent_leaf.lock().unwrap() = Some(parent_leaf);
                 return match res {
                     Ok(result) => {
                         let message = if result.message.is_empty() {
@@ -2263,6 +2346,11 @@ impl CodingAgent {
                                 }
                             }
                         }
+                        if let Err(error) = self.commit_completed_subagent_lanes() {
+                            *self.dispatch_parent_leaf.lock().unwrap() = None;
+                            return Some(Err(error));
+                        }
+                        *self.dispatch_parent_leaf.lock().unwrap() = None;
                         if let Some(agent_run_output) = agent_run_output {
                             return Some(agent_run_output);
                         }
@@ -2289,10 +2377,23 @@ impl CodingAgent {
         }
 
         let msg = AgentMessage::user(effective_input, images);
-        self.session_tree.add_message(msg.clone());
+        let parent_leaf = self.session_tree.add_message(msg.clone());
+        *self.dispatch_parent_leaf.lock().unwrap() = Some(parent_leaf);
         self.agent.prompt_message(msg).await;
         self.dispatch_assistant_message_hooks().await;
         self.run_scheduled_agent_work().await;
+        if let Err(error) = self.commit_completed_subagent_lanes() {
+            *self.dispatch_parent_leaf.lock().unwrap() = None;
+            let _ = self
+                .agent
+                .loop_engine
+                .event_tx
+                .send(AgentEvent::AgentError {
+                    error: error.clone(),
+                });
+            return Some(Err(error));
+        }
+        *self.dispatch_parent_leaf.lock().unwrap() = None;
 
         None
     }
@@ -2302,7 +2403,7 @@ async fn run_subagents_with_context(
     tasks: Vec<AgentRunTask>,
     parallel: bool,
     context: SubagentRunContext,
-) -> Result<(String, Vec<AgentMessage>), String> {
+) -> Result<(String, Vec<AgentMessage>, Vec<CompletedSubagentLane>), String> {
     let run_id = NEXT_SUBAGENT_UI_RUN_ID.fetch_add(1, Ordering::Relaxed);
     for (task_index, task) in tasks.iter().enumerate() {
         let _ = context.parent_event_tx.send(AgentEvent::SubagentQueued {
@@ -2351,7 +2452,10 @@ async fn run_subagents_with_context(
 
         let context = context.clone();
         let event_tx = context.parent_event_tx.clone();
+        let lane_task = task.task.clone();
+        let lane_agent = task.agent.clone();
         async move {
+            let parent_leaf_id = context.parent_leaf_id.clone();
             let _permit = context
                 .semaphore
                 .clone()
@@ -2366,7 +2470,8 @@ async fn run_subagents_with_context(
             .await
             .map_err(|_| "Subagent timed out".to_string())?;
             let (succeeded, error) = match &result {
-                Ok(_) => (true, None),
+                Ok(result) if result.error.is_none() => (true, None),
+                Ok(result) => (false, result.error.clone()),
                 Err(error) => (false, Some(error.clone())),
             };
             let _ = event_tx.send(AgentEvent::SubagentFinished {
@@ -2375,7 +2480,27 @@ async fn run_subagents_with_context(
                 succeeded,
                 error,
             });
-            result
+            let lane = CompletedSubagentLane {
+                lane_name: format!("subagent-{run_id}:{task_index}"),
+                parent_leaf_id,
+                task: lane_task,
+                agent: lane_agent,
+                status: if succeeded {
+                    SubagentLaneStatus::Completed
+                } else {
+                    SubagentLaneStatus::Failed
+                },
+                messages: result
+                    .as_ref()
+                    .map(|result| result.messages.clone())
+                    .unwrap_or_default(),
+                error: result
+                    .as_ref()
+                    .ok()
+                    .and_then(|result| result.error.clone())
+                    .or_else(|| result.as_ref().err().cloned()),
+            };
+            Ok((result, lane))
         }
     };
     let results = if parallel {
@@ -2398,20 +2523,26 @@ async fn run_subagents_with_context(
                 tools: task.tools,
                 model: task.model,
             };
-            let result = run_one(task_index, task).await;
-            if let Ok(result) = &result {
-                previous = result.output.clone();
+            let result = run_one(task_index, task).await?;
+            if let Ok(output) = &result.0 {
+                previous = output.output.clone();
             }
-            results.push(result);
+            results.push(Ok(result));
         }
         results
     };
-    let thinking = results
+    let results = results.into_iter().collect::<Result<Vec<_>, String>>()?;
+    let (tool_results, lanes): (Vec<_>, Vec<_>) = results.into_iter().unzip();
+    let thinking = tool_results
         .iter()
         .filter_map(|result| result.as_ref().ok())
         .flat_map(|result| result.thinking.clone())
         .collect();
-    Ok((format_subagent_results(tasks, results), thinking))
+    Ok((
+        format_subagent_results(tasks, tool_results),
+        thinking,
+        lanes,
+    ))
 }
 
 async fn run_subagent_task(
@@ -2437,6 +2568,18 @@ async fn run_subagent_task(
             output: format!("test subagent result ({observed_model})"),
             thinking: Vec::new(),
             inner_tools: Vec::new(),
+            error: None,
+            messages: vec![
+                AgentMessage::User {
+                    content: task.clone(),
+                },
+                AgentMessage::Assistant {
+                    content: Some("test subagent result".into()),
+                    tool_calls: None,
+                    stop_reason: None,
+                    deferred_handle: None,
+                },
+            ],
         });
     }
     let mut agent = Agent::new(
@@ -2514,7 +2657,7 @@ async fn run_subagent_task(
             error = Some(message);
         }
     }
-    if let Some(error) = error {
+    if error.is_some() {
         if config.model.is_some() && model != context.parent_model {
             let mut fallback_config = config.clone();
             fallback_config.model = None;
@@ -2527,7 +2670,6 @@ async fn run_subagent_task(
             ))
             .await;
         }
-        return Err(format!("Subagent '{}' failed: {error}", config.name));
     }
 
     let state = agent.get_state().await;
@@ -2542,12 +2684,7 @@ async fn run_subagent_task(
             } => Some(content.clone()),
             _ => None,
         })
-        .ok_or_else(|| {
-            format!(
-                "Subagent '{}' completed without a final text response.",
-                config.name
-            )
-        })?;
+        .unwrap_or_default();
     let thinking: Vec<AgentMessage> = state
         .messages
         .iter()
@@ -2585,10 +2722,26 @@ async fn run_subagent_task(
             _ => {}
         }
     }
+    let completion_error = error
+        .map(|error| format!("Subagent '{}' failed: {error}", config.name))
+        .or_else(|| {
+            output.is_empty().then(|| {
+                format!(
+                    "Subagent '{}' completed without a final text response.",
+                    config.name
+                )
+            })
+        });
     Ok(SubagentResult {
-        output,
+        output: completion_error.clone().unwrap_or(output),
         thinking,
         inner_tools,
+        error: completion_error,
+        messages: state
+            .messages
+            .into_iter()
+            .filter(|message| !matches!(message, AgentMessage::System { .. }))
+            .collect(),
     })
 }
 
@@ -2651,6 +2804,8 @@ struct SubagentResult {
     output: String,
     thinking: Vec<AgentMessage>,
     inner_tools: Vec<SubagentInnerTool>,
+    error: Option<String>,
+    messages: Vec<AgentMessage>,
 }
 
 fn tool_target_preview(name: &str, arguments: &str) -> String {
@@ -2726,7 +2881,11 @@ fn format_subagent_results(
                 SubagentSessionData {
                     task: task.task,
                     agent: task.agent,
-                    status: "Done".to_string(),
+                    status: if res.error.is_some() {
+                        "Failed".to_string()
+                    } else {
+                        "Done".to_string()
+                    },
                     thinking: thinking.trim().to_string(),
                     inner_tools,
                     output: res.output,
@@ -3527,6 +3686,72 @@ mod tests {
             .content
             .contains("test subagent result (test-model)"));
         assert!(!results[0].content.contains("Running 1 subagent task"));
+    }
+
+    #[tokio::test]
+    async fn completed_subagents_persist_as_passive_sibling_branches() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("session.jsonl");
+        let mut options = coding_agent_options(dir.path().to_path_buf());
+        options.session_file = Some(session_file.clone());
+        let mut coding_agent = CodingAgent::new(options);
+        coding_agent.set_subagent_work_observer(Arc::new(Mutex::new(Vec::new())));
+        let parent = coding_agent
+            .session_tree
+            .add_message(AgentMessage::User {
+                content: "parent".into(),
+            });
+        *coding_agent.dispatch_parent_leaf.lock().unwrap() = Some(parent.clone());
+
+        let results = coding_agent
+            .agent
+            .loop_engine
+            .execute_tools(&[provider_tool_call(
+                "subagent-call",
+                "subagent",
+                serde_json::json!({
+                    "tasks": [
+                        {"agent": "scout", "task": "inspect"},
+                        {"agent": "reviewer", "task": "review"}
+                    ],
+                    "parallel": true
+                }),
+            )])
+            .await;
+        assert!(!results[0].is_error, "{}", results[0].content);
+        coding_agent.commit_completed_subagent_lanes().unwrap();
+
+        assert_eq!(
+            coding_agent.session_tree.active_node_id(),
+            Some(parent.as_str())
+        );
+        let lane_roots = coding_agent
+            .session_tree
+            .nodes
+            .values()
+            .filter(|node| {
+                matches!(
+                    &node.message,
+                    AgentMessage::Custom { custom_type, .. } if custom_type == "subagent_lane"
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(lane_roots.len(), 2);
+        assert!(lane_roots
+            .iter()
+            .all(|node| node.parent_id.as_deref() == Some(parent.as_str())));
+        let loaded = SessionTree::load_from_file(&session_file).unwrap();
+        assert_eq!(
+            loaded
+                .nodes
+                .values()
+                .filter(|node| matches!(
+                    &node.message,
+                    AgentMessage::Custom { custom_type, .. } if custom_type == "subagent_lane"
+                ))
+                .count(),
+            2
+        );
     }
 
     #[tokio::test]

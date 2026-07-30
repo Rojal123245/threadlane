@@ -345,6 +345,56 @@ impl SessionTree {
         node_id
     }
 
+    pub fn append_passive_branch(
+        &mut self,
+        parent_leaf_id: Option<&str>,
+        messages: Vec<AgentMessage>,
+    ) -> Result<Vec<String>, String> {
+        if parent_leaf_id.is_some_and(|id| !self.nodes.contains_key(id)) {
+            return Err(format!(
+                "Parent session node '{}' not found",
+                parent_leaf_id.unwrap()
+            ));
+        }
+        let mut next = self.clone();
+        let active_node_id = next.active_node_id.clone();
+        let mut parent_id = parent_leaf_id.map(str::to_owned);
+        let mut created = Vec::with_capacity(messages.len());
+
+        for message in messages {
+            let mut next_id = next.nodes.len() + 1;
+            let node_id = loop {
+                let candidate = format!("node_{next_id}");
+                if !next.nodes.contains_key(&candidate) {
+                    break candidate;
+                }
+                next_id += 1;
+            };
+            let node = SessionNode {
+                id: node_id.clone(),
+                parent_id: parent_id.clone(),
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                message,
+            };
+            next.nodes.insert(node_id.clone(), node);
+            next.node_order.push(node_id.clone());
+            parent_id = Some(node_id.clone());
+            created.push(node_id);
+        }
+        next.active_node_id = active_node_id;
+
+        if let Some(path) = next.file_path.clone() {
+            let _guard = session_file_lock().lock().unwrap();
+            next.save_transactionally(&path)
+                .map_err(|error| format!("Failed to persist passive branch: {error}"))?;
+        }
+        *self = next;
+        Ok(created)
+    }
+
     /// Replaces the active context with a new root branch while retaining old
     /// nodes as navigable history. New nodes are appended to the same session file.
     pub fn replace_active_branch(&mut self, messages: Vec<AgentMessage>) {
@@ -870,6 +920,78 @@ mod tests {
         let branch_b = tree.get_branch_messages(Some(&n3));
         assert_eq!(branch_b.len(), 2);
         assert!(matches!(&branch_b[1], AgentMessage::User { content } if content == "lane_b_1"));
+    }
+
+    #[test]
+    fn passive_branch_append_preserves_active_leaf_and_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut tree = SessionTree::new("session");
+        tree.file_path = Some(path.clone());
+        let parent = tree.add_message(AgentMessage::User {
+            content: "parent".into(),
+        });
+        let expected = vec![
+            AgentMessage::User {
+                content: "child task".into(),
+            },
+            AgentMessage::Assistant {
+                content: Some("child result".into()),
+                tool_calls: None,
+                stop_reason: None,
+                deferred_handle: None,
+            },
+        ];
+
+        let branch = tree
+            .append_passive_branch(Some(&parent), expected.clone())
+            .unwrap();
+
+        assert_eq!(tree.active_node_id(), Some(parent.as_str()));
+        assert_eq!(
+            serde_json::to_value(tree.get_branch_messages(branch.last().map(String::as_str)))
+                .unwrap(),
+            serde_json::to_value([vec![AgentMessage::User {
+                content: "parent".into()
+            }], expected].concat())
+            .unwrap()
+        );
+        let loaded = SessionTree::load_from_file(&path).unwrap();
+        assert_eq!(loaded.active_node_id(), Some(parent.as_str()));
+        assert_eq!(
+            serde_json::to_value(
+                loaded.get_branch_messages(branch.last().map(String::as_str))
+            )
+            .unwrap(),
+            serde_json::to_value(tree.get_branch_messages(branch.last().map(String::as_str)))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn passive_branch_append_rolls_back_when_persistence_fails() {
+        let mut tree = SessionTree::new("session");
+        let parent = tree.add_message(AgentMessage::User {
+            content: "parent".into(),
+        });
+        tree.file_path = Some(
+            tempfile::tempdir()
+                .unwrap()
+                .path()
+                .join("missing/session.jsonl"),
+        );
+        let node_count = tree.nodes.len();
+
+        assert!(tree
+            .append_passive_branch(
+                Some(&parent),
+                vec![AgentMessage::User {
+                    content: "child".into(),
+                }],
+            )
+            .is_err());
+        assert_eq!(tree.nodes.len(), node_count);
+        assert_eq!(tree.active_node_id(), Some(parent.as_str()));
     }
 
     #[test]

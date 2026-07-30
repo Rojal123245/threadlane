@@ -268,6 +268,7 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 
 - `HarnessSupervisor` owns only explicit background tasks (currently `/task <prompt>`). Ordinary chat sessions continue to use the existing `SessionRuntime` path and must not be mirrored into supervisor tasks.
 - Harness side effects are intent-first: persist `OperationStarted`, `TaskAttempt`, `ToolStarted`, and `QueueEnqueued` under the lane lock before starting the corresponding model/tool work or mutating the in-memory queue. `ToolExecutionStart` is observational only.
+- Model subagents execute with short-lived child `Agent`s but persist as passive sibling branches on the parent `SessionTree`; only the formatted final tool result enters the parent active branch.
 - Forward supervisor events through `GuiAgentEvent`; update `BackgroundTaskState` and widgets only on the Makepad event thread.
 - Threadlane extensions are compiled WASI modules with an exported
   `extension_info` manifest. The settings picker installs a `.wasm` into either

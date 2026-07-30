@@ -772,6 +772,7 @@ impl HarnessSupervisor {
         let event_tx = self.event_tx.clone();
         let tasks = self.tasks.clone();
         let runtimes = self.runtimes.clone();
+        let lanes = self.lanes.clone();
         let tid = task_id.clone();
         let pid = project_id.to_string();
         let session_id = final_session_file
@@ -782,6 +783,7 @@ impl HarnessSupervisor {
         tokio::spawn(async move {
             let mut sub_rx = rx;
             while let Ok(evt) = sub_rx.recv().await {
+                observe_subagent_lane(&lanes, &session_id, &evt);
                 let status = match &evt {
                     AgentEvent::AgentStart => Some(TaskStatus::Running),
                     AgentEvent::AgentEnd { .. } => Some(TaskStatus::Completed),
@@ -1221,6 +1223,7 @@ impl HarnessSupervisor {
         session_file: Option<&Path>,
         event: &AgentEvent,
     ) -> bool {
+        observe_subagent_lane(&self.lanes, session_id, event);
         apply_subagent_event(
             &mut self.tasks.lock().unwrap(),
             project_id,
@@ -1298,6 +1301,31 @@ fn apply_background_event(task: &mut TaskRecord, event: &AgentEvent) -> bool {
         }
         _ => false,
     }
+}
+
+fn observe_subagent_lane(
+    lanes: &Arc<Mutex<HashMap<String, Lane>>>,
+    session_id: &str,
+    event: &AgentEvent,
+) {
+    let AgentEvent::SubagentQueued {
+        run_id,
+        task_index,
+        ..
+    } = event
+    else {
+        return;
+    };
+    let lane_name = format!("subagent-{run_id}:{task_index}");
+    lanes
+        .lock()
+        .unwrap()
+        .entry(format!("{session_id}:{lane_name}"))
+        .or_insert_with(|| {
+            let mut lane = Lane::new(lane_name, session_id);
+            lane.parent_lane = Some("main".into());
+            lane
+        });
 }
 
 fn apply_subagent_event(
@@ -2070,6 +2098,33 @@ mod tests {
 
         let cancelled = supervisor.cancel_lane_hierarchy("session-1", "root");
         assert_eq!(cancelled, 2);
+    }
+
+    #[test]
+    fn subagent_events_create_sibling_supervisor_lanes() {
+        let dir = tempfile::tempdir().unwrap();
+        let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
+        supervisor.get_or_create_lane("session-1", "main");
+        for task_index in 0..2 {
+            supervisor.observe_session_event(
+                "project-1",
+                "session-1",
+                None,
+                &AgentEvent::SubagentQueued {
+                    run_id: 9,
+                    task_index,
+                    agent: "worker".into(),
+                    task: format!("task {task_index}"),
+                },
+            );
+        }
+
+        for task_index in 0..2 {
+            let lane =
+                supervisor.get_or_create_lane("session-1", &format!("subagent-9:{task_index}"));
+            assert_eq!(lane.parent_lane.as_deref(), Some("main"));
+        }
+        assert_eq!(supervisor.cancel_lane_hierarchy("session-1", "main"), 3);
     }
 
     #[test]
