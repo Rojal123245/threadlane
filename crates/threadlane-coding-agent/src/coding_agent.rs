@@ -2668,6 +2668,37 @@ impl CodingAgent {
                         });
                     error
                 };
+                if !lane.task_attempted {
+                    let error = "Interrupted subagent had no persisted task attempt".to_string();
+                    let messages = vec![AgentMessage::Custom {
+                        custom_type: "subagent_lane".into(),
+                        payload: serde_json::json!({
+                            "lane": lane.lane,
+                            "run_id": lane.run_id,
+                            "agent": "recovered",
+                            "task": lane.task,
+                            "status": "aborted",
+                            "error": error,
+                        }),
+                    }];
+                    self.session_tree
+                        .append_passive_branch(lane.source_leaf_id.as_deref(), messages)
+                        .map_err(&retrying)?;
+                    journal
+                        .finish(&lane.lane, &lane.run_id, OpOutcome::Aborted, Some(error))
+                        .map_err(&retrying)?;
+                    let _ = self
+                        .agent
+                        .loop_engine
+                        .event_tx
+                        .send(AgentEvent::SubagentRecovery {
+                            run_id: lane.run_id.clone(),
+                            status: SubagentRecoveryStatus::Aborted,
+                            detail: Some("Interrupted task was not replayable".into()),
+                        });
+                    recovered += 1;
+                    continue;
+                }
                 if let Some((marker_id, status, error)) =
                     markers.get(&(lane.lane.clone(), lane.run_id.clone()))
                 {
@@ -5801,14 +5832,104 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        let finished_run_id = std::iter::from_fn(|| events.try_recv().ok()).find_map(|event| {
-            match event {
+        let finished_run_id =
+            std::iter::from_fn(|| events.try_recv().ok()).find_map(|event| match event {
                 AgentEvent::SubagentFinished { journal_run_id, .. } => Some(journal_run_id),
                 _ => None,
-            }
-        });
+            });
 
         assert_eq!(finished_run_id.as_deref(), Some(persisted_run_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn partial_journal_start_recovers_as_aborted_without_child_execution() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("session.jsonl");
+        let op_log_file = session_file.with_extension("oplog.jsonl");
+        let journal = SubagentLaneJournal::load(&session_file).unwrap();
+        journal.fail_next_task_attempt();
+        let (parent_event_tx, _) = broadcast::channel(8);
+
+        let (_, _, lanes) = run_subagents_with_context(
+            vec![AgentRunTask {
+                agent: "scout".into(),
+                task: "inspect the project".into(),
+                instructions: None,
+                tools: None,
+                model: None,
+            }],
+            false,
+            SubagentRunContext {
+                api_key: "test-key".into(),
+                account_id: None,
+                parent_model: "test-model".into(),
+                work_dir: dir.path().to_path_buf(),
+                extensions: Arc::new(WasiExtensionManager::for_project_session(
+                    dir.path(),
+                    "test-session",
+                )),
+                parent_event_tx,
+                parent_leaf_id: None,
+                journal: Some(journal),
+                scheduler_observer: None,
+                child_work_observer: None,
+                child_tool_observer: None,
+                semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(lanes[0].status, SubagentLaneStatus::Failed));
+
+        let persisted_run_id = load_op_records_from_file(&op_log_file)
+            .unwrap()
+            .into_iter()
+            .find_map(|record| match record {
+                OpRecord::OperationStarted { id, .. } => Some(id),
+                _ => None,
+            })
+            .unwrap();
+        let mut options = coding_agent_options(dir.path().to_path_buf());
+        options.session_file = Some(session_file);
+        let mut coding_agent = CodingAgent::new(options);
+        let child_work = Arc::new(Mutex::new(Vec::new()));
+        coding_agent.set_subagent_work_observer(child_work.clone());
+        let mut events = coding_agent.agent.subscribe();
+
+        assert_eq!(
+            coding_agent
+                .recover_interrupted_subagent_lanes()
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(child_work.lock().unwrap().is_empty());
+
+        let recovery = std::iter::from_fn(|| events.try_recv().ok())
+            .filter_map(|event| match event {
+                AgentEvent::SubagentRecovery { run_id, status, .. } => Some((run_id, status)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(recovery.len(), 2);
+        assert!(recovery
+            .iter()
+            .all(|(run_id, _)| run_id == &persisted_run_id));
+        assert_eq!(
+            recovery[1].1,
+            threadlane_agent::SubagentRecoveryStatus::Aborted
+        );
+        assert!(load_op_records_from_file(&op_log_file)
+            .unwrap()
+            .iter()
+            .any(|record| matches!(
+                record,
+                OpRecord::OperationFinished {
+                    run_id,
+                    outcome: OpOutcome::Aborted,
+                    ..
+                } if run_id == &persisted_run_id
+            )));
     }
 
     #[tokio::test]

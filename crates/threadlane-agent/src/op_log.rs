@@ -279,6 +279,7 @@ pub struct InterruptedSubagentLane {
     pub source_leaf_id: Option<String>,
     pub started_seq: u64,
     pub task: String,
+    pub task_attempted: bool,
     pub messages: Vec<AgentMessage>,
     pub safe_tools: Vec<OpRecord>,
     pub unsafe_tools: Vec<OpRecord>,
@@ -291,6 +292,7 @@ pub fn interrupted_subagent_lanes(records: &[OpRecord]) -> Vec<InterruptedSubage
         started_seq: u64,
         source_leaf_id: Option<String>,
         task: String,
+        task_attempted: bool,
         messages: Vec<(u64, AgentMessage)>,
         tools: Vec<OpRecord>,
         active: bool,
@@ -318,6 +320,7 @@ pub fn interrupted_subagent_lanes(records: &[OpRecord]) -> Vec<InterruptedSubage
                     started_seq: *seq,
                     source_leaf_id: source_leaf_id.clone(),
                     task: String::new(),
+                    task_attempted: false,
                     messages: Vec::new(),
                     tools: Vec::new(),
                     active: true,
@@ -332,6 +335,7 @@ pub fn interrupted_subagent_lanes(records: &[OpRecord]) -> Vec<InterruptedSubage
                     .and_then(|occurrences| occurrences.last())
                 {
                     occurrences[*index].task = task.clone();
+                    occurrences[*index].task_attempted = true;
                 }
             }
             OpRecord::WriteDeferred {
@@ -443,6 +447,7 @@ pub fn interrupted_subagent_lanes(records: &[OpRecord]) -> Vec<InterruptedSubage
                 source_leaf_id: occurrence.source_leaf_id,
                 started_seq: occurrence.started_seq,
                 task: occurrence.task,
+                task_attempted: occurrence.task_attempted,
                 messages: messages.into_iter().map(|(_, message)| message).collect(),
                 safe_tools,
                 unsafe_tools,

@@ -8,6 +8,8 @@
 - Classified completed work as `Recovered`, provider failures as `Retrying` with bounded detail, cancellation as `Cancelled`, and unsafe interruption as `Aborted`.
 - Review fix: `SubagentStarted` and `SubagentFinished` now carry the journal-generated `subagent-run-<sequence>` identity. The chat reducer migrates the temporary queued UI key to that durable identity, which is also used by `SubagentRecovery`.
 - Review fix: a partial journal start now returns the persisted `OperationStarted` identity with its error. `SubagentFinished` therefore retains that durable ID when `TaskAttempt` cannot be appended, allowing later recovery to update the same activity.
+- Final review fix: recovery now marks an open subagent operation with no persisted `TaskAttempt` as unreplayable and aborted under its durable run ID. It persists a terminal session marker, finishes the journal operation, emits terminal recovery status, and skips child execution.
+- Formatting fix: formatted only the newly added `finished_run_id` closure; unrelated formatter-only changes were left untouched.
 
 ## Tests and checks
 
@@ -18,9 +20,14 @@
 - Pass: `rtk cargo test -p threadlane-coding-agent model_subagent_tool_returns_awaited_child_output` — 1 passed.
 - Pass: `rtk cargo test -p threadlane-coding-agent subagent_intents_are_durable_before_child_execution` — 1 passed.
 - Pass: `rtk cargo test -p threadlane-coding-agent partial_journal_start_finishes_with_the_persisted_run_id` — 1 passed.
+- Pass: `rtk cargo test -p threadlane-coding-agent partial_journal_start_recovers_as_aborted_without_child_execution` — 1 passed.
+- Pass: `rtk cargo test -p threadlane-agent interrupted_subagent_lanes` — 3 passed.
 - Pass: `rtk cargo test -p threadlane --bin threadlane partial_journal_start_and_recovery_share_one_harness_activity` — 1 passed.
 - Pass: `rtk cargo test -p threadlane --bin threadlane` — 128 passed.
 - Pass: `rtk cargo check -p threadlane` — 0 errors; existing Makepad dependency and unrelated dead-code warnings remain.
+- Pass: `rtk cargo check -p threadlane -p threadlane-coding-agent` — 0 errors; existing warnings remain.
+- Note: `rtk cargo test -p threadlane-coding-agent` reached 99 passed tests; 2 unrelated network tests failed with sandbox `Operation not permitted` while opening their listeners.
+- Note: `rtk cargo fmt --all -- --check` no longer reports the `finished_run_id` closure, but still reports unrelated pre-existing formatting differences in Task 2 files and supervisor code; those formatter-only changes were intentionally not applied.
 - Pass: `rtk git -c core.fsmonitor=false diff --check`.
 
 ## Scope
