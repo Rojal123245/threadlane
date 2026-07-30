@@ -2426,15 +2426,6 @@ script_mod! {
                                             text_style +: { font_size: 8.5 }
                                         }
                                     }
-
-
-
-                                    git_branch_drop := mod.components.GitBranchDropDown {
-                                        width: 132
-                                        height: 28
-                                        labels: ["Git"]
-                                    }
-
                                     attach_btn := mod.components.IconButton {
                                         width: 30
                                         height: 28
@@ -2563,6 +2554,64 @@ script_mod! {
                                                 color_down: theme.color_primary_foreground
                                             }
                                         }
+                                    }
+                                }
+                            }
+                            checkout_target_row := View {
+                                width: Fill
+                                height: Fit
+                                flow: Down
+                                spacing: 4
+                                padding: Inset{left: 9 right: 7 bottom: 5}
+
+                                checkout_target_controls := View {
+                                    width: Fill
+                                    height: 28
+                                    flow: Right
+                                    spacing: 6
+                                    align: Align{y: 0.5}
+
+                                    checkout_target_drop := mod.components.GitBranchDropDown {
+                                        width: 142
+                                        height: 28
+                                        labels: ["Current checkout", "New worktree…"]
+                                    }
+
+                                    git_branch_drop := mod.components.GitBranchDropDown {
+                                        width: 132
+                                        height: 28
+                                        labels: ["Git"]
+                                    }
+                                }
+
+                                worktree_prompt_row := View {
+                                    width: Fill
+                                    height: 28
+                                    visible: false
+                                    flow: Right
+                                    spacing: 4
+
+                                    worktree_name := mod.components.SearchInput {
+                                        width: 110
+                                        empty_text: "Worktree name"
+                                        margin: 0
+                                    }
+                                    worktree_path := mod.components.SearchInput {
+                                        width: Fill
+                                        empty_text: "Path"
+                                        margin: 0
+                                    }
+                                    worktree_create_btn := mod.components.HeaderChipButton {
+                                        width: Fit
+                                        height: 28
+                                        text: "Create"
+                                        padding: Inset{left: 7 right: 7 top: 4 bottom: 4}
+                                    }
+                                    worktree_cancel_btn := mod.components.HeaderChipButton {
+                                        width: Fit
+                                        height: 28
+                                        text: "Cancel"
+                                        padding: Inset{left: 7 right: 7 top: 4 bottom: 4}
                                     }
                                 }
                             }
@@ -3969,6 +4018,12 @@ pub struct App {
     #[rust]
     git_status: HashMap<PathBuf, GitStatus>,
     #[rust]
+    checkout_targets: HashMap<SessionKey, PathBuf>,
+    #[rust]
+    worktree_prompt_open: bool,
+    #[rust]
+    pending_worktree_path: Option<PathBuf>,
+    #[rust]
     git_new_branch_open: bool,
     #[rust]
     git_diff_open: bool,
@@ -4595,6 +4650,46 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(file_tree_tab_btn)).clicked(actions) {
             self.right_sidebar_tab = RightSidebarTab::FileTree;
             self.sync_right_sidebar(cx);
+        }
+
+        if self
+            .ui
+            .icon_drop_down(cx, ids!(checkout_target_drop))
+            .selected(actions)
+            .is_some()
+        {
+            let selected = self
+                .ui
+                .icon_drop_down(cx, ids!(checkout_target_drop))
+                .selected_label();
+            if selected == "New worktree…" {
+                self.set_worktree_prompt_visible(cx, true);
+            } else {
+                self.pending_worktree_path = None;
+                if let Some(key) = self.workspace_state.active_key().cloned() {
+                    self.checkout_targets.remove(&key);
+                }
+                self.set_worktree_prompt_visible(cx, false);
+                self.rebind_active_runtime_to_target(cx);
+                self.sync_git_branch_picker(cx);
+                self.request_git_status();
+            }
+        }
+
+        if self.ui.button(cx, ids!(worktree_cancel_btn)).clicked(actions) {
+            self.pending_worktree_path = None;
+            self.set_worktree_prompt_visible(cx, false);
+            self.sync_git_branch_picker(cx);
+        }
+
+        if self.ui.button(cx, ids!(worktree_create_btn)).clicked(actions)
+            || self
+                .ui
+                .text_input(cx, ids!(worktree_path))
+                .returned(actions)
+                .is_some()
+        {
+            self.start_create_worktree(cx);
         }
 
         if self
@@ -6300,9 +6395,47 @@ impl App {
     }
 
     fn active_work_dir(&self) -> Option<&Path> {
-        self.workspace_state
-            .active_key()
-            .map(|key| key.work_dir.as_path())
+        let key = self.workspace_state.active_key()?;
+        Some(
+            self.checkout_targets
+                .get(key)
+                .map_or(key.work_dir.as_path(), PathBuf::as_path),
+        )
+    }
+
+    fn rebind_active_runtime_to_target(&mut self, cx: &mut Cx) {
+        let Some(key) = self.workspace_state.active_key().cloned() else {
+            return;
+        };
+        let Some((model, reasoning_effort, session_file)) = self
+            .session_runtimes
+            .get(&key)
+            .map(|runtime| {
+                (
+                    runtime.model.clone(),
+                    runtime.reasoning_effort,
+                    runtime.session_file.clone(),
+                )
+            })
+        else {
+            return;
+        };
+        let (api_key, account_id) = self.current_credentials(cx);
+        let Some(work_dir) = self.active_work_dir().map(Path::to_path_buf) else {
+            return;
+        };
+        let agent = CodingAgent::new(CodingAgentOptions {
+            api_key,
+            account_id,
+            model: model.clone(),
+            work_dir,
+            session_file,
+            system_prompt: Default::default(),
+        });
+        self.session_runtimes.insert(
+            key,
+            SessionRuntime::new(agent, model, reasoning_effort),
+        );
     }
 
     fn request_git_status(&mut self) {
@@ -6340,6 +6473,57 @@ impl App {
         let picker = self.ui.icon_drop_down(cx, ids!(git_branch_drop));
         picker.set_labels(cx, labels);
         picker.set_selected_item(cx, selected);
+        let target_selected = self
+            .workspace_state
+            .active_key()
+            .and_then(|key| self.checkout_targets.get(key))
+            .map_or(0, |_| 1);
+        let target_picker = self.ui.icon_drop_down(cx, ids!(checkout_target_drop));
+        target_picker.set_selected_item(cx, target_selected);
+        target_picker.set_visible(cx, status.is_some());
+    }
+
+    fn set_worktree_prompt_visible(&mut self, cx: &mut Cx, visible: bool) {
+        self.worktree_prompt_open = visible;
+        self.ui
+            .view(cx, ids!(worktree_prompt_row))
+            .set_visible(cx, visible);
+        if visible {
+            self.ui
+                .text_input(cx, ids!(worktree_name))
+                .set_text(cx, "");
+            self.ui
+                .text_input(cx, ids!(worktree_path))
+                .set_text(cx, "");
+            self.ui
+                .text_input(cx, ids!(worktree_name))
+                .set_key_focus(cx);
+        }
+    }
+
+    fn start_create_worktree(&mut self, cx: &mut Cx) {
+        let Some(work_dir) = self.active_work_dir().map(Path::to_path_buf) else {
+            return;
+        };
+        let name = self.ui.text_input(cx, ids!(worktree_name)).text();
+        let path_text = self.ui.text_input(cx, ids!(worktree_path)).text();
+        let branch = self
+            .ui
+            .icon_drop_down(cx, ids!(git_branch_drop))
+            .selected_label();
+        let path = PathBuf::from(path_text.trim());
+        if name.trim().is_empty() || path_text.trim().is_empty() {
+            self.git_feedback = Some((false, "Enter a worktree name and path.".into()));
+            return;
+        }
+        if branch.is_empty() || branch == "Git" || branch == "detached HEAD" {
+            self.git_feedback = Some((false, "Select a branch before creating a worktree.".into()));
+            return;
+        }
+        self.pending_worktree_path = Some(path.clone());
+        self.start_git_operation(cx, format!("create worktree `{name}`"), move |_| {
+            crate::git::create_worktree(&work_dir, &path, &branch)
+        });
     }
 
     fn sync_right_sidebar(&mut self, cx: &mut Cx) {
@@ -8721,10 +8905,24 @@ impl App {
                                     .text_input(cx, ids!(git_commit_message))
                                     .set_text(cx, "");
                             }
+                            if operation.starts_with("create worktree ") {
+                                if let (Some(key), Some(path)) = (
+                                    self.workspace_state.active_key().cloned(),
+                                    self.pending_worktree_path.take(),
+                                ) {
+                                    self.checkout_targets.insert(key, path);
+                                }
+                                self.set_worktree_prompt_visible(cx, false);
+                                self.rebind_active_runtime_to_target(cx);
+                                self.sync_git_branch_picker(cx);
+                            }
                             let message = format!("Git {operation} completed.");
                             self.git_feedback = Some((true, message));
                         }
                         Err(error) => {
+                            if operation.starts_with("create worktree ") {
+                                self.pending_worktree_path = None;
+                            }
                             let message = format!("Git {operation} failed: {error}");
                             self.git_feedback = Some((false, message));
                         }
