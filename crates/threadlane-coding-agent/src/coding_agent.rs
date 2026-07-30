@@ -128,7 +128,7 @@ impl SubagentLaneJournal {
             .unwrap_or_default()
             .as_millis() as u64;
         let operation = OpRecord::OperationStarted {
-            id: format!("operation-{run_id}"),
+            id: run_id.to_string(),
             seq: records.len() as u64 + 1,
             lane: lane.to_string(),
             timestamp,
@@ -179,7 +179,7 @@ impl SubagentLaneJournal {
                 .unwrap_or_default()
                 .as_millis() as u64,
             run_id: run_id.to_string(),
-            assistant_entry_id: String::new(),
+            assistant_entry_id: format!("assistant-{run_id}"),
             tool_index,
             tool_call_id: tool_call_id.to_string(),
             tool_name: tool_name.to_string(),
@@ -3071,7 +3071,7 @@ mod tests {
         let records = threadlane_agent::load_op_records_from_file(&session_file).unwrap();
         assert!(matches!(
             records.first(),
-            Some(threadlane_agent::OpRecord::OperationStarted { .. })
+            Some(threadlane_agent::OpRecord::OperationStarted { id, .. }) if id == "run-1"
         ));
         assert!(matches!(
             records.get(1),
@@ -3087,6 +3087,111 @@ mod tests {
             .collect();
         assert_eq!(run_ids, ["run-1".to_string()].into_iter().collect());
         assert!(records.windows(2).all(|pair| pair[0].seq() < pair[1].seq()));
+    }
+
+    #[test]
+    fn subagent_journal_tool_started_has_recovery_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("session.jsonl");
+        let journal = SubagentLaneJournal::load(&session_file).unwrap();
+
+        journal.start("subagent-1:0", "run-1", "inspect").unwrap();
+        journal
+            .tool_started(
+                "subagent-1:0",
+                "run-1",
+                "call-1",
+                "read_file",
+                serde_json::json!({"path": "README.md"}),
+            )
+            .unwrap();
+
+        let records = threadlane_agent::load_op_records_from_file(&session_file).unwrap();
+        assert!(matches!(
+            records.get(2),
+            Some(threadlane_agent::OpRecord::ToolStarted {
+                assistant_entry_id,
+                ..
+            }) if !assistant_entry_id.is_empty()
+        ));
+    }
+
+    #[test]
+    fn subagent_journal_checkpoint_skips_system_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("session.jsonl");
+        let journal = SubagentLaneJournal::load(&session_file).unwrap();
+        let messages = [
+            AgentMessage::System {
+                content: "system".into(),
+            },
+            AgentMessage::User {
+                content: "task".into(),
+            },
+            AgentMessage::Assistant {
+                content: Some("done".into()),
+                tool_calls: None,
+                stop_reason: Some("stop".into()),
+                deferred_handle: None,
+            },
+        ];
+
+        journal.start("subagent-1:0", "run-1", "task").unwrap();
+        journal
+            .checkpoint("subagent-1:0", "run-1", &messages)
+            .unwrap();
+
+        let records = threadlane_agent::load_op_records_from_file(&session_file).unwrap();
+        let deferred: Vec<_> = records
+            .iter()
+            .filter_map(|record| match record {
+                threadlane_agent::OpRecord::WriteDeferred { target, .. } => Some(target),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deferred.len(), 2);
+        assert!(matches!(
+            deferred[0],
+            AgentMessage::User { content } if content == "task"
+        ));
+        assert!(matches!(
+            deferred[1],
+            AgentMessage::Assistant {
+                content: Some(content),
+                stop_reason: Some(reason),
+                ..
+            } if content == "done" && reason == "stop"
+        ));
+    }
+
+    #[test]
+    fn subagent_journal_finish_closes_started_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("session.jsonl");
+        let journal = SubagentLaneJournal::load(&session_file).unwrap();
+
+        journal.start("subagent-1:0", "run-1", "inspect").unwrap();
+        journal
+            .finish(
+                "subagent-1:0",
+                "run-1",
+                threadlane_agent::OpOutcome::Completed,
+                None,
+            )
+            .unwrap();
+
+        let records = threadlane_agent::load_op_records_from_file(&session_file).unwrap();
+        assert!(matches!(
+            records.last(),
+            Some(threadlane_agent::OpRecord::OperationFinished {
+                run_id,
+                outcome: threadlane_agent::OpOutcome::Completed,
+                ..
+            }) if run_id == "run-1"
+        ));
+        let mut tree = SessionTree::new("session");
+        let recovered = threadlane_agent::reconcile_op_log_recovery(&mut tree, &records);
+        assert_eq!(recovered.recovered_open_operations, 0);
     }
 
     #[tokio::test]
