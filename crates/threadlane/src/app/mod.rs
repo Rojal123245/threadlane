@@ -48,9 +48,10 @@ use threadlane_agent::{
     SessionPlan,
 };
 use threadlane_coding_agent::{
-    default_global_threadlane_dir, discover_agents, AgentConfig, AgentScope, CapabilityCatalog,
-    CodingAgent, CodingAgentOptions, CodingAgentWorkHandle, ExtensionManager, ExtensionScope,
-    HarnessSupervisor, ProjectContext, SkillMetadata, SkillSettings, TaskRecord,
+    cancel_open_subagent_operations, default_global_threadlane_dir, discover_agents, AgentConfig,
+    AgentScope, CapabilityCatalog, CodingAgent, CodingAgentOptions, CodingAgentWorkHandle,
+    ExtensionManager, ExtensionScope, HarnessSupervisor, ProjectContext, SkillMetadata,
+    SkillSettings, TaskRecord,
 };
 use threadlane_provider::auth;
 use threadlane_provider::openai::{fetch_available_models, OpenAIClient};
@@ -2506,9 +2507,9 @@ script_mod! {
                                     }
 
                                     composer_action_slot := View {
-                                        width: 34
+                                        width: 68
                                         height: 30
-                                        flow: Overlay
+                                        flow: Right
 
                                         send_btn := mod.components.ComposerAction {
                                             width: 34
@@ -2574,7 +2575,7 @@ script_mod! {
                                     checkout_target_drop := mod.components.IconDropDown {
                                         width: 142
                                         height: 28
-                                        labels: ["Current checkout", "New worktree…"]
+                                        labels: ["New worktree…", "Current checkout"]
                                         use_provider_icons: false
                                         padding: Inset{left: 10 right: 22}
                                         icon_walk: Walk{width: 14 height: 14 margin: Inset{right: 6}}
@@ -2588,6 +2589,11 @@ script_mod! {
                                                 use_provider_icons: false
                                             }
                                         }
+                                    }
+
+                                    flex_spacer := View {
+                                        width: Fill
+                                        height: 28
                                     }
 
                                     git_branch_drop := mod.components.GitBranchDropDown {
@@ -4859,6 +4865,18 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(stop_btn)).clicked(actions) {
             let active_key = self.workspace_state.active_key().cloned();
             if let Some(key) = active_key {
+                if let Some(session_file) = self
+                    .session_runtimes
+                    .get(&key)
+                    .and_then(|runtime| runtime.session_file.as_deref())
+                {
+                    if let Err(error) = cancel_open_subagent_operations(session_file) {
+                        self.push_chat(
+                            MsgRole::System,
+                            format!("Could not persist subagent cancellation: {error}"),
+                        );
+                    }
+                }
                 let current_draft = self.prompt_text(cx);
                 let (restored_draft, restored_attachments) = self
                     .session_runtimes
@@ -5087,8 +5105,14 @@ impl MatchEvent for App {
                 .is_some_and(|workspace| !workspace.ui.attachments.is_empty());
             if !input_text.trim().is_empty() || has_attachments {
                 if self.busy {
-                    self.enqueue_steer_interrupt(cx, &input_text);
+                    let attachments = self
+                        .workspace_state
+                        .active_workspace()
+                        .map(|workspace| workspace.ui.attachments.clone())
+                        .unwrap_or_default();
+                    self.enqueue_steer_interrupt(cx, &input_text, attachments);
                     cti.text_input_ref(cx).set_text(cx, "");
+                    self.refresh_attachment_ui(cx);
                 } else {
                     self.dispatch_input(cx, input_text, InputOrigin::Composer);
                 }
@@ -5275,17 +5299,40 @@ fn format_capabilities_summary(skills: &[SkillMetadata], agents: &[AgentConfig])
 }
 
 impl App {
-    fn enqueue_steer_interrupt(&mut self, _cx: &mut Cx, input_text: &str) {
+    fn enqueue_steer_interrupt(
+        &mut self,
+        _cx: &mut Cx,
+        input_text: &str,
+        attachments: Vec<ImageAttachment>,
+    ) {
         let Some(key) = self.workspace_state.active_key().cloned() else {
             return;
         };
         if let Some(runtime) = self.session_runtimes.get(&key) {
-            runtime.work_handle.queue_follow_up(input_text.to_string());
+            runtime
+                .work_handle
+                .queue_follow_up_with_images(input_text.to_string(), attachments.clone());
+            let agent = runtime.agent.clone();
+            let _ = get_runtime().spawn(async move {
+                agent.lock().await.run_scheduled_agent_work().await;
+                SignalToUI::set_ui_signal();
+            });
         }
         if let Some(workspace) = self.workspace_state.active_workspace_mut() {
-            workspace
-                .chat
-                .push_chat(MsgRole::User, input_text.to_string());
+            let attachment_names = attachments
+                .iter()
+                .map(|attachment| attachment.display_name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let visible = if attachment_names.is_empty() {
+                input_text.to_string()
+            } else if input_text.trim().is_empty() {
+                format!("Attached: {attachment_names}")
+            } else {
+                format!("{input_text}\n\nAttached: {attachment_names}")
+            };
+            workspace.chat.push_chat(MsgRole::User, visible);
+            workspace.ui.attachments.clear();
         }
     }
 
@@ -6490,7 +6537,7 @@ impl App {
             .workspace_state
             .active_key()
             .and_then(|key| self.checkout_targets.get(key))
-            .map_or(0, |_| 1);
+            .map_or(1, |_| 0);
         let target_picker = self.ui.icon_drop_down(cx, ids!(checkout_target_drop));
         target_picker.set_selected_item(cx, target_selected);
         target_picker.set_visible(cx, status.is_some());

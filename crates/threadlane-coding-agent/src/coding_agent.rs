@@ -86,7 +86,10 @@ use crate::policy::ToolPolicy;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AgentWork {
     RequestTurn(String),
-    QueueMessage(String),
+    QueueMessage {
+        content: String,
+        images: Vec<ImageAttachment>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -489,6 +492,11 @@ pub(crate) fn abort_open_subagent_operations(
     SubagentLaneJournal::load(session_file)?.begin_cancellation()
 }
 
+pub fn cancel_open_subagent_operations(session_file: &Path) -> Result<(), String> {
+    let _guard = abort_open_subagent_operations(session_file)?;
+    Ok(())
+}
+
 #[derive(Clone, Default)]
 struct AgentWorkScheduler {
     pending: Arc<std::sync::Mutex<Vec<AgentWork>>>,
@@ -532,8 +540,8 @@ impl AgentWorkScheduler {
         for work in pending {
             match work {
                 AgentWork::RequestTurn(prompt) => agent.prompt(&prompt).await,
-                AgentWork::QueueMessage(content) => {
-                    agent.follow_up(AgentMessage::User { content });
+                AgentWork::QueueMessage { content, images } => {
+                    agent.follow_up(AgentMessage::user(content, images));
                     agent.run_follow_up().await;
                 }
             }
@@ -578,8 +586,19 @@ pub struct CodingAgentWorkHandle {
 
 impl CodingAgentWorkHandle {
     pub fn queue_follow_up(&self, content: impl Into<String>) {
+        self.queue_follow_up_with_images(content, Vec::new());
+    }
+
+    pub fn queue_follow_up_with_images(
+        &self,
+        content: impl Into<String>,
+        images: Vec<ImageAttachment>,
+    ) {
         self.scheduler
-            .schedule(AgentWork::QueueMessage(content.into()));
+            .schedule(AgentWork::QueueMessage {
+                content: content.into(),
+                images,
+            });
     }
 }
 
@@ -789,7 +808,10 @@ impl HostCapabilityHandler {
                 AgentWork::RequestTurn(string_argument(&request.arguments, "prompt")?.to_string())
             }
             "queue_message" => {
-                AgentWork::QueueMessage(string_argument(&request.arguments, "content")?.to_string())
+                AgentWork::QueueMessage {
+                    content: string_argument(&request.arguments, "content")?.to_string(),
+                    images: Vec::new(),
+                }
             }
             _ => return unknown_operation(self.capability, &request.operation),
         };
@@ -2393,7 +2415,7 @@ impl CodingAgent {
         }
     }
 
-    async fn run_scheduled_agent_work(&mut self) {
+    pub async fn run_scheduled_agent_work(&mut self) {
         while self.agent_work.run(&mut self.agent).await {
             self.dispatch_assistant_message_hooks().await;
         }
@@ -3605,7 +3627,10 @@ async fn run_subagent_task(
         scheduler.schedule(if is_recovery {
             AgentWork::RequestTurn(SUBAGENT_RECOVERY_PROMPT.into())
         } else {
-            AgentWork::QueueMessage("test subagent follow-up".into())
+            AgentWork::QueueMessage {
+                content: "test subagent follow-up".into(),
+                images: Vec::new(),
+            }
         });
         let observed_model = model.clone();
         let _ = scheduler.run(&mut agent).await;
@@ -6283,7 +6308,10 @@ mod tests {
         assert_eq!(output.unwrap().unwrap(), "queued");
         assert_eq!(
             *observed.lock().unwrap(),
-            vec![AgentWork::QueueMessage("standalone queued work".into())]
+            vec![AgentWork::QueueMessage {
+                content: "standalone queued work".into(),
+                images: Vec::new(),
+            }]
         );
     }
 
@@ -6296,12 +6324,24 @@ mod tests {
 
         coding_agent
             .work_handle()
-            .queue_follow_up("interrupt the current turn");
+            .queue_follow_up_with_images(
+                "interrupt the current turn",
+                vec![ImageAttachment {
+                    display_name: "diagram.png".into(),
+                    data_url: "data:image/png;base64,AA==".into(),
+                }],
+            );
         coding_agent.run_scheduled_agent_work().await;
 
         assert_eq!(
             *observed.lock().unwrap(),
-            vec![AgentWork::QueueMessage("interrupt the current turn".into())]
+            vec![AgentWork::QueueMessage {
+                content: "interrupt the current turn".into(),
+                images: vec![ImageAttachment {
+                    display_name: "diagram.png".into(),
+                    data_url: "data:image/png;base64,AA==".into(),
+                }],
+            }]
         );
     }
 
@@ -6330,7 +6370,10 @@ mod tests {
             .contains("test subagent result (changed-model)"));
         assert_eq!(
             *observed.lock().unwrap(),
-            vec![AgentWork::QueueMessage("test subagent follow-up".into())]
+            vec![AgentWork::QueueMessage {
+                content: "test subagent follow-up".into(),
+                images: Vec::new(),
+            }]
         );
     }
 
