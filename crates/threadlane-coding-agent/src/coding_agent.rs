@@ -22,10 +22,10 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use threadlane_agent::{
-    repair_interrupted_tool_turn, AfterToolCallHook, AfterToolCallResult, Agent, AgentEvent,
-    AgentMessage, AgentState, AgentToolCall, AgentToolDefinition, AgentToolResult,
-    BeforeToolCallHook, BeforeToolCallResult, ImageAttachment, ReasoningEffort, SessionTree,
-    ToolExecutor,
+    append_op_record_to_file, load_op_records_from_file, repair_interrupted_tool_turn,
+    AfterToolCallHook, AfterToolCallResult, Agent, AgentEvent, AgentMessage, AgentState,
+    AgentToolCall, AgentToolDefinition, AgentToolResult, BeforeToolCallHook, BeforeToolCallResult,
+    ImageAttachment, OpOutcome, OpRecord, ReasoningEffort, SessionTree, ToolExecutor,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::broadcast;
@@ -103,6 +103,150 @@ struct CompletedSubagentLane {
     status: SubagentLaneStatus,
     messages: Vec<AgentMessage>,
     error: Option<String>,
+}
+
+#[derive(Clone)]
+struct SubagentLaneJournal {
+    session_file: PathBuf,
+    records: Arc<std::sync::Mutex<Vec<OpRecord>>>,
+}
+
+impl SubagentLaneJournal {
+    fn load(session_file: &Path) -> Result<Self, String> {
+        let records = load_op_records_from_file(session_file)
+            .map_err(|error| format!("Failed to load subagent lane journal: {error}"))?;
+        Ok(Self {
+            session_file: session_file.to_path_buf(),
+            records: Arc::new(std::sync::Mutex::new(records)),
+        })
+    }
+
+    fn start(&self, lane: &str, run_id: &str, task: &str) -> Result<(), String> {
+        let mut records = self.records.lock().map_err(|error| error.to_string())?;
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let operation = OpRecord::OperationStarted {
+            id: format!("operation-{run_id}"),
+            seq: records.len() as u64 + 1,
+            lane: lane.to_string(),
+            timestamp,
+            source_leaf_id: None,
+            kind: "subagent".to_string(),
+            system_prompt_override: None,
+        };
+        append_op_record_to_file(&self.session_file, &operation)
+            .map_err(|error| format!("Failed to append subagent lane journal: {error}"))?;
+        records.push(operation);
+
+        let attempt = OpRecord::TaskAttempt {
+            id: format!("attempt-{run_id}-1"),
+            seq: records.len() as u64 + 1,
+            lane: lane.to_string(),
+            timestamp,
+            run_id: run_id.to_string(),
+            task: task.to_string(),
+            attempt: 1,
+        };
+        append_op_record_to_file(&self.session_file, &attempt)
+            .map_err(|error| format!("Failed to append subagent lane journal: {error}"))?;
+        records.push(attempt);
+        Ok(())
+    }
+
+    fn tool_started(
+        &self,
+        lane: &str,
+        run_id: &str,
+        tool_call_id: &str,
+        tool_name: &str,
+        effective_args: Value,
+    ) -> Result<(), String> {
+        let mut records = self.records.lock().map_err(|error| error.to_string())?;
+        let tool_index = records
+            .iter()
+            .filter(|record| {
+                matches!(record, OpRecord::ToolStarted { run_id: record_run_id, .. } if record_run_id == run_id)
+            })
+            .count();
+        let record = OpRecord::ToolStarted {
+            id: format!("tool-{run_id}-{tool_index}"),
+            seq: records.len() as u64 + 1,
+            lane: lane.to_string(),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+            run_id: run_id.to_string(),
+            assistant_entry_id: String::new(),
+            tool_index,
+            tool_call_id: tool_call_id.to_string(),
+            tool_name: tool_name.to_string(),
+            effective_args,
+            result_entry_id: format!("result-{tool_call_id}"),
+            replay: threadlane_agent::classify_tool_replay_safety(tool_name),
+        };
+        append_op_record_to_file(&self.session_file, &record)
+            .map_err(|error| format!("Failed to append subagent lane journal: {error}"))?;
+        records.push(record);
+        Ok(())
+    }
+
+    fn checkpoint(
+        &self,
+        lane: &str,
+        run_id: &str,
+        messages: &[AgentMessage],
+    ) -> Result<(), String> {
+        let mut records = self.records.lock().map_err(|error| error.to_string())?;
+        for message in messages {
+            if matches!(message, AgentMessage::System { .. }) {
+                continue;
+            }
+            let record = OpRecord::WriteDeferred {
+                id: format!("write-{run_id}-{}", records.len() + 1),
+                seq: records.len() as u64 + 1,
+                lane: lane.to_string(),
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+                run_id: run_id.to_string(),
+                target: message.clone(),
+            };
+            append_op_record_to_file(&self.session_file, &record)
+                .map_err(|error| format!("Failed to append subagent lane journal: {error}"))?;
+            records.push(record);
+        }
+        Ok(())
+    }
+
+    fn finish(
+        &self,
+        lane: &str,
+        run_id: &str,
+        outcome: OpOutcome,
+        error: Option<String>,
+    ) -> Result<(), String> {
+        let mut records = self.records.lock().map_err(|error| error.to_string())?;
+        let record = OpRecord::OperationFinished {
+            id: format!("finish-{run_id}"),
+            seq: records.len() as u64 + 1,
+            lane: lane.to_string(),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+            run_id: run_id.to_string(),
+            outcome,
+            error,
+        };
+        append_op_record_to_file(&self.session_file, &record)
+            .map_err(|error| format!("Failed to append subagent lane journal: {error}"))?;
+        records.push(record);
+        Ok(())
+    }
 }
 
 #[derive(Clone, Default)]
@@ -2913,6 +3057,37 @@ mod tests {
     use crate::wasi_extension::{WasiExtension, WasiExtensionInvocation, WasiExtensionResponse};
     use std::sync::Mutex;
     use std::time::{Duration as StdDuration, Instant};
+
+    #[test]
+    fn subagent_journal_persists_start_before_returning() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("session.jsonl");
+        let journal = SubagentLaneJournal::load(&session_file).unwrap();
+
+        journal
+            .start("subagent-1:0", "run-1", "inspect the repository")
+            .unwrap();
+
+        let records = threadlane_agent::load_op_records_from_file(&session_file).unwrap();
+        assert!(matches!(
+            records.first(),
+            Some(threadlane_agent::OpRecord::OperationStarted { .. })
+        ));
+        assert!(matches!(
+            records.get(1),
+            Some(threadlane_agent::OpRecord::TaskAttempt { .. })
+        ));
+        assert!(records.iter().all(|record| !record.id().is_empty()));
+        let run_ids: std::collections::HashSet<_> = records
+            .iter()
+            .filter_map(|record| match record {
+                threadlane_agent::OpRecord::TaskAttempt { run_id, .. } => Some(run_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(run_ids, ["run-1".to_string()].into_iter().collect());
+        assert!(records.windows(2).all(|pair| pair[0].seq() < pair[1].seq()));
+    }
 
     #[tokio::test]
     async fn model_switch_repairs_tool_call_interrupted_by_cancellation() {
