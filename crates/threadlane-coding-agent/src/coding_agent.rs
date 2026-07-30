@@ -3405,6 +3405,38 @@ mod tests {
         assert_eq!(recovered.recovered_open_operations, 0);
     }
 
+    #[test]
+    fn interrupted_subagent_recovery_does_not_mutate_parent_leaf() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("session.jsonl");
+        let journal = SubagentLaneJournal::load(&session_file).unwrap();
+        journal.start("subagent-1:0", "run-1", "inspect").unwrap();
+        journal
+            .tool_started(
+                "subagent-1:0",
+                "run-1",
+                "call-1",
+                "write_file",
+                serde_json::json!({}),
+            )
+            .unwrap();
+
+        let records = threadlane_agent::load_op_records_from_file(&session_file).unwrap();
+        let mut tree = SessionTree::new("session");
+        tree.add_message(AgentMessage::Assistant {
+            content: Some("parent".into()),
+            tool_calls: None,
+            stop_reason: None,
+            deferred_handle: None,
+        });
+
+        let recovered = threadlane_agent::reconcile_op_log_recovery(&mut tree, &records);
+
+        assert_eq!(recovered.recovered_open_operations, 0);
+        assert!(recovered.safe_tools_to_replay.is_empty());
+        assert_eq!(tree.get_active_branch_messages().len(), 1);
+    }
+
     #[tokio::test]
     async fn model_switch_repairs_tool_call_interrupted_by_cancellation() {
         let dir = tempfile::tempdir().unwrap();
