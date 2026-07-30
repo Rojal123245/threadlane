@@ -60,6 +60,12 @@ pub enum AgentEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    SubagentRecovery {
+        run_id: String,
+        status: SubagentRecoveryStatus,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
     PlanUpdated {
         plan: SessionPlan,
     },
@@ -72,6 +78,15 @@ pub enum AgentEvent {
         matched_text: String,
         reminder: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentRecoveryStatus {
+    Started,
+    Recovered,
+    Retrying,
+    Aborted,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

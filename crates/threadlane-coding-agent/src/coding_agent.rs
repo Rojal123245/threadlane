@@ -25,7 +25,8 @@ use threadlane_agent::{
     append_op_record_to_file, load_op_records_from_file, repair_interrupted_tool_turn,
     AfterToolCallHook, AfterToolCallResult, Agent, AgentEvent, AgentMessage, AgentState,
     AgentToolCall, AgentToolDefinition, AgentToolResult, BeforeToolCallHook, BeforeToolCallResult,
-    ImageAttachment, OpOutcome, OpRecord, ReasoningEffort, SessionTree, ToolExecutor,
+    ImageAttachment, OpOutcome, OpRecord, ReasoningEffort, SessionTree, SubagentRecoveryStatus,
+    ToolExecutor,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::broadcast;
@@ -2600,6 +2601,15 @@ impl CodingAgent {
             let mut recovered = 0;
 
             for lane in threadlane_agent::interrupted_subagent_lanes(&records) {
+                let _ = self
+                    .agent
+                    .loop_engine
+                    .event_tx
+                    .send(AgentEvent::SubagentRecovery {
+                        run_id: lane.run_id.clone(),
+                        status: SubagentRecoveryStatus::Started,
+                        detail: Some("Recovering interrupted task".into()),
+                    });
                 if let Some((marker_id, status, error)) =
                     markers.get(&(lane.lane.clone(), lane.run_id.clone()))
                 {
@@ -2652,6 +2662,20 @@ impl CodingAgent {
                         _ => OpOutcome::Completed,
                     };
                     journal.finish(&lane.lane, &lane.run_id, outcome, error.clone())?;
+                    let (status, detail) = match status.as_str() {
+                        "aborted" => (SubagentRecoveryStatus::Aborted, "Recovery was aborted"),
+                        "failed" => (SubagentRecoveryStatus::Retrying, "Recovery needs retry"),
+                        _ => (SubagentRecoveryStatus::Recovered, "Recovered prior work"),
+                    };
+                    let _ = self
+                        .agent
+                        .loop_engine
+                        .event_tx
+                        .send(AgentEvent::SubagentRecovery {
+                            run_id: lane.run_id.clone(),
+                            status,
+                            detail: Some(detail.into()),
+                        });
                     recovered += 1;
                     continue;
                 }
@@ -2713,12 +2737,30 @@ impl CodingAgent {
                     self.session_tree
                         .append_passive_branch(lane.source_leaf_id.as_deref(), messages)?;
                     journal.finish(&lane.lane, &lane.run_id, OpOutcome::Aborted, error)?;
+                    let _ = self
+                        .agent
+                        .loop_engine
+                        .event_tx
+                        .send(AgentEvent::SubagentRecovery {
+                            run_id: lane.run_id.clone(),
+                            status: SubagentRecoveryStatus::Aborted,
+                            detail: Some("Unsafe tool was not replayed".into()),
+                        });
                     recovered += 1;
                     continue;
                 }
 
                 let mut resume_messages = lane.messages.clone();
                 resume_messages.extend(safe_messages);
+                let _ = self
+                    .agent
+                    .loop_engine
+                    .event_tx
+                    .send(AgentEvent::SubagentRecovery {
+                        run_id: lane.run_id.clone(),
+                        status: SubagentRecoveryStatus::Retrying,
+                        detail: Some("Resuming interrupted task".into()),
+                    });
                 let model = self.agent.loop_engine.state.lock().await.model.clone();
                 #[cfg(test)]
                 let scheduler_observer = self
@@ -2789,6 +2831,20 @@ impl CodingAgent {
                 self.session_tree
                     .append_passive_branch(lane.source_leaf_id.as_deref(), messages)?;
                 journal.finish(&lane.lane, &lane.run_id, outcome, error)?;
+                let (status, detail) = if status == "completed" {
+                    (SubagentRecoveryStatus::Recovered, "Recovery complete")
+                } else {
+                    (SubagentRecoveryStatus::Retrying, "Recovery needs retry")
+                };
+                let _ = self
+                    .agent
+                    .loop_engine
+                    .event_tx
+                    .send(AgentEvent::SubagentRecovery {
+                        run_id: lane.run_id.clone(),
+                        status,
+                        detail: Some(detail.into()),
+                    });
                 recovered += 1;
             }
             Ok(recovered)
@@ -3628,7 +3684,8 @@ fn subagent_ui_event(event: AgentEvent, tool_call_prefix: &str) -> Option<AgentE
         | AgentEvent::TurnEnd { .. }
         | AgentEvent::SubagentQueued { .. }
         | AgentEvent::SubagentStarted { .. }
-        | AgentEvent::SubagentFinished { .. } => None,
+        | AgentEvent::SubagentFinished { .. }
+        | AgentEvent::SubagentRecovery { .. } => None,
         // Keep child prose and reasoning inside the child session. The final
         // labelled result renders it under the matching task after completion.
         AgentEvent::MessageUpdate { .. } => None,
@@ -4333,6 +4390,7 @@ mod tests {
         let mut coding_agent = CodingAgent::new(options);
         let observed = Arc::new(Mutex::new(Vec::new()));
         coding_agent.set_subagent_work_observer(observed.clone());
+        let mut events = coding_agent.agent.subscribe();
 
         assert_eq!(
             coding_agent
@@ -4356,6 +4414,20 @@ mod tests {
                 } if content == "test subagent result"
             )
         }));
+        let recovery_statuses = std::iter::from_fn(|| events.try_recv().ok())
+            .filter_map(|event| match event {
+                AgentEvent::SubagentRecovery { status, .. } => Some(status),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            recovery_statuses,
+            vec![
+                threadlane_agent::SubagentRecoveryStatus::Started,
+                threadlane_agent::SubagentRecoveryStatus::Retrying,
+                threadlane_agent::SubagentRecoveryStatus::Recovered,
+            ]
+        );
     }
 
     #[tokio::test]
@@ -4650,6 +4722,7 @@ mod tests {
         let mut options = coding_agent_options(dir.path().to_path_buf());
         options.session_file = Some(session_file.clone());
         let mut coding_agent = CodingAgent::new(options);
+        let mut events = coding_agent.agent.subscribe();
 
         assert_eq!(
             coding_agent
@@ -4659,6 +4732,20 @@ mod tests {
             1
         );
         assert!(!run_command_count.exists());
+
+        let recovery_statuses = std::iter::from_fn(|| events.try_recv().ok())
+            .filter_map(|event| match event {
+                AgentEvent::SubagentRecovery { status, .. } => Some(status),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            recovery_statuses,
+            vec![
+                threadlane_agent::SubagentRecoveryStatus::Started,
+                threadlane_agent::SubagentRecoveryStatus::Aborted,
+            ]
+        );
 
         let records = load_op_records_from_file(&op_log_file).unwrap();
         assert_eq!(

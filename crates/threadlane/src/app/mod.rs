@@ -8435,7 +8435,8 @@ impl App {
             | AgentEvent::MessageStart { .. }
             | AgentEvent::SubagentQueued { .. }
             | AgentEvent::SubagentStarted { .. }
-            | AgentEvent::SubagentFinished { .. } => {}
+            | AgentEvent::SubagentFinished { .. }
+            | AgentEvent::SubagentRecovery { .. } => {}
         }
     }
 

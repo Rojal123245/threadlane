@@ -17,7 +17,7 @@ pub use compaction::{
     CompactionStrategy,
 };
 pub use engine::get_runtime;
-pub use events::{AgentEvent, HarnessMetrics};
+pub use events::{AgentEvent, HarnessMetrics, SubagentRecoveryStatus};
 pub use hooks::*;
 pub use loop_engine::{repair_interrupted_tool_turn, AgentLoop, ToolIntentRecorder};
 pub use op_log::*;

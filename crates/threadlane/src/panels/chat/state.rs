@@ -69,6 +69,37 @@ pub struct SubagentRailItem {
     pub token_usage: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HarnessActivityStatus {
+    Queued,
+    Working,
+    Recovering,
+    Recovered,
+    Retrying,
+    Aborted,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HarnessActivity {
+    pub key: String,
+    pub task: String,
+    pub agent: String,
+    pub status: HarnessActivityStatus,
+    pub detail: String,
+}
+
+pub fn reduce_harness_activity(activities: &mut Vec<HarnessActivity>, activity: HarnessActivity) {
+    if let Some(existing) = activities
+        .iter_mut()
+        .find(|existing| existing.key == activity.key)
+    {
+        *existing = activity;
+    } else {
+        activities.push(activity);
+    }
+}
+
 pub fn subagent_rail_items(
     arguments: &str,
     output: &str,
@@ -295,6 +326,7 @@ pub struct ChatData {
     pub messages: Vec<ChatMessage>,
     pub streaming_text: String,
     pub streaming_kind: Option<StreamingKind>,
+    pub harness_activities: Vec<HarnessActivity>,
     pub revision: u64,
 }
 
@@ -1058,6 +1090,75 @@ pub use crate::path_utils::truncate_chars;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn harness_activity(key: &str, status: HarnessActivityStatus) -> HarnessActivity {
+        HarnessActivity {
+            key: key.into(),
+            task: format!("{key} task"),
+            agent: "scout".into(),
+            status,
+            detail: format!("{key} detail"),
+        }
+    }
+
+    #[test]
+    fn harness_activity_replaces_queued_with_working_then_recovered() {
+        let mut activities = ChatData::default().harness_activities;
+        reduce_harness_activity(
+            &mut activities,
+            harness_activity("lane-a", HarnessActivityStatus::Queued),
+        );
+
+        reduce_harness_activity(
+            &mut activities,
+            harness_activity("lane-a", HarnessActivityStatus::Working),
+        );
+        assert_eq!(activities.len(), 1);
+        assert_eq!(activities[0].status, HarnessActivityStatus::Working);
+        reduce_harness_activity(
+            &mut activities,
+            harness_activity("lane-a", HarnessActivityStatus::Recovered),
+        );
+
+        assert_eq!(activities.len(), 1);
+        assert_eq!(activities[0].key, "lane-a");
+        assert_eq!(activities[0].status, HarnessActivityStatus::Recovered);
+    }
+
+    #[test]
+    fn harness_activity_replaces_retrying_with_aborted() {
+        let mut activities = vec![harness_activity("lane-a", HarnessActivityStatus::Retrying)];
+
+        reduce_harness_activity(
+            &mut activities,
+            harness_activity("lane-a", HarnessActivityStatus::Aborted),
+        );
+
+        assert_eq!(activities.len(), 1);
+        assert_eq!(activities[0].status, HarnessActivityStatus::Aborted);
+    }
+
+    #[test]
+    fn harness_activity_replaces_duplicate_key_without_reordering_lanes() {
+        let mut activities = vec![
+            harness_activity("lane-a", HarnessActivityStatus::Queued),
+            harness_activity("lane-b", HarnessActivityStatus::Working),
+        ];
+
+        reduce_harness_activity(
+            &mut activities,
+            HarnessActivity {
+                detail: "Retrying recovery".into(),
+                ..harness_activity("lane-a", HarnessActivityStatus::Retrying)
+            },
+        );
+
+        assert_eq!(activities.len(), 2);
+        assert_eq!(activities[0].key, "lane-a");
+        assert_eq!(activities[0].status, HarnessActivityStatus::Retrying);
+        assert_eq!(activities[0].detail, "Retrying recovery");
+        assert_eq!(activities[1].key, "lane-b");
+    }
 
     #[test]
     fn stopped_generation_finalizes_streaming_and_running_tools() {
