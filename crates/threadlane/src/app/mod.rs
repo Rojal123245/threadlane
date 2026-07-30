@@ -2571,10 +2571,23 @@ script_mod! {
                                     spacing: 6
                                     align: Align{y: 0.5}
 
-                                    checkout_target_drop := mod.components.GitBranchDropDown {
+                                    checkout_target_drop := mod.components.IconDropDown {
                                         width: 142
                                         height: 28
                                         labels: ["Current checkout", "New worktree…"]
+                                        use_provider_icons: false
+                                        padding: Inset{left: 10 right: 22}
+                                        icon_walk: Walk{width: 14 height: 14 margin: Inset{right: 6}}
+                                        draw_icon +: {
+                                            svg: crate_resource("self:resources/icons/folder.svg")
+                                            color: theme.color_primary
+                                        }
+                                        popup_menu: mod.components.IconPopupMenu {
+                                            width: 142
+                                            menu_item: mod.components.IconPopupMenuItem {
+                                                use_provider_icons: false
+                                            }
+                                        }
                                     }
 
                                     git_branch_drop := mod.components.GitBranchDropDown {
