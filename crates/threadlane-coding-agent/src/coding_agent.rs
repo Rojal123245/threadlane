@@ -140,6 +140,18 @@ impl AgentWorkScheduler {
     }
 }
 
+#[derive(Clone)]
+pub struct CodingAgentWorkHandle {
+    scheduler: AgentWorkScheduler,
+}
+
+impl CodingAgentWorkHandle {
+    pub fn queue_follow_up(&self, content: impl Into<String>) {
+        self.scheduler
+            .schedule(AgentWork::QueueMessage(content.into()));
+    }
+}
+
 /// A persistent subprocess managed by the host for WASI extensions.
 /// Extensions reference managed processes by name across invocations.
 struct ManagedProcess {
@@ -1865,6 +1877,12 @@ impl CodingAgent {
         }
     }
 
+    pub fn work_handle(&self) -> CodingAgentWorkHandle {
+        CodingAgentWorkHandle {
+            scheduler: self.agent_work.clone(),
+        }
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
         self.agent.subscribe()
     }
@@ -3444,6 +3462,24 @@ mod tests {
         assert_eq!(
             *observed.lock().unwrap(),
             vec![AgentWork::QueueMessage("standalone queued work".into())]
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_follow_up_runs_through_the_agent_scheduler() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut coding_agent = CodingAgent::new(coding_agent_options(dir.path().to_path_buf()));
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        coding_agent.agent_work.set_test_observer(observed.clone());
+
+        coding_agent
+            .work_handle()
+            .queue_follow_up("interrupt the current turn");
+        coding_agent.run_scheduled_agent_work().await;
+
+        assert_eq!(
+            *observed.lock().unwrap(),
+            vec![AgentWork::QueueMessage("interrupt the current turn".into())]
         );
     }
 

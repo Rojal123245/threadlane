@@ -23,6 +23,14 @@ use threadlane_tools::{
 };
 use tokio::sync::{broadcast, mpsc, Mutex};
 
+fn normalized_tool_call_id(id: &str, empty_index: usize) -> String {
+    if id.is_empty() {
+        format!("call_{empty_index}")
+    } else {
+        id.to_string()
+    }
+}
+
 /// Removes an assistant tool-call turn that was interrupted before every call
 /// received a tool result. Provider APIs reject replaying such incomplete turns.
 pub fn repair_interrupted_tool_turn(messages: &mut Vec<AgentMessage>) -> bool {
@@ -44,25 +52,14 @@ pub fn repair_interrupted_tool_turn(messages: &mut Vec<AgentMessage>) -> bool {
         let expected_ids: HashSet<String> = tool_calls
             .iter()
             .enumerate()
-            .map(|(idx, call)| {
-                if call.id.is_empty() {
-                    format!("call_{idx}")
-                } else {
-                    call.id.clone()
-                }
-            })
+            .map(|(idx, call)| normalized_tool_call_id(&call.id, idx))
             .collect();
         let mut completed_ids = HashSet::new();
         let mut next = index + 1;
-        let mut empty_counter = 0;
+        let mut tool_index = 0;
         while let Some(AgentMessage::Tool { tool_call_id, .. }) = messages.get(next) {
-            let id = if tool_call_id.is_empty() {
-                let s = format!("call_{empty_counter}");
-                empty_counter += 1;
-                s
-            } else {
-                tool_call_id.clone()
-            };
+            let id = normalized_tool_call_id(tool_call_id, tool_index);
+            tool_index += 1;
             completed_ids.insert(id);
             next += 1;
         }
@@ -95,6 +92,7 @@ fn token_usage_from_provider(usage: ProviderUsage) -> TokenUsage {
 }
 
 pub fn convert_to_llm(messages: &[AgentMessage]) -> Vec<Value> {
+    let messages = normalize_tool_call_ids(messages);
     messages
         .iter()
         .filter_map(|msg| match msg {
@@ -175,10 +173,11 @@ pub fn convert_to_llm(messages: &[AgentMessage]) -> Vec<Value> {
 }
 
 pub fn convert_to_codex_llm(messages: &[AgentMessage]) -> (String, Vec<Value>) {
+    let messages = normalize_tool_call_ids(messages);
     let mut instructions = String::new();
     let mut items = Vec::new();
 
-    for msg in messages {
+    for msg in &messages {
         match msg {
             AgentMessage::System { content } => {
                 if !instructions.is_empty() {
@@ -232,7 +231,7 @@ pub fn convert_to_codex_llm(messages: &[AgentMessage]) -> (String, Vec<Value>) {
                     for tc in t_calls {
                         items.push(serde_json::json!({
                             "type": "function_call",
-                            "call_id": if tc.id.is_empty() { "call_0" } else { &tc.id },
+                            "call_id": tc.id,
                             "name": tc.function.name,
                             "arguments": tc.function.arguments
                         }));
@@ -244,14 +243,9 @@ pub fn convert_to_codex_llm(messages: &[AgentMessage]) -> (String, Vec<Value>) {
                 content,
                 ..
             } => {
-                let call_id = if tool_call_id.is_empty() {
-                    "call_0"
-                } else {
-                    tool_call_id
-                };
                 items.push(serde_json::json!({
                     "type": "function_call_output",
-                    "call_id": call_id,
+                    "call_id": tool_call_id,
                     "output": content
                 }));
             }
@@ -271,6 +265,58 @@ pub fn convert_to_codex_llm(messages: &[AgentMessage]) -> (String, Vec<Value>) {
     }
 
     (instructions, items)
+}
+
+fn normalize_tool_call_ids(messages: &[AgentMessage]) -> Vec<AgentMessage> {
+    let mut tool_index = 0;
+    messages
+        .iter()
+        .map(|message| match message {
+            AgentMessage::Assistant {
+                content,
+                tool_calls: Some(tool_calls),
+                stop_reason,
+                deferred_handle,
+            } => {
+                tool_index = 0;
+                AgentMessage::Assistant {
+                    content: content.clone(),
+                    tool_calls: Some(
+                        tool_calls
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, call)| {
+                                let mut call = call.clone();
+                                call.id = normalized_tool_call_id(&call.id, idx);
+                                call
+                            })
+                            .collect(),
+                    ),
+                    stop_reason: stop_reason.clone(),
+                    deferred_handle: deferred_handle.clone(),
+                }
+            }
+            AgentMessage::Tool {
+                tool_call_id,
+                name,
+                content,
+                is_error,
+            } => {
+                let normalized = normalized_tool_call_id(tool_call_id, tool_index);
+                tool_index += 1;
+                AgentMessage::Tool {
+                    tool_call_id: normalized,
+                    name: name.clone(),
+                    content: content.clone(),
+                    is_error: *is_error,
+                }
+            }
+            other => {
+                tool_index = 0;
+                other.clone()
+            }
+        })
+        .collect()
 }
 
 #[derive(Clone)]
@@ -1175,6 +1221,7 @@ fn normalize_tool_arguments(
 #[cfg(test)]
 mod normalize_tool_arguments_tests {
     use super::*;
+    use threadlane_provider::openai::{ToolCall, ToolCallFunction};
 
     #[test]
     fn fills_missing_file_paths_from_the_workspace() {
@@ -1182,5 +1229,102 @@ mod normalize_tool_arguments_tests {
             normalize_tool_arguments("read_file", "{}", Some(std::path::Path::new("/workspace")));
 
         assert_eq!(arguments, r#"{"path":"/workspace"}"#);
+    }
+
+    #[test]
+    fn normalizes_empty_tool_ids_by_tool_index() {
+        let messages = vec![
+            AgentMessage::Assistant {
+                content: None,
+                tool_calls: Some(vec![
+                    ToolCall {
+                        id: String::new(),
+                        r#type: "function".into(),
+                        function: ToolCallFunction {
+                            name: "read_file".into(),
+                            arguments: "{}".into(),
+                        },
+                        thought_signature: None,
+                    },
+                    ToolCall {
+                        id: String::new(),
+                        r#type: "function".into(),
+                        function: ToolCallFunction {
+                            name: "list_dir".into(),
+                            arguments: "{}".into(),
+                        },
+                        thought_signature: None,
+                    },
+                ]),
+                stop_reason: None,
+                deferred_handle: None,
+            },
+            AgentMessage::Tool {
+                tool_call_id: String::new(),
+                name: "read_file".into(),
+                content: "one".into(),
+                is_error: false,
+            },
+            AgentMessage::Tool {
+                tool_call_id: String::new(),
+                name: "list_dir".into(),
+                content: "two".into(),
+                is_error: false,
+            },
+        ];
+
+        let chat = convert_to_llm(&messages);
+        assert_eq!(chat[1]["tool_call_id"], "call_0");
+        assert_eq!(chat[2]["tool_call_id"], "call_1");
+
+        let (_, codex) = convert_to_codex_llm(&messages);
+        assert_eq!(codex[2]["call_id"], "call_0");
+        assert_eq!(codex[3]["call_id"], "call_1");
+    }
+
+    #[test]
+    fn normalizes_empty_tool_ids_after_explicit_ids() {
+        let messages = vec![
+            AgentMessage::Assistant {
+                content: None,
+                tool_calls: Some(vec![
+                    ToolCall {
+                        id: "provider-call".into(),
+                        r#type: "function".into(),
+                        function: ToolCallFunction {
+                            name: "read_file".into(),
+                            arguments: "{}".into(),
+                        },
+                        thought_signature: None,
+                    },
+                    ToolCall {
+                        id: String::new(),
+                        r#type: "function".into(),
+                        function: ToolCallFunction {
+                            name: "list_dir".into(),
+                            arguments: "{}".into(),
+                        },
+                        thought_signature: None,
+                    },
+                ]),
+                stop_reason: None,
+                deferred_handle: None,
+            },
+            AgentMessage::Tool {
+                tool_call_id: "provider-call".into(),
+                name: "read_file".into(),
+                content: "one".into(),
+                is_error: false,
+            },
+            AgentMessage::Tool {
+                tool_call_id: String::new(),
+                name: "list_dir".into(),
+                content: "two".into(),
+                is_error: false,
+            },
+        ];
+
+        let chat = convert_to_llm(&messages);
+        assert_eq!(chat[2]["tool_call_id"], "call_1");
     }
 }

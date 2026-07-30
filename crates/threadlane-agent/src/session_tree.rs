@@ -459,6 +459,13 @@ impl SessionTree {
             };
             writeln!(file, "{}", serde_json::to_string(&metadata)?)?;
         }
+        for (key, value) in &self.global_facts {
+            let fact = SessionRecord::GlobalFact {
+                key: key.clone(),
+                value: value.clone(),
+            };
+            writeln!(file, "{}", serde_json::to_string(&fact)?)?;
+        }
         let plan = SessionRecord::Plan {
             explanation: self.plan.explanation.clone(),
             items: self.plan.items.clone(),
@@ -840,5 +847,19 @@ mod tests {
         let loaded = SessionTree::load_from_file(&path).unwrap();
         assert_eq!(loaded.get_fact("git_branch"), Some("feat/multi-lane"));
         assert_eq!(loaded.get_fact("env"), Some("staging"));
+    }
+
+    #[test]
+    fn global_facts_survive_metadata_rewrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session_facts_rewrite.jsonl");
+        let mut tree = SessionTree::new("facts_session");
+        tree.file_path = Some(path.clone());
+        tree.set_fact("git_branch", "feat/multi-lane").unwrap();
+
+        tree.set_name("Named session".into()).unwrap();
+
+        let loaded = SessionTree::load_from_file(&path).unwrap();
+        assert_eq!(loaded.get_fact("git_branch"), Some("feat/multi-lane"));
     }
 }

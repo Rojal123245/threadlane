@@ -41,8 +41,8 @@ use robius_file_picker::FileDialog;
 use threadlane_agent::{get_runtime, AgentEvent, ImageAttachment, ReasoningEffort, SessionPlan};
 use threadlane_coding_agent::{
     default_global_threadlane_dir, discover_agents, AgentConfig, AgentScope, CapabilityCatalog,
-    CodingAgent, CodingAgentOptions, ExtensionManager, ExtensionScope, HarnessSupervisor,
-    ProjectContext, SkillMetadata, SkillSettings, TaskRecord,
+    CodingAgent, CodingAgentOptions, CodingAgentWorkHandle, ExtensionManager, ExtensionScope,
+    HarnessSupervisor, ProjectContext, SkillMetadata, SkillSettings, TaskRecord,
 };
 use threadlane_provider::auth;
 use threadlane_provider::openai::{fetch_available_models, OpenAIClient};
@@ -3848,6 +3848,7 @@ struct GenerationRun {
 
 struct SessionRuntime {
     agent: Arc<tokio::sync::Mutex<CodingAgent>>,
+    work_handle: CodingAgentWorkHandle,
     session_file: Option<PathBuf>,
     generation: Option<GenerationRun>,
     terminal_generation_id: Option<u64>,
@@ -3871,8 +3872,10 @@ impl SessionRuntime {
     fn new(agent: CodingAgent, model: String, reasoning_effort: ReasoningEffort) -> Self {
         let session_file = agent.session_tree.file_path.clone();
         let plan = agent.current_plan();
+        let work_handle = agent.work_handle();
         Self {
             agent: Arc::new(tokio::sync::Mutex::new(agent)),
+            work_handle,
             session_file,
             generation: None,
             terminal_generation_id: None,
@@ -5151,15 +5154,8 @@ fn format_capabilities_summary(skills: &[SkillMetadata], agents: &[AgentConfig])
 impl App {
     fn enqueue_steer_interrupt(&mut self, _cx: &mut Cx, input_text: &str) {
         let Some(key) = self.workspace_state.active_key().cloned() else { return; };
-        if let Some(supervisor) = &self.supervisor {
-            supervisor.enqueue_steer_priority(
-                &key.session_id,
-                "main",
-                threadlane_agent::AgentMessage::User {
-                    content: input_text.to_string(),
-                },
-                threadlane_agent::SteerPriority::High,
-            );
+        if let Some(runtime) = self.session_runtimes.get(&key) {
+            runtime.work_handle.queue_follow_up(input_text.to_string());
         }
         if let Some(workspace) = self.workspace_state.active_workspace_mut() {
             workspace.chat.push_chat(MsgRole::User, input_text.to_string());
