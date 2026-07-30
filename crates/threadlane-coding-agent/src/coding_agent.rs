@@ -2770,6 +2770,42 @@ async fn checkpoint_new_subagent_messages(
     Ok(())
 }
 
+async fn consume_subagent_turn_checkpoints(
+    mut events: broadcast::Receiver<AgentEvent>,
+    journal: Option<SubagentLaneJournal>,
+    lane_name: String,
+    run_id: String,
+    state: Arc<tokio::sync::Mutex<AgentState>>,
+) -> Result<usize, String> {
+    let mut checkpoint_cursor = 0;
+    while let Ok(event) = events.recv().await {
+        if matches!(&event, AgentEvent::TurnEnd { .. }) {
+            checkpoint_new_subagent_messages(
+                journal.as_ref(),
+                &lane_name,
+                &run_id,
+                &state,
+                &mut checkpoint_cursor,
+            )
+            .await?;
+        }
+        if matches!(&event, AgentEvent::AgentEnd { .. }) {
+            break;
+        }
+    }
+    Ok(checkpoint_cursor)
+}
+
+async fn checkpoint_subagent_final_snapshot(
+    journal: Option<&SubagentLaneJournal>,
+    lane_name: &str,
+    run_id: &str,
+    state: &Arc<tokio::sync::Mutex<AgentState>>,
+    checkpoint_cursor: &mut usize,
+) -> Result<(), String> {
+    checkpoint_new_subagent_messages(journal, lane_name, run_id, state, checkpoint_cursor).await
+}
+
 fn accept_completed_subagent_lanes(
     completed_lanes: &Arc<std::sync::Mutex<Vec<CompletedSubagentLane>>>,
     lanes: Vec<CompletedSubagentLane>,
@@ -2940,30 +2976,18 @@ async fn run_subagent_task(
     });
 
     // Persist only completed child turns; partial stream deltas stay in memory.
-    let mut checkpoint_events = agent.subscribe();
+    let checkpoint_events = agent.subscribe();
     let checkpoint_state = agent.loop_engine.state.clone();
     let checkpoint_journal = context.journal.clone();
     let checkpoint_lane_name = lane_name.clone();
     let checkpoint_run_id = journal_run_id.clone();
-    let checkpoint_task = tokio::spawn(async move {
-        let mut checkpoint_cursor = 0;
-        while let Ok(event) = checkpoint_events.recv().await {
-            if matches!(&event, AgentEvent::TurnEnd { .. }) {
-                checkpoint_new_subagent_messages(
-                    checkpoint_journal.as_ref(),
-                    &checkpoint_lane_name,
-                    &checkpoint_run_id,
-                    &checkpoint_state,
-                    &mut checkpoint_cursor,
-                )
-                .await?;
-            }
-            if matches!(&event, AgentEvent::AgentEnd { .. }) {
-                break;
-            }
-        }
-        Ok::<usize, String>(checkpoint_cursor)
-    });
+    let checkpoint_task = tokio::spawn(consume_subagent_turn_checkpoints(
+        checkpoint_events,
+        checkpoint_journal,
+        checkpoint_lane_name,
+        checkpoint_run_id,
+        checkpoint_state,
+    ));
 
     // Preserve provider and tool-loop errors in the command result as well.
     let mut events = agent.subscribe();
@@ -2973,7 +2997,7 @@ async fn run_subagent_task(
     let mut checkpoint_cursor = checkpoint_task
         .await
         .map_err(|error| format!("Child turn checkpoint task failed: {error}"))??;
-    checkpoint_new_subagent_messages(
+    checkpoint_subagent_final_snapshot(
         context.journal.as_ref(),
         &lane_name,
         &journal_run_id,
@@ -4257,7 +4281,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subagent_checkpoints_completed_turns_once_and_finishes_after_sink() {
+    async fn subagent_turn_end_and_final_snapshot_checkpoint_once_and_finish_after_sink() {
         let dir = tempfile::tempdir().unwrap();
         let session_file = dir.path().join("session.jsonl");
         let journal = SubagentLaneJournal::load(&session_file).unwrap();
@@ -4282,25 +4306,29 @@ mod tests {
                 },
             ];
         }
-        let mut cursor = 0;
-        checkpoint_new_subagent_messages(
-            Some(&journal),
-            lane_name,
-            run_id,
-            &agent.loop_engine.state,
-            &mut cursor,
-        )
-        .await
-        .unwrap();
-        checkpoint_new_subagent_messages(
-            Some(&journal),
-            lane_name,
-            run_id,
-            &agent.loop_engine.state,
-            &mut cursor,
-        )
-        .await
-        .unwrap();
+        let checkpoint_task = tokio::spawn(consume_subagent_turn_checkpoints(
+            agent.subscribe(),
+            Some(journal.clone()),
+            lane_name.into(),
+            run_id.into(),
+            agent.loop_engine.state.clone(),
+        ));
+        let _ = agent.loop_engine.event_tx.send(AgentEvent::TurnEnd {
+            turn_number: 1,
+            tool_results: Vec::new(),
+        });
+        let _ = agent.loop_engine.event_tx.send(AgentEvent::AgentEnd {
+            usage: Default::default(),
+        });
+        let mut cursor = checkpoint_task.await.unwrap().unwrap();
+        assert_eq!(
+            load_op_records_from_file(&session_file)
+                .unwrap()
+                .iter()
+                .filter(|record| matches!(record, OpRecord::WriteDeferred { .. }))
+                .count(),
+            2
+        );
         agent
             .loop_engine
             .state
@@ -4313,7 +4341,7 @@ mod tests {
                 content: "[]".into(),
                 is_error: false,
             });
-        checkpoint_new_subagent_messages(
+        checkpoint_subagent_final_snapshot(
             Some(&journal),
             lane_name,
             run_id,
