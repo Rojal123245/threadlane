@@ -28,8 +28,10 @@ use crate::state::{
     active_session_entry, archive_session, begin_title_generation, builtin_commands,
     create_new_session, delete_session, end_title_generation, is_project_working,
     is_session_working, normalize_session_title, project_work_dir_at_row, refresh_sessions,
+    session_health,
     session_entry_at_row, session_entry_for_file, session_overflow_at_row, session_title_eligible,
-    set_active_project, set_active_session, set_session_context_target, set_session_working,
+    set_active_project, set_active_session, set_session_context_target, set_session_health,
+    set_session_working,
     title_prompt_for_submission, toggle_project_collapsed, toggle_project_show_all, truncate_chars,
     CapabilityState, CommandInfo, GuiAgentEvent, MsgRole, SessionEntry, ToolStatus,
 };
@@ -8437,7 +8439,13 @@ impl App {
             | AgentEvent::SubagentFinished { .. }
             | AgentEvent::SubagentRecovery { .. }) => {
                 let Some(key) = target_key else { return };
-                reduce_harness_event(&mut self.workspace_state.workspace_mut(key).chat, event);
+                let health = {
+                    let chat = &mut self.workspace_state.workspace_mut(key.clone()).chat;
+                    reduce_harness_event(chat, event);
+                    session_health(&chat.harness_activities)
+                };
+                set_session_health(&key.work_dir, &key.session_id, health);
+                self.ui.widget(cx, ids!(session_list)).redraw(cx);
             }
             AgentEvent::TurnStart { .. }
             | AgentEvent::MessageStart { .. } => {}
