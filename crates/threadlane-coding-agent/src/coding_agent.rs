@@ -1624,6 +1624,13 @@ async fn dispatch_hook_requests_isolated(
 }
 
 impl CodingAgent {
+    pub(crate) fn set_tool_intent_recorder(
+        &mut self,
+        recorder: Option<threadlane_agent::ToolIntentRecorder>,
+    ) {
+        self.agent.loop_engine.tool_intent_recorder = recorder;
+    }
+
     pub async fn replay_safe_tools(
         &self,
         records: &[threadlane_agent::OpRecord],

@@ -325,10 +325,13 @@ struct ToolExecutorRoute {
     tool_names: HashSet<String>,
 }
 
+pub type ToolIntentRecorder = Arc<dyn Fn(&str, &str, &str) -> Result<(), String> + Send + Sync>;
+
 #[derive(Clone)]
 struct ToolRunContext {
     before_hook: Option<Arc<dyn BeforeToolCallHook>>,
     after_hook: Option<Arc<dyn AfterToolCallHook>>,
+    intent_recorder: Option<ToolIntentRecorder>,
     event_tx: broadcast::Sender<AgentEvent>,
     state: Arc<Mutex<AgentState>>,
     tool_routes: Vec<ToolExecutorRoute>,
@@ -348,6 +351,7 @@ pub struct AgentLoop {
     follow_up_queue: PendingMessageQueue,
     pub before_tool_call_hook: Option<Arc<dyn BeforeToolCallHook>>,
     pub after_tool_call_hook: Option<Arc<dyn AfterToolCallHook>>,
+    pub tool_intent_recorder: Option<ToolIntentRecorder>,
     transform_context_hook: Option<Arc<dyn TransformContextHook>>,
     should_stop_hook: Option<Arc<dyn ShouldStopAfterTurnHook>>,
     pub event_tx: broadcast::Sender<AgentEvent>,
@@ -385,6 +389,7 @@ impl AgentLoop {
             follow_up_queue: PendingMessageQueue::new(QueueMode::All),
             before_tool_call_hook: None,
             after_tool_call_hook: None,
+            tool_intent_recorder: None,
             transform_context_hook: None,
             should_stop_hook: None,
             event_tx,
@@ -957,6 +962,7 @@ impl AgentLoop {
                 let context = ToolRunContext {
                     before_hook: self.before_tool_call_hook.clone(),
                     after_hook: self.after_tool_call_hook.clone(),
+                    intent_recorder: self.tool_intent_recorder.clone(),
                     event_tx: self.event_tx.clone(),
                     state: self.state.clone(),
                     tool_routes: tool_routes.clone(),
@@ -1006,6 +1012,7 @@ impl AgentLoop {
             ToolRunContext {
                 before_hook: self.before_tool_call_hook.clone(),
                 after_hook: self.after_tool_call_hook.clone(),
+                intent_recorder: self.tool_intent_recorder.clone(),
                 event_tx: self.event_tx.clone(),
                 state: self.state.clone(),
                 tool_routes,
@@ -1072,6 +1079,24 @@ impl AgentLoop {
                     result: res.clone(),
                 });
                 return res;
+            }
+        }
+
+        if let Some(recorder) = &context.intent_recorder {
+            if let Err(error) = recorder(&tc.id, &tc.function.name, &arguments) {
+                let result = AgentToolResult {
+                    tool_call_id: tc.id.clone(),
+                    name: tc.function.name.clone(),
+                    content: error,
+                    is_error: true,
+                    terminate: false,
+                };
+                let _ = context.event_tx.send(AgentEvent::ToolExecutionEnd {
+                    tool_call_id: tc.id,
+                    name: tc.function.name,
+                    result: result.clone(),
+                });
+                return result;
             }
         }
 
@@ -1221,6 +1246,7 @@ fn normalize_tool_arguments(
 #[cfg(test)]
 mod normalize_tool_arguments_tests {
     use super::*;
+    use std::sync::Mutex as StdMutex;
     use threadlane_provider::openai::{ToolCall, ToolCallFunction};
 
     #[test]
@@ -1326,5 +1352,68 @@ mod normalize_tool_arguments_tests {
 
         let chat = convert_to_llm(&messages);
         assert_eq!(chat[2]["tool_call_id"], "call_1");
+    }
+
+    #[tokio::test]
+    async fn tool_intent_recorder_sees_normalized_arguments_before_execution() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut agent = AgentLoop::new("", None, "test");
+        agent.work_dir = Some(dir.path().to_path_buf());
+        let recorded = Arc::new(StdMutex::new(None));
+        let recorded_for_callback = recorded.clone();
+        agent.tool_intent_recorder = Some(Arc::new(move |id, name, arguments| {
+            *recorded_for_callback.lock().unwrap() =
+                Some((id.to_string(), name.to_string(), arguments.to_string()));
+            Ok(())
+        }));
+
+        let results = agent
+            .execute_tools(&[ToolCall {
+                id: "call-1".into(),
+                r#type: "function".into(),
+                function: ToolCallFunction {
+                    name: "list_dir".into(),
+                    arguments: "{}".into(),
+                },
+                thought_signature: None,
+            }])
+            .await;
+
+        assert_eq!(
+            recorded.lock().unwrap().as_ref(),
+            Some(&(
+                "call-1".into(),
+                "list_dir".into(),
+                format!(r#"{{"path":"{}"}}"#, dir.path().display())
+            ))
+        );
+        assert!(!results[0].is_error);
+    }
+
+    #[tokio::test]
+    async fn tool_intent_recorder_failure_prevents_execution() {
+        let mut agent = AgentLoop::new("", None, "test");
+        agent.tool_intent_recorder = Some(Arc::new(|_, _, _| Err("intent append failed".into())));
+        let mut events = agent.event_tx.subscribe();
+
+        let results = agent
+            .execute_tools(&[ToolCall {
+                id: "call-1".into(),
+                r#type: "function".into(),
+                function: ToolCallFunction {
+                    name: "list_dir".into(),
+                    arguments: "{}".into(),
+                },
+                thought_signature: None,
+            }])
+            .await;
+
+        assert!(results[0].is_error);
+        assert_eq!(results[0].content, "intent append failed");
+        assert!(matches!(
+            events.try_recv(),
+            Ok(AgentEvent::ToolExecutionEnd { .. })
+        ));
+        assert!(events.try_recv().is_err());
     }
 }

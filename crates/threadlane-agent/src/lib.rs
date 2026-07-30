@@ -19,7 +19,7 @@ pub use compaction::{
 pub use engine::get_runtime;
 pub use events::{AgentEvent, HarnessMetrics};
 pub use hooks::*;
-pub use loop_engine::{repair_interrupted_tool_turn, AgentLoop};
+pub use loop_engine::{repair_interrupted_tool_turn, AgentLoop, ToolIntentRecorder};
 pub use op_log::*;
 pub use queue::PendingMessageQueue;
 pub use rules::*;

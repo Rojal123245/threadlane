@@ -6,8 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use threadlane_agent::{
-    append_op_record_to_file, AgentEvent, AgentMessage, LaneQueue, OpRecord, QueueKind,
-    TokenUsage,
+    append_op_record_to_file, AgentEvent, AgentMessage, LaneQueue, OpRecord, QueueKind, TokenUsage,
 };
 use tokio::sync::broadcast;
 
@@ -51,6 +50,7 @@ pub struct Lane {
     pub queue: LaneQueue,
     pub op_log: Vec<OpRecord>,
     pub active_run_id: Option<String>,
+    session_file: Option<PathBuf>,
     pub accumulated_usage: TokenUsage,
 }
 
@@ -65,9 +65,39 @@ impl Lane {
             queue: LaneQueue::default(),
             op_log: Vec::new(),
             active_run_id: None,
+            session_file: None,
             accumulated_usage: TokenUsage::default(),
         }
     }
+}
+
+fn persist_queue_intent(
+    lane: &mut Lane,
+    queue: QueueKind,
+    priority: Option<threadlane_agent::SteerPriority>,
+    target: AgentMessage,
+) -> Result<(), String> {
+    let session_file = lane.session_file.as_deref().ok_or_else(|| {
+        format!(
+            "Lane '{}:{}' has no session file",
+            lane.session_id, lane.name
+        )
+    })?;
+    let seq = lane.op_log.len() as u64 + 1;
+    let record = OpRecord::QueueEnqueued {
+        id: format!("queue-{}-{}-{seq}", lane.session_id, lane.name),
+        seq,
+        lane: lane.name.clone(),
+        timestamp: now_ms() as u64,
+        run_id: lane.active_run_id.clone(),
+        queue,
+        priority,
+        target,
+    };
+    append_op_record_to_file(&session_file.with_extension("oplog.jsonl"), &record)
+        .map_err(|error| format!("Failed to append queue intent: {error}"))?;
+    lane.op_log.push(record);
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,7 +242,9 @@ impl HarnessSupervisor {
         let lock = self.lanes.lock().unwrap();
         let mut total = TokenUsage::default();
         for lane in lock.values() {
-            if lane.session_id == session_id && (lane.name == root_lane || lane.parent_lane.as_deref() == Some(root_lane)) {
+            if lane.session_id == session_id
+                && (lane.name == root_lane || lane.parent_lane.as_deref() == Some(root_lane))
+            {
                 total.input_tokens += lane.accumulated_usage.input_tokens;
                 total.output_tokens += lane.accumulated_usage.output_tokens;
                 total.total_tokens += lane.accumulated_usage.total_tokens;
@@ -231,7 +263,11 @@ impl HarnessSupervisor {
         self.event_tx.subscribe()
     }
 
-    pub fn subscribe_lane(&self, _session_id: &str, _lane_name: &str) -> broadcast::Receiver<TaskAgentEvent> {
+    pub fn subscribe_lane(
+        &self,
+        _session_id: &str,
+        _lane_name: &str,
+    ) -> broadcast::Receiver<TaskAgentEvent> {
         self.event_tx.subscribe()
     }
 
@@ -243,23 +279,31 @@ impl HarnessSupervisor {
             .clone()
     }
 
-    pub fn get_or_create_sub_lane(&self, session_id: &str, lane_name: &str, parent_lane: &str) -> Lane {
+    pub fn get_or_create_sub_lane(
+        &self,
+        session_id: &str,
+        lane_name: &str,
+        parent_lane: &str,
+    ) -> Lane {
         let key = format!("{session_id}:{lane_name}");
         let mut lock = self.lanes.lock().unwrap();
-        let lane = lock.entry(key)
-            .or_insert_with(|| {
-                let mut l = Lane::new(lane_name, session_id);
-                l.parent_lane = Some(parent_lane.to_string());
-                l
-            });
+        let lane = lock.entry(key).or_insert_with(|| {
+            let mut l = Lane::new(lane_name, session_id);
+            l.parent_lane = Some(parent_lane.to_string());
+            l
+        });
         lane.clone()
     }
 
     pub fn cancel_lane_hierarchy(&self, session_id: &str, root_lane: &str) -> usize {
         let mut lock = self.lanes.lock().unwrap();
         let mut cancelled_count = 0;
-        let targets: Vec<String> = lock.values()
-            .filter(|l| l.session_id == session_id && (l.name == root_lane || l.parent_lane.as_deref() == Some(root_lane)))
+        let targets: Vec<String> = lock
+            .values()
+            .filter(|l| {
+                l.session_id == session_id
+                    && (l.name == root_lane || l.parent_lane.as_deref() == Some(root_lane))
+            })
             .map(|l| format!("{session_id}:{}", l.name))
             .collect();
 
@@ -272,25 +316,58 @@ impl HarnessSupervisor {
         cancelled_count
     }
 
-    pub fn enqueue_steer(&self, session_id: &str, lane_name: &str, message: AgentMessage) {
+    pub fn enqueue_steer(
+        &self,
+        session_id: &str,
+        lane_name: &str,
+        message: AgentMessage,
+    ) -> Result<(), String> {
         let key = format!("{session_id}:{lane_name}");
         let mut lock = self.lanes.lock().unwrap();
-        let lane = lock.entry(key).or_insert_with(|| Lane::new(lane_name, session_id));
+        let lane = lock
+            .entry(key)
+            .or_insert_with(|| Lane::new(lane_name, session_id));
+        persist_queue_intent(
+            lane,
+            QueueKind::Steer,
+            Some(threadlane_agent::SteerPriority::Normal),
+            message.clone(),
+        )?;
         lane.queue.enqueue(QueueKind::Steer, message);
+        Ok(())
     }
 
-    pub fn enqueue_steer_priority(&self, session_id: &str, lane_name: &str, message: AgentMessage, priority: threadlane_agent::SteerPriority) {
+    pub fn enqueue_steer_priority(
+        &self,
+        session_id: &str,
+        lane_name: &str,
+        message: AgentMessage,
+        priority: threadlane_agent::SteerPriority,
+    ) -> Result<(), String> {
         let key = format!("{session_id}:{lane_name}");
         let mut lock = self.lanes.lock().unwrap();
-        let lane = lock.entry(key).or_insert_with(|| Lane::new(lane_name, session_id));
+        let lane = lock
+            .entry(key)
+            .or_insert_with(|| Lane::new(lane_name, session_id));
+        persist_queue_intent(lane, QueueKind::Steer, Some(priority), message.clone())?;
         lane.queue.enqueue_steer_with_priority(message, priority);
+        Ok(())
     }
 
-    pub fn enqueue_followup(&self, session_id: &str, lane_name: &str, message: AgentMessage) {
+    pub fn enqueue_followup(
+        &self,
+        session_id: &str,
+        lane_name: &str,
+        message: AgentMessage,
+    ) -> Result<(), String> {
         let key = format!("{session_id}:{lane_name}");
         let mut lock = self.lanes.lock().unwrap();
-        let lane = lock.entry(key).or_insert_with(|| Lane::new(lane_name, session_id));
+        let lane = lock
+            .entry(key)
+            .or_insert_with(|| Lane::new(lane_name, session_id));
+        persist_queue_intent(lane, QueueKind::FollowUp, None, message.clone())?;
         lane.queue.enqueue(QueueKind::FollowUp, message);
+        Ok(())
     }
 
     pub fn update_lane_leaf(&self, session_id: &str, lane_name: &str, leaf_id: Option<String>) {
@@ -316,21 +393,19 @@ impl HarnessSupervisor {
         session_file: &Path,
         record: OpRecord,
     ) -> Result<(), String> {
-        append_op_record_to_file(&session_file.with_extension("oplog.jsonl"), &record)
-            .map_err(|error| format!("Failed to append lane operation: {error}"))?;
         let key = format!("{session_id}:{lane_name}");
         let mut lock = self.lanes.lock().unwrap();
         let lane = lock
             .entry(key)
-            .or_insert_with(|| Lane::new(lane_name, session_id))
-            .clone();
-        let mut lane = lane;
+            .or_insert_with(|| Lane::new(lane_name, session_id));
+        append_op_record_to_file(&session_file.with_extension("oplog.jsonl"), &record)
+            .map_err(|error| format!("Failed to append lane operation: {error}"))?;
+        lane.session_file = Some(session_file.to_path_buf());
         if matches!(&record, OpRecord::OperationStarted { .. }) {
             lane.active_run_id = Some(record.id().to_string());
             lane.status = LaneStatus::Running;
         }
         lane.op_log.push(record);
-        lock.insert(format!("{session_id}:{lane_name}"), lane);
         Ok(())
     }
 
@@ -344,43 +419,40 @@ impl HarnessSupervisor {
         effective_args: serde_json::Value,
     ) -> Result<(), String> {
         let key = format!("{session_id}:{lane_name}");
-        let (run_id, seq, tool_index) = {
-            let lock = self.lanes.lock().unwrap();
-            let lane = lock
-                .get(&key)
-                .ok_or_else(|| format!("Lane '{key}' not found"))?;
-            let run_id = lane
-                .active_run_id
-                .clone()
-                .ok_or_else(|| format!("Lane '{key}' has no active run"))?;
-            let tool_index = lane
-                .op_log
-                .iter()
-                .filter(|record| {
-                    matches!(record, OpRecord::ToolStarted { run_id: record_run_id, .. } if record_run_id == &run_id)
-                })
-                .count();
-            (run_id, lane.op_log.len() as u64 + 1, tool_index)
+        let mut lock = self.lanes.lock().unwrap();
+        let lane = lock
+            .get_mut(&key)
+            .ok_or_else(|| format!("Lane '{key}' not found"))?;
+        let run_id = lane
+            .active_run_id
+            .clone()
+            .ok_or_else(|| format!("Lane '{key}' has no active run"))?;
+        let tool_index = lane
+            .op_log
+            .iter()
+            .filter(|record| {
+                matches!(record, OpRecord::ToolStarted { run_id: record_run_id, .. } if record_run_id == &run_id)
+            })
+            .count();
+        let record = OpRecord::ToolStarted {
+            id: format!("tool-{run_id}-{tool_index}"),
+            seq: lane.op_log.len() as u64 + 1,
+            lane: lane_name.to_string(),
+            timestamp: now_ms() as u64,
+            run_id,
+            assistant_entry_id: String::new(),
+            tool_index,
+            tool_call_id: tool_call_id.to_string(),
+            tool_name: tool_name.to_string(),
+            effective_args,
+            result_entry_id: format!("result-{tool_call_id}"),
+            replay: threadlane_agent::classify_tool_replay_safety(tool_name),
         };
-        self.append_persisted_lane_record(
-            session_id,
-            lane_name,
-            session_file,
-            OpRecord::ToolStarted {
-                id: format!("tool-{tool_call_id}"),
-                seq,
-                lane: lane_name.to_string(),
-                timestamp: now_ms() as u64,
-                run_id,
-                assistant_entry_id: String::new(),
-                tool_index,
-                tool_call_id: tool_call_id.to_string(),
-                tool_name: tool_name.to_string(),
-                effective_args,
-                result_entry_id: format!("result-{tool_call_id}"),
-                replay: threadlane_agent::classify_tool_replay_safety(tool_name),
-            },
-        )
+        append_op_record_to_file(&session_file.with_extension("oplog.jsonl"), &record)
+            .map_err(|error| format!("Failed to append lane operation: {error}"))?;
+        lane.session_file = Some(session_file.to_path_buf());
+        lane.op_log.push(record);
+        Ok(())
     }
 
     pub fn checkpoint_lane(&self, session_id: &str, lane_name: &str) -> CheckpointResult {
@@ -422,6 +494,7 @@ impl HarnessSupervisor {
         for (lane_name, lane_records) in grouped {
             let key = format!("{session_id}:{lane_name}");
             let mut lane = Lane::new(&lane_name, session_id);
+            lane.session_file = Some(session_file.to_path_buf());
             let finished_runs: std::collections::HashSet<String> = lane_records
                 .iter()
                 .filter_map(|record| match record {
@@ -430,10 +503,29 @@ impl HarnessSupervisor {
                 })
                 .collect();
             lane.active_run_id = lane_records.iter().rev().find_map(|record| match record {
-                OpRecord::OperationStarted { id, .. }
-                    if !finished_runs.contains(id) => Some(id.clone()),
+                OpRecord::OperationStarted { id, .. } if !finished_runs.contains(id) => {
+                    Some(id.clone())
+                }
                 _ => None,
             });
+            for record in &lane_records {
+                if let OpRecord::QueueEnqueued {
+                    queue,
+                    priority,
+                    target,
+                    ..
+                } = record
+                {
+                    if queue == &QueueKind::Steer {
+                        lane.queue.enqueue_steer_with_priority(
+                            target.clone(),
+                            priority.unwrap_or(threadlane_agent::SteerPriority::Normal),
+                        );
+                    } else {
+                        lane.queue.enqueue(queue.clone(), target.clone());
+                    }
+                }
+            }
             lane.op_log = lane_records;
             lane.status = LaneStatus::Suspended;
             lock.insert(key, lane);
@@ -450,11 +542,7 @@ impl HarnessSupervisor {
         outcome: threadlane_agent::OpOutcome,
     ) -> Result<(), String> {
         for (index, run_id) in run_ids.iter().enumerate() {
-            let seq = self
-                .get_or_create_lane(session_id, "main")
-                .op_log
-                .len() as u64
-                + 1;
+            let seq = self.get_or_create_lane(session_id, "main").op_log.len() as u64 + 1;
             self.append_persisted_lane_record(
                 session_id,
                 "main",
@@ -472,7 +560,10 @@ impl HarnessSupervisor {
         }
         let mut lanes = self.lanes.lock().unwrap();
         if let Some(lane) = lanes.get_mut(&format!("{session_id}:main")) {
-            if run_ids.iter().any(|run_id| lane.active_run_id.as_ref() == Some(run_id)) {
+            if run_ids
+                .iter()
+                .any(|run_id| lane.active_run_id.as_ref() == Some(run_id))
+            {
                 lane.active_run_id = None;
                 lane.status = LaneStatus::Idle;
             }
@@ -493,7 +584,9 @@ impl HarnessSupervisor {
 
         let key = format!("{session_id}:{lane_name}");
         let mut lock = self.lanes.lock().unwrap();
-        let lane = lock.entry(key).or_insert_with(|| Lane::new(lane_name, session_id));
+        let lane = lock
+            .entry(key)
+            .or_insert_with(|| Lane::new(lane_name, session_id));
 
         lane.leaf_id = Some(target_node_id.to_string());
         lane.status = LaneStatus::Idle;
@@ -522,7 +615,9 @@ impl HarnessSupervisor {
         let key = format!("{session_id}:{lane_name}");
         let leaf_id = {
             let mut lock = self.lanes.lock().unwrap();
-            let lane = lock.get_mut(&key).ok_or_else(|| format!("Lane '{key}' not found"))?;
+            let lane = lock
+                .get_mut(&key)
+                .ok_or_else(|| format!("Lane '{key}' not found"))?;
             lane.status = LaneStatus::Running;
             lane.leaf_id.clone()
         };
@@ -675,7 +770,6 @@ impl HarnessSupervisor {
         self.save_registry();
 
         let event_tx = self.event_tx.clone();
-        let supervisor = self.clone();
         let tasks = self.tasks.clone();
         let runtimes = self.runtimes.clone();
         let tid = task_id.clone();
@@ -688,25 +782,6 @@ impl HarnessSupervisor {
         tokio::spawn(async move {
             let mut sub_rx = rx;
             while let Ok(evt) = sub_rx.recv().await {
-                if let AgentEvent::ToolExecutionStart {
-                    tool_call_id,
-                    name,
-                    arguments,
-                } = &evt
-                {
-                    if child_task_id(tool_call_id).is_none() {
-                        let effective_args = serde_json::from_str(arguments)
-                            .unwrap_or_else(|_| serde_json::Value::String(arguments.clone()));
-                        let _ = supervisor.append_tool_started_record(
-                            &session_id,
-                            "main",
-                            &event_session_file,
-                            tool_call_id,
-                            name,
-                            effective_args,
-                        );
-                    }
-                }
                 let status = match &evt {
                     AgentEvent::AgentStart => Some(TaskStatus::Running),
                     AgentEvent::AgentEnd { .. } => Some(TaskStatus::Completed),
@@ -907,9 +982,13 @@ impl HarnessSupervisor {
                         session_file,
                         &mut agent.session_tree,
                     ) {
-                        let replayed = agent.replay_safe_tools(&recovery.safe_tools_to_replay).await;
+                        let replayed = agent
+                            .replay_safe_tools(&recovery.safe_tools_to_replay)
+                            .await;
                         let replay_failed = replayed.iter().any(|result| result.is_error);
-                        for (record, result) in recovery.safe_tools_to_replay.iter().zip(replayed.iter()) {
+                        for (record, result) in
+                            recovery.safe_tools_to_replay.iter().zip(replayed.iter())
+                        {
                             if let threadlane_agent::OpRecord::ToolStarted {
                                 tool_call_id, ..
                             } = record
@@ -948,7 +1027,28 @@ impl HarnessSupervisor {
                     }
                 }
             }
+            if let Some(session_file) = session_file_for_run.as_deref() {
+                let recorder_supervisor = supervisor.clone();
+                let recorder_session_id = session_id_for_run.clone();
+                let recorder_session_file = session_file.to_path_buf();
+                agent.set_tool_intent_recorder(Some(Arc::new(move |id, name, arguments| {
+                    if child_task_id(id).is_some() {
+                        return Ok(());
+                    }
+                    let effective_args = serde_json::from_str(arguments)
+                        .unwrap_or_else(|_| serde_json::Value::String(arguments.to_string()));
+                    recorder_supervisor.append_tool_started_record(
+                        &recorder_session_id,
+                        "main",
+                        &recorder_session_file,
+                        id,
+                        name,
+                        effective_args,
+                    )
+                })));
+            }
             let input_result = agent.handle_input(&prompt).await;
+            agent.set_tool_intent_recorder(None);
             let (outcome, error) = match input_result {
                 Some(Err(error)) => (threadlane_agent::OpOutcome::Failed, Some(error)),
                 _ => (threadlane_agent::OpOutcome::Completed, None),
@@ -1295,8 +1395,78 @@ fn md5_hash(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use threadlane_agent::TokenUsage;
     use std::time::Duration;
+    use threadlane_agent::TokenUsage;
+
+    #[tokio::test]
+    async fn tool_started_is_durable_before_execution() {
+        let dir = tempfile::tempdir().unwrap();
+        let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
+        let session_file = dir.path().join("session.jsonl");
+        supervisor
+            .append_persisted_lane_record(
+                "session-1",
+                "main",
+                &session_file,
+                OpRecord::OperationStarted {
+                    id: "run-1".into(),
+                    seq: 1,
+                    lane: "main".into(),
+                    timestamp: 1,
+                    source_leaf_id: None,
+                    kind: "prompt".into(),
+                    system_prompt_override: None,
+                },
+            )
+            .unwrap();
+        let mut agent = CodingAgent::new(CodingAgentOptions {
+            api_key: "test_key".into(),
+            account_id: None,
+            model: "gpt-4o".into(),
+            work_dir: dir.path().to_path_buf(),
+            session_file: Some(session_file.clone()),
+            system_prompt: Default::default(),
+        });
+        let recorder_supervisor = supervisor.clone();
+        let recorder_session_file = session_file.clone();
+        agent.set_tool_intent_recorder(Some(Arc::new(move |id, name, arguments| {
+            recorder_supervisor.append_tool_started_record(
+                "session-1",
+                "main",
+                &recorder_session_file,
+                id,
+                name,
+                serde_json::from_str(arguments).unwrap(),
+            )
+        })));
+
+        let results = agent
+            .replay_safe_tools(&[OpRecord::ToolStarted {
+                id: "existing-intent".into(),
+                seq: 2,
+                lane: "main".into(),
+                timestamp: 1,
+                run_id: "run-1".into(),
+                assistant_entry_id: String::new(),
+                tool_index: 0,
+                tool_call_id: "call-1".into(),
+                tool_name: "list_dir".into(),
+                effective_args: serde_json::json!({}),
+                result_entry_id: "result-call-1".into(),
+                replay: threadlane_agent::ToolReplaySafety::Safe,
+            }])
+            .await;
+
+        assert!(!results[0].is_error);
+        let records = threadlane_agent::load_op_records_from_file(
+            &session_file.with_extension("oplog.jsonl"),
+        )
+        .unwrap();
+        assert!(matches!(
+            records.last(),
+            Some(OpRecord::ToolStarted { tool_call_id, .. }) if tool_call_id == "call-1"
+        ));
+    }
 
     #[tokio::test]
     async fn failed_input_persists_failed_operation() {
@@ -1319,9 +1489,15 @@ mod tests {
             )
             .unwrap();
 
-        supervisor.submit_input(&task_id, "/subagent".into()).unwrap();
+        supervisor
+            .submit_input(&task_id, "/subagent".into())
+            .unwrap();
         let session_file = loop {
-            if let Some(task) = supervisor.list_tasks_for_project(&project.id).into_iter().find(|task| task.id == task_id) {
+            if let Some(task) = supervisor
+                .list_tasks_for_project(&project.id)
+                .into_iter()
+                .find(|task| task.id == task_id)
+            {
                 if let Some(session_file) = task.session_file {
                     break session_file;
                 }
@@ -1347,7 +1523,10 @@ mod tests {
             })
             .unwrap();
         assert_eq!(finished, &threadlane_agent::OpOutcome::Failed);
-        assert_eq!(supervisor.get_task_status(&task_id), Some(TaskStatus::Failed));
+        assert_eq!(
+            supervisor.get_task_status(&task_id),
+            Some(TaskStatus::Failed)
+        );
     }
 
     #[test]
@@ -1588,24 +1767,159 @@ mod tests {
     fn supervisor_lane_management_and_queuing() {
         let dir = tempfile::tempdir().unwrap();
         let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
+        let session_file = dir.path().join("session.jsonl");
 
         let lane = supervisor.get_or_create_lane("session-1", "main");
         assert_eq!(lane.name, "main");
         assert_eq!(lane.status, LaneStatus::Idle);
 
-        supervisor.enqueue_steer(
-            "session-1",
-            "main",
-            AgentMessage::User {
-                content: "steer msg".into(),
-            },
-        );
+        supervisor
+            .append_persisted_lane_record(
+                "session-1",
+                "main",
+                &session_file,
+                OpRecord::OperationStarted {
+                    id: "run-1".into(),
+                    seq: 1,
+                    lane: "main".into(),
+                    timestamp: 1,
+                    source_leaf_id: None,
+                    kind: "prompt".into(),
+                    system_prompt_override: None,
+                },
+            )
+            .unwrap();
+        supervisor
+            .enqueue_steer(
+                "session-1",
+                "main",
+                AgentMessage::User {
+                    content: "steer msg".into(),
+                },
+            )
+            .unwrap();
 
         supervisor.update_lane_leaf("session-1", "main", Some("node_1".into()));
 
         let updated_lane = supervisor.get_or_create_lane("session-1", "main");
         assert_eq!(updated_lane.leaf_id.as_deref(), Some("node_1"));
         assert_eq!(updated_lane.queue.steer.len(), 1);
+        let records = threadlane_agent::load_op_records_from_file(
+            &session_file.with_extension("oplog.jsonl"),
+        )
+        .unwrap();
+        assert!(matches!(
+            records.last(),
+            Some(OpRecord::QueueEnqueued {
+                id,
+                queue: QueueKind::Steer,
+                target: AgentMessage::User { content },
+                ..
+            }) if !id.is_empty() && content == "steer msg"
+        ));
+    }
+
+    #[test]
+    fn queue_enqueued_is_persisted_before_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
+        let session_file = dir.path().join("session.jsonl");
+        supervisor
+            .append_persisted_lane_record(
+                "session-1",
+                "main",
+                &session_file,
+                OpRecord::OperationStarted {
+                    id: "run-1".into(),
+                    seq: 1,
+                    lane: "main".into(),
+                    timestamp: 1,
+                    source_leaf_id: None,
+                    kind: "prompt".into(),
+                    system_prompt_override: None,
+                },
+            )
+            .unwrap();
+
+        supervisor
+            .enqueue_followup(
+                "session-1",
+                "main",
+                AgentMessage::User {
+                    content: "next".into(),
+                },
+            )
+            .unwrap();
+        supervisor
+            .enqueue_steer_priority(
+                "session-1",
+                "main",
+                AgentMessage::User {
+                    content: "urgent".into(),
+                },
+                threadlane_agent::SteerPriority::High,
+            )
+            .unwrap();
+        let records = threadlane_agent::load_op_records_from_file(
+            &session_file.with_extension("oplog.jsonl"),
+        )
+        .unwrap();
+        assert!(matches!(
+            records.get(records.len() - 2),
+            Some(OpRecord::QueueEnqueued {
+                queue: QueueKind::FollowUp,
+                target: AgentMessage::User { content },
+                ..
+            }) if content == "next"
+        ));
+        assert!(matches!(
+            records.last(),
+            Some(OpRecord::QueueEnqueued {
+                queue: QueueKind::Steer,
+                target: AgentMessage::User { content },
+                ..
+            }) if content == "urgent"
+        ));
+
+        let mut tree = threadlane_agent::SessionTree::new("session-1");
+        supervisor
+            .restore_session_lanes("session-1", &session_file, &mut tree)
+            .unwrap();
+        supervisor
+            .restore_session_lanes("session-1", &session_file, &mut tree)
+            .unwrap();
+        let restored = supervisor.get_or_create_lane("session-1", "main");
+        assert_eq!(restored.queue.follow_up.len(), 1);
+        assert_eq!(restored.queue.steer.len(), 1);
+        assert_eq!(
+            restored.queue.steer[0].priority,
+            threadlane_agent::SteerPriority::High
+        );
+
+        supervisor
+            .lanes
+            .lock()
+            .unwrap()
+            .get_mut("session-1:main")
+            .unwrap()
+            .session_file = Some(dir.path().join("missing/session.jsonl"));
+        assert!(supervisor
+            .enqueue_followup(
+                "session-1",
+                "main",
+                AgentMessage::User {
+                    content: "must not queue".into(),
+                },
+            )
+            .is_err());
+        assert_eq!(
+            supervisor
+                .get_or_create_lane("session-1", "main")
+                .queue
+                .follow_up
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -1638,7 +1952,13 @@ mod tests {
         .unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].id(), "run-1");
-        assert_eq!(supervisor.get_or_create_lane("session-1", "main").op_log.len(), 1);
+        assert_eq!(
+            supervisor
+                .get_or_create_lane("session-1", "main")
+                .op_log
+                .len(),
+            1
+        );
 
         supervisor
             .append_tool_started_record(
@@ -1769,8 +2089,28 @@ mod tests {
         let _root = supervisor.get_or_create_lane("session-1", "root");
         let _child = supervisor.get_or_create_sub_lane("session-1", "sub-1", "root");
 
-        supervisor.record_lane_usage("session-1", "root", &TokenUsage { input_tokens: 100, output_tokens: 50, total_tokens: 150, cache_read_tokens: 0, cache_write_tokens: 0 });
-        supervisor.record_lane_usage("session-1", "sub-1", &TokenUsage { input_tokens: 200, output_tokens: 80, total_tokens: 280, cache_read_tokens: 0, cache_write_tokens: 0 });
+        supervisor.record_lane_usage(
+            "session-1",
+            "root",
+            &TokenUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+                total_tokens: 150,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+        );
+        supervisor.record_lane_usage(
+            "session-1",
+            "sub-1",
+            &TokenUsage {
+                input_tokens: 200,
+                output_tokens: 80,
+                total_tokens: 280,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+        );
 
         let tree_usage = supervisor.aggregate_tree_usage("session-1", "root");
         assert_eq!(tree_usage.input_tokens, 300);

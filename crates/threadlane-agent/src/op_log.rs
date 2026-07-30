@@ -75,6 +75,8 @@ pub enum OpRecord {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run_id: Option<String>,
         queue: QueueKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        priority: Option<SteerPriority>,
         target: AgentMessage,
     },
     WriteDeferred {
