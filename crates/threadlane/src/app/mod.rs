@@ -3839,6 +3839,7 @@ fn task_sidebar_items(
                 status: record.status,
                 cancellable,
                 started_at_ms: record.started_at_ms,
+                finished_at_ms: record.finished_at_ms,
             }
         })
         .collect()
