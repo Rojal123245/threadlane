@@ -125,6 +125,11 @@ enum InterruptedSubagentRecoveryState {
     Complete,
 }
 
+fn subagent_terminal_record_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 impl SubagentLaneJournal {
     fn load(session_file: &Path) -> Result<Self, String> {
         let op_log_file = session_file.with_extension("oplog.jsonl");
@@ -244,7 +249,17 @@ impl SubagentLaneJournal {
         outcome: OpOutcome,
         error: Option<String>,
     ) -> Result<(), String> {
-        let mut records = self.records.lock().map_err(|error| error.to_string())?;
+        let _terminal_record_lock = subagent_terminal_record_lock()
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let mut records = load_op_records_from_file(&self.op_log_file)
+            .map_err(|error| format!("Failed to load subagent lane journal: {error}"))?;
+        if records.iter().any(|record| {
+            matches!(record, OpRecord::OperationFinished { run_id: terminal_run_id, .. } if terminal_run_id == run_id)
+        }) {
+            *self.records.lock().map_err(|error| error.to_string())? = records;
+            return Ok(());
+        }
         let record = OpRecord::OperationFinished {
             id: format!("finish-{run_id}"),
             seq: records.len() as u64 + 1,
@@ -260,6 +275,7 @@ impl SubagentLaneJournal {
         append_op_record_to_file(&self.op_log_file, &record)
             .map_err(|error| format!("Failed to append subagent lane journal: {error}"))?;
         records.push(record);
+        *self.records.lock().map_err(|error| error.to_string())? = records;
         Ok(())
     }
 
@@ -3647,6 +3663,49 @@ mod tests {
         let mut tree = SessionTree::new("session");
         let recovered = threadlane_agent::reconcile_op_log_recovery(&mut tree, &records);
         assert_eq!(recovered.recovered_open_operations, 0);
+    }
+
+    #[test]
+    fn subagent_journal_finish_does_not_duplicate_across_loaded_journals() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("session.jsonl");
+        let op_log_file = session_file.with_extension("oplog.jsonl");
+        let first = SubagentLaneJournal::load(&session_file).unwrap();
+        first.start("subagent-1:0", "run-1", "inspect").unwrap();
+        let second = SubagentLaneJournal::load(&session_file).unwrap();
+
+        first
+            .finish(
+                "subagent-1:0",
+                "run-1",
+                threadlane_agent::OpOutcome::Completed,
+                None,
+            )
+            .unwrap();
+        second
+            .finish(
+                "subagent-1:0",
+                "run-1",
+                threadlane_agent::OpOutcome::Aborted,
+                None,
+            )
+            .unwrap();
+
+        let terminals: Vec<_> = threadlane_agent::load_op_records_from_file(&op_log_file)
+            .unwrap()
+            .into_iter()
+            .filter(|record| {
+                matches!(record, OpRecord::OperationFinished { run_id, .. } if run_id == "run-1")
+            })
+            .collect();
+        assert_eq!(terminals.len(), 1);
+        assert!(matches!(
+            terminals.first(),
+            Some(OpRecord::OperationFinished {
+                outcome: threadlane_agent::OpOutcome::Completed,
+                ..
+            })
+        ));
     }
 
     #[test]

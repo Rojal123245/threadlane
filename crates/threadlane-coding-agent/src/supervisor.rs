@@ -1702,6 +1702,18 @@ mod tests {
             })
             .collect();
         assert_eq!(aborted, ["run-open-1", "run-open-2"]);
+        for run_id in ["run-open-1", "run-open-2", "run-finished"] {
+            assert_eq!(
+                records
+                    .iter()
+                    .filter(|record| {
+                        matches!(record, OpRecord::OperationFinished { run_id: record_run_id, .. } if record_run_id == run_id)
+                    })
+                    .count(),
+                1,
+                "expected one terminal record for {run_id}",
+            );
+        }
     }
 
     #[test]
