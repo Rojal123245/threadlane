@@ -179,7 +179,7 @@ impl SubagentLaneJournal {
                 .unwrap_or_default()
                 .as_millis() as u64,
             run_id: run_id.to_string(),
-            assistant_entry_id: format!("assistant-{run_id}"),
+            assistant_entry_id: String::new(),
             tool_index,
             tool_call_id: tool_call_id.to_string(),
             tool_name: tool_name.to_string(),
@@ -3090,7 +3090,7 @@ mod tests {
     }
 
     #[test]
-    fn subagent_journal_tool_started_has_recovery_anchor() {
+    fn subagent_journal_tool_started_uses_explicit_empty_anchor_placeholder() {
         let dir = tempfile::tempdir().unwrap();
         let session_file = dir.path().join("session.jsonl");
         let journal = SubagentLaneJournal::load(&session_file).unwrap();
@@ -3112,7 +3112,7 @@ mod tests {
             Some(threadlane_agent::OpRecord::ToolStarted {
                 assistant_entry_id,
                 ..
-            }) if !assistant_entry_id.is_empty()
+            }) if assistant_entry_id.is_empty()
         ));
     }
 
