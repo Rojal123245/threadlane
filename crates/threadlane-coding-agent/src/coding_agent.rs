@@ -262,6 +262,38 @@ impl SubagentLaneJournal {
         records.push(record);
         Ok(())
     }
+
+    fn abort_open_runs(&self) -> Result<(), String> {
+        let open_runs = {
+            let records = self.records.lock().map_err(|error| error.to_string())?;
+            let finished: HashSet<_> = records
+                .iter()
+                .filter_map(|record| match record {
+                    OpRecord::OperationFinished { run_id, .. } => Some(run_id.as_str()),
+                    _ => None,
+                })
+                .collect();
+            records
+                .iter()
+                .filter_map(|record| match record {
+                    OpRecord::OperationStarted { id, lane, kind, .. }
+                        if kind == "subagent" && !finished.contains(id.as_str()) =>
+                    {
+                        Some((lane.clone(), id.clone()))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        for (lane, run_id) in open_runs {
+            self.finish(&lane, &run_id, OpOutcome::Aborted, None)?;
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn abort_open_subagent_operations(session_file: &Path) -> Result<(), String> {
+    SubagentLaneJournal::load(session_file)?.abort_open_runs()
 }
 
 #[derive(Clone, Default)]
