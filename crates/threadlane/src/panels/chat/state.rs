@@ -44,6 +44,8 @@ pub struct ToolPresentation {
 
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct SubagentSessionData {
+    #[serde(default)]
+    pub run_id: Option<String>,
     pub task: String,
     pub agent: String,
     pub status: String,
@@ -303,7 +305,7 @@ pub fn subagent_rail_items(
     messages: &[ChatMessage],
     child_run: Option<u64>,
 ) -> Vec<SubagentRailItem> {
-    subagent_rail_items_with_harness(arguments, output, status, messages, child_run, &[])
+    subagent_rail_items_with_harness(arguments, output, status, messages, child_run)
 }
 
 pub fn subagent_rail_items_with_harness(
@@ -312,7 +314,6 @@ pub fn subagent_rail_items_with_harness(
     status: ToolStatus,
     messages: &[ChatMessage],
     child_run: Option<u64>,
-    activities: &[HarnessActivity],
 ) -> Vec<SubagentRailItem> {
     let child_run = (status == ToolStatus::Running)
         .then_some(child_run)
@@ -329,7 +330,7 @@ pub fn subagent_rail_items_with_harness(
                         subagent_session_detail(&session)
                     };
                     SubagentRailItem {
-                        key: harness_activity_key(activities, &session.task, &session.agent, index),
+                        key: session.run_id,
                         agent: session.agent,
                         task: normalize_whitespace_bounded(&session.task, 160),
                         status: session.status,
@@ -367,7 +368,7 @@ pub fn subagent_rail_items_with_harness(
                 .map(|task| normalize_whitespace_bounded(task, 160))
                 .unwrap_or_default();
             SubagentRailItem {
-                key: harness_activity_key(activities, &task_text, &agent, index),
+                key: None,
                 agent,
                 task: task_text,
                 status: match status {
@@ -384,22 +385,6 @@ pub fn subagent_rail_items_with_harness(
             }
         })
         .collect()
-}
-
-fn harness_activity_key(
-    activities: &[HarnessActivity],
-    task: &str,
-    agent: &str,
-    index: usize,
-) -> Option<String> {
-    activities
-        .iter()
-        .filter(|activity| {
-            normalize_whitespace_bounded(&activity.task, 160) == task
-                && normalize_whitespace_bounded(&activity.agent, 48) == agent
-        })
-        .nth(index)
-        .map(|activity| activity.key.clone())
 }
 
 pub fn is_subagent_child_tool(message: &ChatMessage) -> bool {

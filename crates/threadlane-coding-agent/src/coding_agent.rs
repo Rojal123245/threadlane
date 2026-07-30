@@ -3416,7 +3416,7 @@ async fn run_subagents_with_context(
         .flat_map(|result| result.thinking.clone())
         .collect();
     Ok((
-        format_subagent_results(tasks, tool_results),
+        format_subagent_results(tasks, tool_results, &lanes),
         thinking,
         lanes,
     ))
@@ -3869,6 +3869,7 @@ fn tool_target_preview(name: &str, arguments: &str) -> String {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SubagentSessionData {
+    run_id: String,
     task: String,
     agent: String,
     status: String,
@@ -3887,11 +3888,13 @@ pub struct SubagentInnerToolData {
 fn format_subagent_results(
     tasks: Vec<AgentRunTask>,
     results: Vec<Result<SubagentResult, String>>,
+    lanes: &[CompletedSubagentLane],
 ) -> String {
     let sessions: Vec<SubagentSessionData> = tasks
         .into_iter()
         .zip(results)
-        .map(|(task, result)| match result {
+        .zip(lanes)
+        .map(|((task, result), lane)| match result {
             Ok(res) => {
                 let mut thinking = String::new();
                 for think_msg in &res.thinking {
@@ -3915,6 +3918,7 @@ fn format_subagent_results(
                     .collect();
 
                 SubagentSessionData {
+                    run_id: lane.run_id.clone(),
                     task: task.task,
                     agent: task.agent,
                     status: if res.error.is_some() {
@@ -3928,6 +3932,7 @@ fn format_subagent_results(
                 }
             }
             Err(error) => SubagentSessionData {
+                run_id: lane.run_id.clone(),
                 task: task.task,
                 agent: task.agent,
                 status: "Failed".to_string(),
