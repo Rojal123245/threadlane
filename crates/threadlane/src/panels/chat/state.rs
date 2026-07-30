@@ -61,6 +61,7 @@ pub struct SubagentInnerToolData {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SubagentRailItem {
+    pub key: Option<String>,
     pub agent: String,
     pub task: String,
     pub status: String,
@@ -104,6 +105,59 @@ pub fn reduce_harness_activity(activities: &mut Vec<HarnessActivity>, activity: 
         }
     } else {
         activities.push(activity);
+    }
+}
+
+pub fn harness_activity_label(activity: &HarnessActivity) -> String {
+    match activity.status {
+        HarnessActivityStatus::Queued => "Delegated",
+        HarnessActivityStatus::Working => "Working",
+        HarnessActivityStatus::Recovering => "Recovering",
+        HarnessActivityStatus::Recovered => "Recovered",
+        HarnessActivityStatus::Retrying => "Retrying recovery",
+        HarnessActivityStatus::Aborted => "Aborted · unsafe tool",
+        HarnessActivityStatus::Cancelled => "Cancelled",
+    }
+    .into()
+}
+
+pub fn harness_activity_detail(activity: &HarnessActivity) -> String {
+    let detail = normalize_whitespace_bounded(&activity.detail, 240);
+    if detail.is_empty() {
+        harness_activity_label(activity)
+    } else {
+        detail
+    }
+}
+
+pub fn merge_harness_activities(
+    rail_items: &mut Vec<SubagentRailItem>,
+    activities: &[HarnessActivity],
+) {
+    for activity in activities {
+        let item = SubagentRailItem {
+            key: Some(activity.key.clone()),
+            agent: {
+                let agent = normalize_whitespace_bounded(&activity.agent, 48);
+                if agent.is_empty() { "subagent".into() } else { agent }
+            },
+            task: {
+                let task = normalize_whitespace_bounded(&activity.task, 160);
+                if task.is_empty() { "Subagent task".into() } else { task }
+            },
+            status: harness_activity_label(activity),
+            detail: harness_activity_detail(activity),
+            parent_lane: Some("main".into()),
+            token_usage: None,
+        };
+        if let Some(existing) = rail_items
+            .iter_mut()
+            .find(|existing| existing.key.as_deref() == Some(&activity.key))
+        {
+            *existing = item;
+        } else {
+            rail_items.push(item);
+        }
     }
 }
 
@@ -197,6 +251,7 @@ pub fn reduce_harness_event(data: &mut ChatData, event: AgentEvent) {
         _ => return,
     };
     reduce_harness_activity(&mut data.harness_activities, activity);
+    data.revision = data.revision.wrapping_add(1);
 }
 
 fn subagent_activity_key(run_id: u64, task_index: usize) -> String {
@@ -262,6 +317,7 @@ pub fn subagent_rail_items(
                         subagent_session_detail(&session)
                     };
                     SubagentRailItem {
+                        key: None,
                         agent: session.agent,
                         task: normalize_whitespace_bounded(&session.task, 160),
                         status: session.status,
@@ -288,6 +344,7 @@ pub fn subagent_rail_items(
         .flatten()
         .enumerate()
         .map(|(index, task)| SubagentRailItem {
+            key: None,
             agent: task
                 .get("agent")
                 .and_then(serde_json::Value::as_str)
@@ -1240,6 +1297,49 @@ mod tests {
             status,
             detail: format!("{key} detail"),
         }
+    }
+
+    #[test]
+    fn harness_activity_presentation_uses_concise_lifecycle_copy() {
+        let cases = [
+            (HarnessActivityStatus::Queued, "Delegated"),
+            (HarnessActivityStatus::Working, "Working"),
+            (HarnessActivityStatus::Recovering, "Recovering"),
+            (HarnessActivityStatus::Recovered, "Recovered"),
+            (HarnessActivityStatus::Retrying, "Retrying recovery"),
+            (HarnessActivityStatus::Aborted, "Aborted · unsafe tool"),
+            (HarnessActivityStatus::Cancelled, "Cancelled"),
+        ];
+
+        for (status, expected) in cases {
+            let activity = HarnessActivity {
+                detail: "  Recovery\nreason  ".into(),
+                ..harness_activity("lane-a", status)
+            };
+            assert_eq!(harness_activity_label(&activity), expected);
+            assert_eq!(harness_activity_detail(&activity), "Recovery reason");
+        }
+    }
+
+    #[test]
+    fn merge_harness_activities_replaces_a_durable_rail_item() {
+        let mut rail_items = Vec::new();
+        merge_harness_activities(
+            &mut rail_items,
+            &[harness_activity("lane-a", HarnessActivityStatus::Recovering)],
+        );
+        merge_harness_activities(
+            &mut rail_items,
+            &[HarnessActivity {
+                detail: "Recovered prior work".into(),
+                ..harness_activity("lane-a", HarnessActivityStatus::Recovered)
+            }],
+        );
+
+        assert_eq!(rail_items.len(), 1);
+        assert_eq!(rail_items[0].key.as_deref(), Some("lane-a"));
+        assert_eq!(rail_items[0].status, "Recovered");
+        assert_eq!(rail_items[0].detail, "Recovered prior work");
     }
 
     #[test]
