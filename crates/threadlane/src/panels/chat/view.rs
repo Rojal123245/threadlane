@@ -304,12 +304,13 @@ fn display_rows_with_harness(
                         ..
                     } => {
                         if name == "subagent" || presentation.icon == ToolIcon::Subagent {
-                            let rail_items = super::state::subagent_rail_items(
+                            let rail_items = super::state::subagent_rail_items_with_harness(
                                 arguments,
                                 output,
                                 *status,
                                 messages,
                                 owned_subagent_runs.get(&message_index).copied(),
+                                activities,
                             );
                             let working = rail_items
                                 .iter()
@@ -356,19 +357,34 @@ fn display_rows_with_harness(
         })
         .collect::<Vec<_>>();
 
-    if !activities.is_empty() {
-        if let Some(DisplayRow::SubagentTool(row)) = rows
-            .iter_mut()
-            .find(|row| matches!(row, DisplayRow::SubagentTool(_)))
-        {
-            super::state::merge_harness_activities(&mut row.rail_items, activities);
-            row.preview = harness_activity_preview(activities);
+    for activity in activities {
+        let activity_row = rows.iter().position(|row| {
+            matches!(
+                row,
+                DisplayRow::SubagentTool(row)
+                    if row.rail_items.iter().any(|item| {
+                        item.key.as_deref() == Some(activity.key.as_str())
+                    })
+            )
+        });
+        if let Some(row_index) = activity_row {
+            let DisplayRow::SubagentTool(row) = &mut rows[row_index] else {
+                unreachable!();
+            };
+            super::state::merge_harness_activities(
+                &mut row.rail_items,
+                std::slice::from_ref(activity),
+            );
+            row.preview = harness_activity_preview(std::slice::from_ref(activity));
         } else {
             let mut rail_items = Vec::new();
-            super::state::merge_harness_activities(&mut rail_items, activities);
+            super::state::merge_harness_activities(
+                &mut rail_items,
+                std::slice::from_ref(activity),
+            );
             rows.push(DisplayRow::SubagentTool(CachedSubagentTool {
                 rail_items,
-                preview: harness_activity_preview(activities),
+                preview: harness_activity_preview(std::slice::from_ref(activity)),
             }));
         }
     }
@@ -1298,6 +1314,53 @@ mod tests {
         assert_eq!(row.rail_items.len(), 1);
         assert_eq!(row.rail_items[0].key.as_deref(), Some("lane-a"));
         assert_eq!(row.rail_items[0].status, "Recovering");
+    }
+
+    #[test]
+    fn harness_activity_updates_only_the_matching_delegation_row() {
+        let subagent = |id: &str, task: &str, agent: &str| ChatMessage::Tool {
+            id: id.into(),
+            name: "subagent".into(),
+            arguments: "{}".into(),
+            output: serde_json::json!([{
+                "task": task,
+                "agent": agent,
+                "status": "Done",
+                "thinking": "",
+                "inner_tools": [],
+                "output": "completed"
+            }])
+            .to_string(),
+            status: ToolStatus::Done,
+            presentation: super::super::state::tool_presentation("subagent", "{}"),
+            result_preview: String::new(),
+            result_metadata: String::new(),
+            started_at: Instant::now(),
+        };
+        let messages = vec![
+            subagent("delegate-a", "First task", "scout"),
+            subagent("delegate-b", "Second task", "reviewer"),
+        ];
+        let activities = vec![super::super::state::HarnessActivity {
+            key: "subagent-run-2".into(),
+            task: "Second task".into(),
+            agent: "reviewer".into(),
+            status: super::super::state::HarnessActivityStatus::Recovering,
+            detail: "Recovering checkpoint".into(),
+        }];
+
+        let rows = display_rows_with_harness(&messages, None, "", &activities);
+
+        assert_eq!(rows.len(), 2);
+        let [DisplayRow::SubagentTool(first), DisplayRow::SubagentTool(second)] = &rows[..]
+        else {
+            panic!("expected two delegation rows");
+        };
+        assert_eq!(first.rail_items[0].task, "First task");
+        assert_eq!(first.rail_items[0].status, "Done");
+        assert_eq!(second.rail_items[0].key.as_deref(), Some("subagent-run-2"));
+        assert_eq!(second.rail_items[0].status, "Recovering");
+        assert_eq!(second.rail_items.len(), 1);
     }
 
     #[test]

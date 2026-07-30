@@ -19,3 +19,10 @@
 ## Follow-up
 
 Runtime visual verification remains required for fold expansion/reflow, keyboard focus, and recovery/abort row presentation.
+
+## Review fix
+
+- Persisted subagent-result rail items now receive the matching durable activity key during projection.
+- Display-row merging selects the `SubagentTool` containing that key and appends a separate lifecycle row only when no matching rail exists.
+- Added coverage for two delegation rows with one matching lifecycle activity; the correct row updates and no duplicate or misattributed row is produced.
+- Validated with `rtk cargo test -p threadlane harness_activity_updates_only_the_matching_delegation_row`.

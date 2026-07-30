@@ -295,12 +295,24 @@ fn subagent_finished_status(
     }
 }
 
+#[cfg(test)]
 pub fn subagent_rail_items(
     arguments: &str,
     output: &str,
     status: ToolStatus,
     messages: &[ChatMessage],
     child_run: Option<u64>,
+) -> Vec<SubagentRailItem> {
+    subagent_rail_items_with_harness(arguments, output, status, messages, child_run, &[])
+}
+
+pub fn subagent_rail_items_with_harness(
+    arguments: &str,
+    output: &str,
+    status: ToolStatus,
+    messages: &[ChatMessage],
+    child_run: Option<u64>,
+    activities: &[HarnessActivity],
 ) -> Vec<SubagentRailItem> {
     let child_run = (status == ToolStatus::Running)
         .then_some(child_run)
@@ -317,7 +329,7 @@ pub fn subagent_rail_items(
                         subagent_session_detail(&session)
                     };
                     SubagentRailItem {
-                        key: None,
+                        key: harness_activity_key(activities, &session.task, &session.agent, index),
                         agent: session.agent,
                         task: normalize_whitespace_bounded(&session.task, 160),
                         status: session.status,
@@ -343,31 +355,51 @@ pub fn subagent_rail_items(
         .into_iter()
         .flatten()
         .enumerate()
-        .map(|(index, task)| SubagentRailItem {
-            key: None,
-            agent: task
+        .map(|(index, task)| {
+            let agent = task
                 .get("agent")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("subagent")
-                .to_string(),
-            task: task
+                .to_string();
+            let task_text = task
                 .get("task")
                 .and_then(serde_json::Value::as_str)
                 .map(|task| normalize_whitespace_bounded(task, 160))
-                .unwrap_or_default(),
-            status: match status {
-                ToolStatus::Running if parallel || index == 0 => "Working",
-                ToolStatus::Running => "Queued",
-                ToolStatus::Done => "Done",
-                ToolStatus::Error => "Failed",
-                ToolStatus::Cancelled => "Stopped",
+                .unwrap_or_default();
+            SubagentRailItem {
+                key: harness_activity_key(activities, &task_text, &agent, index),
+                agent,
+                task: task_text,
+                status: match status {
+                    ToolStatus::Running if parallel || index == 0 => "Working",
+                    ToolStatus::Running => "Queued",
+                    ToolStatus::Done => "Done",
+                    ToolStatus::Error => "Failed",
+                    ToolStatus::Cancelled => "Stopped",
+                }
+                .to_string(),
+                detail: subagent_task_activity_detail(messages, child_run, index),
+                parent_lane: Some("main".into()),
+                token_usage: None,
             }
-            .to_string(),
-            detail: subagent_task_activity_detail(messages, child_run, index),
-            parent_lane: Some("main".into()),
-            token_usage: None,
         })
         .collect()
+}
+
+fn harness_activity_key(
+    activities: &[HarnessActivity],
+    task: &str,
+    agent: &str,
+    index: usize,
+) -> Option<String> {
+    activities
+        .iter()
+        .filter(|activity| {
+            normalize_whitespace_bounded(&activity.task, 160) == task
+                && normalize_whitespace_bounded(&activity.agent, 48) == agent
+        })
+        .nth(index)
+        .map(|activity| activity.key.clone())
 }
 
 pub fn is_subagent_child_tool(message: &ChatMessage) -> bool {
