@@ -56,6 +56,8 @@ type AgentRunner = Arc<
 type AgentWorkObserver = Arc<std::sync::Mutex<Vec<AgentWork>>>;
 #[cfg(test)]
 type SubagentObserverState = Arc<std::sync::Mutex<Option<AgentWorkObserver>>>;
+#[cfg(test)]
+type SubagentBoundaryObserver = Arc<dyn Fn() + Send + Sync>;
 
 #[derive(Clone)]
 struct SubagentRunContext {
@@ -69,6 +71,10 @@ struct SubagentRunContext {
     journal: Option<SubagentLaneJournal>,
     #[cfg(test)]
     scheduler_observer: Option<AgentWorkObserver>,
+    #[cfg(test)]
+    child_work_observer: Option<SubagentBoundaryObserver>,
+    #[cfg(test)]
+    child_tool_observer: Option<Arc<AtomicBool>>,
     semaphore: Arc<tokio::sync::Semaphore>,
 }
 
@@ -301,6 +307,35 @@ impl AgentWorkScheduler {
             }
         }
         true
+    }
+}
+
+#[cfg(test)]
+struct DeterministicSubagentToolExecutor {
+    observed: Arc<AtomicBool>,
+}
+
+#[cfg(test)]
+#[async_trait]
+impl ToolExecutor for DeterministicSubagentToolExecutor {
+    fn executor_id(&self) -> &str {
+        "threadlane.test.subagent_tool"
+    }
+
+    fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
+        vec![AgentToolDefinition {
+            name: "test_child_tool".into(),
+            description: None,
+            parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+        }]
+    }
+
+    async fn execute_tool(&self, name: &str, _args: &str) -> Option<Result<String, String>> {
+        (name == "test_child_tool").then(|| {
+            self.observed.store(true, Ordering::SeqCst);
+            Ok("test child tool result".into())
+        })
     }
 }
 
@@ -1977,24 +2012,21 @@ impl CodingAgent {
                         journal: journal.clone(),
                         #[cfg(test)]
                         scheduler_observer: observer,
+                        #[cfg(test)]
+                        child_work_observer: None,
+                        #[cfg(test)]
+                        child_tool_observer: None,
                         semaphore,
                     },
                 )
                 .await?;
-                let lanes_to_finish = lanes.clone();
-                completed_lanes
-                    .lock()
-                    .map_err(|_| "Completed subagent lane sink is unavailable".to_string())?
-                    .extend(lanes);
-                if let Some(journal) = journal {
-                    for lane in lanes_to_finish {
-                        let outcome = match lane.status {
-                            SubagentLaneStatus::Completed => OpOutcome::Completed,
-                            SubagentLaneStatus::Failed => OpOutcome::Failed,
-                        };
-                        journal.finish(&lane.lane_name, &lane.run_id, outcome, lane.error)?;
-                    }
-                }
+                accept_completed_subagent_lanes(
+                    &completed_lanes,
+                    lanes,
+                    journal,
+                    #[cfg(test)]
+                    None,
+                )?;
                 Ok(serde_json::json!({
                     "message": output,
                     "output": output,
@@ -2633,6 +2665,10 @@ async fn run_subagents_with_context(
             let result = match start {
                 Ok(()) => {
                     let _ = event_tx.send(AgentEvent::SubagentStarted { run_id, task_index });
+                    #[cfg(test)]
+                    if let Some(observer) = context.child_work_observer.as_ref() {
+                        observer();
+                    }
                     timeout(
                         SUBAGENT_TIMEOUT,
                         run_subagent_task(config, task.task, context, run_id, task_index),
@@ -2719,6 +2755,48 @@ async fn run_subagents_with_context(
     ))
 }
 
+async fn checkpoint_new_subagent_messages(
+    journal: Option<&SubagentLaneJournal>,
+    lane_name: &str,
+    run_id: &str,
+    state: &Arc<tokio::sync::Mutex<AgentState>>,
+    checkpoint_cursor: &mut usize,
+) -> Result<(), String> {
+    let messages = state.lock().await.messages.clone();
+    if let Some(journal) = journal {
+        journal.checkpoint(lane_name, run_id, &messages[*checkpoint_cursor..])?;
+    }
+    *checkpoint_cursor = messages.len();
+    Ok(())
+}
+
+fn accept_completed_subagent_lanes(
+    completed_lanes: &Arc<std::sync::Mutex<Vec<CompletedSubagentLane>>>,
+    lanes: Vec<CompletedSubagentLane>,
+    journal: Option<SubagentLaneJournal>,
+    #[cfg(test)] sink_observer: Option<SubagentBoundaryObserver>,
+) -> Result<(), String> {
+    let lanes_to_finish = lanes.clone();
+    completed_lanes
+        .lock()
+        .map_err(|_| "Completed subagent lane sink is unavailable".to_string())?
+        .extend(lanes);
+    #[cfg(test)]
+    if let Some(observer) = sink_observer {
+        observer();
+    }
+    if let Some(journal) = journal {
+        for lane in lanes_to_finish {
+            let outcome = match lane.status {
+                SubagentLaneStatus::Completed => OpOutcome::Completed,
+                SubagentLaneStatus::Failed => OpOutcome::Failed,
+            };
+            journal.finish(&lane.lane_name, &lane.run_id, outcome, lane.error)?;
+        }
+    }
+    Ok(())
+}
+
 async fn run_subagent_task(
     config: AgentConfig,
     task: String,
@@ -2801,18 +2879,19 @@ async fn run_subagent_task(
 
     #[cfg(test)]
     if let Some(observer) = context.scheduler_observer.as_ref() {
-        if config
-            .tools
-            .as_ref()
-            .map_or(true, |tools| tools.iter().any(|tool| tool == "list_dir"))
-        {
+        if let Some(tool_observer) = context.child_tool_observer.as_ref() {
+            agent.loop_engine.register_tool_executor(Arc::new(
+                DeterministicSubagentToolExecutor {
+                    observed: tool_observer.clone(),
+                },
+            ))?;
             let tool_results = agent
                 .loop_engine
                 .execute_tools(&[threadlane_provider::openai::ToolCall {
                     id: "test-child-tool".into(),
                     r#type: "function".into(),
                     function: threadlane_provider::openai::ToolCallFunction {
-                        name: "list_dir".into(),
+                        name: "test_child_tool".into(),
                         arguments: "{}".into(),
                     },
                     thought_signature: None,
@@ -2870,15 +2949,14 @@ async fn run_subagent_task(
         let mut checkpoint_cursor = 0;
         while let Ok(event) = checkpoint_events.recv().await {
             if matches!(&event, AgentEvent::TurnEnd { .. }) {
-                let messages = checkpoint_state.lock().await.messages.clone();
-                if let Some(journal) = checkpoint_journal.as_ref() {
-                    journal.checkpoint(
-                        &checkpoint_lane_name,
-                        &checkpoint_run_id,
-                        &messages[checkpoint_cursor..],
-                    )?;
-                }
-                checkpoint_cursor = messages.len();
+                checkpoint_new_subagent_messages(
+                    checkpoint_journal.as_ref(),
+                    &checkpoint_lane_name,
+                    &checkpoint_run_id,
+                    &checkpoint_state,
+                    &mut checkpoint_cursor,
+                )
+                .await?;
             }
             if matches!(&event, AgentEvent::AgentEnd { .. }) {
                 break;
@@ -2892,13 +2970,17 @@ async fn run_subagent_task(
     agent.prompt(&task).await;
     while agent_work.run(&mut agent).await {}
 
-    let checkpoint_cursor = checkpoint_task
+    let mut checkpoint_cursor = checkpoint_task
         .await
         .map_err(|error| format!("Child turn checkpoint task failed: {error}"))??;
-    let messages = agent.loop_engine.state.lock().await.messages.clone();
-    if let Some(journal) = context.journal.as_ref() {
-        journal.checkpoint(&lane_name, &journal_run_id, &messages[checkpoint_cursor..])?;
-    }
+    checkpoint_new_subagent_messages(
+        context.journal.as_ref(),
+        &lane_name,
+        &journal_run_id,
+        &agent.loop_engine.state,
+        &mut checkpoint_cursor,
+    )
+    .await?;
 
     let mut error = None;
     while let Ok(event) = events.try_recv() {
@@ -4077,31 +4159,46 @@ mod tests {
     async fn subagent_intents_are_durable_before_child_execution() {
         let dir = tempfile::tempdir().unwrap();
         let session_file = dir.path().join("session.jsonl");
-        let mut options = coding_agent_options(dir.path().to_path_buf());
-        options.session_file = Some(session_file.clone());
-        let coding_agent = CodingAgent::new(options);
-        let observed = Arc::new(Mutex::new(Vec::new()));
-        coding_agent.set_subagent_work_observer(observed.clone());
+        let records_at_child_start = Arc::new(Mutex::new(None));
+        let observed_records = records_at_child_start.clone();
+        let observed_file = session_file.clone();
+        let (parent_event_tx, _) = broadcast::channel(8);
+        let (_, _, lanes) = run_subagents_with_context(
+            vec![AgentRunTask {
+                agent: "scout".into(),
+                task: "inspect the project".into(),
+                instructions: None,
+                tools: None,
+                model: None,
+            }],
+            false,
+            SubagentRunContext {
+                api_key: "test-key".into(),
+                account_id: None,
+                parent_model: "test-model".into(),
+                work_dir: dir.path().to_path_buf(),
+                extensions: Arc::new(WasiExtensionManager::for_project_session(
+                    dir.path(),
+                    "test-session",
+                )),
+                parent_event_tx,
+                parent_leaf_id: None,
+                journal: Some(SubagentLaneJournal::load(&session_file).unwrap()),
+                scheduler_observer: Some(Arc::new(Mutex::new(Vec::new()))),
+                child_work_observer: Some(Arc::new(move || {
+                    *observed_records.lock().unwrap() =
+                        Some(load_op_records_from_file(&observed_file).unwrap());
+                })),
+                child_tool_observer: None,
+                semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+            },
+        )
+        .await
+        .unwrap();
 
-        let results = coding_agent
-            .agent
-            .loop_engine
-            .execute_tools(&[provider_tool_call(
-                "subagent-call",
-                "subagent",
-                serde_json::json!({
-                    "tasks": [{"agent": "scout", "task": "inspect the project"}],
-                    "parallel": false
-                }),
-            )])
-            .await;
-
-        assert!(!results[0].is_error, "{}", results[0].content);
-        assert_eq!(
-            *observed.lock().unwrap(),
-            vec![AgentWork::QueueMessage("test subagent follow-up".into())]
-        );
-        let records = load_op_records_from_file(&session_file).unwrap();
+        assert_eq!(lanes.len(), 1);
+        let records = records_at_child_start.lock().unwrap().clone().unwrap();
+        assert_eq!(records.len(), 2);
         assert!(matches!(
             records.first(),
             Some(OpRecord::OperationStarted { kind, .. }) if kind == "subagent"
@@ -4117,6 +4214,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session_file = dir.path().join("missing/session.jsonl");
         let observed = Arc::new(Mutex::new(Vec::new()));
+        let executed = Arc::new(AtomicBool::new(false));
         let (parent_event_tx, _) = broadcast::channel(8);
         let result = run_subagent_task(
             AgentConfig {
@@ -4142,6 +4240,8 @@ mod tests {
                 parent_leaf_id: None,
                 journal: Some(SubagentLaneJournal::load(&session_file).unwrap()),
                 scheduler_observer: Some(observed.clone()),
+                child_work_observer: None,
+                child_tool_observer: Some(executed.clone()),
                 semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
             },
             1,
@@ -4152,7 +4252,114 @@ mod tests {
         assert!(
             matches!(result, Err(error) if error.contains("Failed to append subagent lane journal"))
         );
+        assert!(!executed.load(Ordering::SeqCst));
         assert!(observed.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn subagent_checkpoints_completed_turns_once_and_finishes_after_sink() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("session.jsonl");
+        let journal = SubagentLaneJournal::load(&session_file).unwrap();
+        let lane_name = "subagent-1:0";
+        let run_id = "subagent-1:0";
+        journal.start(lane_name, run_id, "inspect").unwrap();
+        let agent = Agent::new("test-key", None, "test-model");
+        {
+            let mut state = agent.loop_engine.state.lock().await;
+            state.messages = vec![
+                AgentMessage::System {
+                    content: "system".into(),
+                },
+                AgentMessage::User {
+                    content: "inspect".into(),
+                },
+                AgentMessage::Assistant {
+                    content: Some("done".into()),
+                    tool_calls: None,
+                    stop_reason: None,
+                    deferred_handle: None,
+                },
+            ];
+        }
+        let mut cursor = 0;
+        checkpoint_new_subagent_messages(
+            Some(&journal),
+            lane_name,
+            run_id,
+            &agent.loop_engine.state,
+            &mut cursor,
+        )
+        .await
+        .unwrap();
+        checkpoint_new_subagent_messages(
+            Some(&journal),
+            lane_name,
+            run_id,
+            &agent.loop_engine.state,
+            &mut cursor,
+        )
+        .await
+        .unwrap();
+        agent
+            .loop_engine
+            .state
+            .lock()
+            .await
+            .messages
+            .push(AgentMessage::Tool {
+                tool_call_id: "call-1".into(),
+                name: "list_dir".into(),
+                content: "[]".into(),
+                is_error: false,
+            });
+        checkpoint_new_subagent_messages(
+            Some(&journal),
+            lane_name,
+            run_id,
+            &agent.loop_engine.state,
+            &mut cursor,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            load_op_records_from_file(&session_file)
+                .unwrap()
+                .iter()
+                .filter(|record| matches!(record, OpRecord::WriteDeferred { .. }))
+                .count(),
+            3
+        );
+
+        let completed_lanes = Arc::new(Mutex::new(Vec::new()));
+        let sink = completed_lanes.clone();
+        let sink_file = session_file.clone();
+        let sink_run_id = run_id.to_string();
+        accept_completed_subagent_lanes(
+            &completed_lanes,
+            vec![CompletedSubagentLane {
+                lane_name: lane_name.into(),
+                run_id: run_id.into(),
+                parent_leaf_id: None,
+                task: "inspect".into(),
+                agent: "scout".into(),
+                status: SubagentLaneStatus::Completed,
+                messages: Vec::new(),
+                error: None,
+            }],
+            Some(journal),
+            Some(Arc::new(move || {
+                assert_eq!(sink.lock().unwrap().len(), 1);
+                assert!(!load_op_records_from_file(&sink_file).unwrap().iter().any(
+                    |record| matches!(record, OpRecord::OperationFinished { run_id, .. } if run_id == &sink_run_id)
+                ));
+            })),
+        )
+        .unwrap();
+        assert!(matches!(
+            load_op_records_from_file(&session_file).unwrap().last(),
+            Some(OpRecord::OperationFinished { run_id: finished_run_id, .. }) if finished_run_id == run_id
+        ));
     }
 
     #[tokio::test]
