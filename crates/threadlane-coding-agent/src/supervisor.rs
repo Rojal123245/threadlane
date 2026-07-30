@@ -442,6 +442,44 @@ impl HarnessSupervisor {
         Ok(recovery)
     }
 
+    pub fn finish_recovered_operations(
+        &self,
+        session_id: &str,
+        session_file: &Path,
+        run_ids: &[String],
+        outcome: threadlane_agent::OpOutcome,
+    ) -> Result<(), String> {
+        for (index, run_id) in run_ids.iter().enumerate() {
+            let seq = self
+                .get_or_create_lane(session_id, "main")
+                .op_log
+                .len() as u64
+                + 1;
+            self.append_persisted_lane_record(
+                session_id,
+                "main",
+                session_file,
+                OpRecord::OperationFinished {
+                    id: format!("finish-recovery-{run_id}-{index}"),
+                    seq,
+                    lane: "main".into(),
+                    timestamp: now_ms() as u64,
+                    run_id: run_id.clone(),
+                    outcome: outcome.clone(),
+                    error: None,
+                },
+            )?;
+        }
+        let mut lanes = self.lanes.lock().unwrap();
+        if let Some(lane) = lanes.get_mut(&format!("{session_id}:main")) {
+            if run_ids.iter().any(|run_id| lane.active_run_id.as_ref() == Some(run_id)) {
+                lane.active_run_id = None;
+                lane.status = LaneStatus::Idle;
+            }
+        }
+        Ok(())
+    }
+
     pub fn navigate_lane(
         &self,
         session_id: &str,
@@ -870,17 +908,39 @@ impl HarnessSupervisor {
                         &mut agent.session_tree,
                     ) {
                         let replayed = agent.replay_safe_tools(&recovery.safe_tools_to_replay).await;
-                        for (record, result) in recovery.safe_tools_to_replay.iter().zip(replayed) {
+                        let replay_failed = replayed.iter().any(|result| result.is_error);
+                        for (record, result) in recovery.safe_tools_to_replay.iter().zip(replayed.iter()) {
                             if let threadlane_agent::OpRecord::ToolStarted {
                                 tool_call_id, ..
                             } = record
                             {
                                 agent.session_tree.replace_tool_result(
                                     tool_call_id,
-                                    result.content,
+                                    result.content.clone(),
                                     result.is_error,
                                 );
                             }
+                        }
+                        let recovered_run_ids: Vec<String> = recovery
+                            .open_operation_ids
+                            .iter()
+                            .filter(|run_id| *run_id != &run_id_for_run)
+                            .cloned()
+                            .collect();
+                        if !recovered_run_ids.is_empty() {
+                            let recovery_outcome = if recovery.unreplayable_tools > 0 {
+                                threadlane_agent::OpOutcome::Aborted
+                            } else if replay_failed {
+                                threadlane_agent::OpOutcome::Failed
+                            } else {
+                                threadlane_agent::OpOutcome::Completed
+                            };
+                            let _ = supervisor.finish_recovered_operations(
+                                &session_id_for_run,
+                                session_file,
+                                &recovered_run_ids,
+                                recovery_outcome,
+                            );
                         }
                         if recovery.recovered_open_operations > 0 {
                             agent.sync_session_history().await;
@@ -1456,6 +1516,20 @@ mod tests {
         let restored = supervisor.get_or_create_lane("session-1", "main");
         assert_eq!(restored.status, LaneStatus::Suspended);
         assert_eq!(restored.active_run_id.as_deref(), Some("run-1"));
+
+        supervisor
+            .finish_recovered_operations(
+                "session-1",
+                &session_file,
+                &recovery.open_operation_ids,
+                threadlane_agent::OpOutcome::Aborted,
+            )
+            .unwrap();
+        let mut tree = threadlane_agent::SessionTree::new("session-1");
+        let second_recovery = supervisor
+            .restore_session_lanes("session-1", &session_file, &mut tree)
+            .unwrap();
+        assert_eq!(second_recovery.recovered_open_operations, 0);
     }
 
     #[test]

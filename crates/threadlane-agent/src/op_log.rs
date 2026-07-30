@@ -265,6 +265,8 @@ pub fn load_op_records_from_file(path: &Path) -> std::io::Result<Vec<OpRecord>> 
 #[derive(Debug, Clone, Default)]
 pub struct RecoveryResult {
     pub recovered_open_operations: usize,
+    pub open_operation_ids: Vec<String>,
+    pub unreplayable_tools: usize,
     pub safe_tools_to_replay: Vec<OpRecord>,
 }
 
@@ -293,6 +295,9 @@ pub fn reconcile_op_log_recovery(session_tree: &mut SessionTree, records: &[OpRe
         return RecoveryResult::default();
     }
 
+    let mut open_operation_ids: Vec<String> = open_operations.iter().cloned().collect();
+    open_operation_ids.sort();
+
     // Check for ToolStarted records belonging to open operations that have no matching result entry
     let existing_tool_ids: HashSet<String> = session_tree
         .nodes
@@ -304,6 +309,7 @@ pub fn reconcile_op_log_recovery(session_tree: &mut SessionTree, records: &[OpRe
         .collect();
 
     let mut safe_tools_to_replay = Vec::new();
+    let mut unreplayable_tools = 0;
 
     for intent in tool_intents {
         if let OpRecord::ToolStarted {
@@ -317,6 +323,7 @@ pub fn reconcile_op_log_recovery(session_tree: &mut SessionTree, records: &[OpRe
         {
             if open_operations.contains(run_id) && !existing_tool_ids.contains(tool_call_id) {
                 if replay == &ToolReplaySafety::Never {
+                    unreplayable_tools += 1;
                     let synthetic_msg = AgentMessage::Tool {
                         tool_call_id: tool_call_id.clone(),
                         name: tool_name.clone(),
@@ -350,6 +357,8 @@ pub fn reconcile_op_log_recovery(session_tree: &mut SessionTree, records: &[OpRe
 
     RecoveryResult {
         recovered_open_operations: open_operations.len(),
+        open_operation_ids,
+        unreplayable_tools,
         safe_tools_to_replay,
     }
 }
@@ -396,6 +405,8 @@ mod tests {
 
         let recovered = reconcile_op_log_recovery(&mut tree, &records);
         assert_eq!(recovered.recovered_open_operations, 1);
+        assert_eq!(recovered.open_operation_ids, vec!["run-1"]);
+        assert_eq!(recovered.unreplayable_tools, 1);
 
         let branch = tree.get_active_branch_messages();
         assert_eq!(branch.len(), 2);
