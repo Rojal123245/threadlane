@@ -13,6 +13,7 @@ pub mod command_input;
 pub mod composer_action;
 pub mod composer_surface;
 pub mod context_menu;
+pub mod context_window;
 pub mod empty_row;
 pub mod file_tree;
 pub mod flex_spacer;
@@ -57,6 +58,7 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     composer_action::script_mod(vm);
     composer_surface::script_mod(vm);
     context_menu::script_mod(vm);
+    context_window::script_mod(vm);
     empty_row::script_mod(vm);
     modal_dialog::script_mod(vm);
     search_input::script_mod(vm);

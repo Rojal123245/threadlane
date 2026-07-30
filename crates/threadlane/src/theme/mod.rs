@@ -55,6 +55,9 @@ pub fn install(vm: &mut ScriptVm) {
             color_success_tint: #x3aaa7818
             color_destructive_tint: #xc0703018
             color_accent_tint: #x9a75d518
+            color_state_hover: #x303844
+            color_state_active: #x354153
+            color_state_pressed: #x2d37446b
 
             // ── Radii ─────────────────────────────────────────────────
             radius_xs: 5.0

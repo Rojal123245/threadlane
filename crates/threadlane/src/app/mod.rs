@@ -5,6 +5,7 @@
 use crate::components::file_tree::{FileTree, FileTreeAction};
 use crate::components::git_changes::{GitChanges, GitChangesAction};
 use crate::components::git_diff::GitDiffView;
+use crate::components::context_window::ContextWindowWidgetRefExt;
 use crate::components::model_dropdown::IconDropDownWidgetRefExt;
 use crate::components::session_row::ProjectHeaderAction;
 use crate::components::task_sidebar::{
@@ -45,7 +46,7 @@ use makepad_widgets::*;
 use robius_file_picker::FileDialog;
 use threadlane_agent::{
     get_runtime, load_op_records_from_file, AgentEvent, ImageAttachment, ReasoningEffort,
-    SessionPlan,
+    SessionPlan, TokenUsage,
 };
 use threadlane_coding_agent::{
     cancel_open_subagent_operations, default_global_threadlane_dir, discover_agents, AgentConfig,
@@ -76,6 +77,8 @@ const MAX_TERMINAL_OUTPUT: usize = 256 * 1024;
 const RIGHT_SIDEBAR_MIN_WIDTH: f64 = 220.0;
 const RIGHT_SIDEBAR_MAX_WIDTH: f64 = 520.0;
 const RIGHT_SIDEBAR_MIN_MAIN_WIDTH: f64 = 360.0;
+const DEFAULT_CONTEXT_WINDOW: u32 = 258_000;
+const CONTEXT_USAGE_FACT: &str = "context_window_usage";
 
 fn normalize_generated_commit_message(raw: &str) -> String {
     let line = raw
@@ -91,6 +94,10 @@ fn normalize_generated_commit_message(raw: &str) -> String {
         .unwrap_or(line)
         .trim();
     truncate_chars(line, 72)
+}
+
+fn context_window_limit(_model: &str) -> u32 {
+    DEFAULT_CONTEXT_WINDOW
 }
 
 fn restore_harness_activities(session_file: &Path) -> Vec<HarnessActivity> {
@@ -2506,6 +2513,12 @@ script_mod! {
 
                                     }
 
+                                    context_window := mod.components.ContextWindow {
+                                        width: 28
+                                        height: 28
+                                        visible: false
+                                    }
+
                                     composer_action_slot := View {
                                         width: 68
                                         height: 30
@@ -3943,6 +3956,7 @@ struct SessionRuntime {
     model: String,
     reasoning_effort: ReasoningEffort,
     plan: SessionPlan,
+    latest_usage: Option<TokenUsage>,
 }
 
 #[derive(Clone)]
@@ -3970,6 +3984,7 @@ impl SessionRuntime {
             model,
             reasoning_effort,
             plan,
+            latest_usage: None,
         }
     }
 }
@@ -4317,6 +4332,10 @@ impl MatchEvent for App {
             .active_key()
             .cloned()
             .unwrap_or_else(|| SessionKey::project_draft(work_dir));
+        let latest_usage = coding_agent
+            .session_tree
+            .get_fact(CONTEXT_USAGE_FACT)
+            .and_then(|value| serde_json::from_str::<TokenUsage>(value).ok());
         if let Some(entry) = initial_entry {
             let messages = coding_agent.session_tree.get_active_branch_messages();
             let session_file = entry.session_file.clone();
@@ -4331,10 +4350,13 @@ impl MatchEvent for App {
                 session_health(&workspace.chat.harness_activities),
             );
         }
-        self.session_runtimes.insert(
-            initial_key,
-            SessionRuntime::new(coding_agent, initial_model.clone(), ReasoningEffort::Medium),
+        let mut runtime = SessionRuntime::new(
+            coding_agent,
+            initial_model.clone(),
+            ReasoningEffort::Medium,
         );
+        runtime.latest_usage = latest_usage;
+        self.session_runtimes.insert(initial_key, runtime);
         self.set_model_dropup_options(cx, self.available_models.clone(), &initial_model);
 
         self.spawn_model_fetch(api_key, account_id_opt);
@@ -4342,6 +4364,7 @@ impl MatchEvent for App {
         self.sync_terminal_project(cx);
         self.request_git_status();
         self.sync_task_sidebar(cx);
+        self.sync_context_window(cx);
 
         cx.redraw_all();
     }
@@ -6055,6 +6078,28 @@ impl App {
         let effort_drop = self.ui.icon_drop_down(cx, ids!(effort_drop));
         effort_drop.set_labels(cx, labels);
         effort_drop.set_selected_item(cx, ordered.len() - 1);
+    }
+
+    fn sync_context_window(&self, cx: &mut Cx) {
+        let indicator = self.ui.context_window(cx, ids!(context_window));
+        let Some(key) = self.workspace_state.active_key() else {
+            indicator.clear_usage(cx);
+            return;
+        };
+        let Some(runtime) = self.session_runtimes.get(key) else {
+            indicator.clear_usage(cx);
+            return;
+        };
+        let Some(usage) = &runtime.latest_usage else {
+            indicator.clear_usage(cx);
+            return;
+        };
+        indicator.set_usage(
+            cx,
+            usage.input_tokens,
+            usage.total_tokens,
+            context_window_limit(&runtime.model),
+        );
     }
 
     fn refresh_attachment_ui(&self, cx: &mut Cx) {
@@ -8063,11 +8108,14 @@ impl App {
                 system_prompt: Default::default(),
             });
             let model = agent.session_tree.model.clone().unwrap_or(model);
+            let latest_usage = agent
+                .session_tree
+                .get_fact(CONTEXT_USAGE_FACT)
+                .and_then(|value| serde_json::from_str::<TokenUsage>(value).ok());
             let messages = agent.session_tree.get_active_branch_messages();
-            self.session_runtimes.insert(
-                key.clone(),
-                SessionRuntime::new(agent, model, reasoning_effort),
-            );
+            let mut runtime = SessionRuntime::new(agent, model, reasoning_effort);
+            runtime.latest_usage = latest_usage;
+            self.session_runtimes.insert(key.clone(), runtime);
             self.workspace_state
                 .workspace_mut(key.clone())
                 .chat
@@ -8097,6 +8145,7 @@ impl App {
         self.refresh_project_capabilities(cx, &entry.work_dir);
         self.restore_active_status(cx);
         self.sync_task_sidebar(cx);
+        self.sync_context_window(cx);
         cx.redraw_all();
     }
 
@@ -8593,7 +8642,7 @@ impl App {
             // AgentEnd closes one agent loop, but CodingAgent may still run
             // hooks or scheduled work. GenerationFinished is the terminal event.
             AgentEvent::AgentEnd { .. } if generation.is_none() => (),
-            AgentEvent::AgentEnd { .. } => {
+            AgentEvent::AgentEnd { usage } => {
                 let Some((key, id)) = generation else { return };
                 let accepted = self.session_runtimes.get(&key).is_some_and(|runtime| {
                     accepts_generation_event(
@@ -8606,6 +8655,17 @@ impl App {
                 if !accepted {
                     return;
                 }
+                if let Some(runtime) = self.session_runtimes.get_mut(&key) {
+                    runtime.latest_usage = Some(usage.clone());
+                    let agent = runtime.agent.clone();
+                    get_runtime().spawn(async move {
+                        let mut agent = agent.lock().await;
+                        if let Ok(value) = serde_json::to_string(&usage) {
+                            let _ = agent.session_tree.set_fact(CONTEXT_USAGE_FACT, value);
+                        }
+                    });
+                }
+                self.sync_context_window(cx);
                 self.workspace_state
                     .workspace_mut(key.clone())
                     .chat
