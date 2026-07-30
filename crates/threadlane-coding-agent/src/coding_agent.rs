@@ -3553,16 +3553,24 @@ async fn run_subagent_task(
         let journal_run_id = journal_run_id.clone();
         agent.loop_engine.tool_intent_recorder =
             Some(Arc::new(move |tool_call_id, tool_name, arguments| {
-                let effective_args = serde_json::from_str(arguments).map_err(|error| {
-                    format!("Failed to parse child tool intent arguments: {error}")
-                })?;
-                journal.tool_started(
-                    &lane_name,
-                    &journal_run_id,
-                    tool_call_id,
-                    tool_name,
-                    effective_args,
-                )
+                let lane_name = lane_name.clone();
+                let journal_run_id = journal_run_id.clone();
+                let tool_call_id = tool_call_id.to_string();
+                let tool_name = tool_name.to_string();
+                let arguments = arguments.to_string();
+                let journal = journal.clone();
+                Box::pin(async move {
+                    let effective_args = serde_json::from_str(&arguments).map_err(|error| {
+                        format!("Failed to parse child tool intent arguments: {error}")
+                    })?;
+                    journal.tool_started(
+                        &lane_name,
+                        &journal_run_id,
+                        &tool_call_id,
+                        &tool_name,
+                        effective_args,
+                    )
+                })
             }));
     }
 
@@ -5111,8 +5119,11 @@ mod tests {
         let live_intents = Arc::new(AtomicU64::new(0));
         let observed_live_intents = live_intents.clone();
         coding_agent.set_tool_intent_recorder(Some(Arc::new(move |_, _, _| {
-            observed_live_intents.fetch_add(1, Ordering::SeqCst);
-            Ok(())
+            let observed_live_intents = observed_live_intents.clone();
+            Box::pin(async move {
+                observed_live_intents.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
         })));
         let record = threadlane_agent::OpRecord::ToolStarted {
             id: "tool-1".into(),

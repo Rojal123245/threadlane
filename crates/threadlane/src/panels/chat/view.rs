@@ -374,7 +374,10 @@ fn display_rows_with_harness(
         }
         for item in row.rail_items.iter_mut().filter(|item| item.key.is_none()) {
             let Some((index, activity)) = activities.iter().enumerate().find(|(index, activity)| {
-                !matched[*index] && item.task == activity.task && item.agent == activity.agent
+                !matched[*index]
+                    && item.task
+                        == super::state::normalize_whitespace_bounded(&activity.task, 160)
+                    && item.agent == activity.agent
             }) else {
                 continue;
             };

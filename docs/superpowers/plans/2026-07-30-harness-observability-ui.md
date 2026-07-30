@@ -82,11 +82,11 @@ pub fn reduce_harness_activity(
 ```
 
 - [ ] Write failing reducer tests for queued → working, working → recovered, retrying, aborted, terminal replacement, and duplicate-key replacement.
-- [ ] Run `rtk cargo test -p threadlane --lib harness_activity`; verify the tests fail because the model/reducer does not exist.
+- [ ] Run `rtk cargo test -p threadlane --bin threadlane harness_activity`; verify the tests fail because the model/reducer does not exist.
 - [ ] Add the event/status types and reducer. Use the durable lane key as the map identity, preserve insertion order for distinct lanes, and replace only the matching item.
 - [ ] Add `harness_activities: Vec<HarnessActivity>` to the existing session-scoped `ChatData` or `SessionWorkspace` state, with an empty default and no persistence record.
 - [ ] Emit `SubagentRecovery::Started`, `Recovered`, `Retrying`, and `Aborted` from the existing CodingAgent recovery path. Emit only concise detail strings suitable for UI copy.
-- [ ] Run `rtk cargo test -p threadlane --lib harness_activity` and the focused coding-agent recovery tests; expect the reducer and event construction tests to pass.
+- [ ] Run `rtk cargo test -p threadlane --bin threadlane harness_activity` and the focused coding-agent recovery tests; expect the reducer and event construction tests to pass.
 - [ ] Commit with `feat: add harness activity presentation state`.
 
 ---
@@ -111,12 +111,12 @@ AgentEvent::SubagentRecovery { .. } => { /* reduce recovery status */ }
 ```
 
 - [ ] Write a failing app-state test that sends queued, started, recovery, and finished events for one session and asserts one activity item remains with the latest terminal status.
-- [ ] Run `rtk cargo test -p threadlane --lib harness_event_routing`; verify failure because the app currently ignores subagent lifecycle variants.
+- [ ] Run `rtk cargo test -p threadlane --bin threadlane harness_event_routing`; verify failure because the app currently ignores subagent lifecycle variants.
 - [ ] Route all subagent lifecycle variants in `handle_agent_event` to the target `SessionWorkspace` selected by the existing generation key.
 - [ ] Keep stale-generation filtering unchanged; events for non-current generations must not mutate the active workspace.
 - [ ] Map `SubagentFinished` errors to `Aborted` only when the event indicates cancellation/unsafe interruption; ordinary provider failure should remain a concise retryable/failed detail.
 - [ ] Redraw the existing chat list after state reduction and preserve current session status/composer behavior.
-- [ ] Run `rtk cargo test -p threadlane --lib harness_event_routing` and the existing app/state tests.
+- [ ] Run `rtk cargo test -p threadlane --bin threadlane harness_event_routing` and the existing app/state tests.
 - [ ] Commit with `feat: route harness lifecycle events to chat state`.
 
 ---
@@ -145,13 +145,13 @@ pub fn merge_harness_activities(
 
 - [ ] Write failing presentation tests for `Delegated`, `Working`, `Recovering`, `Recovered`, `Retrying recovery`, `Aborted · unsafe tool`, and `Cancelled` copy.
 - [ ] Add a test proving a persisted lane and a live event with the same key produce one rail item and retain the latest status/detail.
-- [ ] Run `rtk cargo test -p threadlane --lib harness_activity_label`; verify failure before implementing the mapping.
+- [ ] Run `rtk cargo test -p threadlane --bin threadlane harness_activity_label`; verify failure before implementing the mapping.
 - [ ] Extend `SubagentRailItem` with only the fields needed for durable identity and bounded status/detail; keep existing task/tool detail formatting intact.
 - [ ] Merge session-scoped harness activities into the existing rail/display-row construction in `ChatList`/`DisplayRow` without adding a second collapsible container.
 - [ ] Keep successful recovery collapsed by default, keep unresolved recovery visible, and bound task/detail text using existing normalization helpers.
 - [ ] Ensure terminal status replaces the summary without deleting underlying `ChatMessage` history or changing stream grouping.
 - [ ] Preserve keyboard focus, `ToolFoldHeader` layout-change redraws, and existing `SubagentRail::draw_all_unscoped` behavior.
-- [ ] Run focused chat tests plus `rtk cargo test -p threadlane --lib panels::chat`.
+- [ ] Run focused chat tests plus `rtk cargo test -p threadlane --bin threadlane panels::chat`.
 - [ ] Commit with `feat: show harness activity in chat`.
 
 ---
@@ -181,12 +181,12 @@ pub fn session_health(activities: &[HarnessActivity]) -> SessionHealth;
 ```
 
 - [ ] Write failing tests for healthy sessions, unresolved retryable recovery, and unsafe-abort warning visibility.
-- [ ] Run `rtk cargo test -p threadlane --lib session_health`; verify failure before adding the projection.
+- [ ] Run `rtk cargo test -p threadlane --bin threadlane session_health`; verify failure before adding the projection.
 - [ ] Add the projection in the existing sessions state path without adding a new global registry or persistence field.
 - [ ] Render one muted badge in the existing session row template only for `Recovering` or `Warning`; do not alter healthy row geometry or selected-session treatment.
 - [ ] Use existing semantic `warning`/`destructive`/`muted` theme roles and a short accessible label such as `Recovery pending` or `Subagent aborted`.
 - [ ] Keep badge placement inside the existing bounded action/label slot so it cannot intercept row selection or context-menu events.
-- [ ] Run focused session tests and `rtk cargo test -p threadlane --lib panels::sessions`.
+- [ ] Run focused session tests and `rtk cargo test -p threadlane --bin threadlane panels::sessions`.
 - [ ] Commit with `feat: add session harness health badge`.
 
 ---

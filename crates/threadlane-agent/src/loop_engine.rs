@@ -14,7 +14,9 @@ use crate::types::{
 };
 use serde_json::Value;
 use std::collections::HashSet;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use threadlane_provider::openai::{clamp_prompt_cache_key, ProviderUsage, StreamEvent, ToolCall};
 use threadlane_provider::router::{PayloadFormat, PayloadSource, ProviderClient};
@@ -325,7 +327,11 @@ struct ToolExecutorRoute {
     tool_names: HashSet<String>,
 }
 
-pub type ToolIntentRecorder = Arc<dyn Fn(&str, &str, &str) -> Result<(), String> + Send + Sync>;
+pub type ToolIntentRecorder = Arc<
+    dyn Fn(&str, &str, &str) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>
+        + Send
+        + Sync,
+>;
 
 #[derive(Clone)]
 struct ToolRunContext {
@@ -1106,7 +1112,7 @@ impl AgentLoop {
         }
 
         if let Some(recorder) = &context.intent_recorder {
-            if let Err(error) = recorder(&tc.id, &tc.function.name, &arguments) {
+            if let Err(error) = recorder(&tc.id, &tc.function.name, &arguments).await {
                 let result = AgentToolResult {
                     tool_call_id: tc.id.clone(),
                     name: tc.function.name.clone(),
@@ -1385,9 +1391,12 @@ mod normalize_tool_arguments_tests {
         let recorded = Arc::new(StdMutex::new(None));
         let recorded_for_callback = recorded.clone();
         agent.tool_intent_recorder = Some(Arc::new(move |id, name, arguments| {
-            *recorded_for_callback.lock().unwrap() =
-                Some((id.to_string(), name.to_string(), arguments.to_string()));
-            Ok(())
+            let recorded = recorded_for_callback.clone();
+            let value = (id.to_string(), name.to_string(), arguments.to_string());
+            Box::pin(async move {
+                *recorded.lock().unwrap() = Some(value);
+                Ok(())
+            })
         }));
 
         let results = agent
@@ -1416,7 +1425,9 @@ mod normalize_tool_arguments_tests {
     #[tokio::test]
     async fn tool_intent_recorder_failure_prevents_execution() {
         let mut agent = AgentLoop::new("", None, "test");
-        agent.tool_intent_recorder = Some(Arc::new(|_, _, _| Err("intent append failed".into())));
+        agent.tool_intent_recorder = Some(Arc::new(|_, _, _| {
+            Box::pin(async { Err("intent append failed".into()) })
+        }));
         let mut events = agent.event_tx.subscribe();
 
         let results = agent

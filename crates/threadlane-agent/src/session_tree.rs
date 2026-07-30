@@ -445,13 +445,43 @@ impl SessionTree {
         content: String,
         is_error: bool,
     ) -> bool {
-        let Some(node_id) = self.nodes.iter().find_map(|(node_id, node)| {
+        if let Some(path) = self.file_path.clone() {
+            let _guard = session_file_lock().lock().unwrap();
+            let Ok(mut latest) = Self::load_from_file(&path) else {
+                return false;
+            };
+            let Some(node_id) = latest.node_order.iter().find(|node_id| {
+                matches!(
+                    latest.nodes.get(*node_id).map(|node| &node.message),
+                    Some(AgentMessage::Tool { tool_call_id: id, .. }) if id == tool_call_id
+                )
+            }).cloned() else {
+                return false;
+            };
+            let Some(node) = latest.nodes.get_mut(&node_id) else {
+                return false;
+            };
+            if let AgentMessage::Tool {
+                content: current_content,
+                is_error: current_is_error,
+                ..
+            } = &mut node.message
+            {
+                *current_content = content;
+                *current_is_error = is_error;
+            }
+            if latest.save_transactionally(&path).is_err() {
+                return false;
+            }
+            *self = latest;
+            return true;
+        }
+        let Some(node_id) = self.node_order.iter().find(|node_id| {
             matches!(
-                &node.message,
-                AgentMessage::Tool { tool_call_id: id, .. } if id == tool_call_id
+                self.nodes.get(*node_id).map(|node| &node.message),
+                Some(AgentMessage::Tool { tool_call_id: id, .. }) if id == tool_call_id
             )
-            .then_some(node_id.clone())
-        }) else {
+        }).cloned() else {
             return false;
         };
         let previous = self

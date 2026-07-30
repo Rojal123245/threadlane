@@ -57,7 +57,7 @@ impl SubagentLaneJournal {
 
 - [ ] Write `subagent_journal_persists_start_before_returning` and assert `OperationStarted` then `TaskAttempt`, non-empty IDs, one run ID, and strictly increasing sequence numbers.
 - [ ] Run `rtk cargo test -p threadlane-coding-agent subagent_journal_persists_start_before_returning`; expect compile failure because the journal is absent.
-- [ ] Implement `load` with `load_op_records_from_file` and one shared records mutex. Each mutation must lock records, allocate `seq = records.len() as u64 + 1`, append with `append_op_record_to_file`, then push in memory.
+- [ ] Implement `load` with `load_op_records_from_file` and one shared records mutex. Each mutation must allocate the next sequence from the durable maximum under the append lock, append with `append_op_record_to_file`, then push in memory.
 - [ ] Implement `checkpoint` as one `WriteDeferred` per message, skipping `AgentMessage::System`.
 - [ ] Run the focused test and `rtk cargo test -p threadlane-coding-agent subagent_journal`; expect PASS.
 - [ ] Commit with `git commit -m "feat: add subagent lane journal"`.

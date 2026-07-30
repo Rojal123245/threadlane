@@ -237,6 +237,8 @@ pub fn append_op_record_to_file(path: &Path, record: &OpRecord) -> std::io::Resu
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     let line = serde_json::to_string(record)?;
     writeln!(file, "{}", line)?;
+    file.flush()?;
+    file.sync_data()?;
     Ok(())
 }
 
@@ -250,14 +252,18 @@ pub fn load_op_records_from_file(path: &Path) -> std::io::Result<Vec<OpRecord>> 
     let reader = BufReader::new(file);
     let mut records = Vec::new();
 
-    for line in reader.lines() {
+    for (line_number, line) in reader.lines().enumerate() {
         let line = line?;
         let line_trimmed = line.trim();
         if line_trimmed.is_empty() {
             continue;
         }
-        if let Ok(rec) = serde_json::from_str::<OpRecord>(line_trimmed) {
-            records.push(rec);
+        match serde_json::from_str::<OpRecord>(line_trimmed) {
+            Ok(rec) => records.push(rec),
+            Err(error) => eprintln!(
+                "Failed to parse session oplog line {}: {error}",
+                line_number + 1
+            ),
         }
     }
 

@@ -4322,9 +4322,14 @@ impl MatchEvent for App {
             let session_file = entry.session_file.clone();
             let workspace = self
                 .workspace_state
-                .workspace_mut(SessionKey::new(entry.work_dir, entry.id));
+                .workspace_mut(SessionKey::new(entry.work_dir.clone(), entry.id.clone()));
             workspace.chat.replace_from_agent_messages(&messages);
             workspace.chat.harness_activities = restore_harness_activities(&session_file);
+            set_session_health(
+                &entry.work_dir,
+                &entry.id,
+                session_health(&workspace.chat.harness_activities),
+            );
         }
         self.session_runtimes.insert(
             initial_key,
@@ -8067,10 +8072,17 @@ impl App {
                 .workspace_mut(key.clone())
                 .chat
                 .replace_from_agent_messages(&messages);
+            let activities = restore_harness_activities(&entry.session_file);
+            let health = session_health(&activities);
             self.workspace_state
                 .workspace_mut(key.clone())
                 .chat
-                .harness_activities = restore_harness_activities(&entry.session_file);
+                .harness_activities = activities;
+            set_session_health(
+                &entry.work_dir,
+                &entry.id,
+                health,
+            );
         }
 
         if let Some((model, reasoning_effort)) = self

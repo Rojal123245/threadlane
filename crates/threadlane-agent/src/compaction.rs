@@ -184,15 +184,17 @@ pub fn compact_messages_with_strategy(
                 return messages.to_vec();
             }
             let mut keyframes = Vec::new();
+            let mut user_keyframes = 0;
             for (idx, msg) in messages.iter().enumerate() {
                 if idx == 0 && matches!(msg, AgentMessage::System { .. }) {
                     keyframes.push(msg.clone());
                 } else if matches!(
                     msg,
                     AgentMessage::User { .. } | AgentMessage::UserWithImages { .. }
-                ) && keyframes.len() <= 2
+                ) && user_keyframes < 3
                 {
                     keyframes.push(msg.clone());
+                    user_keyframes += 1;
                 }
             }
             let keyframe_tokens: usize = keyframes.iter().map(estimate_message_tokens).sum();
@@ -200,14 +202,13 @@ pub fn compact_messages_with_strategy(
 
             let recent = compact_messages_to_token_budget(messages, remaining_budget);
             let mut result = keyframes;
-            let mut result_json: Vec<String> = result
+            let mut result_json: std::collections::HashSet<String> = result
                 .iter()
                 .filter_map(|m| serde_json::to_string(m).ok())
                 .collect();
             for msg in recent {
                 if let Ok(json) = serde_json::to_string(&msg) {
-                    if !result_json.contains(&json) {
-                        result_json.push(json);
+                    if result_json.insert(json) {
                         result.push(msg);
                     }
                 }
@@ -222,6 +223,7 @@ pub fn prune_historical_tool_outputs(
     messages: &[AgentMessage],
     keep_recent_tool_turns: usize,
 ) -> Vec<AgentMessage> {
+    const INLINE_TOOL_OUTPUT_LIMIT: usize = 200;
     let mut tool_seen_count = 0;
     let mut result = Vec::with_capacity(messages.len());
 
@@ -243,11 +245,11 @@ pub fn prune_historical_tool_outputs(
                 content,
                 is_error,
             } => {
-                if keep_full[i] || content.len() <= 200 {
+                if keep_full[i] || content.len() <= INLINE_TOOL_OUTPUT_LIMIT {
                     result.push(msg.clone());
                 } else {
                     let pruned_content = format!(
-                        "[Historical tool output truncated for '{name}' ({} bytes retained in session oplog)]",
+                        "[Historical tool output truncated for '{name}' ({} bytes)]",
                         content.len()
                     );
                     result.push(AgentMessage::Tool {
@@ -358,8 +360,8 @@ fn extract_session_insights(messages: &[AgentMessage]) -> (Vec<String>, Vec<Stri
                     }
                 }
                 if *is_error
-                    || content.contains("Access denied")
-                    || content.contains("Operation not permitted")
+                    && (content.contains("Access denied")
+                        || content.contains("Operation not permitted"))
                 {
                     let line = "Command execution in restricted environments may require BypassSandbox mode.";
                     if !gotchas.contains(&line.to_string()) {

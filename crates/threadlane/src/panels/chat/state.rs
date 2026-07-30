@@ -234,7 +234,7 @@ pub fn merge_harness_activities(
             },
             status: harness_activity_label(activity),
             detail: harness_activity_detail(activity),
-            parent_lane: Some("main".into()),
+            parent_lane: None,
             token_usage: None,
         };
         if let Some(existing) = rail_items
@@ -420,7 +420,7 @@ pub fn subagent_rail_items_with_harness(
                         task: normalize_whitespace_bounded(&session.task, 160),
                         status: session.status,
                         detail,
-                        parent_lane: Some("main".into()),
+                        parent_lane: None,
                         token_usage: None,
                     }
                 })
@@ -465,7 +465,7 @@ pub fn subagent_rail_items_with_harness(
                 }
                 .to_string(),
                 detail: subagent_task_activity_detail(messages, child_run, index),
-                parent_lane: Some("main".into()),
+                parent_lane: None,
                 token_usage: None,
             }
         })
@@ -1150,7 +1150,7 @@ fn subagent_presentation(
     (primary, metadata, detail)
 }
 
-fn normalize_whitespace_bounded(text: &str, max_chars: usize) -> String {
+pub(crate) fn normalize_whitespace_bounded(text: &str, max_chars: usize) -> String {
     text.chars()
         .take(max_chars)
         .collect::<String>()
