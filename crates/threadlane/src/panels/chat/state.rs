@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
-use threadlane_agent::{AgentEvent, AgentMessage, SubagentRecoveryStatus};
+use threadlane_agent::{AgentEvent, AgentMessage, OpOutcome, OpRecord, SubagentRecoveryStatus};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum MsgRole {
@@ -90,6 +90,91 @@ pub struct HarnessActivity {
     pub agent: String,
     pub status: HarnessActivityStatus,
     pub detail: String,
+}
+
+pub fn harness_activities_from_oplog(records: &[OpRecord]) -> Vec<HarnessActivity> {
+    #[derive(Clone)]
+    struct Restored {
+        key: String,
+        task: String,
+        agent: String,
+        status: HarnessActivityStatus,
+        detail: String,
+        latest_seq: u64,
+    }
+
+    let mut starts = HashMap::<String, Restored>::new();
+    let mut ordered = records.iter().enumerate().collect::<Vec<_>>();
+    ordered.sort_by_key(|(index, record)| (record.seq(), *index));
+
+    for (_, record) in ordered {
+        match record {
+            OpRecord::OperationStarted { id, kind, seq, .. } if kind == "subagent" => {
+                starts.insert(
+                    id.clone(),
+                    Restored {
+                        key: id.clone(),
+                        task: String::new(),
+                        agent: "subagent".into(),
+                        status: HarnessActivityStatus::Working,
+                        detail: "Restored from session history".into(),
+                        latest_seq: *seq,
+                    },
+                );
+            }
+            OpRecord::TaskAttempt {
+                run_id, task, seq, ..
+            } => {
+                if let Some(restored) = starts.get_mut(run_id) {
+                    restored.task = task.clone();
+                    restored.latest_seq = *seq;
+                }
+            }
+            OpRecord::OperationFinished {
+                run_id,
+                outcome,
+                error,
+                seq,
+                ..
+            } => {
+                if let Some(restored) = starts.get_mut(run_id) {
+                    let (status, fallback) = match outcome {
+                        OpOutcome::Completed => {
+                            (HarnessActivityStatus::Recovered, "Completed")
+                        }
+                        OpOutcome::Aborted => (HarnessActivityStatus::Cancelled, "Cancelled"),
+                        OpOutcome::Failed | OpOutcome::Declined => {
+                            (HarnessActivityStatus::Aborted, "Aborted")
+                        }
+                    };
+                    restored.status = status;
+                    restored.detail = error.clone().unwrap_or_else(|| fallback.into());
+                    restored.latest_seq = *seq;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut activities = starts
+        .into_values()
+        .filter(|restored| !restored.task.trim().is_empty())
+        .map(|restored| {
+            (
+                restored.latest_seq,
+                HarnessActivity {
+                    key: restored.key,
+                    task: restored.task,
+                    agent: restored.agent,
+                    status: restored.status,
+                    detail: restored.detail,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    activities.sort_by(|left, right| right.0.cmp(&left.0));
+    activities.truncate(20);
+    activities.into_iter().map(|(_, activity)| activity).collect()
 }
 
 pub fn reduce_harness_activity(activities: &mut Vec<HarnessActivity>, activity: HarnessActivity) {
@@ -1326,6 +1411,90 @@ mod tests {
             status,
             detail: format!("{key} detail"),
         }
+    }
+
+    fn subagent_started(run_id: &str, seq: u64) -> OpRecord {
+        OpRecord::OperationStarted {
+            id: run_id.into(),
+            seq,
+            lane: "subagent-lane".into(),
+            timestamp: seq,
+            source_leaf_id: None,
+            kind: "subagent".into(),
+            system_prompt_override: None,
+        }
+    }
+
+    fn task_attempt(run_id: &str, task: &str, seq: u64) -> OpRecord {
+        OpRecord::TaskAttempt {
+            id: format!("attempt-{run_id}"),
+            seq,
+            lane: "subagent-lane".into(),
+            timestamp: seq,
+            run_id: run_id.into(),
+            task: task.into(),
+            attempt: 1,
+        }
+    }
+
+    fn operation_finished(run_id: &str, outcome: OpOutcome, seq: u64) -> OpRecord {
+        OpRecord::OperationFinished {
+            id: format!("finish-{run_id}"),
+            seq,
+            lane: "subagent-lane".into(),
+            timestamp: seq,
+            run_id: run_id.into(),
+            outcome,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn restores_completed_and_cancelled_subagents() {
+        let activities = harness_activities_from_oplog(&[
+            subagent_started("run-complete", 1),
+            task_attempt("run-complete", "inspect source", 2),
+            operation_finished("run-complete", OpOutcome::Completed, 3),
+            subagent_started("run-cancelled", 4),
+            task_attempt("run-cancelled", "inspect tests", 5),
+            operation_finished("run-cancelled", OpOutcome::Aborted, 6),
+        ]);
+
+        assert_eq!(activities[0].key, "run-cancelled");
+        assert_eq!(activities[0].status, HarnessActivityStatus::Cancelled);
+        assert_eq!(activities[1].status, HarnessActivityStatus::Recovered);
+    }
+
+    #[test]
+    fn caps_restored_activities_to_latest_twenty() {
+        let records = (0..21)
+            .flat_map(|index| {
+                [
+                    subagent_started(&format!("run-{index}"), index * 2),
+                    task_attempt(&format!("run-{index}"), "inspect source", index * 2 + 1),
+                ]
+            })
+            .collect::<Vec<_>>();
+
+        let activities = harness_activities_from_oplog(&records);
+
+        assert_eq!(activities.len(), 20);
+        assert_eq!(activities[0].key, "run-20");
+        assert_eq!(activities[19].key, "run-1");
+    }
+
+    #[test]
+    fn restores_unfinished_subagents_and_ignores_missing_tasks() {
+        let activities = harness_activities_from_oplog(&[
+            subagent_started("run-open", 1),
+            task_attempt("run-open", "inspect source", 2),
+            subagent_started("run-no-task", 3),
+        ]);
+
+        assert_eq!(activities.len(), 1);
+        assert_eq!(activities[0].key, "run-open");
+        assert_eq!(activities[0].status, HarnessActivityStatus::Working);
+        assert_eq!(activities[0].detail, "Restored from session history");
     }
 
     #[test]
