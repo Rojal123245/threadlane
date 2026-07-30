@@ -234,13 +234,16 @@ pub fn first_existing_user_prompt(tree: &SessionTree) -> Option<String> {
 
 pub fn begin_title_generation(work_dir: &Path, session_id: &str) -> bool {
     let key = (canonicalize_path(work_dir), session_id.to_string());
-    // This is deliberately a lifetime attempt marker, not an in-flight guard.
-    // Failed requests must not become eligible again later in this process.
     TITLE_ATTEMPTED.write().unwrap().insert(key)
 }
+
+pub fn reset_title_attempt(work_dir: &Path, session_id: &str) {
+    let key = (canonicalize_path(work_dir), session_id.to_string());
+    TITLE_ATTEMPTED.write().unwrap().remove(&key);
+}
+
 pub fn end_title_generation(_work_dir: &Path, _session_id: &str) {
-    // Kept as a no-op for callers that finish the detached task. Never clear
-    // the marker: one attempt is allowed per session per application lifetime.
+    // Kept as a no-op for completed title runs.
 }
 
 pub static SESSIONS_DATA: LazyLock<RwLock<SessionsData>> = LazyLock::new(|| {
@@ -853,6 +856,8 @@ mod tests {
         tree.add_message(AgentMessage::Assistant {
             content: Some("reply".into()),
             tool_calls: None,
+            stop_reason: None,
+            deferred_handle: None,
         });
         tree.add_message(AgentMessage::User {
             content: "Later request".into(),

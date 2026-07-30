@@ -1877,6 +1877,7 @@ impl CodingAgent {
         let AgentMessage::Assistant {
             content,
             tool_calls,
+            ..
         } = message
         else {
             return;
@@ -2102,6 +2103,8 @@ impl CodingAgent {
                 self.session_tree.add_message(AgentMessage::Assistant {
                     content: Some(output.clone()),
                     tool_calls: None,
+                    stop_reason: None,
+                    deferred_handle: None,
                 });
                 self.run_scheduled_agent_work().await;
                 return Some(output);
@@ -2160,6 +2163,8 @@ impl CodingAgent {
                                         self.session_tree.add_message(AgentMessage::Assistant {
                                             content: Some(output.to_string()),
                                             tool_calls: None,
+                                            stop_reason: None,
+                                            deferred_handle: None,
                                         });
                                         Some(Ok(output.to_string()))
                                     }
@@ -2704,6 +2709,8 @@ mod tests {
                     "read_file",
                     serde_json::json!({"path": "src/main.rs"}),
                 )]),
+                stop_reason: None,
+                deferred_handle: None,
             });
         }
 
@@ -2759,6 +2766,8 @@ mod tests {
             AgentMessage::Assistant {
                 content: Some("A. Always visible\nB. Visible while scrolling\nC. Hidden".into()),
                 tool_calls: None,
+                stop_reason: None,
+                deferred_handle: None,
             },
             AgentMessage::User {
                 content: "B".into(),

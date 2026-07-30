@@ -41,24 +41,29 @@ pub fn repair_interrupted_tool_turn(messages: &mut Vec<AgentMessage>) -> bool {
             continue;
         }
 
-        let expected_ids: HashSet<&str> = tool_calls
+        let expected_ids: HashSet<String> = tool_calls
             .iter()
-            .map(|call| {
+            .enumerate()
+            .map(|(idx, call)| {
                 if call.id.is_empty() {
-                    "call_0"
+                    format!("call_{idx}")
                 } else {
-                    call.id.as_str()
+                    call.id.clone()
                 }
             })
             .collect();
         let mut completed_ids = HashSet::new();
         let mut next = index + 1;
+        let mut empty_counter = 0;
         while let Some(AgentMessage::Tool { tool_call_id, .. }) = messages.get(next) {
-            completed_ids.insert(if tool_call_id.is_empty() {
-                "call_0"
+            let id = if tool_call_id.is_empty() {
+                let s = format!("call_{empty_counter}");
+                empty_counter += 1;
+                s
             } else {
-                tool_call_id.as_str()
-            });
+                tool_call_id.clone()
+            };
+            completed_ids.insert(id);
             next += 1;
         }
 
@@ -126,6 +131,7 @@ pub fn convert_to_llm(messages: &[AgentMessage]) -> Vec<Value> {
             AgentMessage::Assistant {
                 content,
                 tool_calls,
+                ..
             } => {
                 let mut map = serde_json::Map::new();
                 map.insert("role".into(), "assistant".into());
@@ -211,6 +217,7 @@ pub fn convert_to_codex_llm(messages: &[AgentMessage]) -> (String, Vec<Value>) {
             AgentMessage::Assistant {
                 content,
                 tool_calls,
+                ..
             } => {
                 if let Some(c) = content {
                     if !c.trim().is_empty() {
@@ -809,6 +816,8 @@ impl AgentLoop {
                 } else {
                     Some(captured_tool_calls.clone())
                 },
+                stop_reason: None,
+                deferred_handle: None,
             };
 
             {

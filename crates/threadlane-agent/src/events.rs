@@ -73,3 +73,12 @@ pub enum AgentEvent {
         reminder: String,
     },
 }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HarnessMetrics {
+    pub total_runs: u64,
+    pub total_tools_executed: u64,
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
+    pub active_lanes: usize,
+}

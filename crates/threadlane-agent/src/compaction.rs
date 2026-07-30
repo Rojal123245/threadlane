@@ -5,6 +5,15 @@ pub(crate) const AUTO_COMPACTION_KEEP_RECENT_TOKENS: usize = 20_000;
 const MAX_CHECKPOINT_CHARS: usize = 12_000;
 const ESTIMATED_IMAGE_TOKENS: usize = 1_200;
 
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum CompactionStrategy {
+    #[default]
+    TokenBudget,
+    SemanticKeyframes,
+}
+
 #[derive(Debug, Clone)]
 pub struct CompactionOptions {
     pub max_messages: usize,
@@ -29,6 +38,7 @@ fn estimate_message_tokens(message: &AgentMessage) -> usize {
         AgentMessage::Assistant {
             content,
             tool_calls,
+            ..
         } => {
             content.as_deref().map_or(0, str::len)
                 + tool_calls.as_ref().map_or(0, |calls| {
@@ -158,6 +168,102 @@ fn compact_from_index(messages: &[AgentMessage], mut start: usize) -> Vec<AgentM
             .cloned(),
     );
     compacted
+}
+
+pub fn compact_messages_with_strategy(
+    messages: &[AgentMessage],
+    target_tokens: usize,
+    strategy: CompactionStrategy,
+) -> Vec<AgentMessage> {
+    match strategy {
+        CompactionStrategy::TokenBudget => compact_messages_to_token_budget(messages, target_tokens),
+        CompactionStrategy::SemanticKeyframes => {
+            if messages.len() <= 2 {
+                return messages.to_vec();
+            }
+            let mut keyframes = Vec::new();
+            for (idx, msg) in messages.iter().enumerate() {
+                if idx == 0 && matches!(msg, AgentMessage::System { .. }) {
+                    keyframes.push(msg.clone());
+                } else if matches!(msg, AgentMessage::User { .. } | AgentMessage::UserWithImages { .. }) && keyframes.len() <= 2 {
+                    keyframes.push(msg.clone());
+                }
+            }
+            let keyframe_tokens: usize = keyframes.iter().map(estimate_message_tokens).sum();
+            let remaining_budget = target_tokens.saturating_sub(keyframe_tokens);
+
+            let recent = compact_messages_to_token_budget(messages, remaining_budget);
+            let mut result = keyframes;
+            let mut result_json: Vec<String> = result.iter().filter_map(|m| serde_json::to_string(m).ok()).collect();
+            for msg in recent {
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    if !result_json.contains(&json) {
+                        result_json.push(json);
+                        result.push(msg);
+                    }
+                }
+            }
+            result
+        }
+    }
+}
+
+/// Squeezes historical tool outputs older than `keep_recent_tool_turns` to save input tokens.
+pub fn prune_historical_tool_outputs(
+    messages: &[AgentMessage],
+    keep_recent_tool_turns: usize,
+) -> Vec<AgentMessage> {
+    let mut tool_seen_count = 0;
+    let mut result = Vec::with_capacity(messages.len());
+
+    let mut keep_full = vec![false; messages.len()];
+    for (i, msg) in messages.iter().enumerate().rev() {
+        if matches!(msg, AgentMessage::Tool { .. }) {
+            tool_seen_count += 1;
+            if tool_seen_count <= keep_recent_tool_turns {
+                keep_full[i] = true;
+            }
+        }
+    }
+
+    for (i, msg) in messages.iter().enumerate() {
+        match msg {
+            AgentMessage::Tool {
+                tool_call_id,
+                name,
+                content,
+                is_error,
+            } => {
+                if keep_full[i] || content.len() <= 200 {
+                    result.push(msg.clone());
+                } else {
+                    let pruned_content = format!(
+                        "[Historical tool output truncated for '{name}' ({} bytes retained in session oplog)]",
+                        content.len()
+                    );
+                    result.push(AgentMessage::Tool {
+                        tool_call_id: tool_call_id.clone(),
+                        name: name.clone(),
+                        content: pruned_content,
+                        is_error: *is_error,
+                    });
+                }
+            }
+            _ => result.push(msg.clone()),
+        }
+    }
+
+    result
+}
+
+/// Prepares a token-optimal message context for model invocation by squeezing historical tool outputs
+/// and applying semantic keyframe compaction.
+pub fn prepare_token_optimal_context(
+    messages: &[AgentMessage],
+    target_tokens: usize,
+) -> Vec<AgentMessage> {
+    let pruned = prune_historical_tool_outputs(messages, 3);
+    compact_messages_with_strategy(&pruned, target_tokens, CompactionStrategy::SemanticKeyframes)
 }
 
 fn build_checkpoint(messages: &[AgentMessage]) -> String {
@@ -295,6 +401,8 @@ mod tests {
         msgs.push(AgentMessage::Assistant {
             content: None,
             tool_calls: Some(vec![]),
+            stop_reason: None,
+            deferred_handle: None,
         });
         msgs.push(AgentMessage::Tool {
             tool_call_id: "call_1".into(),
@@ -328,6 +436,8 @@ mod tests {
             AgentMessage::Assistant {
                 content: Some("Makepad theme tokens must be used.".into()),
                 tool_calls: None,
+                stop_reason: None,
+                deferred_handle: None,
             },
         ];
 
@@ -335,5 +445,66 @@ mod tests {
         assert!(!arch.is_empty());
         assert!(!verify.is_empty());
         assert!(verify.contains(&"cargo test --workspace".to_string()));
+    }
+
+    #[test]
+    fn test_semantic_keyframe_compaction() {
+        let msgs = vec![
+            AgentMessage::System { content: "System Goal".into() },
+            AgentMessage::User { content: "Initial User Goal".into() },
+            AgentMessage::Assistant {
+                content: Some("Intermediate reasoning".into()),
+                tool_calls: None,
+                stop_reason: None,
+                deferred_handle: None,
+            },
+            AgentMessage::User { content: "Latest prompt".into() },
+        ];
+
+        let compacted = compact_messages_with_strategy(&msgs, 200, CompactionStrategy::SemanticKeyframes);
+        assert!(!compacted.is_empty());
+        assert_eq!(compacted[0].role_str(), "system");
+    }
+
+    #[test]
+    fn test_prune_historical_tool_outputs_and_optimal_context() {
+        let mut msgs = vec![
+            AgentMessage::System { content: "system prompt".into() },
+            AgentMessage::User { content: "initial goal prompt".into() },
+        ];
+
+        for i in 0..10 {
+            msgs.push(AgentMessage::Assistant {
+                content: Some(format!("step {i}")),
+                tool_calls: None,
+                stop_reason: None,
+                deferred_handle: None,
+            });
+            msgs.push(AgentMessage::Tool {
+                tool_call_id: format!("call_{i}"),
+                name: "view_file".into(),
+                content: "a".repeat(5_000),
+                is_error: false,
+            });
+        }
+
+        let pruned = prune_historical_tool_outputs(&msgs, 3);
+        assert_eq!(pruned.len(), msgs.len());
+
+        let full_count = pruned
+            .iter()
+            .filter(|m| matches!(m, AgentMessage::Tool { content, .. } if content.contains("aaaaa")))
+            .count();
+        assert_eq!(full_count, 3);
+
+        let truncated_count = pruned
+            .iter()
+            .filter(|m| matches!(m, AgentMessage::Tool { content, .. } if content.contains("Historical tool output truncated")))
+            .count();
+        assert_eq!(truncated_count, 7);
+
+        let optimal = prepare_token_optimal_context(&msgs, 10_000);
+        assert!(!optimal.is_empty());
+        assert_eq!(optimal[0].role_str(), "system");
     }
 }

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use threadlane_agent::AgentEvent;
+use threadlane_agent::{AgentEvent, AgentMessage, LaneQueue, OpRecord, QueueKind, TokenUsage};
 use tokio::sync::broadcast;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -20,9 +20,51 @@ pub enum TaskStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LaneStatus {
+    Idle,
+    Running,
+    Suspended,
+    Cancelling,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CheckpointResult {
+    pub steer_messages: Vec<AgentMessage>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskKind {
     Background,
     Subagent,
+}
+
+#[derive(Debug, Clone)]
+pub struct Lane {
+    pub name: String,
+    pub session_id: String,
+    pub parent_lane: Option<String>,
+    pub leaf_id: Option<String>,
+    pub status: LaneStatus,
+    pub queue: LaneQueue,
+    pub op_log: Vec<OpRecord>,
+    pub active_run_id: Option<String>,
+    pub accumulated_usage: TokenUsage,
+}
+
+impl Lane {
+    pub fn new(name: impl Into<String>, session_id: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            session_id: session_id.into(),
+            parent_lane: None,
+            leaf_id: None,
+            status: LaneStatus::Idle,
+            queue: LaneQueue::default(),
+            op_log: Vec::new(),
+            active_run_id: None,
+            accumulated_usage: TokenUsage::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +108,7 @@ impl TaskRecord {
 pub struct TaskAgentEvent {
     task_id: String,
     project_id: String,
+    lane: Option<String>,
     event: AgentEvent,
 }
 
@@ -76,6 +119,10 @@ impl TaskAgentEvent {
 
     pub fn project_id(&self) -> &str {
         &self.project_id
+    }
+
+    pub fn lane(&self) -> Option<&str> {
+        self.lane.as_deref()
     }
 
     pub fn into_parts(self) -> (String, String, AgentEvent) {
@@ -90,11 +137,37 @@ struct TaskRuntime {
     run_handle: Option<tokio::task::AbortHandle>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ToolOutputCache {
+    cache: HashMap<String, String>,
+}
+
+impl ToolOutputCache {
+    pub fn get(&self, key: &str) -> Option<String> {
+        self.cache.get(key).cloned()
+    }
+
+    pub fn put(&mut self, key: String, output: String) {
+        self.cache.insert(key, output);
+    }
+
+    pub fn invalidate_all(&mut self) {
+        self.cache.clear();
+    }
+
+    pub fn invalidate_path(&mut self, path: &str) {
+        self.cache.retain(|key, _| !key.contains(path));
+    }
+}
+
 pub struct HarnessSupervisor {
     global_dir: PathBuf,
     projects: Arc<Mutex<HashMap<String, ProjectRecord>>>,
     tasks: Arc<Mutex<HashMap<String, TaskRecord>>>,
     runtimes: Arc<Mutex<HashMap<String, TaskRuntime>>>,
+    lanes: Arc<Mutex<HashMap<String, Lane>>>,
+    metrics: Arc<Mutex<threadlane_agent::HarnessMetrics>>,
+    output_cache: Arc<Mutex<ToolOutputCache>>,
     event_tx: broadcast::Sender<TaskAgentEvent>,
 }
 
@@ -107,14 +180,233 @@ impl HarnessSupervisor {
             projects: Arc::new(Mutex::new(HashMap::new())),
             tasks: Arc::new(Mutex::new(HashMap::new())),
             runtimes: Arc::new(Mutex::new(HashMap::new())),
+            lanes: Arc::new(Mutex::new(HashMap::new())),
+            metrics: Arc::new(Mutex::new(threadlane_agent::HarnessMetrics::default())),
+            output_cache: Arc::new(Mutex::new(ToolOutputCache::default())),
             event_tx,
         };
         supervisor.load_registry();
         supervisor
     }
 
+    pub fn output_cache(&self) -> Arc<Mutex<ToolOutputCache>> {
+        self.output_cache.clone()
+    }
+
+    pub fn record_lane_usage(&self, session_id: &str, lane_name: &str, usage: &TokenUsage) {
+        let key = format!("{session_id}:{lane_name}");
+        let mut lock = self.lanes.lock().unwrap();
+        if let Some(lane) = lock.get_mut(&key) {
+            lane.accumulated_usage.input_tokens += usage.input_tokens;
+            lane.accumulated_usage.output_tokens += usage.output_tokens;
+            lane.accumulated_usage.total_tokens += usage.total_tokens;
+        }
+    }
+
+    pub fn aggregate_tree_usage(&self, session_id: &str, root_lane: &str) -> TokenUsage {
+        let lock = self.lanes.lock().unwrap();
+        let mut total = TokenUsage::default();
+        for lane in lock.values() {
+            if lane.session_id == session_id && (lane.name == root_lane || lane.parent_lane.as_deref() == Some(root_lane)) {
+                total.input_tokens += lane.accumulated_usage.input_tokens;
+                total.output_tokens += lane.accumulated_usage.output_tokens;
+                total.total_tokens += lane.accumulated_usage.total_tokens;
+            }
+        }
+        total
+    }
+
+    pub fn metrics(&self) -> threadlane_agent::HarnessMetrics {
+        let mut m = self.metrics.lock().unwrap().clone();
+        m.active_lanes = self.lanes.lock().unwrap().len();
+        m
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<TaskAgentEvent> {
         self.event_tx.subscribe()
+    }
+
+    pub fn subscribe_lane(&self, _session_id: &str, _lane_name: &str) -> broadcast::Receiver<TaskAgentEvent> {
+        self.event_tx.subscribe()
+    }
+
+    pub fn get_or_create_lane(&self, session_id: &str, lane_name: &str) -> Lane {
+        let key = format!("{session_id}:{lane_name}");
+        let mut lock = self.lanes.lock().unwrap();
+        lock.entry(key)
+            .or_insert_with(|| Lane::new(lane_name, session_id))
+            .clone()
+    }
+
+    pub fn get_or_create_sub_lane(&self, session_id: &str, lane_name: &str, parent_lane: &str) -> Lane {
+        let key = format!("{session_id}:{lane_name}");
+        let mut lock = self.lanes.lock().unwrap();
+        let lane = lock.entry(key)
+            .or_insert_with(|| {
+                let mut l = Lane::new(lane_name, session_id);
+                l.parent_lane = Some(parent_lane.to_string());
+                l
+            });
+        lane.clone()
+    }
+
+    pub fn cancel_lane_hierarchy(&self, session_id: &str, root_lane: &str) -> usize {
+        let mut lock = self.lanes.lock().unwrap();
+        let mut cancelled_count = 0;
+        let targets: Vec<String> = lock.values()
+            .filter(|l| l.session_id == session_id && (l.name == root_lane || l.parent_lane.as_deref() == Some(root_lane)))
+            .map(|l| format!("{session_id}:{}", l.name))
+            .collect();
+
+        for key in targets {
+            if let Some(lane) = lock.get_mut(&key) {
+                lane.status = LaneStatus::Cancelling;
+                cancelled_count += 1;
+            }
+        }
+        cancelled_count
+    }
+
+    pub fn enqueue_steer(&self, session_id: &str, lane_name: &str, message: AgentMessage) {
+        let key = format!("{session_id}:{lane_name}");
+        let mut lock = self.lanes.lock().unwrap();
+        let lane = lock.entry(key).or_insert_with(|| Lane::new(lane_name, session_id));
+        lane.queue.enqueue(QueueKind::Steer, message);
+    }
+
+    pub fn enqueue_steer_priority(&self, session_id: &str, lane_name: &str, message: AgentMessage, priority: threadlane_agent::SteerPriority) {
+        let key = format!("{session_id}:{lane_name}");
+        let mut lock = self.lanes.lock().unwrap();
+        let lane = lock.entry(key).or_insert_with(|| Lane::new(lane_name, session_id));
+        lane.queue.enqueue_steer_with_priority(message, priority);
+    }
+
+    pub fn enqueue_followup(&self, session_id: &str, lane_name: &str, message: AgentMessage) {
+        let key = format!("{session_id}:{lane_name}");
+        let mut lock = self.lanes.lock().unwrap();
+        let lane = lock.entry(key).or_insert_with(|| Lane::new(lane_name, session_id));
+        lane.queue.enqueue(QueueKind::FollowUp, message);
+    }
+
+    pub fn update_lane_leaf(&self, session_id: &str, lane_name: &str, leaf_id: Option<String>) {
+        let key = format!("{session_id}:{lane_name}");
+        let mut lock = self.lanes.lock().unwrap();
+        if let Some(lane) = lock.get_mut(&key) {
+            lane.leaf_id = leaf_id;
+        }
+    }
+
+    pub fn append_lane_op_record(&self, session_id: &str, lane_name: &str, record: OpRecord) {
+        let key = format!("{session_id}:{lane_name}");
+        let mut lock = self.lanes.lock().unwrap();
+        if let Some(lane) = lock.get_mut(&key) {
+            lane.op_log.push(record);
+        }
+    }
+
+    pub fn checkpoint_lane(&self, session_id: &str, lane_name: &str) -> CheckpointResult {
+        let key = format!("{session_id}:{lane_name}");
+        let mut lock = self.lanes.lock().unwrap();
+        let mut steer_messages = Vec::new();
+
+        if let Some(lane) = lock.get_mut(&key) {
+            while let Some(msg) = lane.queue.pop_steer() {
+                steer_messages.push(msg);
+            }
+        }
+
+        CheckpointResult { steer_messages }
+    }
+
+    pub fn restore_session_lanes(
+        &self,
+        session_id: &str,
+        session_file: &Path,
+        session_tree: &mut threadlane_agent::SessionTree,
+    ) -> Result<threadlane_agent::RecoveryResult, String> {
+        let oplog_file = session_file.with_extension("oplog.jsonl");
+        if !oplog_file.exists() {
+            return Ok(threadlane_agent::RecoveryResult::default());
+        }
+
+        let records = threadlane_agent::load_op_records_from_file(&oplog_file)
+            .map_err(|e| format!("Failed to read oplog file: {e}"))?;
+
+        let recovery = threadlane_agent::reconcile_op_log_recovery(session_tree, &records);
+
+        let mut grouped: HashMap<String, Vec<OpRecord>> = HashMap::new();
+        for rec in records {
+            grouped.entry(rec.lane().to_string()).or_default().push(rec);
+        }
+
+        let mut lock = self.lanes.lock().unwrap();
+        for (lane_name, lane_records) in grouped {
+            let key = format!("{session_id}:{lane_name}");
+            let mut lane = Lane::new(&lane_name, session_id);
+            lane.op_log = lane_records;
+            lane.status = LaneStatus::Suspended;
+            lock.insert(key, lane);
+        }
+
+        Ok(recovery)
+    }
+
+    pub fn navigate_lane(
+        &self,
+        session_id: &str,
+        lane_name: &str,
+        target_node_id: &str,
+        session_tree: &mut threadlane_agent::SessionTree,
+    ) -> Result<bool, String> {
+        if !session_tree.nodes.contains_key(target_node_id) {
+            return Err(format!("Node '{target_node_id}' not found in session tree"));
+        }
+
+        let key = format!("{session_id}:{lane_name}");
+        let mut lock = self.lanes.lock().unwrap();
+        let lane = lock.entry(key).or_insert_with(|| Lane::new(lane_name, session_id));
+
+        lane.leaf_id = Some(target_node_id.to_string());
+        lane.status = LaneStatus::Idle;
+
+        let nav_record = OpRecord::Navigation {
+            id: format!("nav-{}", now_ms()),
+            seq: lane.op_log.len() as u64 + 1,
+            lane: lane_name.to_string(),
+            timestamp: now_ms() as u64,
+            run_id: lane.active_run_id.clone().unwrap_or_default(),
+            target_id: target_node_id.to_string(),
+            summary_entry_id: None,
+        };
+        lane.op_log.push(nav_record);
+
+        Ok(true)
+    }
+
+    pub fn redeem_deferred(
+        &self,
+        session_id: &str,
+        lane_name: &str,
+        result_message: AgentMessage,
+        session_tree: &mut threadlane_agent::SessionTree,
+    ) -> Result<String, String> {
+        let key = format!("{session_id}:{lane_name}");
+        let leaf_id = {
+            let mut lock = self.lanes.lock().unwrap();
+            let lane = lock.get_mut(&key).ok_or_else(|| format!("Lane '{key}' not found"))?;
+            lane.status = LaneStatus::Running;
+            lane.leaf_id.clone()
+        };
+
+        let new_node_id = session_tree.add_message_at_leaf(leaf_id.as_deref(), result_message);
+
+        let mut lock = self.lanes.lock().unwrap();
+        if let Some(lane) = lock.get_mut(&key) {
+            lane.leaf_id = Some(new_node_id.clone());
+            lane.status = LaneStatus::Idle;
+        }
+
+        Ok(new_node_id)
     }
 
     fn registry_file(&self) -> PathBuf {
@@ -293,6 +585,7 @@ impl HarnessSupervisor {
                 let _ = event_tx.send(TaskAgentEvent {
                     task_id: tid.clone(),
                     project_id: pid.clone(),
+                    lane: Some("main".into()),
                     event: evt,
                 });
             }
@@ -841,5 +1134,123 @@ mod tests {
             .unwrap();
         assert_eq!(task.status, TaskStatus::Cancelled);
         assert!(task.finished_at_ms.is_some());
+    }
+
+    #[test]
+    fn supervisor_lane_management_and_queuing() {
+        let dir = tempfile::tempdir().unwrap();
+        let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
+
+        let lane = supervisor.get_or_create_lane("session-1", "main");
+        assert_eq!(lane.name, "main");
+        assert_eq!(lane.status, LaneStatus::Idle);
+
+        supervisor.enqueue_steer(
+            "session-1",
+            "main",
+            AgentMessage::User {
+                content: "steer msg".into(),
+            },
+        );
+
+        supervisor.update_lane_leaf("session-1", "main", Some("node_1".into()));
+
+        let updated_lane = supervisor.get_or_create_lane("session-1", "main");
+        assert_eq!(updated_lane.leaf_id.as_deref(), Some("node_1"));
+        assert_eq!(updated_lane.queue.steer.len(), 1);
+    }
+
+    #[test]
+    fn supervisor_lane_navigation_and_deferred_redemption() {
+        let dir = tempfile::tempdir().unwrap();
+        let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
+        let mut tree = threadlane_agent::SessionTree::new("session-test");
+
+        let root_id = tree.add_message(AgentMessage::User {
+            content: "root prompt".into(),
+        });
+        let child_id = tree.add_message(AgentMessage::Assistant {
+            content: Some("reply".into()),
+            tool_calls: None,
+            stop_reason: None,
+            deferred_handle: None,
+        });
+
+        supervisor.update_lane_leaf("session-test", "main", Some(child_id.clone()));
+        assert!(supervisor
+            .navigate_lane("session-test", "main", &root_id, &mut tree)
+            .unwrap());
+
+        let lane = supervisor.get_or_create_lane("session-test", "main");
+        assert_eq!(lane.leaf_id.as_deref(), Some(root_id.as_str()));
+
+        let redeemed_id = supervisor
+            .redeem_deferred(
+                "session-test",
+                "main",
+                AgentMessage::Assistant {
+                    content: Some("redeemed response".into()),
+                    tool_calls: None,
+                    stop_reason: None,
+                    deferred_handle: None,
+                },
+                &mut tree,
+            )
+            .unwrap();
+
+        let branch = tree.get_branch_messages(Some(&redeemed_id));
+        assert_eq!(branch.len(), 2);
+    }
+
+    #[test]
+    fn supervisor_metrics_and_lane_subscription() {
+        let dir = tempfile::tempdir().unwrap();
+        let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
+
+        let _lane = supervisor.get_or_create_lane("session-1", "worker");
+        let metrics = supervisor.metrics();
+        assert_eq!(metrics.active_lanes, 1);
+
+        let _rx = supervisor.subscribe_lane("session-1", "worker");
+        let _rx2 = _rx.resubscribe();
+    }
+
+    #[test]
+    fn supervisor_sub_lane_lineage_and_cancellation() {
+        let dir = tempfile::tempdir().unwrap();
+        let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
+
+        let _parent = supervisor.get_or_create_lane("session-1", "root");
+        let child = supervisor.get_or_create_sub_lane("session-1", "sub-1", "root");
+        assert_eq!(child.parent_lane.as_deref(), Some("root"));
+
+        let cancelled = supervisor.cancel_lane_hierarchy("session-1", "root");
+        assert_eq!(cancelled, 2);
+    }
+
+    #[test]
+    fn supervisor_tool_output_cache_and_usage_aggregation() {
+        let dir = tempfile::tempdir().unwrap();
+        let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
+
+        {
+            let cache_arc = supervisor.output_cache();
+            let mut cache = cache_arc.lock().unwrap();
+            cache.put("view_file:main.rs".into(), "content".into());
+            assert_eq!(cache.get("view_file:main.rs").as_deref(), Some("content"));
+            cache.invalidate_all();
+            assert_eq!(cache.get("view_file:main.rs"), None);
+        }
+
+        let _root = supervisor.get_or_create_lane("session-1", "root");
+        let _child = supervisor.get_or_create_sub_lane("session-1", "sub-1", "root");
+
+        supervisor.record_lane_usage("session-1", "root", &TokenUsage { input_tokens: 100, output_tokens: 50, total_tokens: 150, cache_read_tokens: 0, cache_write_tokens: 0 });
+        supervisor.record_lane_usage("session-1", "sub-1", &TokenUsage { input_tokens: 200, output_tokens: 80, total_tokens: 280, cache_read_tokens: 0, cache_write_tokens: 0 });
+
+        let tree_usage = supervisor.aggregate_tree_usage("session-1", "root");
+        assert_eq!(tree_usage.input_tokens, 300);
+        assert_eq!(tree_usage.output_tokens, 130);
+        assert_eq!(tree_usage.total_tokens, 430);
     }
 }

@@ -4953,14 +4953,19 @@ impl MatchEvent for App {
 
         let submit_prompt = self.ui.button(cx, ids!(send_btn)).clicked(actions)
             || cti.text_input_ref(cx).returned(actions).is_some();
-        if submit_prompt && !self.busy {
+        if submit_prompt {
             let input_text = cti.text_input_ref(cx).text();
             let has_attachments = self
                 .workspace_state
                 .active_workspace()
                 .is_some_and(|workspace| !workspace.ui.attachments.is_empty());
             if !input_text.trim().is_empty() || has_attachments {
-                self.dispatch_input(cx, input_text, InputOrigin::Composer);
+                if self.busy {
+                    self.enqueue_steer_interrupt(cx, &input_text);
+                    cti.text_input_ref(cx).set_text(cx, "");
+                } else {
+                    self.dispatch_input(cx, input_text, InputOrigin::Composer);
+                }
             }
         }
     }
@@ -5144,6 +5149,23 @@ fn format_capabilities_summary(skills: &[SkillMetadata], agents: &[AgentConfig])
 }
 
 impl App {
+    fn enqueue_steer_interrupt(&mut self, _cx: &mut Cx, input_text: &str) {
+        let Some(key) = self.workspace_state.active_key().cloned() else { return; };
+        if let Some(supervisor) = &self.supervisor {
+            supervisor.enqueue_steer_priority(
+                &key.session_id,
+                "main",
+                threadlane_agent::AgentMessage::User {
+                    content: input_text.to_string(),
+                },
+                threadlane_agent::SteerPriority::High,
+            );
+        }
+        if let Some(workspace) = self.workspace_state.active_workspace_mut() {
+            workspace.chat.push_chat(MsgRole::User, input_text.to_string());
+        }
+    }
+
     fn open_providers_modal(&mut self, cx: &mut Cx) {
         let mut show_extensions = false;
         let mut show_skills = false;
@@ -7646,7 +7668,7 @@ impl App {
         let show_stop = presentation.show_stop(has_generation);
         self.ui
             .button(cx, ids!(send_btn))
-            .set_visible(cx, !show_stop);
+            .set_visible(cx, true);
         self.ui
             .button(cx, ids!(stop_btn))
             .set_visible(cx, show_stop);

@@ -675,17 +675,27 @@ impl Widget for SubagentRail {
             let row = self.rows.get_or_insert(cx, row_id, |cx| {
                 cx.with_vm(|vm| WidgetRef::script_from_value(vm, template))
             });
+            let display_agent = if item.parent_lane.is_some() {
+                format!("└─ {}", item.agent)
+            } else {
+                item.agent.clone()
+            };
             let title = row.label(cx, ids!(title_lbl));
-            if title.text() != item.agent {
-                title.set_text(cx, &item.agent);
+            if title.text() != display_agent {
+                title.set_text(cx, &display_agent);
             }
             let preview = row.label(cx, ids!(preview_lbl));
             if preview.text() != item.task {
                 preview.set_text(cx, &item.task);
             }
+            let display_status = if let Some(usage) = &item.token_usage {
+                format!("{} ({})", item.status, usage)
+            } else {
+                item.status.clone()
+            };
             let status = row.label(cx, ids!(status_lbl));
-            if status.text() != item.status {
-                status.set_text(cx, &item.status);
+            if status.text() != display_status {
+                status.set_text(cx, &display_status);
             }
             let mut md = row.markdown(cx, ids!(detail_md));
             if md.text() != item.detail {

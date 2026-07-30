@@ -65,6 +65,8 @@ pub struct SubagentRailItem {
     pub task: String,
     pub status: String,
     pub detail: String,
+    pub parent_lane: Option<String>,
+    pub token_usage: Option<String>,
 }
 
 pub fn subagent_rail_items(
@@ -93,6 +95,8 @@ pub fn subagent_rail_items(
                         task: normalize_whitespace_bounded(&session.task, 160),
                         status: session.status,
                         detail,
+                        parent_lane: Some("main".into()),
+                        token_usage: None,
                     }
                 })
                 .collect();
@@ -132,6 +136,8 @@ pub fn subagent_rail_items(
             }
             .to_string(),
             detail: subagent_task_activity_detail(messages, child_run, index),
+            parent_lane: Some("main".into()),
+            token_usage: None,
         })
         .collect()
 }
@@ -448,6 +454,7 @@ impl ChatData {
                 AgentMessage::Assistant {
                     content,
                     tool_calls,
+                    ..
                 } => {
                     if let Some(text) = content {
                         if !text.is_empty() {
