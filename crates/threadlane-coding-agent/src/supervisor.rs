@@ -958,29 +958,38 @@ impl HarnessSupervisor {
             } else {
                 TaskStatus::Completed
             };
+            let run_is_active = supervisor
+                .lanes
+                .lock()
+                .unwrap()
+                .get(&format!("{session_id_for_run}:main"))
+                .and_then(|lane| lane.active_run_id.as_deref())
+                == Some(run_id_for_run.as_str());
 
-            if let Some(session_file) = session_file_for_run.as_deref() {
-                let seq = supervisor
-                    .get_or_create_lane(&session_id_for_run, "main")
-                    .op_log
-                    .len() as u64
-                    + 1;
-                let _ = supervisor.append_persisted_lane_record(
-                    &session_id_for_run,
-                    "main",
-                    session_file,
-                    OpRecord::OperationFinished {
-                        id: format!("finish-{}", now_ms()),
-                        seq,
-                        lane: "main".into(),
-                        timestamp: now_ms() as u64,
-                        run_id: run_id_for_run.clone(),
-                        outcome,
-                        error,
-                    },
-                );
+            if run_is_active {
+                if let Some(session_file) = session_file_for_run.as_deref() {
+                    let seq = supervisor
+                        .get_or_create_lane(&session_id_for_run, "main")
+                        .op_log
+                        .len() as u64
+                        + 1;
+                    let _ = supervisor.append_persisted_lane_record(
+                        &session_id_for_run,
+                        "main",
+                        session_file,
+                        OpRecord::OperationFinished {
+                            id: format!("finish-{}", now_ms()),
+                            seq,
+                            lane: "main".into(),
+                            timestamp: now_ms() as u64,
+                            run_id: run_id_for_run.clone(),
+                            outcome,
+                            error,
+                        },
+                    );
+                }
             }
-            {
+            if run_is_active {
                 let mut lanes = supervisor.lanes.lock().unwrap();
                 if let Some(lane) = lanes.get_mut(&format!("{session_id_for_run}:main")) {
                     lane.status = LaneStatus::Idle;
@@ -999,7 +1008,7 @@ impl HarnessSupervisor {
             let mut r_lock = runtimes_map.lock().unwrap();
             if let Some(rt) = r_lock.get_mut(&tid) {
                 if rt.status == TaskStatus::Running {
-                    rt.status = TaskStatus::Completed;
+                    rt.status = task_status;
                 }
                 rt.run_handle = None;
             }
@@ -1020,6 +1029,27 @@ impl HarnessSupervisor {
             .and_then(|runtime| runtime.run_handle.take())
         {
             handle.abort();
+        }
+        let active_run = {
+            let task = self.tasks.lock().unwrap().get(task_id).cloned();
+            task.filter(|task| task.active()).and_then(|task| {
+                let run_id = self
+                    .lanes
+                    .lock()
+                    .unwrap()
+                    .get(&format!("{}:main", task.session_id))
+                    .and_then(|lane| lane.active_run_id.clone());
+                task.session_file
+                    .map(|session_file| (task.session_id, session_file, run_id))
+            })
+        };
+        if let Some((session_id, session_file, Some(run_id))) = active_run {
+            let _ = self.finish_recovered_operations(
+                &session_id,
+                &session_file,
+                &[run_id],
+                threadlane_agent::OpOutcome::Aborted,
+            );
         }
         let finished_at_ms = now_ms();
         let mut tasks = self.tasks.lock().unwrap();
@@ -1318,6 +1348,66 @@ mod tests {
             .unwrap();
         assert_eq!(finished, &threadlane_agent::OpOutcome::Failed);
         assert_eq!(supervisor.get_task_status(&task_id), Some(TaskStatus::Failed));
+    }
+
+    #[test]
+    fn cancelling_task_finishes_active_operation_as_aborted() {
+        let dir = tempfile::tempdir().unwrap();
+        let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
+        let session_file = dir.path().join("session.jsonl");
+        supervisor.tasks.lock().unwrap().insert(
+            "task-1".into(),
+            TaskRecord {
+                id: "task-1".into(),
+                project_id: "project-1".into(),
+                session_id: "session-1".into(),
+                session_file: Some(session_file.clone()),
+                parent_task_id: None,
+                kind: TaskKind::Background,
+                agent: "task".into(),
+                summary: "run".into(),
+                current_activity: None,
+                status: TaskStatus::Running,
+                started_at_ms: 1,
+                finished_at_ms: None,
+            },
+        );
+        supervisor
+            .append_persisted_lane_record(
+                "session-1",
+                "main",
+                &session_file,
+                OpRecord::OperationStarted {
+                    id: "run-1".into(),
+                    seq: 1,
+                    lane: "main".into(),
+                    timestamp: 1,
+                    source_leaf_id: None,
+                    kind: "prompt".into(),
+                    system_prompt_override: None,
+                },
+            )
+            .unwrap();
+
+        supervisor.cancel_task("task-1").unwrap();
+
+        let records = threadlane_agent::load_op_records_from_file(
+            &session_file.with_extension("oplog.jsonl"),
+        )
+        .unwrap();
+        assert!(records.iter().any(|record| matches!(
+            record,
+            OpRecord::OperationFinished {
+                run_id,
+                outcome: threadlane_agent::OpOutcome::Aborted,
+                ..
+            } if run_id == "run-1"
+        )));
+        let mut tree = threadlane_agent::SessionTree::new("session-1");
+        let recovery = supervisor
+            .restore_session_lanes("session-1", &session_file, &mut tree)
+            .unwrap();
+        assert_eq!(recovery.recovered_open_operations, 0);
     }
 
     #[test]
