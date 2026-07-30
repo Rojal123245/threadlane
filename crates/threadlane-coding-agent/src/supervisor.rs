@@ -948,7 +948,16 @@ impl HarnessSupervisor {
                     }
                 }
             }
-            let _ = agent.handle_input(&prompt).await;
+            let input_result = agent.handle_input(&prompt).await;
+            let (outcome, error) = match input_result {
+                Some(Err(error)) => (threadlane_agent::OpOutcome::Failed, Some(error)),
+                _ => (threadlane_agent::OpOutcome::Completed, None),
+            };
+            let task_status = if error.is_some() {
+                TaskStatus::Failed
+            } else {
+                TaskStatus::Completed
+            };
 
             if let Some(session_file) = session_file_for_run.as_deref() {
                 let seq = supervisor
@@ -966,8 +975,8 @@ impl HarnessSupervisor {
                         lane: "main".into(),
                         timestamp: now_ms() as u64,
                         run_id: run_id_for_run.clone(),
-                        outcome: threadlane_agent::OpOutcome::Completed,
-                        error: None,
+                        outcome,
+                        error,
                     },
                 );
             }
@@ -982,7 +991,7 @@ impl HarnessSupervisor {
             let mut t_lock = tasks_map.lock().unwrap();
             if let Some(tr) = t_lock.get_mut(&tid) {
                 if tr.status == TaskStatus::Running {
-                    tr.status = TaskStatus::Completed;
+                    tr.status = task_status;
                     tr.current_activity = None;
                     tr.finished_at_ms = Some(now_ms());
                 }
@@ -1257,6 +1266,59 @@ fn md5_hash(input: &str) -> String {
 mod tests {
     use super::*;
     use threadlane_agent::TokenUsage;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn failed_input_persists_failed_operation() {
+        let global_dir = tempfile::tempdir().unwrap();
+        let project_dir = tempfile::tempdir().unwrap();
+        let supervisor = HarnessSupervisor::new(global_dir.path().to_path_buf());
+        let project = supervisor.register_project(project_dir.path()).unwrap();
+        let task_id = supervisor
+            .create_task(
+                &project.id,
+                None,
+                CodingAgentOptions {
+                    api_key: "test_key".into(),
+                    account_id: None,
+                    model: "gpt-4o".into(),
+                    work_dir: project_dir.path().to_path_buf(),
+                    session_file: None,
+                    system_prompt: Default::default(),
+                },
+            )
+            .unwrap();
+
+        supervisor.submit_input(&task_id, "/subagent".into()).unwrap();
+        let session_file = loop {
+            if let Some(task) = supervisor.list_tasks_for_project(&project.id).into_iter().find(|task| task.id == task_id) {
+                if let Some(session_file) = task.session_file {
+                    break session_file;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        for _ in 0..100 {
+            if supervisor.get_task_status(&task_id) == Some(TaskStatus::Failed) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        let records = threadlane_agent::load_op_records_from_file(
+            &session_file.with_extension("oplog.jsonl"),
+        )
+        .unwrap();
+        let finished = records
+            .iter()
+            .find_map(|record| match record {
+                OpRecord::OperationFinished { outcome, .. } => Some(outcome),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(finished, &threadlane_agent::OpOutcome::Failed);
+        assert_eq!(supervisor.get_task_status(&task_id), Some(TaskStatus::Failed));
+    }
 
     #[test]
     fn subagent_lifecycle_is_tracked_under_its_session() {

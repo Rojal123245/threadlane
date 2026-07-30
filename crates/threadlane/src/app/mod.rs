@@ -8091,7 +8091,7 @@ impl App {
                     generation_id,
                     work_dir: event_work_dir.clone(),
                     session_id: event_session_id.clone(),
-                    output: out,
+                    output: out.unwrap_or_else(|error| error),
                 });
                 SignalToUI::set_ui_signal();
             }

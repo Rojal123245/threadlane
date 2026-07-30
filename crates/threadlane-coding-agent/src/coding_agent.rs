@@ -2077,7 +2077,7 @@ impl CodingAgent {
         self.agent.set_reasoning_effort(effort).await;
     }
 
-    pub(crate) async fn handle_input(&mut self, input: &str) -> Option<String> {
+    pub(crate) async fn handle_input(&mut self, input: &str) -> Option<Result<String, String>> {
         self.handle_input_with_images(input, Vec::new()).await
     }
 
@@ -2085,7 +2085,7 @@ impl CodingAgent {
         &mut self,
         input: &str,
         images: Vec<ImageAttachment>,
-    ) -> Option<String> {
+    ) -> Option<Result<String, String>> {
         self.repair_interrupted_history().await;
         let trimmed = input.trim();
 
@@ -2129,16 +2129,16 @@ impl CodingAgent {
                             .await;
                         self.dispatch_assistant_message_hooks().await;
                         self.run_scheduled_agent_work().await;
-                        return Some(format!("Loaded skill '{}'", skill_name));
+                        return Some(Ok(format!("Loaded skill '{}'", skill_name)));
                     }
-                    Err(err) => return Some(format!("Skill Error: {}", err)),
+                    Err(err) => return Some(Err(format!("Skill Error: {}", err))),
                 }
             }
 
             if cmd_name == "subagent" {
                 let task_prompt = cmd_args.trim();
                 if task_prompt.is_empty() {
-                    return Some("Usage: /subagent <task description>".to_string());
+                    return Some(Err("Usage: /subagent <task description>".to_string()));
                 }
                 let task = AgentRunTask {
                     agent: "worker".to_string(),
@@ -2149,14 +2149,14 @@ impl CodingAgent {
                 };
                 let result = match (self.agent_runner)(vec![task], false).await {
                     Ok(result) => result,
-                    Err(err) => return Some(format!("Subagent Error: {err}")),
+                    Err(err) => return Some(Err(format!("Subagent Error: {err}"))),
                 };
                 let output = result["output"].as_str().unwrap_or_default().to_string();
                 let thinking =
                     match serde_json::from_value::<Vec<AgentMessage>>(result["thinking"].clone()) {
                         Ok(thinking) => thinking,
                         Err(err) => {
-                            return Some(format!("Subagent Error: invalid thinking: {err}"))
+                            return Some(Err(format!("Subagent Error: invalid thinking: {err}")))
                         }
                     };
                 self.session_tree
@@ -2171,7 +2171,7 @@ impl CodingAgent {
                     deferred_handle: None,
                 });
                 self.run_scheduled_agent_work().await;
-                return Some(output);
+                return Some(Ok(output));
             }
 
             if let Some(res) = self
@@ -2194,7 +2194,7 @@ impl CodingAgent {
                         {
                             Ok(dispatch) => dispatch,
                             Err(error) => {
-                                return Some(format!("WASI Broker Error: {}", error.message))
+                                return Some(Err(format!("WASI Broker Error: {}", error.message)))
                             }
                         };
                         let agent_run_output =
@@ -2257,25 +2257,22 @@ impl CodingAgent {
                             }
                         }
                         if let Some(agent_run_output) = agent_run_output {
-                            return Some(match agent_run_output {
-                                Ok(output) => output,
-                                Err(error) => error,
-                            });
+                            return Some(agent_run_output);
                         }
-                        message
+                        message.map(Ok)
                     }
-                    Err(err) => Some(format!("WASI Extension Error: {}", err)),
+                    Err(err) => Some(Err(format!("WASI Extension Error: {}", err))),
                 };
             }
 
             if let Some(cmd_action) = parse_slash_command(effective_input) {
                 if cmd_action == CommandAction::Quit {
-                    return Some("quitting".to_string());
+                    return Some(Ok("quitting".to_string()));
                 }
                 let output =
                     execute_slash_command(cmd_action, &mut self.agent, &mut self.session_tree)
                         .await;
-                return Some(output);
+                return Some(Ok(output));
             }
         }
 
@@ -2780,7 +2777,7 @@ mod tests {
 
         let output = coding_agent.handle_input("/model next-model").await;
 
-        assert_eq!(output.as_deref(), Some("Switched model to: next-model"));
+        assert_eq!(output.unwrap().unwrap(), "Switched model to: next-model");
         let state = coding_agent.agent.get_state().await;
         assert_eq!(state.model, "next-model");
         assert_eq!(state.messages.len(), 2);
@@ -2807,8 +2804,8 @@ mod tests {
             .await;
 
         assert_eq!(
-            output.as_deref(),
-            Some("Switched model to: antigravity/gemini-3.6-flash")
+            output.unwrap().unwrap(),
+            "Switched model to: antigravity/gemini-3.6-flash"
         );
         let (chat, codex) = coding_agent.agent.loop_engine.build_api_payloads().await;
         assert_eq!(chat["model"], "antigravity/gemini-3.6-flash");
@@ -2817,6 +2814,16 @@ mod tests {
             coding_agent.session_tree.model.as_deref(),
             Some("antigravity/gemini-3.6-flash")
         );
+    }
+
+    #[tokio::test]
+    async fn invalid_command_returns_typed_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut coding_agent = CodingAgent::new(coding_agent_options(dir.path().to_path_buf()));
+
+        let output = coding_agent.handle_input("/subagent").await;
+
+        assert!(output.unwrap().is_err());
     }
 
     #[tokio::test]
@@ -3550,7 +3557,7 @@ mod tests {
 
         let output = coding_agent.handle_input("/queue").await;
 
-        assert_eq!(output.as_deref(), Some("queued"));
+        assert_eq!(output.unwrap().unwrap(), "queued");
         assert_eq!(
             *observed.lock().unwrap(),
             vec![AgentWork::QueueMessage("standalone queued work".into())]
@@ -3595,6 +3602,7 @@ mod tests {
             .await;
 
         assert!(output
+            .unwrap()
             .unwrap()
             .contains("test subagent result (changed-model)"));
         assert_eq!(
