@@ -1624,6 +1624,37 @@ async fn dispatch_hook_requests_isolated(
 }
 
 impl CodingAgent {
+    pub async fn replay_safe_tools(
+        &self,
+        records: &[threadlane_agent::OpRecord],
+    ) -> Vec<AgentToolResult> {
+        let calls = records
+            .iter()
+            .filter_map(|record| match record {
+                threadlane_agent::OpRecord::ToolStarted {
+                    tool_call_id,
+                    tool_name,
+                    effective_args,
+                    replay: threadlane_agent::ToolReplaySafety::Safe,
+                    ..
+                } => Some(threadlane_provider::openai::ToolCall {
+                    id: tool_call_id.clone(),
+                    r#type: "function".into(),
+                    function: threadlane_provider::openai::ToolCallFunction {
+                        name: tool_name.clone(),
+                        arguments: effective_args.to_string(),
+                    },
+                    thought_signature: None,
+                }),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if calls.is_empty() {
+            return Vec::new();
+        }
+        self.agent.loop_engine.execute_tools(&calls).await
+    }
+
     pub async fn sync_session_history(&mut self) {
         let branch = self.session_tree.get_active_branch_messages();
         let mut state = self.agent.loop_engine.state.lock().await;
@@ -2848,6 +2879,35 @@ mod tests {
             state.messages.last(),
             Some(AgentMessage::User { content }) if content == "Recovered prompt"
         ));
+    }
+
+    #[tokio::test]
+    async fn replay_safe_tools_executes_read_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recovered.txt");
+        std::fs::write(&path, "replayed content").unwrap();
+        let coding_agent = CodingAgent::new(coding_agent_options(dir.path().to_path_buf()));
+        let record = threadlane_agent::OpRecord::ToolStarted {
+            id: "tool-1".into(),
+            seq: 1,
+            lane: "main".into(),
+            timestamp: 1,
+            run_id: "run-1".into(),
+            assistant_entry_id: String::new(),
+            tool_index: 0,
+            tool_call_id: "call-1".into(),
+            tool_name: "read_file".into(),
+            effective_args: serde_json::json!({"path": path}),
+            result_entry_id: "result-1".into(),
+            replay: threadlane_agent::ToolReplaySafety::Safe,
+        };
+
+        let results = coding_agent.replay_safe_tools(&[record]).await;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].tool_call_id, "call-1");
+        assert!(results[0].content.contains("replayed content"));
+        assert!(!results[0].is_error);
     }
 
     #[tokio::test]

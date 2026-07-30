@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 pub fn classify_tool_replay_safety(tool_name: &str) -> ToolReplaySafety {
     match tool_name {
-        "view_file" | "list_dir" | "grep_search" | "read_url_content" | "search_web"
+        "view_file" | "read_file" | "list_dir" | "grep_search" | "read_url_content" | "search_web"
         | "list_permissions" => ToolReplaySafety::Safe,
         _ => ToolReplaySafety::Never,
     }

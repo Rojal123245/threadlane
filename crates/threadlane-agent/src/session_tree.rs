@@ -388,6 +388,47 @@ impl SessionTree {
             .collect()
     }
 
+    pub fn replace_tool_result(
+        &mut self,
+        tool_call_id: &str,
+        content: String,
+        is_error: bool,
+    ) -> bool {
+        let Some(node_id) = self.nodes.iter().find_map(|(node_id, node)| {
+            matches!(
+                &node.message,
+                AgentMessage::Tool { tool_call_id: id, .. } if id == tool_call_id
+            )
+            .then_some(node_id.clone())
+        }) else {
+            return false;
+        };
+        let previous = self
+            .nodes
+            .get(&node_id)
+            .map(|node| node.message.clone())
+            .unwrap();
+        {
+            let node = self.nodes.get_mut(&node_id).unwrap();
+            if let AgentMessage::Tool {
+                content: current_content,
+                is_error: current_is_error,
+                ..
+            } = &mut node.message
+            {
+                *current_content = content;
+                *current_is_error = is_error;
+            }
+        }
+        if let Some(path) = self.file_path.clone() {
+            if self.save_transactionally(&path).is_err() {
+                self.nodes.get_mut(&node_id).unwrap().message = previous;
+                return false;
+            }
+        }
+        true
+    }
+
     pub fn switch_active_node(&mut self, node_id: &str) -> bool {
         if !self.nodes.contains_key(node_id) {
             return false;
@@ -861,5 +902,23 @@ mod tests {
 
         let loaded = SessionTree::load_from_file(&path).unwrap();
         assert_eq!(loaded.get_fact("git_branch"), Some("feat/multi-lane"));
+    }
+
+    #[test]
+    fn replaces_recovered_tool_result_in_place() {
+        let mut tree = SessionTree::new("recovered");
+        tree.add_message(AgentMessage::Tool {
+            tool_call_id: "call-1".into(),
+            name: "read_file".into(),
+            content: "[Recovered tool result]".into(),
+            is_error: false,
+        });
+
+        assert!(tree.replace_tool_result("call-1", "actual output".into(), false));
+        assert!(matches!(
+            tree.get_active_branch_messages().last(),
+            Some(AgentMessage::Tool { content, is_error, .. })
+                if content == "actual output" && !is_error
+        ));
     }
 }

@@ -869,6 +869,19 @@ impl HarnessSupervisor {
                         session_file,
                         &mut agent.session_tree,
                     ) {
+                        let replayed = agent.replay_safe_tools(&recovery.safe_tools_to_replay).await;
+                        for (record, result) in recovery.safe_tools_to_replay.iter().zip(replayed) {
+                            if let threadlane_agent::OpRecord::ToolStarted {
+                                tool_call_id, ..
+                            } = record
+                            {
+                                agent.session_tree.replace_tool_result(
+                                    tool_call_id,
+                                    result.content,
+                                    result.is_error,
+                                );
+                            }
+                        }
                         if recovery.recovered_open_operations > 0 {
                             agent.sync_session_history().await;
                         }
