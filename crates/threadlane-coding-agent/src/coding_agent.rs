@@ -1624,6 +1624,21 @@ async fn dispatch_hook_requests_isolated(
 }
 
 impl CodingAgent {
+    pub async fn sync_session_history(&mut self) {
+        let branch = self.session_tree.get_active_branch_messages();
+        let mut state = self.agent.loop_engine.state.lock().await;
+        let system_prompt = state.system_prompt.clone();
+        state.messages = std::iter::once(AgentMessage::System {
+            content: system_prompt,
+        })
+        .chain(
+            branch
+                .into_iter()
+                .filter(|message| !matches!(message, AgentMessage::System { .. })),
+        )
+        .collect();
+    }
+
     pub async fn reload_extensions(&mut self) -> Result<usize, String> {
         let global_threadlane_dir = default_global_threadlane_dir();
         let loaded = self
@@ -2816,6 +2831,23 @@ mod tests {
         assert_eq!(chat["messages"][3]["content"], "B");
         assert_eq!(codex["input"][1]["role"], "assistant");
         assert_eq!(codex["input"][2]["content"][0]["text"], "B");
+    }
+
+    #[tokio::test]
+    async fn sync_session_history_loads_recovered_messages_into_provider_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut coding_agent = CodingAgent::new(coding_agent_options(dir.path().to_path_buf()));
+        coding_agent.session_tree.add_message(AgentMessage::User {
+            content: "Recovered prompt".into(),
+        });
+
+        coding_agent.sync_session_history().await;
+
+        let state = coding_agent.agent.get_state().await;
+        assert!(matches!(
+            state.messages.last(),
+            Some(AgentMessage::User { content }) if content == "Recovered prompt"
+        ));
     }
 
     #[tokio::test]

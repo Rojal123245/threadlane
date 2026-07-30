@@ -5,7 +5,10 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use threadlane_agent::{AgentEvent, AgentMessage, LaneQueue, OpRecord, QueueKind, TokenUsage};
+use threadlane_agent::{
+    append_op_record_to_file, AgentEvent, AgentMessage, LaneQueue, OpRecord, QueueKind,
+    TokenUsage,
+};
 use tokio::sync::broadcast;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,6 +138,7 @@ struct TaskRuntime {
     status: TaskStatus,
     prompt_lock: Arc<tokio::sync::Mutex<()>>,
     run_handle: Option<tokio::task::AbortHandle>,
+    recovery_loaded: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -160,6 +164,7 @@ impl ToolOutputCache {
     }
 }
 
+#[derive(Clone)]
 pub struct HarnessSupervisor {
     global_dir: PathBuf,
     projects: Arc<Mutex<HashMap<String, ProjectRecord>>>,
@@ -304,6 +309,80 @@ impl HarnessSupervisor {
         }
     }
 
+    pub fn append_persisted_lane_record(
+        &self,
+        session_id: &str,
+        lane_name: &str,
+        session_file: &Path,
+        record: OpRecord,
+    ) -> Result<(), String> {
+        append_op_record_to_file(&session_file.with_extension("oplog.jsonl"), &record)
+            .map_err(|error| format!("Failed to append lane operation: {error}"))?;
+        let key = format!("{session_id}:{lane_name}");
+        let mut lock = self.lanes.lock().unwrap();
+        let lane = lock
+            .entry(key)
+            .or_insert_with(|| Lane::new(lane_name, session_id))
+            .clone();
+        let mut lane = lane;
+        if matches!(&record, OpRecord::OperationStarted { .. }) {
+            lane.active_run_id = Some(record.id().to_string());
+            lane.status = LaneStatus::Running;
+        }
+        lane.op_log.push(record);
+        lock.insert(format!("{session_id}:{lane_name}"), lane);
+        Ok(())
+    }
+
+    pub fn append_tool_started_record(
+        &self,
+        session_id: &str,
+        lane_name: &str,
+        session_file: &Path,
+        tool_call_id: &str,
+        tool_name: &str,
+        effective_args: serde_json::Value,
+    ) -> Result<(), String> {
+        let key = format!("{session_id}:{lane_name}");
+        let (run_id, seq, tool_index) = {
+            let lock = self.lanes.lock().unwrap();
+            let lane = lock
+                .get(&key)
+                .ok_or_else(|| format!("Lane '{key}' not found"))?;
+            let run_id = lane
+                .active_run_id
+                .clone()
+                .ok_or_else(|| format!("Lane '{key}' has no active run"))?;
+            let tool_index = lane
+                .op_log
+                .iter()
+                .filter(|record| {
+                    matches!(record, OpRecord::ToolStarted { run_id: record_run_id, .. } if record_run_id == &run_id)
+                })
+                .count();
+            (run_id, lane.op_log.len() as u64 + 1, tool_index)
+        };
+        self.append_persisted_lane_record(
+            session_id,
+            lane_name,
+            session_file,
+            OpRecord::ToolStarted {
+                id: format!("tool-{tool_call_id}"),
+                seq,
+                lane: lane_name.to_string(),
+                timestamp: now_ms() as u64,
+                run_id,
+                assistant_entry_id: String::new(),
+                tool_index,
+                tool_call_id: tool_call_id.to_string(),
+                tool_name: tool_name.to_string(),
+                effective_args,
+                result_entry_id: format!("result-{tool_call_id}"),
+                replay: threadlane_agent::classify_tool_replay_safety(tool_name),
+            },
+        )
+    }
+
     pub fn checkpoint_lane(&self, session_id: &str, lane_name: &str) -> CheckpointResult {
         let key = format!("{session_id}:{lane_name}");
         let mut lock = self.lanes.lock().unwrap();
@@ -343,6 +422,18 @@ impl HarnessSupervisor {
         for (lane_name, lane_records) in grouped {
             let key = format!("{session_id}:{lane_name}");
             let mut lane = Lane::new(&lane_name, session_id);
+            let finished_runs: std::collections::HashSet<String> = lane_records
+                .iter()
+                .filter_map(|record| match record {
+                    OpRecord::OperationFinished { run_id, .. } => Some(run_id.clone()),
+                    _ => None,
+                })
+                .collect();
+            lane.active_run_id = lane_records.iter().rev().find_map(|record| match record {
+                OpRecord::OperationStarted { id, .. }
+                    if !finished_runs.contains(id) => Some(id.clone()),
+                _ => None,
+            });
             lane.op_log = lane_records;
             lane.status = LaneStatus::Suspended;
             lock.insert(key, lane);
@@ -528,6 +619,7 @@ impl HarnessSupervisor {
             status: TaskStatus::Idle,
             prompt_lock: Arc::new(tokio::sync::Mutex::new(())),
             run_handle: None,
+            recovery_loaded: false,
         };
 
         {
@@ -545,6 +637,7 @@ impl HarnessSupervisor {
         self.save_registry();
 
         let event_tx = self.event_tx.clone();
+        let supervisor = self.clone();
         let tasks = self.tasks.clone();
         let runtimes = self.runtimes.clone();
         let tid = task_id.clone();
@@ -557,6 +650,25 @@ impl HarnessSupervisor {
         tokio::spawn(async move {
             let mut sub_rx = rx;
             while let Ok(evt) = sub_rx.recv().await {
+                if let AgentEvent::ToolExecutionStart {
+                    tool_call_id,
+                    name,
+                    arguments,
+                } = &evt
+                {
+                    if child_task_id(tool_call_id).is_none() {
+                        let effective_args = serde_json::from_str(arguments)
+                            .unwrap_or_else(|_| serde_json::Value::String(arguments.clone()));
+                        let _ = supervisor.append_tool_started_record(
+                            &session_id,
+                            "main",
+                            &event_session_file,
+                            tool_call_id,
+                            name,
+                            effective_args,
+                        );
+                    }
+                }
                 let status = match &evt {
                     AgentEvent::AgentStart => Some(TaskStatus::Running),
                     AgentEvent::AgentEnd { .. } => Some(TaskStatus::Completed),
@@ -661,13 +773,67 @@ impl HarnessSupervisor {
     }
 
     pub fn submit_input(&self, task_id: &str, prompt: String) -> Result<(), String> {
-        let (agent_arc, prompt_lock) = {
+        let (agent_arc, prompt_lock, session_id, session_file) = {
             let runtimes = self.runtimes.lock().unwrap();
             let rt = runtimes
                 .get(task_id)
                 .ok_or_else(|| format!("Task ID '{task_id}' not found"))?;
-            (rt.agent.clone(), rt.prompt_lock.clone())
+            let task = self
+                .tasks
+                .lock()
+                .unwrap()
+                .get(task_id)
+                .cloned()
+                .ok_or_else(|| format!("Task ID '{task_id}' not found"))?;
+            (
+                rt.agent.clone(),
+                rt.prompt_lock.clone(),
+                task.session_id,
+                task.session_file,
+            )
         };
+
+        let lane = self.get_or_create_lane(&session_id, "main");
+        let run_id = format!("run-{}", now_ms());
+        let started_seq = lane.op_log.len() as u64 + 1;
+        let session_file_for_log = session_file
+            .as_deref()
+            .ok_or_else(|| format!("Task ID '{task_id}' has no session file"))?;
+        self.append_persisted_lane_record(
+            &session_id,
+            "main",
+            session_file_for_log,
+            OpRecord::OperationStarted {
+                id: run_id.clone(),
+                seq: started_seq,
+                lane: "main".into(),
+                timestamp: now_ms() as u64,
+                source_leaf_id: lane.leaf_id.clone(),
+                kind: "prompt".into(),
+                system_prompt_override: None,
+            },
+        )?;
+        self.append_persisted_lane_record(
+            &session_id,
+            "main",
+            session_file_for_log,
+            OpRecord::TaskAttempt {
+                id: format!("attempt-{run_id}"),
+                seq: started_seq + 1,
+                lane: "main".into(),
+                timestamp: now_ms() as u64,
+                run_id: run_id.clone(),
+                task: prompt.clone(),
+                attempt: 1,
+            },
+        )?;
+        {
+            let mut lanes = self.lanes.lock().unwrap();
+            if let Some(lane) = lanes.get_mut(&format!("{session_id}:main")) {
+                lane.status = LaneStatus::Running;
+                lane.active_run_id = Some(run_id.clone());
+            }
+        }
 
         if let Some(task) = self.tasks.lock().unwrap().get_mut(task_id) {
             task.summary = prompt.clone();
@@ -677,11 +843,68 @@ impl HarnessSupervisor {
         let tid = task_id.to_string();
         let tasks_map = self.tasks.clone();
         let runtimes_map = self.runtimes.clone();
+        let supervisor = self.clone();
+        let session_file_for_run = session_file.clone();
+        let session_id_for_run = session_id.clone();
+        let run_id_for_run = run_id.clone();
 
         let handle = tokio::spawn(async move {
             let _guard = prompt_lock.lock().await;
             let mut agent = agent_arc.lock().await;
+            let should_restore = {
+                let mut runtimes = runtimes_map.lock().unwrap();
+                runtimes
+                    .get_mut(&tid)
+                    .map(|runtime| {
+                        let restore = !runtime.recovery_loaded;
+                        runtime.recovery_loaded = true;
+                        restore
+                    })
+                    .unwrap_or(false)
+            };
+            if should_restore {
+                if let Some(session_file) = session_file_for_run.as_deref() {
+                    if let Ok(recovery) = supervisor.restore_session_lanes(
+                        &session_id_for_run,
+                        session_file,
+                        &mut agent.session_tree,
+                    ) {
+                        if recovery.recovered_open_operations > 0 {
+                            agent.sync_session_history().await;
+                        }
+                    }
+                }
+            }
             let _ = agent.handle_input(&prompt).await;
+
+            if let Some(session_file) = session_file_for_run.as_deref() {
+                let seq = supervisor
+                    .get_or_create_lane(&session_id_for_run, "main")
+                    .op_log
+                    .len() as u64
+                    + 1;
+                let _ = supervisor.append_persisted_lane_record(
+                    &session_id_for_run,
+                    "main",
+                    session_file,
+                    OpRecord::OperationFinished {
+                        id: format!("finish-{}", now_ms()),
+                        seq,
+                        lane: "main".into(),
+                        timestamp: now_ms() as u64,
+                        run_id: run_id_for_run.clone(),
+                        outcome: threadlane_agent::OpOutcome::Completed,
+                        error: None,
+                    },
+                );
+            }
+            {
+                let mut lanes = supervisor.lanes.lock().unwrap();
+                if let Some(lane) = lanes.get_mut(&format!("{session_id_for_run}:main")) {
+                    lane.status = LaneStatus::Idle;
+                    lane.active_run_id = None;
+                }
+            }
 
             let mut t_lock = tasks_map.lock().unwrap();
             if let Some(tr) = t_lock.get_mut(&tid) {
@@ -1158,6 +1381,68 @@ mod tests {
         let updated_lane = supervisor.get_or_create_lane("session-1", "main");
         assert_eq!(updated_lane.leaf_id.as_deref(), Some("node_1"));
         assert_eq!(updated_lane.queue.steer.len(), 1);
+    }
+
+    #[test]
+    fn lane_operation_records_are_persisted_and_retained() {
+        let dir = tempfile::tempdir().unwrap();
+        let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
+        let session_file = dir.path().join("session.jsonl");
+        supervisor.get_or_create_lane("session-1", "main");
+
+        supervisor
+            .append_persisted_lane_record(
+                "session-1",
+                "main",
+                &session_file,
+                OpRecord::OperationStarted {
+                    id: "run-1".into(),
+                    seq: 1,
+                    lane: "main".into(),
+                    timestamp: 1,
+                    source_leaf_id: None,
+                    kind: "prompt".into(),
+                    system_prompt_override: None,
+                },
+            )
+            .unwrap();
+
+        let records = threadlane_agent::load_op_records_from_file(
+            &session_file.with_extension("oplog.jsonl"),
+        )
+        .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id(), "run-1");
+        assert_eq!(supervisor.get_or_create_lane("session-1", "main").op_log.len(), 1);
+
+        supervisor
+            .append_tool_started_record(
+                "session-1",
+                "main",
+                &session_file,
+                "call-1",
+                "view_file",
+                serde_json::json!({"path":"src/lib.rs"}),
+            )
+            .unwrap();
+        let records = threadlane_agent::load_op_records_from_file(
+            &session_file.with_extension("oplog.jsonl"),
+        )
+        .unwrap();
+        assert!(matches!(
+            records.last(),
+            Some(OpRecord::ToolStarted { tool_call_id, replay, .. })
+                if tool_call_id == "call-1" && replay == &threadlane_agent::ToolReplaySafety::Safe
+        ));
+
+        let mut tree = threadlane_agent::SessionTree::new("session-1");
+        let recovery = supervisor
+            .restore_session_lanes("session-1", &session_file, &mut tree)
+            .unwrap();
+        assert_eq!(recovery.recovered_open_operations, 1);
+        let restored = supervisor.get_or_create_lane("session-1", "main");
+        assert_eq!(restored.status, LaneStatus::Suspended);
+        assert_eq!(restored.active_run_id.as_deref(), Some("run-1"));
     }
 
     #[test]
