@@ -422,6 +422,29 @@ impl AntigravityClient {
     }
 }
 
+#[async_trait::async_trait]
+impl crate::traits::ModelProvider for AntigravityClient {
+    fn provider_id(&self) -> &'static str {
+        "antigravity"
+    }
+
+    fn supports_model(&self, model: &str) -> bool {
+        crate::router::is_antigravity_model(model)
+    }
+
+    async fn stream_chat_completion(
+        &self,
+        payload_source: crate::router::PayloadSource,
+        _prompt_cache_key: Option<String>,
+        event_tx: mpsc::Sender<StreamEvent>,
+    ) {
+        let payload = payload_source
+            .resolve(crate::router::PayloadFormat::ChatCompletions)
+            .await;
+        self.stream_chat_completion(payload, event_tx).await;
+    }
+}
+
 fn credential_cache_key(token: &str) -> [u8; 32] {
     let credentials = load_antigravity_credentials();
     let mut hasher = Sha256::new();
