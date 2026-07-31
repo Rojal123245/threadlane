@@ -2,19 +2,6 @@
 
 use crate::git::GitStatus;
 
-#[allow(dead_code)]
-pub fn format_git_branch_label(status: &GitStatus) -> String {
-    if let Some(branch) = &status.branch {
-        if status.detached {
-            format!("detached @ {}", branch)
-        } else {
-            branch.clone()
-        }
-    } else {
-        "No branch".to_string()
-    }
-}
-
 pub fn git_branch_picker_labels(status: Option<&GitStatus>) -> (Vec<String>, usize) {
     let mut labels = status
         .map(|status| status.branches.clone())
