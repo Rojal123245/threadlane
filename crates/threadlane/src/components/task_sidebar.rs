@@ -132,7 +132,6 @@ script_mod! {
         }
     }
 
-
     mod.components.TaskSidebar = set_type_default() do mod.components.TaskSidebarBase {
         width: 280
         height: Fill
@@ -173,7 +172,6 @@ script_mod! {
             show_bg: true
             draw_bg +: { color: theme.color_card }
         }
-
 
         list := PortalList {
             width: Fill
@@ -297,16 +295,6 @@ pub enum TaskSidebarAction {
     None,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[allow(dead_code)]
-pub enum TaskSidebarFilter {
-    #[default]
-    All,
-    Active,
-    Completed,
-    Failed,
-}
-
 /// The two deliberately explicit sections make the sidebar model useful to callers and tests,
 /// while rows remain a compact portal-list representation.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -345,28 +333,13 @@ fn status_rank(status: TaskStatus) -> u8 {
     }
 }
 
-fn task_matches_filter(status: TaskStatus, filter: TaskSidebarFilter) -> bool {
-    match filter {
-        TaskSidebarFilter::All => true,
-        TaskSidebarFilter::Active => matches!(
-            status,
-            TaskStatus::Idle | TaskStatus::Running | TaskStatus::Waiting
-        ),
-        TaskSidebarFilter::Completed => status == TaskStatus::Completed,
-        TaskSidebarFilter::Failed => status == TaskStatus::Failed,
-    }
-}
-
 fn sidebar_groups(
     items: &[TaskSidebarItem],
     current_session_id: Option<&str>,
-    filter: TaskSidebarFilter,
 ) -> Vec<AgentSessionGroup> {
     let mut grouped: HashMap<&str, Vec<usize>> = HashMap::new();
     for (index, item) in items.iter().enumerate() {
-        if task_matches_filter(item.status, filter) {
-            grouped.entry(&item.session_id).or_default().push(index);
-        }
+        grouped.entry(&item.session_id).or_default().push(index);
     }
     for indices in grouped.values_mut() {
         indices.sort_by(|left, right| {
@@ -416,7 +389,6 @@ fn sidebar_rows(
         plan,
         items,
         current_session_id,
-        TaskSidebarFilter::All,
         &HashMap::new(),
     )
 }
@@ -425,13 +397,12 @@ fn sidebar_rows_filtered(
     plan: &SessionPlan,
     items: &[TaskSidebarItem],
     current_session_id: Option<&str>,
-    filter: TaskSidebarFilter,
     expanded: &HashMap<String, bool>,
 ) -> Vec<TaskSidebarRow> {
     let plan_section = PlanSection {
         items: (0..plan.items.len()).collect(),
     };
-    let groups = sidebar_groups(items, current_session_id, filter);
+    let groups = sidebar_groups(items, current_session_id);
     let mut rows = Vec::with_capacity(items.len() + groups.len() + plan_section.items.len() + 1);
     if !plan_section.items.is_empty() {
         rows.push(TaskSidebarRow::PlanHeader);
@@ -605,7 +576,6 @@ impl TaskSidebar {
             &plan,
             &items,
             current_session_id.as_deref(),
-            TaskSidebarFilter::All,
             &self.expanded_sessions,
         );
         self.plan = plan;
@@ -613,8 +583,6 @@ impl TaskSidebar {
         self.current_session_id = current_session_id;
         self.view.redraw(cx);
     }
-
-
     pub fn toggle_session(&mut self, cx: &mut Cx, session_id: &str) {
         let expanded = self
             .expanded_sessions
@@ -625,7 +593,6 @@ impl TaskSidebar {
             &self.plan,
             &self.items,
             self.current_session_id.as_deref(),
-            TaskSidebarFilter::All,
             &self.expanded_sessions,
         );
         self.view.redraw(cx);
@@ -641,7 +608,6 @@ impl TaskSidebar {
             &self.plan,
             &self.items,
             self.current_session_id.as_deref(),
-            TaskSidebarFilter::All,
             &self.expanded_sessions,
         );
         self.view.redraw(cx);
@@ -928,26 +894,6 @@ mod tests {
     }
 
     #[test]
-    fn filters_keep_failed_tasks_separate_from_cancelled_tasks() {
-        assert!(task_matches_filter(
-            TaskStatus::Running,
-            TaskSidebarFilter::Active
-        ));
-        assert!(task_matches_filter(
-            TaskStatus::Completed,
-            TaskSidebarFilter::Completed
-        ));
-        assert!(task_matches_filter(
-            TaskStatus::Failed,
-            TaskSidebarFilter::Failed
-        ));
-        assert!(!task_matches_filter(
-            TaskStatus::Cancelled,
-            TaskSidebarFilter::Failed
-        ));
-    }
-
-    #[test]
     fn collapsed_session_rows_preserve_stable_session_identity() {
         let items = vec![
             item("a", "session-a", TaskStatus::Running, 2),
@@ -959,7 +905,6 @@ mod tests {
             &SessionPlan::default(),
             &items,
             Some("session-b"),
-            TaskSidebarFilter::All,
             &expanded,
         );
 
