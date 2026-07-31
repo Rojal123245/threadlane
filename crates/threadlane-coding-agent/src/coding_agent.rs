@@ -5068,8 +5068,8 @@ mod tests {
         ];
         let mut tree = SessionTree::new("session");
         tree.file_path = Some(session_file.clone());
-        for message in messages.clone() {
-            tree.add_message(message);
+        for message in &messages {
+            tree.add_message(message.clone());
         }
 
         let mut options = coding_agent_options(dir.path().to_path_buf());
