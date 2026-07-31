@@ -49,6 +49,7 @@ pub mod workspace_badge;
 pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     init::script_mod(vm);
     icon_button::script_mod(vm);
+    sidebar_compose_button::script_mod(vm);
     clipped_label::script_mod(vm);
     code_label::script_mod(vm);
     status_dot::script_mod(vm);
@@ -81,7 +82,6 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     project_header::script_mod(vm);
     provider_card::script_mod(vm);
     provider_settings_modal::script_mod(vm);
-    sidebar_compose_button::script_mod(vm);
     session_title::script_mod(vm);
     session_row::script_mod(vm);
     status_pill::script_mod(vm);

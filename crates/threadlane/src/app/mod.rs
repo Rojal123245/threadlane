@@ -2,6 +2,11 @@
 //!
 //! Chat, sessions, and command palette panels are modularized under `crate::panels`.
 
+mod settings_handlers;
+mod terminal_handlers;
+mod workspace_sync;
+
+use terminal_handlers::{canonical_terminal_work_dir, truncate_terminal_output};
 use crate::components::file_tree::{FileTree, FileTreeAction};
 use crate::components::git_changes::{GitChanges, GitChangesAction};
 use crate::components::git_diff::GitDiffView;
@@ -62,7 +67,6 @@ use threadlane_provider::openai::{fetch_available_models, OpenAIClient};
 use threadlane_provider::ProviderClient;
 
 use crate::panels::terminal::{ProjectTerminalGroup, ProjectTerminalSession};
-use makepad_terminal_core::{Pty, TermKeyCode as TerminalKeyCode, Terminal};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -237,25 +241,6 @@ fn project_name(path: &Path) -> String {
         .map(|name| name.to_string_lossy().into_owned())
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| path.display().to_string())
-}
-
-fn canonical_terminal_work_dir(work_dir: &Path) -> PathBuf {
-    std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf())
-}
-
-fn truncate_terminal_output(output: &mut String) {
-    if output.len() <= MAX_TERMINAL_OUTPUT {
-        return;
-    }
-    let mut cutoff = output.len() - MAX_TERMINAL_OUTPUT;
-    while cutoff < output.len() && !output.is_char_boundary(cutoff) {
-        cutoff += 1;
-    }
-    let cutoff = output[cutoff..]
-        .char_indices()
-        .find_map(|(offset, ch)| (ch == '\n').then_some(cutoff + offset + 1))
-        .unwrap_or(cutoff);
-    output.drain(..cutoff);
 }
 
 use crate::path_utils::compact_workspace_path;
@@ -3789,43 +3774,7 @@ impl MatchEvent for App {
             self.open_capabilities_modal(cx);
         }
 
-        let providers_modal_uid = self.ui.widget(cx, ids!(providers_modal)).widget_uid();
-        if let Some(action) = actions.find_widget_action(providers_modal_uid) {
-            match action.cast::<ProviderSettingsModalAction>() {
-                ProviderSettingsModalAction::ShowExtensions
-                | ProviderSettingsModalAction::Refresh => self.refresh_capability_state(cx),
-                ProviderSettingsModalAction::ShowSkills
-                | ProviderSettingsModalAction::RefreshSkills => self.refresh_skill_state(cx),
-                ProviderSettingsModalAction::ShowMcpServers
-                | ProviderSettingsModalAction::RefreshMcpServers => self.refresh_mcp_state(cx),
-                ProviderSettingsModalAction::Add(scope) => {
-                    self.open_extension_picker(scope);
-                }
-                ProviderSettingsModalAction::SetEnabled { row, enabled } => {
-                    self.set_extension_enabled(cx, row, enabled);
-                }
-                ProviderSettingsModalAction::Remove(row) => {
-                    self.remove_extension(cx, row);
-                }
-                ProviderSettingsModalAction::SetSkillEnabled { row, enabled } => {
-                    self.set_skill_enabled(cx, row, enabled);
-                }
-                ProviderSettingsModalAction::SetMcpEnabled { row, enabled } => {
-                    self.set_mcp_enabled(cx, row, enabled);
-                }
-                ProviderSettingsModalAction::RemoveMcpServer(row) => {
-                    self.remove_mcp_server(cx, row);
-                }
-                ProviderSettingsModalAction::AddMcpServer {
-                    scope,
-                    name,
-                    command,
-                } => {
-                    self.add_mcp_server(cx, scope, name, command);
-                }
-                ProviderSettingsModalAction::None => {}
-            }
-        }
+        self.handle_provider_settings_action(cx, actions);
 
         let task_sidebar_uid = self.ui.widget(cx, ids!(task_sidebar)).widget_uid();
         if let Some(action) = actions.find_widget_action(task_sidebar_uid) {
@@ -5026,29 +4975,6 @@ impl App {
         cx.redraw_all();
     }
 
-    fn sync_sidebar_action_visibility(&mut self, cx: &mut Cx, event: &Event) {
-        match event {
-            Event::MouseMove(event) => self.sidebar_pointer = Some(event.abs),
-            Event::MouseLeave(_) => self.sidebar_pointer = None,
-            _ => {}
-        }
-        let pointer = self.sidebar_pointer;
-
-        let context_menu_open = crate::panels::sessions::state::SESSIONS_DATA
-            .read()
-            .unwrap()
-            .context_session_id
-            .is_some();
-
-        let projects_header = self.ui.view(cx, ids!(projects_header));
-        let add_project_visible = !context_menu_open
-            && pointer.is_some_and(|position| projects_header.area().rect(cx).contains(position));
-        let add_project_btn = self.ui.button(cx, ids!(add_project_btn));
-        if add_project_btn.visible() != add_project_visible {
-            add_project_btn.set_visible(cx, add_project_visible);
-            projects_header.redraw(cx);
-        }
-    }
 
     fn set_model_dropup_options(&mut self, cx: &mut Cx, models: Vec<String>, selected_model: &str) {
         let Some((canonical, display)) = ordered_model_options(models, selected_model) else {
@@ -6367,344 +6293,7 @@ impl App {
         (api_key, account_id)
     }
 
-    fn active_terminal_project(&self) -> Option<PathBuf> {
-        self.workspace_state
-            .active_key()
-            .map(|key| canonical_terminal_work_dir(&key.work_dir))
-    }
 
-    fn sync_terminal_project(&mut self, cx: &mut Cx) {
-        let Some(work_dir) = self.active_terminal_project() else {
-            return;
-        };
-        let project = project_name(&work_dir);
-        let terminal = self.ui.project_terminal(cx, ids!(project_terminal));
-        if let Some(group) = self.project_terminals.get(&work_dir) {
-            let names = group
-                .sessions
-                .iter()
-                .enumerate()
-                .map(|(index, _)| {
-                    if index == 0 {
-                        project.clone()
-                    } else {
-                        format!("{project} {}", index + 1)
-                    }
-                })
-                .collect::<Vec<_>>();
-            let output = group.sessions.get(group.active).map(Self::terminal_text);
-            let output = output
-                .as_deref()
-                .or(group.error.as_deref())
-                .unwrap_or_default();
-            terminal.set_terminals(cx, &names, Some(group.active), output);
-        } else {
-            terminal.set_terminals(cx, &[], None, "");
-        }
-    }
-
-    fn spawn_project_terminal(
-        &mut self,
-        work_dir: &Path,
-        cols: u16,
-        rows: u16,
-    ) -> Result<ProjectTerminalSession, String> {
-        let pty = Pty::spawn(
-            cols,
-            rows,
-            None,
-            &[("TERM", "xterm-256color")],
-            Some(work_dir),
-        )
-        .map_err(|error| format!("Could not start terminal: {error}"))?;
-        Ok(ProjectTerminalSession {
-            pty,
-            emulator: Terminal::new(cols as usize, rows as usize),
-        })
-    }
-
-    fn create_project_terminal(&mut self, cx: &mut Cx) {
-        let Some(work_dir) = self.active_terminal_project() else {
-            return;
-        };
-        if self.project_terminals.get(&work_dir).is_some_and(|group| {
-            group.sessions.len() >= crate::components::terminal_panel::MAX_VISIBLE_TERMINALS
-        }) {
-            return;
-        }
-        let (cols, rows) = self
-            .ui
-            .project_terminal(cx, ids!(project_terminal))
-            .dimensions(cx)
-            .unwrap_or((80, 24));
-        match self.spawn_project_terminal(&work_dir, cols as u16, rows as u16) {
-            Ok(session) => {
-                let group = self.project_terminals.entry(work_dir).or_default();
-                group.sessions.push(session);
-                group.active = group.sessions.len() - 1;
-                group.error = None;
-                self.terminal_poll_next_frame = cx.new_next_frame();
-            }
-            Err(error) => {
-                self.project_terminals.entry(work_dir).or_default().error = Some(error);
-                self.sync_terminal_project(cx);
-                return;
-            }
-        }
-        self.sync_terminal_project(cx);
-    }
-
-    fn select_project_terminal(&mut self, cx: &mut Cx, index: usize) {
-        let Some(work_dir) = self.active_terminal_project() else {
-            return;
-        };
-        if let Some(group) = self.project_terminals.get_mut(&work_dir) {
-            if index < group.sessions.len() {
-                group.active = index;
-            }
-        }
-        self.sync_terminal_project(cx);
-    }
-
-    fn resize_project_terminals(&mut self, cx: &mut Cx, cols: usize, rows: usize) {
-        let Some(work_dir) = self.active_terminal_project() else {
-            return;
-        };
-        let cols = cols.clamp(1, u16::MAX as usize);
-        let rows = rows.clamp(1, u16::MAX as usize);
-        if let Some(group) = self.project_terminals.get_mut(&work_dir) {
-            for session in &mut group.sessions {
-                if session.emulator.screen().cols() == cols
-                    && session.emulator.screen().rows() == rows
-                {
-                    continue;
-                }
-                if let Err(error) = session.pty.resize(cols as u16, rows as u16) {
-                    eprintln!("Terminal resize failed: {error}");
-                    continue;
-                }
-                session.emulator.resize(cols, rows);
-            }
-        }
-        self.sync_terminal_project(cx);
-    }
-
-    fn close_project_terminal(&mut self, cx: &mut Cx, index: usize) {
-        let Some(work_dir) = self.active_terminal_project() else {
-            return;
-        };
-        let remove_group = if let Some(group) = self.project_terminals.get_mut(&work_dir) {
-            if index >= group.sessions.len() {
-                return;
-            }
-            group.sessions.remove(index).terminate();
-            if group.sessions.is_empty() {
-                true
-            } else {
-                if group.active >= group.sessions.len() {
-                    group.active = group.sessions.len() - 1;
-                } else if index < group.active {
-                    group.active -= 1;
-                }
-                false
-            }
-        } else {
-            return;
-        };
-        if remove_group {
-            if let Some(group) = self.project_terminals.remove(&work_dir) {
-                group.terminate();
-            }
-        }
-        self.sync_terminal_project(cx);
-    }
-
-    fn write_terminal_bytes(&mut self, cx: &mut Cx, bytes: Vec<u8>) {
-        let Some(work_dir) = self.active_terminal_project() else {
-            return;
-        };
-        if self
-            .project_terminals
-            .get(&work_dir)
-            .is_none_or(|group| group.sessions.is_empty())
-        {
-            self.create_project_terminal(cx);
-        }
-        let Some(group) = self.project_terminals.get_mut(&work_dir) else {
-            return;
-        };
-        let Some(terminal) = group.sessions.get_mut(group.active) else {
-            return;
-        };
-        if let Err(error) = terminal.pty.write(&bytes) {
-            eprintln!("Terminal write failed: {error}");
-        }
-        self.sync_terminal_project(cx);
-    }
-
-    fn write_terminal_key(
-        &mut self,
-        cx: &mut Cx,
-        key: TerminalKeyCode,
-        shift: bool,
-        control: bool,
-        alt: bool,
-    ) {
-        let Some(work_dir) = self.active_terminal_project() else {
-            return;
-        };
-        if self
-            .project_terminals
-            .get(&work_dir)
-            .is_none_or(|group| group.sessions.is_empty())
-        {
-            self.create_project_terminal(cx);
-        }
-        let Some(terminal) = self
-            .project_terminals
-            .get_mut(&work_dir)
-            .and_then(|group| group.sessions.get_mut(group.active))
-        else {
-            return;
-        };
-        if let Some(bytes) = terminal.emulator.encode_key(key, "", shift, control, alt) {
-            if let Err(error) = terminal.pty.write(&bytes) {
-                eprintln!("Terminal write failed: {error}");
-            }
-        }
-        self.sync_terminal_project(cx);
-    }
-
-    fn poll_terminal_output(&mut self, cx: &mut Cx) {
-        const MAX_PTY_READS_PER_FRAME: usize = 8;
-        let mut processed_output = false;
-        for group in self.project_terminals.values_mut() {
-            for session in &mut group.sessions {
-                for _ in 0..MAX_PTY_READS_PER_FRAME {
-                    let Some(bytes) = session.pty.try_read() else {
-                        break;
-                    };
-                    processed_output = true;
-                    session.emulator.process_bytes(&bytes);
-                    let outbound = session.emulator.take_outbound();
-                    if !outbound.is_empty() {
-                        let _ = session.pty.write(&outbound);
-                    }
-                }
-            }
-        }
-        if processed_output {
-            self.sync_terminal_project(cx);
-        }
-    }
-
-    fn has_live_terminal_sessions(&self) -> bool {
-        self.project_terminals
-            .values()
-            .any(|group| !group.sessions.is_empty())
-    }
-
-    fn terminal_text(session: &ProjectTerminalSession) -> String {
-        let screen = session.emulator.screen();
-        const CURSOR_MARKER: char = '\u{e000}';
-        let cursor_row = screen.scrollback().len() + screen.cursor.y;
-        let cursor_col = screen.cursor.x;
-        let mut output = String::new();
-        let mut push_row = |row_index: usize, cells: &[makepad_terminal_core::Cell]| {
-            let mut line: String = cells.iter().map(|cell| cell.codepoint).collect();
-            if row_index == cursor_row {
-                let width = line.chars().count();
-                if width < cursor_col {
-                    line.extend(std::iter::repeat_n(' ', cursor_col - width));
-                }
-                let byte_index = line
-                    .char_indices()
-                    .nth(cursor_col)
-                    .map(|(index, _)| index)
-                    .unwrap_or(line.len());
-                line.insert(byte_index, CURSOR_MARKER);
-            } else {
-                line = line.trim_end().to_owned();
-            }
-            output.push_str(&line);
-            output.push('\n');
-        };
-        for (row, cells) in screen.scrollback().iter().enumerate() {
-            push_row(row, cells);
-        }
-        for row in 0..screen.rows() {
-            push_row(screen.scrollback().len() + row, screen.grid.row_slice(row));
-        }
-        truncate_terminal_output(&mut output);
-        output.pop();
-        output
-    }
-
-    fn select_workspace(&mut self, work_dir: PathBuf, session_id: impl Into<String>) {
-        self.workspace_state
-            .select(SessionKey::new(work_dir, session_id));
-    }
-
-    fn select_project_draft(&mut self, cx: &mut Cx, work_dir: PathBuf) {
-        if !work_dir.is_dir() {
-            self.push_chat(
-                MsgRole::System,
-                format!("Project folder `{}` is missing.", work_dir.display()),
-            );
-            return;
-        }
-        set_active_project(&work_dir);
-        if let Some(registry) = self.project_registry.as_mut() {
-            if let Err(error) = registry.remember_selection(&work_dir, None) {
-                self.push_chat(
-                    MsgRole::System,
-                    format!("Could not update recent-project state: {error}"),
-                );
-            }
-        }
-        self.select_workspace_ui(cx, work_dir.clone(), "draft".to_string());
-        let key = SessionKey::project_draft(work_dir.clone());
-        if !self.session_runtimes.contains_key(&key) {
-            let (api_key, account_id) = self.current_credentials(cx);
-            let model = self
-                .ui
-                .icon_drop_down(cx, ids!(model_drop))
-                .selected_label();
-            let model = if model.is_empty() {
-                default_model_name().to_string()
-            } else {
-                model
-            };
-            let effort = ReasoningEffort::from_label(
-                &self
-                    .ui
-                    .icon_drop_down(cx, ids!(effort_drop))
-                    .selected_label(),
-            )
-            .unwrap_or_default();
-            let agent = CodingAgent::new(CodingAgentOptions {
-                api_key,
-                account_id,
-                model: model.clone(),
-                work_dir: work_dir.clone(),
-                session_file: None,
-                system_prompt: Default::default(),
-            });
-            self.session_runtimes
-                .insert(key.clone(), SessionRuntime::new(agent, model, effort));
-        }
-        if let Some((model, effort)) = self
-            .session_runtimes
-            .get(&key)
-            .map(|runtime| (runtime.model.clone(), runtime.reasoning_effort))
-        {
-            self.set_model_dropup_options(cx, self.available_models.clone(), &model);
-            self.set_reasoning_effort_picker(cx, effort);
-        }
-        self.refresh_project_capabilities(cx, &work_dir);
-        self.restore_active_status(cx);
-        cx.redraw_all();
-    }
 
     fn start_background_task(
         &mut self,
@@ -6841,59 +6430,6 @@ impl App {
         }
     }
 
-    fn select_workspace_ui(&mut self, cx: &mut Cx, work_dir: PathBuf, session_id: String) {
-        self.save_active_draft(cx);
-        self.git_operation_pending = false;
-        self.git_pr_pending = false;
-        self.git_pr_created = false;
-        self.git_status_pending = false;
-        self.git_new_branch_open = false;
-        if let Some(abort) = self.git_commit_message_abort.take() {
-            abort.abort();
-        }
-        self.git_commit_message_pending = false;
-        self.git_commit_message_request_id = self.git_commit_message_request_id.wrapping_add(1);
-        self.git_diff_open = false;
-        self.git_diff_request_id = self.git_diff_request_id.wrapping_add(1);
-        self.git_diff_pending = false;
-        self.git_feedback = None;
-        self.ui
-            .text_input(cx, ids!(git_commit_message))
-            .set_text(cx, "");
-        if let Some(mut changes) = self
-            .ui
-            .widget(cx, ids!(git_changes))
-            .borrow_mut::<GitChanges>()
-        {
-            changes.clear_selection(cx);
-        }
-        self.select_workspace(work_dir, session_id);
-        if let Some(key) = self.workspace_state.active_key() {
-            let home_dir = std::env::var_os("HOME").map(PathBuf::from);
-            self.ui
-                .label(cx, ids!(project_name_label))
-                .set_text(cx, &project_name(&key.work_dir));
-            self.ui.label(cx, ids!(workspace_label)).set_text(
-                cx,
-                &compact_workspace_path(&key.work_dir, home_dir.as_deref()),
-            );
-        }
-        let draft = self
-            .workspace_state
-            .active_workspace()
-            .map(|workspace| workspace.ui.draft.clone())
-            .unwrap_or_default();
-        self.ui
-            .threadlane_command_text_input(cx, ids!(prompt_input))
-            .text_input_ref(cx)
-            .set_text(cx, &draft);
-        self.refresh_attachment_ui(cx);
-        self.sync_terminal_project(cx);
-        self.sync_git_branch_picker(cx);
-        self.sync_right_sidebar(cx);
-        self.request_git_status();
-        self.sync_task_sidebar(cx);
-    }
 
     fn push_chat(&mut self, role: MsgRole, text: impl Into<String>) {
         if let Some(workspace) = self.workspace_state.active_workspace_mut() {
