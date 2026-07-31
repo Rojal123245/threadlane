@@ -99,15 +99,15 @@ script_mod! {
                     text: ""
                     draw_bg +: {
                         color: theme.color_transparent
-                        color_hover: theme.color_card
+                        color_hover: theme.color_accent
                         color_down: theme.color_secondary
                         border_color: theme.color_transparent
                         border_size: 0.0
-                        border_radius: 4.0
+                        border_radius: theme.radius_xs
                     }
                     draw_text +: {
                         color: theme.color_foreground
-                        color_hover: theme.color_primary_foreground
+                        color_hover: theme.color_foreground
                         text_style: theme.font_code { font_size: 8.5 }
                     }
                 }
@@ -252,7 +252,9 @@ impl FileTree {
 impl Widget for FileTree {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let count_str = format!("{} items", self.visible_nodes.len());
-        self.view.label(cx, ids!(count_lbl)).set_text(cx, &count_str);
+        self.view
+            .label(cx, ids!(count_lbl))
+            .set_text(cx, &count_str);
 
         while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {

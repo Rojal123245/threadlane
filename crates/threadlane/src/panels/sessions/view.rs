@@ -1,7 +1,7 @@
 //! Sessions panel main view & sidebar list widget.
 
 use super::state::{
-    relative_time_label, ProjectGroup, SessionListRow, SessionsData, SESSIONS_DATA,
+    relative_time_label, ProjectGroup, SessionHealth, SessionListRow, SessionsData, SESSIONS_DATA,
 };
 use crate::components::session_row::ProjectHeaderAction;
 use crate::path_utils::truncate_chars;
@@ -82,6 +82,14 @@ fn session_row_template(context_target: bool, active: bool, last: bool) -> LiveI
         (false, true, false) => id!(SessionRowActive),
         (false, false, true) => id!(SessionRowLast),
         (false, false, false) => id!(SessionRow),
+    }
+}
+
+fn session_health_badge(health: SessionHealth) -> Option<&'static str> {
+    match health {
+        SessionHealth::Healthy => None,
+        SessionHealth::Recovering => Some("Recovery pending"),
+        SessionHealth::Warning => Some("Recovery needs attention"),
     }
 }
 
@@ -329,6 +337,23 @@ impl Widget for SessionList {
                             item_widget
                                 .widget(cx, ids!(session_row_spinner))
                                 .set_visible(cx, working);
+                            let health = data.session_health_for(&session.work_dir, &session.id);
+                            let mut health_badge = item_widget.label(cx, ids!(health_lbl));
+                            health_badge.set_visible(cx, health != SessionHealth::Healthy);
+                            if let Some(label) = session_health_badge(health) {
+                                health_badge.set_text(cx, label);
+                                if health == SessionHealth::Warning {
+                                    script_apply_eval!(cx, health_badge, {
+                                        use mod.prelude.widgets.*
+                                        draw_text +: { color: theme.color_destructive }
+                                    });
+                                } else {
+                                    script_apply_eval!(cx, health_badge, {
+                                        use mod.prelude.widgets.*
+                                        draw_text +: { color: theme.color_warning }
+                                    });
+                                }
+                            }
                             item_widget.draw_all_unscoped(cx);
                         }
                         None => {}
@@ -392,6 +417,7 @@ impl Widget for SessionList {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::panels::sessions::state::SessionHealth;
     use std::collections::HashSet;
 
     fn project(project_idx: usize) -> SessionListRow {
@@ -483,5 +509,18 @@ mod tests {
             id!(SessionRowLast)
         );
         assert_eq!(session_row_template(false, false, false), id!(SessionRow));
+    }
+
+    #[test]
+    fn session_health_badge_is_hidden_for_healthy_sessions_and_uses_text_for_issues() {
+        assert_eq!(session_health_badge(SessionHealth::Healthy), None);
+        assert_eq!(
+            session_health_badge(SessionHealth::Recovering),
+            Some("Recovery pending")
+        );
+        assert_eq!(
+            session_health_badge(SessionHealth::Warning),
+            Some("Recovery needs attention")
+        );
     }
 }

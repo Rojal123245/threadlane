@@ -25,8 +25,6 @@ pub enum McpScope {
     Project,
 }
 
-
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum McpTransport {
@@ -72,7 +70,6 @@ pub struct McpSettings {
 }
 
 impl McpSettings {
-
     pub fn load_global(global_dir: Option<&Path>) -> Vec<McpServerConfig> {
         let Some(dir) = global_dir else {
             return Vec::new();
@@ -197,10 +194,7 @@ impl McpManager {
         let mut all_configs = Vec::new();
         let mut seen_ids = BTreeSet::new();
 
-        for config in project_configs
-            .into_iter()
-            .chain(global_configs)
-        {
+        for config in project_configs.into_iter().chain(global_configs) {
             if seen_ids.insert(config.id.clone()) {
                 all_configs.push(config);
             }
@@ -406,11 +400,7 @@ impl McpManager {
             .unwrap_or_default()
     }
 
-    async fn execute_tool(
-        &self,
-        full_name: &str,
-        args: &str,
-    ) -> Option<Result<String, String>> {
+    async fn execute_tool(&self, full_name: &str, args: &str) -> Option<Result<String, String>> {
         let guard = self.servers.lock().await;
         let mut target = None;
         for server in guard.iter() {

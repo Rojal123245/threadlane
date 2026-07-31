@@ -52,7 +52,7 @@ fn replace_file(temp_path: &Path, destination: &Path) -> std::io::Result<()> {
     std::fs::rename(temp_path, destination)
 }
 
-fn session_file_lock() -> &'static Mutex<()> {
+pub(crate) fn session_file_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }
@@ -85,6 +85,8 @@ enum SessionRecord {
         #[serde(default)]
         items: Vec<PlanItem>,
     },
+    #[serde(rename = "global_fact")]
+    GlobalFact { key: String, value: String },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -94,6 +96,7 @@ pub struct SessionTree {
     title_attempted: bool,
     pub model: Option<String>,
     plan: SessionPlan,
+    pub global_facts: HashMap<String, String>,
     pub nodes: HashMap<String, SessionNode>,
     /// Node IDs in persisted/insertion order. This is intentionally separate
     /// from `nodes`: the map is only an index and does not define ordering.
@@ -113,6 +116,7 @@ impl SessionTree {
             title_attempted: false,
             model: None,
             plan: SessionPlan::default(),
+            global_facts: HashMap::new(),
             nodes: HashMap::new(),
             node_order: Vec::new(),
             active_node_id: None,
@@ -123,6 +127,36 @@ impl SessionTree {
 
     pub fn has_name(&self) -> bool {
         self.name.as_ref().is_some_and(|name| !name.is_empty())
+    }
+
+    pub fn active_node_id(&self) -> Option<&str> {
+        self.active_node_id.as_deref()
+    }
+
+    pub fn get_fact(&self, key: &str) -> Option<&str> {
+        self.global_facts.get(key).map(|s| s.as_str())
+    }
+
+    pub fn set_fact(
+        &mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> std::io::Result<()> {
+        let key = key.into();
+        let value = value.into();
+
+        if let Some(ref path) = self.file_path {
+            let _guard = session_file_lock().lock().unwrap();
+            let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+            let record = SessionRecord::GlobalFact {
+                key: key.clone(),
+                value: value.clone(),
+            };
+            writeln!(file, "{}", serde_json::to_string(&record)?)?;
+        }
+
+        self.global_facts.insert(key, value);
+        Ok(())
     }
 
     pub fn plan(&self) -> &SessionPlan {
@@ -263,6 +297,13 @@ impl SessionTree {
     }
 
     pub fn add_message(&mut self, message: AgentMessage) -> String {
+        let leaf_id = self.active_node_id.clone();
+        self.add_message_at_leaf(leaf_id.as_deref(), message)
+    }
+
+    /// Appends a message to the passive tree anchored at a specific leaf ID.
+    /// Updates active_node_id if the leaf matches the current active node.
+    pub fn add_message_at_leaf(&mut self, leaf_id: Option<&str>, message: AgentMessage) -> String {
         let mut next_id = self.nodes.len() + 1;
         let node_id = loop {
             let candidate = format!("node_{next_id}");
@@ -276,23 +317,83 @@ impl SessionTree {
             .unwrap_or_default()
             .as_secs();
 
+        let parent_id = leaf_id.map(|s| s.to_string());
         let node = SessionNode {
             id: node_id.clone(),
-            parent_id: self.active_node_id.clone(),
+            parent_id,
             timestamp: now,
             message,
         };
 
+        let old_active = self.active_node_id.clone();
         self.nodes.insert(node_id.clone(), node.clone());
         self.node_order.push(node_id.clone());
-        self.active_node_id = Some(node_id.clone());
+
+        if leaf_id == old_active.as_deref() || old_active.is_none() {
+            self.active_node_id = Some(node_id.clone());
+        }
 
         if let Some(ref path) = self.file_path {
             let _guard = session_file_lock().lock().unwrap();
-            let _ = self.append_node_and_metadata_to_file(path, &node);
+            if self.append_node_and_metadata_to_file(path, &node).is_err() {
+                self.nodes.remove(&node_id);
+                self.node_order.pop();
+                self.active_node_id = old_active;
+                return String::new();
+            }
         }
 
         node_id
+    }
+
+    pub fn append_passive_branch(
+        &mut self,
+        parent_leaf_id: Option<&str>,
+        messages: Vec<AgentMessage>,
+    ) -> Result<Vec<String>, String> {
+        if parent_leaf_id.is_some_and(|id| !self.nodes.contains_key(id)) {
+            return Err(format!(
+                "Parent session node '{}' not found",
+                parent_leaf_id.unwrap()
+            ));
+        }
+        let mut next = self.clone();
+        let active_node_id = next.active_node_id.clone();
+        let mut parent_id = parent_leaf_id.map(str::to_owned);
+        let mut created = Vec::with_capacity(messages.len());
+
+        for message in messages {
+            let mut next_id = next.nodes.len() + 1;
+            let node_id = loop {
+                let candidate = format!("node_{next_id}");
+                if !next.nodes.contains_key(&candidate) {
+                    break candidate;
+                }
+                next_id += 1;
+            };
+            let node = SessionNode {
+                id: node_id.clone(),
+                parent_id: parent_id.clone(),
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                message,
+            };
+            next.nodes.insert(node_id.clone(), node);
+            next.node_order.push(node_id.clone());
+            parent_id = Some(node_id.clone());
+            created.push(node_id);
+        }
+        next.active_node_id = active_node_id;
+
+        if let Some(path) = next.file_path.clone() {
+            let _guard = session_file_lock().lock().unwrap();
+            next.save_transactionally(&path)
+                .map_err(|error| format!("Failed to persist passive branch: {error}"))?;
+        }
+        *self = next;
+        Ok(created)
     }
 
     /// Replaces the active context with a new root branch while retaining old
@@ -307,8 +408,13 @@ impl SessionTree {
     }
 
     pub fn get_active_branch_messages(&self) -> Vec<AgentMessage> {
+        self.get_branch_messages(self.active_node_id.as_deref())
+    }
+
+    /// Traverses the passive DAG from the specified leaf ID back to root.
+    pub fn get_branch_messages(&self, leaf_id: Option<&str>) -> Vec<AgentMessage> {
         let mut path_nodes = Vec::new();
-        let mut curr = self.active_node_id.clone();
+        let mut curr = leaf_id.map(|s| s.to_string());
 
         while let Some(id) = curr {
             if let Some(node) = self.nodes.get(&id) {
@@ -333,17 +439,93 @@ impl SessionTree {
             .collect()
     }
 
-    pub fn switch_active_node(&mut self, node_id: &str) -> bool {
-        if self.nodes.contains_key(node_id) {
-            self.active_node_id = Some(node_id.to_string());
-            if let Some(path) = self.file_path.clone() {
-                let _guard = session_file_lock().lock().unwrap();
-                let _ = self.append_metadata_to_file(&path);
+    pub fn replace_tool_result(
+        &mut self,
+        tool_call_id: &str,
+        content: String,
+        is_error: bool,
+    ) -> bool {
+        if let Some(path) = self.file_path.clone() {
+            let _guard = session_file_lock().lock().unwrap();
+            let Ok(mut latest) = Self::load_from_file(&path) else {
+                return false;
+            };
+            let Some(node_id) = latest.node_order.iter().find(|node_id| {
+                matches!(
+                    latest.nodes.get(*node_id).map(|node| &node.message),
+                    Some(AgentMessage::Tool { tool_call_id: id, .. }) if id == tool_call_id
+                )
+            }).cloned() else {
+                return false;
+            };
+            let Some(node) = latest.nodes.get_mut(&node_id) else {
+                return false;
+            };
+            if let AgentMessage::Tool {
+                content: current_content,
+                is_error: current_is_error,
+                ..
+            } = &mut node.message
+            {
+                *current_content = content;
+                *current_is_error = is_error;
             }
-            true
-        } else {
-            false
+            if latest.save_transactionally(&path).is_err() {
+                return false;
+            }
+            *self = latest;
+            return true;
         }
+        let Some(node_id) = self.node_order.iter().find(|node_id| {
+            matches!(
+                self.nodes.get(*node_id).map(|node| &node.message),
+                Some(AgentMessage::Tool { tool_call_id: id, .. }) if id == tool_call_id
+            )
+        }).cloned() else {
+            return false;
+        };
+        let previous = self
+            .nodes
+            .get(&node_id)
+            .map(|node| node.message.clone())
+            .unwrap();
+        {
+            let node = self.nodes.get_mut(&node_id).unwrap();
+            if let AgentMessage::Tool {
+                content: current_content,
+                is_error: current_is_error,
+                ..
+            } = &mut node.message
+            {
+                *current_content = content;
+                *current_is_error = is_error;
+            }
+        }
+        if let Some(path) = self.file_path.clone() {
+            if self.save_transactionally(&path).is_err() {
+                self.nodes.get_mut(&node_id).unwrap().message = previous;
+                return false;
+            }
+        }
+        true
+    }
+
+    pub fn switch_active_node(&mut self, node_id: &str) -> bool {
+        if !self.nodes.contains_key(node_id) {
+            return false;
+        }
+        if let Some(path) = self.file_path.clone() {
+            let _guard = session_file_lock().lock().unwrap();
+            let old_active = self.active_node_id.clone();
+            self.active_node_id = Some(node_id.to_string());
+            if self.append_metadata_to_file(&path).is_err() {
+                self.active_node_id = old_active;
+                return false;
+            }
+        } else {
+            self.active_node_id = Some(node_id.to_string());
+        }
+        true
     }
 
     pub fn fork_branch(&mut self, node_id: &str) -> Option<SessionTree> {
@@ -398,6 +580,13 @@ impl SessionTree {
                 model: self.model.clone(),
             };
             writeln!(file, "{}", serde_json::to_string(&metadata)?)?;
+        }
+        for (key, value) in &self.global_facts {
+            let fact = SessionRecord::GlobalFact {
+                key: key.clone(),
+                value: value.clone(),
+            };
+            writeln!(file, "{}", serde_json::to_string(&fact)?)?;
         }
         let plan = SessionRecord::Plan {
             explanation: self.plan.explanation.clone(),
@@ -472,6 +661,9 @@ impl SessionTree {
                     }
                     SessionRecord::Plan { explanation, items } => {
                         tree.plan = SessionPlan { explanation, items };
+                    }
+                    SessionRecord::GlobalFact { key, value } => {
+                        tree.global_facts.insert(key, value);
                     }
                 }
             } else if let Ok(node) = serde_json::from_str::<SessionNode>(&l) {
@@ -676,6 +868,8 @@ mod tests {
         normal_turn.add_message(AgentMessage::Assistant {
             content: Some("concurrent".into()),
             tool_calls: None,
+            stop_reason: None,
+            deferred_handle: None,
         });
 
         title_task.set_name("Generated title".into()).unwrap();
@@ -735,5 +929,159 @@ mod tests {
         let mut tree = SessionTree::new("session");
         assert!(tree.set_name(String::new()).is_err());
         assert!(tree.name.is_none());
+    }
+
+    #[test]
+    fn passive_dag_branch_retrieval_by_leaf() {
+        let mut tree = SessionTree::new("passive_session");
+        let n1 = tree.add_message(AgentMessage::User {
+            content: "root".into(),
+        });
+        let n2 = tree.add_message_at_leaf(
+            Some(&n1),
+            AgentMessage::User {
+                content: "lane_a_1".into(),
+            },
+        );
+        let n3 = tree.add_message_at_leaf(
+            Some(&n1),
+            AgentMessage::User {
+                content: "lane_b_1".into(),
+            },
+        );
+
+        let branch_a = tree.get_branch_messages(Some(&n2));
+        assert_eq!(branch_a.len(), 2);
+        assert!(matches!(&branch_a[1], AgentMessage::User { content } if content == "lane_a_1"));
+
+        let branch_b = tree.get_branch_messages(Some(&n3));
+        assert_eq!(branch_b.len(), 2);
+        assert!(matches!(&branch_b[1], AgentMessage::User { content } if content == "lane_b_1"));
+    }
+
+    #[test]
+    fn passive_branch_append_preserves_active_leaf_and_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut tree = SessionTree::new("session");
+        tree.file_path = Some(path.clone());
+        let parent = tree.add_message(AgentMessage::User {
+            content: "parent".into(),
+        });
+        let expected = vec![
+            AgentMessage::User {
+                content: "child task".into(),
+            },
+            AgentMessage::Assistant {
+                content: Some("child result".into()),
+                tool_calls: None,
+                stop_reason: None,
+                deferred_handle: None,
+            },
+        ];
+
+        let branch = tree
+            .append_passive_branch(Some(&parent), expected.clone())
+            .unwrap();
+
+        assert_eq!(tree.active_node_id(), Some(parent.as_str()));
+        assert_eq!(
+            serde_json::to_value(tree.get_branch_messages(branch.last().map(String::as_str)))
+                .unwrap(),
+            serde_json::to_value(
+                [
+                    vec![AgentMessage::User {
+                        content: "parent".into()
+                    }],
+                    expected
+                ]
+                .concat()
+            )
+            .unwrap()
+        );
+        let loaded = SessionTree::load_from_file(&path).unwrap();
+        assert_eq!(loaded.active_node_id(), Some(parent.as_str()));
+        assert_eq!(
+            serde_json::to_value(loaded.get_branch_messages(branch.last().map(String::as_str)))
+                .unwrap(),
+            serde_json::to_value(tree.get_branch_messages(branch.last().map(String::as_str)))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn passive_branch_append_rolls_back_when_persistence_fails() {
+        let mut tree = SessionTree::new("session");
+        let parent = tree.add_message(AgentMessage::User {
+            content: "parent".into(),
+        });
+        tree.file_path = Some(
+            tempfile::tempdir()
+                .unwrap()
+                .path()
+                .join("missing/session.jsonl"),
+        );
+        let node_count = tree.nodes.len();
+
+        assert!(tree
+            .append_passive_branch(
+                Some(&parent),
+                vec![AgentMessage::User {
+                    content: "child".into(),
+                }],
+            )
+            .is_err());
+        assert_eq!(tree.nodes.len(), node_count);
+        assert_eq!(tree.active_node_id(), Some(parent.as_str()));
+    }
+
+    #[test]
+    fn global_facts_persistence_and_lookup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session_facts.jsonl");
+
+        let mut tree = SessionTree::new("facts_session");
+        tree.file_path = Some(path.clone());
+        tree.set_fact("git_branch", "feat/multi-lane").unwrap();
+        tree.set_fact("env", "staging").unwrap();
+
+        assert_eq!(tree.get_fact("git_branch"), Some("feat/multi-lane"));
+        assert_eq!(tree.get_fact("env"), Some("staging"));
+
+        let loaded = SessionTree::load_from_file(&path).unwrap();
+        assert_eq!(loaded.get_fact("git_branch"), Some("feat/multi-lane"));
+        assert_eq!(loaded.get_fact("env"), Some("staging"));
+    }
+
+    #[test]
+    fn global_facts_survive_metadata_rewrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session_facts_rewrite.jsonl");
+        let mut tree = SessionTree::new("facts_session");
+        tree.file_path = Some(path.clone());
+        tree.set_fact("git_branch", "feat/multi-lane").unwrap();
+
+        tree.set_name("Named session".into()).unwrap();
+
+        let loaded = SessionTree::load_from_file(&path).unwrap();
+        assert_eq!(loaded.get_fact("git_branch"), Some("feat/multi-lane"));
+    }
+
+    #[test]
+    fn replaces_recovered_tool_result_in_place() {
+        let mut tree = SessionTree::new("recovered");
+        tree.add_message(AgentMessage::Tool {
+            tool_call_id: "call-1".into(),
+            name: "read_file".into(),
+            content: "[Recovered tool result]".into(),
+            is_error: false,
+        });
+
+        assert!(tree.replace_tool_result("call-1", "actual output".into(), false));
+        assert!(matches!(
+            tree.get_active_branch_messages().last(),
+            Some(AgentMessage::Tool { content, is_error, .. })
+                if content == "actual output" && !is_error
+        ));
     }
 }

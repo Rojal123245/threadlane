@@ -107,6 +107,8 @@ fn test_session_tree_persistence_and_branching() {
     let _n2 = tree.add_message(AgentMessage::Assistant {
         content: Some("Hi there".to_string()),
         tool_calls: None,
+        stop_reason: None,
+        deferred_handle: None,
     });
 
     assert_eq!(tree.nodes.len(), 2);
@@ -345,6 +347,8 @@ fn interrupted_tool_turn_is_removed_before_provider_replay() {
                     thought_signature: None,
                 },
             ]),
+            stop_reason: None,
+            deferred_handle: None,
         },
         AgentMessage::Tool {
             tool_call_id: "call-a".into(),
@@ -373,6 +377,8 @@ fn completed_tool_turn_is_preserved_for_provider_replay() {
                 },
                 thought_signature: None,
             }]),
+            stop_reason: None,
+            deferred_handle: None,
         },
         AgentMessage::Tool {
             tool_call_id: "call-a".into(),
@@ -408,6 +414,8 @@ fn test_convert_to_codex_llm_structure() {
                 },
                 thought_signature: None,
             }]),
+            stop_reason: None,
+            deferred_handle: None,
         },
         AgentMessage::Tool {
             tool_call_id: "call_abc123".to_string(),

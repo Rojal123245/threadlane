@@ -87,6 +87,13 @@ script_mod! {
             height: 10
             visible: false
         }
+        health_lbl := Label {
+            width: Fit
+            height: Fit
+            visible: false
+            text: ""
+            draw_text +: { color: theme.color_muted_foreground text_style +: { font_size: 8.0 } }
+        }
         time_lbl := Label {
             width: Fit
             height: Fit

@@ -5,16 +5,17 @@ use makepad_widgets::text::selection::Cursor;
 use makepad_widgets::*;
 use unicode_segmentation::UnicodeSegmentation;
 
+// Dark theme state colors corresponding to theme.color_state_active and theme.color_state_hover
 fn active_row_color() -> Vec4f {
-    vec4(0.208, 0.255, 0.325, 1.0)
+    vec4(0.208, 0.255, 0.325, 1.0) // #x354153 theme.color_state_active
 }
 
 fn hover_row_color() -> Vec4f {
-    vec4(0.188, 0.22, 0.267, 1.0)
+    vec4(0.188, 0.220, 0.267, 1.0) // #x303844 theme.color_state_hover
 }
 
 fn command_name_color() -> Vec4f {
-    vec4(0.867, 0.89, 0.918, 1.0)
+    vec4(0.906, 0.933, 0.941, 1.0) // #xe7ebf0 theme.color_foreground
 }
 
 const COMMAND_ROW_HEIGHT: f64 = 30.0;

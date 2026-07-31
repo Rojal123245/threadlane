@@ -17,7 +17,10 @@ pub mod wasi_extension;
 
 pub use agents::{discover_agents, AgentConfig, AgentDiscoveryResult, AgentScope, AgentSource};
 pub use capabilities::CapabilityCatalog;
-pub use coding_agent::{CodingAgent, CodingAgentOptions, ExtensionBeforeToolHook};
+pub use coding_agent::{
+    cancel_open_subagent_operations, CodingAgent, CodingAgentOptions, CodingAgentWorkHandle,
+    ExtensionBeforeToolHook,
+};
 pub use commands::{execute_slash_command, parse_slash_command, CommandAction};
 pub use context::{ProjectContext, ProjectInstruction};
 pub use extension_broker::{

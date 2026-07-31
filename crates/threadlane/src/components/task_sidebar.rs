@@ -380,6 +380,7 @@ pub struct TaskSidebarItem {
     pub status: TaskStatus,
     pub cancellable: bool,
     pub started_at_ms: u128,
+    pub finished_at_ms: Option<u128>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -634,12 +635,14 @@ fn status_label(status: TaskStatus) -> &'static str {
     }
 }
 
-fn elapsed_label(started_at_ms: u128) -> String {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(started_at_ms);
-    let seconds = now_ms.saturating_sub(started_at_ms) / 1_000;
+fn elapsed_label(started_at_ms: u128, finished_at_ms: Option<u128>) -> String {
+    let end_ms = finished_at_ms.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or(started_at_ms)
+    });
+    let seconds = end_ms.saturating_sub(started_at_ms) / 1_000;
     if seconds < 60 {
         format!("{seconds}s")
     } else if seconds < 3_600 {
@@ -826,7 +829,7 @@ impl Widget for TaskSidebar {
                             let activity = format!(
                                 "{} · {}",
                                 task_activity_label(task.status, &task.activity),
-                                elapsed_label(task.started_at_ms)
+                                elapsed_label(task.started_at_ms, task.finished_at_ms)
                             );
                             row.label(cx, ids!(activity_lbl)).set_text(cx, &activity);
                             row.button(cx, ids!(cancel_btn))
@@ -843,14 +846,14 @@ impl Widget for TaskSidebar {
                                     "{} · {} · {}",
                                     task.agent,
                                     status_label(task.status),
-                                    elapsed_label(task.started_at_ms)
+                                    elapsed_label(task.started_at_ms, task.finished_at_ms)
                                 )
                             } else {
                                 format!(
                                     "{} · {} · {}\n{}",
                                     task.agent,
                                     status_label(task.status),
-                                    elapsed_label(task.started_at_ms),
+                                    elapsed_label(task.started_at_ms, task.finished_at_ms),
                                     task.activity
                                 )
                             };
@@ -966,6 +969,7 @@ mod tests {
             status,
             cancellable: false,
             started_at_ms,
+            finished_at_ms: None,
         }
     }
 
@@ -1077,6 +1081,11 @@ mod tests {
             task_activity_label(TaskStatus::Running, "Reading events"),
             "Working · Reading events"
         );
+    }
+
+    #[test]
+    fn elapsed_label_freezes_at_task_completion() {
+        assert_eq!(elapsed_label(1_000, Some(5_000)), "4s");
     }
 
     #[test]
