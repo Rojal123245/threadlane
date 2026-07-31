@@ -1154,10 +1154,10 @@ impl Widget for ChatList {
 impl ChatList {
     fn focused_starter_action(&self, cx: &Cx) -> Option<StarterPromptAction> {
         [
-            (ids!(explore_btn), StarterPromptAction::Explore),
-            (ids!(build_btn), StarterPromptAction::Build),
-            (ids!(review_btn), StarterPromptAction::Review),
-            (ids!(fix_btn), StarterPromptAction::Fix),
+            (ids!(empty_state.cards_row.explore_card.btn), StarterPromptAction::Explore),
+            (ids!(empty_state.cards_row.build_card.btn), StarterPromptAction::Build),
+            (ids!(empty_state.cards_row.review_card.btn), StarterPromptAction::Review),
+            (ids!(empty_state.cards_row.fix_card.btn), StarterPromptAction::Fix),
         ]
         .into_iter()
         .find_map(|(path, action)| {

@@ -35,6 +35,7 @@ pub mod session_row;
 pub mod sidebar_compose_button;
 pub mod status_dot;
 pub mod status_pill;
+pub mod starter_prompt_card;
 pub mod task_sidebar;
 pub mod terminal_panel;
 pub mod tool_fold_header;
@@ -74,6 +75,7 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     sidebar_compose_button::script_mod(vm);
     session_row::script_mod(vm);
     status_pill::script_mod(vm);
+    starter_prompt_card::script_mod(vm);
     task_sidebar::script_mod(vm);
     terminal_panel::script_mod(vm);
     tool_section::script_mod(vm)

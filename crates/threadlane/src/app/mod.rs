@@ -339,385 +339,79 @@ script_mod! {
                 }
             }
 
-            // Workspace path subtitle
-            workspace_path_lbl := Label {
+            // Workspace path subtitle badge
+            workspace_path_wrap := RoundedView {
                 width: Fit
                 height: Fit
-                text: ""
-                margin: Inset{bottom: 28}
-                draw_text +: {
-                    color: theme.color_muted_foreground
-                    text_style +: { font_size: 10.5 }
+                flow: Right
+                align: Align{y: 0.5}
+                spacing: 6
+                margin: Inset{bottom: 24}
+                padding: Inset{left: 10 top: 4 right: 10 bottom: 4}
+                draw_bg +: {
+                    color: theme.color_card
+                    border_color: theme.color_border
+                    border_size: 1.0
+                    border_radius: theme.radius_sm
+                }
+                workspace_folder_icon := Icon {
+                    width: 14
+                    height: 14
+                    icon_walk: Walk{width: 14 height: 14}
+                    draw_icon +: {
+                        svg: crate_resource("self:resources/icons/folder.svg")
+                        color: theme.color_primary
+                    }
+                }
+                workspace_path_lbl := Label {
+                    width: Fit
+                    height: Fit
+                    text: ""
+                    draw_text +: {
+                        color: theme.color_muted_foreground
+                        text_style +: { font_size: 10.0 }
+                    }
                 }
             }
 
             // Action suggestion cards
-            cards_row := View {
-                width: Fit
-                height: Fit
-                flow: Right
-                spacing: 10
+                cards_row := View {
+                    width: Fit
+                    height: Fit
+                    flow: Right
+                    spacing: 10
 
-                explore_card := RoundedView {
-                    width: 160
-                    height: 108
-                    flow: Overlay
-                    draw_bg +: {
-                        color: theme.color_card
-                        border_color: theme.color_input
-                        border_size: 1.0
-                        border_radius: 10.0
+                    explore_card := mod.components.StarterPromptCard {
+                        content.header.icon_wrap.draw_bg.color: theme.color_primary_tint
+                        content.header.icon_wrap.draw_bg.border_color: theme.color_primary_tint
+                        content.header.icon_wrap.icon.draw_icon.svg: crate_resource("self:resources/icons/read-file.svg")
+                        content.header.title.text: "Explore code"
+                        content.description.text: "Understand the structure and key files"
                     }
-                    explore_content := View {
-                        width: Fill
-                        height: Fill
-                        flow: Down
-                        spacing: 10
-                        padding: Inset{left: 14 top: 14 right: 14 bottom: 14}
-                        explore_header := View {
-                            width: Fill
-                            height: 26
-                            flow: Right
-                            spacing: 9
-                            align: Align{y: 0.5}
-                            explore_icon_wrap := RoundedView {
-                                width: 26
-                                height: 26
-                                align: Align{x: 0.5 y: 0.5}
-                                draw_bg +: {
-                                    color: theme.color_primary_tint
-                                    border_color: theme.color_primary_tint
-                                    border_size: 1.0
-                                    border_radius: 7.0
-                                }
-                                explore_icon := Icon {
-                                    width: 14
-                                    height: 14
-                                    icon_walk: Walk{width: 14 height: 14}
-                                    draw_icon +: {
-                                        svg: crate_resource("self:resources/icons/read-file.svg")
-                                        color: theme.color_primary
-                                    }
-                                }
-                            }
-                            explore_lbl := Label {
-                                width: Fill
-                                height: Fit
-                                text: "Explore code"
-                                draw_text +: {
-                                    color: theme.color_primary_foreground
-                                    text_style: theme.font_bold { font_size: 11.0 }
-                                }
-                            }
-                        }
-                        explore_desc_lbl := Label {
-                            width: Fill
-                            height: Fit
-                            text: "Understand the structure and key files"
-                            draw_text +: {
-                                color: theme.color_primary
-                                text_style +: { font_size: 9.5 }
-                            }
-                        }
+                    build_card := mod.components.StarterPromptCard {
+                        content.header.icon_wrap.draw_bg.color: theme.color_accent_tint
+                        content.header.icon_wrap.draw_bg.border_color: theme.color_accent_tint
+                        content.header.icon_wrap.icon.draw_icon.svg: crate_resource("self:resources/icons/write-file.svg")
+                        content.header.title.text: "Build something"
+                        content.description.text: "Start a feature, app, or tool"
                     }
-                    explore_btn := Button {
-                        width: Fill
-                        height: Fill
-                        text: "Explore code"
-                        padding: 0
-                        spacing: 0
-                        icon_walk: Walk{width: 0 height: 0}
-                        draw_bg +: {
-                            color: theme.color_transparent
-                            color_hover: theme.color_primary_tint
-                            color_focus: theme.color_primary_tint
-                            color_down: theme.color_primary_tint
-                            border_color: theme.color_transparent
-                            border_color_hover: theme.color_transparent
-                            border_color_focus: theme.color_transparent
-                            border_color_down: theme.color_transparent
-                            border_size: 0.0
-                            border_radius: 10.0
-                        }
-                        draw_text +: {
-                            color: theme.color_transparent
-                            color_hover: theme.color_transparent
-                            color_focus: theme.color_transparent
-                            color_down: theme.color_transparent
-                        }
+                    review_card := mod.components.StarterPromptCard {
+                        content.header.icon_wrap.draw_bg.color: theme.color_success_tint
+                        content.header.icon_wrap.draw_bg.border_color: theme.color_success_tint
+                        content.header.icon_wrap.icon.draw_icon.svg: crate_resource("self:resources/icons/edit-file.svg")
+                        content.header.icon_wrap.icon.draw_icon.color: theme.color_success
+                        content.header.title.text: "Review code"
+                        content.description.text: "Find bugs and simplify changes"
+                    }
+                    fix_card := mod.components.StarterPromptCard {
+                        content.header.icon_wrap.draw_bg.color: theme.color_destructive_tint
+                        content.header.icon_wrap.draw_bg.border_color: theme.color_destructive_tint
+                        content.header.icon_wrap.icon.draw_icon.svg: crate_resource("self:resources/icons/tool.svg")
+                        content.header.icon_wrap.icon.draw_icon.color: theme.color_warning
+                        content.header.title.text: "Fix an issue"
+                        content.description.text: "Diagnose errors and failures"
                     }
                 }
-
-                build_card := RoundedView {
-                    width: 160
-                    height: 108
-                    flow: Overlay
-                    draw_bg +: {
-                        color: theme.color_card
-                        border_color: theme.color_input
-                        border_size: 1.0
-                        border_radius: 10.0
-                    }
-                    build_content := View {
-                        width: Fill
-                        height: Fill
-                        flow: Down
-                        spacing: 10
-                        padding: Inset{left: 14 top: 14 right: 14 bottom: 14}
-                        build_header := View {
-                            width: Fill
-                            height: 26
-                            flow: Right
-                            spacing: 9
-                            align: Align{y: 0.5}
-                            build_icon_wrap := RoundedView {
-                                width: 26
-                                height: 26
-                                align: Align{x: 0.5 y: 0.5}
-                                draw_bg +: {
-                                    color: theme.color_accent_tint
-                                    border_color: theme.color_accent_tint
-                                    border_size: 1.0
-                                    border_radius: 7.0
-                                }
-                                build_icon := Icon {
-                                    width: 14
-                                    height: 14
-                                    icon_walk: Walk{width: 14 height: 14}
-                                    draw_icon +: {
-                                        svg: crate_resource("self:resources/icons/write-file.svg")
-                                        color: theme.color_primary
-                                    }
-                                }
-                            }
-                            build_lbl := Label {
-                                width: Fill
-                                height: Fit
-                                text: "Build something"
-                                draw_text +: {
-                                    color: theme.color_primary_foreground
-                                    text_style: theme.font_bold { font_size: 11.0 }
-                                }
-                            }
-                        }
-                        build_desc_lbl := Label {
-                            width: Fill
-                            height: Fit
-                            text: "Start a feature, app, or tool"
-                            draw_text +: {
-                                color: theme.color_primary
-                                text_style +: { font_size: 9.5 }
-                            }
-                        }
-                    }
-                    build_btn := Button {
-                        width: Fill
-                        height: Fill
-                        text: "Build something"
-                        padding: 0
-                        spacing: 0
-                        icon_walk: Walk{width: 0 height: 0}
-                        draw_bg +: {
-                            color: theme.color_transparent
-                            color_hover: theme.color_accent_tint
-                            color_focus: theme.color_accent_tint
-                            color_down: theme.color_accent_tint
-                            border_color: theme.color_transparent
-                            border_color_hover: theme.color_transparent
-                            border_color_focus: theme.color_transparent
-                            border_color_down: theme.color_transparent
-                            border_size: 0.0
-                            border_radius: 10.0
-                        }
-                        draw_text +: {
-                            color: theme.color_transparent
-                            color_hover: theme.color_transparent
-                            color_focus: theme.color_transparent
-                            color_down: theme.color_transparent
-                        }
-                    }
-                }
-
-                review_card := RoundedView {
-                    width: 160
-                    height: 108
-                    flow: Overlay
-                    draw_bg +: {
-                        color: theme.color_card
-                        border_color: theme.color_input
-                        border_size: 1.0
-                        border_radius: 10.0
-                    }
-                    review_content := View {
-                        width: Fill
-                        height: Fill
-                        flow: Down
-                        spacing: 10
-                        padding: Inset{left: 14 top: 14 right: 14 bottom: 14}
-                        review_header := View {
-                            width: Fill
-                            height: 26
-                            flow: Right
-                            spacing: 9
-                            align: Align{y: 0.5}
-                            review_icon_wrap := RoundedView {
-                                width: 26
-                                height: 26
-                                align: Align{x: 0.5 y: 0.5}
-                                draw_bg +: {
-                                    color: theme.color_success_tint
-                                    border_color: theme.color_success_tint
-                                    border_size: 1.0
-                                    border_radius: 7.0
-                                }
-                                review_icon := Icon {
-                                    width: 14
-                                    height: 14
-                                    icon_walk: Walk{width: 14 height: 14}
-                                    draw_icon +: {
-                                        svg: crate_resource("self:resources/icons/edit-file.svg")
-                                        color: theme.color_success
-                                    }
-                                }
-                            }
-                            review_lbl := Label {
-                                width: Fill
-                                height: Fit
-                                text: "Review code"
-                                draw_text +: {
-                                    color: theme.color_primary_foreground
-                                    text_style: theme.font_bold { font_size: 11.0 }
-                                }
-                            }
-                        }
-                        review_desc_lbl := Label {
-                            width: Fill
-                            height: Fit
-                            text: "Find bugs and simplify changes"
-                            draw_text +: {
-                                color: theme.color_primary
-                                text_style +: { font_size: 9.5 }
-                            }
-                        }
-                    }
-                    review_btn := Button {
-                        width: Fill
-                        height: Fill
-                        text: "Review code"
-                        padding: 0
-                        spacing: 0
-                        icon_walk: Walk{width: 0 height: 0}
-                        draw_bg +: {
-                            color: theme.color_transparent
-                            color_hover: theme.color_success_tint
-                            color_focus: theme.color_success_tint
-                            color_down: theme.color_success_tint
-                            border_color: theme.color_transparent
-                            border_color_hover: theme.color_transparent
-                            border_color_focus: theme.color_transparent
-                            border_color_down: theme.color_transparent
-                            border_size: 0.0
-                            border_radius: 10.0
-                        }
-                        draw_text +: {
-                            color: theme.color_transparent
-                            color_hover: theme.color_transparent
-                            color_focus: theme.color_transparent
-                            color_down: theme.color_transparent
-                        }
-                    }
-                }
-
-                fix_card := RoundedView {
-                    width: 160
-                    height: 108
-                    flow: Overlay
-                    draw_bg +: {
-                        color: theme.color_card
-                        border_color: theme.color_input
-                        border_size: 1.0
-                        border_radius: 10.0
-                    }
-                    fix_content := View {
-                        width: Fill
-                        height: Fill
-                        flow: Down
-                        spacing: 10
-                        padding: Inset{left: 14 top: 14 right: 14 bottom: 14}
-                        fix_header := View {
-                            width: Fill
-                            height: 26
-                            flow: Right
-                            spacing: 9
-                            align: Align{y: 0.5}
-                            fix_icon_wrap := RoundedView {
-                                width: 26
-                                height: 26
-                                align: Align{x: 0.5 y: 0.5}
-                                draw_bg +: {
-                                    color: theme.color_destructive_tint
-                                    border_color: theme.color_destructive_tint
-                                    border_size: 1.0
-                                    border_radius: 7.0
-                                }
-                                fix_icon := Icon {
-                                    width: 14
-                                    height: 14
-                                    icon_walk: Walk{width: 14 height: 14}
-                                    draw_icon +: {
-                                        svg: crate_resource("self:resources/icons/tool.svg")
-                                        color: theme.color_warning
-                                    }
-                                }
-                            }
-                            fix_lbl := Label {
-                                width: Fill
-                                height: Fit
-                                text: "Fix an issue"
-                                draw_text +: {
-                                    color: theme.color_primary_foreground
-                                    text_style: theme.font_bold { font_size: 11.0 }
-                                }
-                            }
-                        }
-                        fix_desc_lbl := Label {
-                            width: Fill
-                            height: Fit
-                            text: "Diagnose errors and failures"
-                            draw_text +: {
-                                color: theme.color_primary
-                                text_style +: { font_size: 9.5 }
-                            }
-                        }
-                    }
-                    fix_btn := Button {
-                        width: Fill
-                        height: Fill
-                        text: "Fix an issue"
-                        padding: 0
-                        spacing: 0
-                        icon_walk: Walk{width: 0 height: 0}
-                        draw_bg +: {
-                            color: theme.color_transparent
-                            color_hover: theme.color_destructive_tint
-                            color_focus: theme.color_destructive_tint
-                            color_down: theme.color_destructive_tint
-                            border_color: theme.color_transparent
-                            border_color_hover: theme.color_transparent
-                            border_color_focus: theme.color_transparent
-                            border_color_down: theme.color_transparent
-                            border_size: 0.0
-                            border_radius: 10.0
-                        }
-                        draw_text +: {
-                            color: theme.color_transparent
-                            color_hover: theme.color_transparent
-                            color_focus: theme.color_transparent
-                            color_down: theme.color_transparent
-                        }
-                    }
-                }
-            }
         }
 
         list := PortalList {
@@ -1098,8 +792,6 @@ script_mod! {
             }
         }
     }
-
-
 
     // -------------------------------------------------------------------
     let SessionList = #(SessionList::register_widget(vm)) {
@@ -2578,12 +2270,19 @@ script_mod! {
                                 spacing: 4
                                 padding: Inset{left: 9 right: 7 bottom: 5}
 
-                                checkout_target_controls := View {
+                                checkout_target_controls := RoundedView {
                                     width: Fill
-                                    height: 28
+                                    height: 32
                                     flow: Right
                                     spacing: 6
+                                    padding: Inset{left: 8 right: 8}
                                     align: Align{y: 0.5}
+                                    draw_bg +: {
+                                        color: theme.color_card
+                                        border_color: theme.color_border
+                                        border_size: 1.0
+                                        border_radius: theme.radius_sm
+                                    }
 
                                     checkout_target_drop := mod.components.IconDropDown {
                                         width: 142
@@ -3127,6 +2826,7 @@ script_mod! {
         }
     }
 }
+
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
