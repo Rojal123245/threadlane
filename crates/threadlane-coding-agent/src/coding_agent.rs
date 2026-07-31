@@ -1807,6 +1807,7 @@ pub struct CodingAgent {
     dispatch_parent_leaf: Arc<std::sync::Mutex<Option<String>>>,
     completed_subagent_lanes: Arc<std::sync::Mutex<Vec<CompletedSubagentLane>>>,
     interrupted_subagent_journal: Option<SubagentLaneJournal>,
+    cancellation_guard: Option<SubagentCancellationGuard>,
     interrupted_subagent_recovery: InterruptedSubagentRecoveryState,
     #[cfg(test)]
     subagent_work_observer: SubagentObserverState,
@@ -2407,6 +2408,7 @@ impl CodingAgent {
             dispatch_parent_leaf,
             completed_subagent_lanes,
             interrupted_subagent_journal,
+            cancellation_guard: None,
             interrupted_subagent_recovery,
             #[cfg(test)]
             subagent_work_observer,
@@ -2429,6 +2431,16 @@ impl CodingAgent {
 
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
         self.agent.subscribe()
+    }
+
+    pub fn cancel(&mut self) -> Result<(), String> {
+        if let Some(journal) = self.interrupted_subagent_journal.as_ref() {
+            self.cancellation_guard = Some(journal.begin_cancellation()?);
+        }
+        let _ = self.agent.loop_engine.event_tx.send(AgentEvent::AgentError {
+            error: "Generation cancelled".into(),
+        });
+        Ok(())
     }
 
     pub fn current_plan(&self) -> threadlane_agent::SessionPlan {
@@ -3018,6 +3030,7 @@ impl CodingAgent {
         input: &str,
         images: Vec<ImageAttachment>,
     ) -> Option<Result<String, String>> {
+        self.cancellation_guard = None;
         if let Err(error) = self.recover_interrupted_subagent_lanes().await {
             return Some(Err(error));
         }
@@ -5558,6 +5571,25 @@ mod tests {
             session_file: None,
             system_prompt: SystemPromptConfig::default(),
         }
+    }
+
+    #[test]
+    fn cancel_keeps_subagent_cancellation_active_until_the_next_submission() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("session.jsonl");
+        let mut options = coding_agent_options(dir.path().to_path_buf());
+        options.session_file = Some(session_file);
+        let mut agent = CodingAgent::new(options);
+        let journal = agent.interrupted_subagent_journal.clone().unwrap();
+        let mut events = agent.subscribe();
+
+        agent.cancel().unwrap();
+
+        assert!(journal.start("subagent-1:0", "inspect", None).is_err());
+        assert!(matches!(
+            events.try_recv(),
+            Ok(AgentEvent::AgentError { error }) if error == "Generation cancelled"
+        ));
     }
 
     fn provider_tool_call(

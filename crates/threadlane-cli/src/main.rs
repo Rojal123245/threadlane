@@ -1,16 +1,17 @@
 mod tui;
+mod input;
+mod runtime;
 mod ui;
 
 use clap::Parser;
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use std::env;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
 use threadlane_agent::AgentEvent;
 use threadlane_coding_agent::{CodingAgent, CodingAgentOptions};
-use tokio::sync::Mutex;
-use ui::{AppState, MessageType, TranscriptMessage};
+#[cfg(test)]
+use runtime::{dispatch_input, Action};
+#[cfg(test)]
+use ui::{AppState, RunStatus};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Threadlane Terminal CLI & Ratatui TUI Runner", long_about = None)]
@@ -43,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Otherwise launch full Ratatui TUI interactive mode
-    run_tui(canonical_work_dir, args.model).await?;
+    runtime::run_tui(canonical_work_dir, args.model).await?;
     Ok(())
 }
 
@@ -90,129 +91,41 @@ async fn run_headless(
     Ok(())
 }
 
-async fn run_tui(work_dir: PathBuf, model: String) -> Result<(), Box<dyn std::error::Error>> {
-    let mut terminal = tui::init()?;
-    let mut state = AppState::new(model.clone(), work_dir.display().to_string());
-
-    let (api_key, account_id) = resolve_credentials();
-    let agent = CodingAgent::new(CodingAgentOptions {
-        api_key,
-        account_id,
-        model,
-        work_dir,
-        session_file: None,
-        system_prompt: Default::default(),
-    });
-
-    let mut event_rx = agent.subscribe();
-    let shared_agent = Arc::new(Mutex::new(agent));
-
-    loop {
-        terminal.draw(|f| ui::render(f, &state))?;
-
-        // Poll for key inputs
-        if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                    break;
-                }
-                match key.code {
-                    KeyCode::Esc => break,
-                    KeyCode::Enter => {
-                        if !state.input.trim().is_empty() && !state.is_generating {
-                            let user_prompt = state.input.clone();
-                            state.input.clear();
-                            state.messages.push(TranscriptMessage {
-                                msg_type: MessageType::User,
-                                content: user_prompt.clone(),
-                            });
-                            state.messages.push(TranscriptMessage {
-                                msg_type: MessageType::Assistant,
-                                content: String::new(),
-                            });
-                            state.is_generating = true;
-
-                            let agent_ref = Arc::clone(&shared_agent);
-                            tokio::spawn(async move {
-                                let mut guard = agent_ref.lock().await;
-                                let _ = guard.handle_input_with_images(&user_prompt, vec![]).await;
-                            });
-                        }
-                    }
-                    KeyCode::Char(c) => {
-                        if !state.is_generating {
-                            state.input.push(c);
-                        }
-                    }
-                    KeyCode::Backspace => {
-                        if !state.is_generating {
-                            state.input.pop();
-                        }
-                    }
-                    KeyCode::Up => {
-                        if state.scroll > 0 {
-                            state.scroll -= 1;
-                        }
-                    }
-                    KeyCode::Down => {
-                        state.scroll += 1;
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        // Drain pending agent streaming events
-        while let Ok(event) = event_rx.try_recv() {
-            match event {
-                AgentEvent::MessageUpdate {
-                    text_delta,
-                    reasoning_delta,
-                    ..
-                } => {
-                    if let Some(delta) = text_delta {
-                        if let Some(last_msg) = state.messages.last_mut() {
-                            if matches!(last_msg.msg_type, MessageType::Assistant) {
-                                last_msg.content.push_str(&delta);
-                            }
-                        }
-                    }
-                    if let Some(r_delta) = reasoning_delta {
-                        if let Some(last_msg) = state.messages.last() {
-                            if !matches!(last_msg.msg_type, MessageType::Thinking) {
-                                state.messages.push(TranscriptMessage {
-                                    msg_type: MessageType::Thinking,
-                                    content: String::new(),
-                                });
-                            }
-                        }
-                        if let Some(last_msg) = state.messages.last_mut() {
-                            last_msg.content.push_str(&r_delta);
-                        }
-                    }
-                }
-                AgentEvent::ToolExecutionStart {
-                    tool_call_id, name, ..
-                } => {
-                    state.messages.push(TranscriptMessage {
-                        msg_type: MessageType::ToolCall(name),
-                        content: format!("Tool ID: {tool_call_id}"),
-                    });
-                }
-                AgentEvent::AgentEnd { .. } => {
-                    state.is_generating = false;
-                }
-                _ => {}
-            }
-        }
-    }
-
-    tui::restore()?;
-    Ok(())
-}
-
-fn resolve_credentials() -> (String, Option<String>) {
+pub(crate) fn resolve_credentials() -> (String, Option<String>) {
     let api_key = env::var("OPENAI_API_KEY").unwrap_or_default();
     let account_id = env::var("CHATGPT_ACCOUNT_ID").ok();
     (api_key, account_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enter_submits_only_when_idle_and_composer_is_nonempty() {
+        let mut state = AppState::test_state();
+        assert_eq!(
+            dispatch_input(&mut state, input::InputEvent::Submit),
+            Action::Submit("".into())
+        );
+        state.composer = "inspect the project".into();
+        assert_eq!(
+            dispatch_input(&mut state, input::InputEvent::Submit),
+            Action::Submit("inspect the project".into())
+        );
+    }
+
+    #[test]
+    fn escape_cancels_generation_before_quitting() {
+        let mut state = AppState::test_state_generating();
+        assert_eq!(
+            dispatch_input(&mut state, input::InputEvent::CancelOrQuit),
+            Action::Cancel
+        );
+        state.status = RunStatus::Idle;
+        assert_eq!(
+            dispatch_input(&mut state, input::InputEvent::CancelOrQuit),
+            Action::Quit
+        );
+    }
 }
