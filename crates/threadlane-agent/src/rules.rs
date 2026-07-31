@@ -12,10 +12,10 @@ pub fn classify_tool_replay_safety(tool_name: &str) -> ToolReplaySafety {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamRule {
-    id: String,
-    name: String,
-    pattern: String,
-    reminder: String,
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) pattern: String,
+    pub(crate) reminder: String,
 }
 
 #[derive(Debug, Clone)]
@@ -34,15 +34,9 @@ pub(crate) struct StreamRuleMonitor {
 }
 
 impl StreamRuleMonitor {
-    pub(crate) fn new(rules: Vec<StreamRule>) -> Self {
-        let mut compiled = Vec::new();
-        for rule in rules {
-            if let Ok(re) = regex::Regex::new(&rule.pattern) {
-                compiled.push((rule, re));
-            }
-        }
+    pub(crate) fn new(rules: Vec<(StreamRule, regex::Regex)>) -> Self {
         Self {
-            rules: compiled,
+            rules,
             accumulated_text: String::new(),
         }
     }
@@ -91,8 +85,9 @@ mod tests {
             pattern: r"Box::leak\(.*\)".into(),
             reminder: "Do not use Box::leak in production code".into(),
         };
+        let re = regex::Regex::new(&rule.pattern).unwrap();
 
-        let mut monitor = StreamRuleMonitor::new(vec![rule]);
+        let mut monitor = StreamRuleMonitor::new(vec![(rule, re)]);
         assert!(monitor.push_chunk("let x = ").is_none());
         assert!(monitor.push_chunk("Box::leak(").is_none());
         let mat = monitor.push_chunk("ptr);");
@@ -111,8 +106,9 @@ mod tests {
             pattern: r"PREFIX_SECRET_\d+".into(),
             reminder: "Do not expose secrets".into(),
         };
+        let re = regex::Regex::new(&rule.pattern).unwrap();
 
-        let mut monitor = StreamRuleMonitor::new(vec![rule]);
+        let mut monitor = StreamRuleMonitor::new(vec![(rule, re)]);
 
         // Push partial prefix that does not match by itself
         assert!(monitor.push_chunk("PREFIX_").is_none());
@@ -139,8 +135,9 @@ mod tests {
             pattern: r"TARGET".into(),
             reminder: "Found target".into(),
         };
+        let re = regex::Regex::new(&rule.pattern).unwrap();
 
-        let mut monitor = StreamRuleMonitor::new(vec![rule]);
+        let mut monitor = StreamRuleMonitor::new(vec![(rule, re)]);
 
         // Push multi-byte UTF-8 characters (crab emoji is 4 bytes)
         // 4095 'a' bytes + 1 crab emoji (4 bytes) = 4099 bytes total
