@@ -63,6 +63,24 @@ pub fn truncate_chars(s: &str, max_len: usize) -> String {
     }
 }
 
+/// Truncate the middle of a string while preserving both its prefix and suffix.
+pub fn truncate_middle_chars(s: &str, max_len: usize) -> String {
+    if max_len == 0 {
+        return String::new();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max_len {
+        return s.to_string();
+    }
+
+    let retained = max_len.saturating_sub(1);
+    let prefix_len = retained / 2;
+    let suffix_len = retained - prefix_len;
+    let prefix: String = chars[..prefix_len].iter().collect();
+    let suffix: String = chars[chars.len() - suffix_len..].iter().collect();
+    format!("{prefix}…{suffix}")
+}
+
 /// Canonicalize a path, returning the original path if canonicalization fails.
 pub fn canonicalize_path(path: &Path) -> std::path::PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
@@ -89,5 +107,17 @@ mod tests {
     fn test_truncate_chars() {
         assert_eq!(truncate_chars("hello", 10), "hello");
         assert_eq!(truncate_chars("hello world", 5), "hell…");
+    }
+
+    #[test]
+    fn test_truncate_middle_chars() {
+        assert_eq!(truncate_middle_chars("hello", 10), "hello");
+        assert_eq!(truncate_middle_chars("hello world", 6), "he…rld");
+        assert_eq!(
+            truncate_middle_chars("screenshot_αβγ_02.png", 12),
+            "scree…02.png"
+        );
+        assert_eq!(truncate_middle_chars("hello", 1), "…");
+        assert_eq!(truncate_middle_chars("hello", 0), "");
     }
 }
