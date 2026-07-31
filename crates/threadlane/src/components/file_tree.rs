@@ -99,15 +99,15 @@ script_mod! {
                     text: ""
                     draw_bg +: {
                         color: theme.color_transparent
-                        color_hover: theme.color_card
+                        color_hover: theme.color_accent
                         color_down: theme.color_secondary
                         border_color: theme.color_transparent
                         border_size: 0.0
-                        border_radius: 4.0
+                        border_radius: theme.radius_xs
                     }
                     draw_text +: {
                         color: theme.color_foreground
-                        color_hover: theme.color_primary_foreground
+                        color_hover: theme.color_foreground
                         text_style: theme.font_code { font_size: 8.5 }
                     }
                 }

@@ -1112,12 +1112,12 @@ script_mod! {
             draw_bg +: {
                 color: theme.color_background
                 color_hover: theme.color_card
-                border_color: theme.color_primary
+                border_color: theme.color_border
                 border_size: 1.0
             }
             project_toggle_surface +: {
                 folder_icon +: { draw_icon +: { color: theme.color_primary } }
-                name_lbl +: { draw_text +: { color: theme.color_primary_foreground } }
+                name_lbl +: { draw_text +: { color: theme.color_foreground } }
             }
         }
 
@@ -1177,18 +1177,18 @@ script_mod! {
                     is_active: 1.0
                     color: theme.color_secondary
                     color_hover: theme.color_accent
-                    border_color: theme.color_transparent
-                    border_size: 0.0
-                    border_radius: 7.0
+                    border_color: theme.color_border
+                    border_size: 1.0
+                    border_radius: theme.radius_sm
                 }
                 title_surface +: {
                     title_lbl +: {
-                        draw_text +: { color: theme.color_primary_foreground }
+                        draw_text +: { color: theme.color_foreground }
                     }
                 }
                 time_lbl +: {
                     draw_text +: {
-                        color: theme.color_card_foreground
+                        color: theme.color_muted_foreground
                     }
                 }
             }
@@ -1204,19 +1204,19 @@ script_mod! {
             mod.components.SessionRowContextBase = SessionRowBase {
                 draw_bg +: {
                     color: theme.color_card
-                    color_hover: theme.color_primary
-                    border_color: theme.color_primary
+                    color_hover: theme.color_accent
+                    border_color: theme.color_border
                     border_size: 1.0
-                    border_radius: 6.0
+                    border_radius: theme.radius_sm
                 }
                 title_surface +: {
                     title_lbl +: {
-                        draw_text +: { color: theme.color_primary_foreground }
+                        draw_text +: { color: theme.color_foreground }
                     }
                 }
                 time_lbl +: {
                     draw_text +: {
-                        color: theme.color_primary
+                        color: theme.color_muted_foreground
                     }
                 }
             }
@@ -1412,8 +1412,8 @@ script_mod! {
                         draw_icon +: {
                             svg: crate_resource("self:resources/icons/close.svg")
                             color: theme.color_muted_foreground
-                            color_hover: theme.color_primary_foreground
-                            color_focus: theme.color_primary_foreground
+                            color_hover: theme.color_foreground
+                            color_focus: theme.color_foreground
                             color_down: theme.color_primary_foreground
                         }
                     }
@@ -2402,8 +2402,8 @@ script_mod! {
                                                 }
                                                 draw_text +: {
                                                     color: theme.color_foreground
-                                                    color_hover: theme.color_primary_foreground
-                                                    color_focus: theme.color_primary_foreground
+                                                    color_hover: theme.color_foreground
+                                                    color_focus: theme.color_foreground
                                                     color_empty: theme.color_muted_foreground
                                                     color_empty_hover: theme.color_muted_foreground
                                                     color_empty_focus: theme.color_muted_foreground

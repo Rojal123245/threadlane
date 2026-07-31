@@ -40,7 +40,7 @@ script_mod! {
         }
         draw_text +: {
             color: theme.color_foreground
-            color_hover: theme.color_primary_foreground
+            color_hover: theme.color_accent_foreground
             hover: instance(0.0)
             active: instance(0.0)
             get_color: fn() {
@@ -50,12 +50,12 @@ script_mod! {
         }
         draw_bg +: {
             color: theme.color_transparent
-            color_hover: theme.color_card
+            color_hover: theme.color_accent
             hover: instance(0.0)
             active: instance(0.0)
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, 5.0)
+                sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, 4.0)
                 sdf.fill(self.color.mix(self.color_hover, self.hover) * (1.0 - self.active))
                 return sdf.result
             }
@@ -107,11 +107,11 @@ script_mod! {
         padding: Inset{left: 4 top: 4 right: 4 bottom: 0}
         menu_item: mod.components.IconPopupMenuItem {}
         draw_bg +: {
-            color: theme.color_background
-            border_color: theme.color_input
-            connector_color: uniform(theme.color_primary)
+            color: theme.color_popover
+            border_color: theme.color_border
+            connector_color: uniform(theme.color_border)
             border_size: 1.0
-            border_radius: 7.0
+            border_radius: theme.radius_md
             selected_anchor_height: uniform(24.0)
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)

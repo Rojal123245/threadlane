@@ -158,21 +158,21 @@ script_mod! {
         padding: Inset{left: 11 right: 10}
         draw_bg +: {
             color: theme.color_transparent
-            color_hover: theme.color_card
-            color_focus: theme.color_card
+            color_hover: theme.color_accent
+            color_focus: theme.color_accent
             color_down: theme.color_secondary
             border_color: theme.color_transparent
             border_color_hover: theme.color_transparent
             border_color_focus: theme.color_transparent
             border_color_down: theme.color_transparent
             border_size: 0.0
-            border_radius: 5.0
+            border_radius: theme.radius_xs
         }
         draw_text +: {
             color: theme.color_foreground
-            color_hover: theme.color_primary_foreground
-            color_focus: theme.color_primary_foreground
-            color_down: theme.color_primary_foreground
+            color_hover: theme.color_accent_foreground
+            color_focus: theme.color_accent_foreground
+            color_down: theme.color_accent_foreground
             text_style +: { font_size: 9.5 }
         }
     }
@@ -189,10 +189,10 @@ script_mod! {
             new_batch: true
             padding: Inset{left: 4 top: 4 right: 4 bottom: 4}
             draw_bg +: {
-                color: theme.color_background
-                border_color: theme.color_secondary
+                color: theme.color_popover
+                border_color: theme.color_border
                 border_size: 1.0
-                border_radius: 9.0
+                border_radius: theme.radius_md
             }
 
             archive_session_btn := mod.components.ContextMenuItem {
@@ -202,9 +202,9 @@ script_mod! {
             delete_session_btn := mod.components.ContextMenuItem {
                 text: "Delete Session"
                 draw_bg +: {
-                    color_hover: theme.color_card
-                    color_focus: theme.color_card
-                    color_down: theme.color_card
+                    color_hover: theme.color_accent
+                    color_focus: theme.color_accent
+                    color_down: theme.color_accent
                 }
                 draw_text +: {
                     color: theme.color_destructive

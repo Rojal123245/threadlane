@@ -12,10 +12,10 @@ script_mod! {
         padding: Inset{left: 16 top: 14 right: 16 bottom: 14}
         spacing: 10
         draw_bg +: {
-            color: theme.color_background
-            border_radius: 8.0
+            color: theme.color_card
+            border_radius: theme.radius_lg
             border_size: 1.0
-            border_color: theme.color_card
+            border_color: theme.color_border
         }
     }
 
