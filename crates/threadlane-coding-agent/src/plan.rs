@@ -121,7 +121,7 @@ impl ToolExecutor for UpdatePlanToolExecutor {
     fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
         vec![AgentToolDefinition::new(
             UPDATE_PLAN_TOOL_NAME,
-            "Replace the current session plan. Use an empty plan to clear it.",
+            "Replace the current session plan. Use this tool at the start of multi-step work and after every meaningful milestone: mark the current step in_progress, mark it completed immediately when it succeeds, and set the next step in_progress. Use an empty plan to clear it.",
             serde_json::json!({
                 "type": "object",
                 "properties": {

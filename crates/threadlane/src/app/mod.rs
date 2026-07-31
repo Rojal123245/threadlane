@@ -3744,6 +3744,10 @@ pub struct App {
     #[rust]
     terminal_poll_next_frame: NextFrame,
     #[rust]
+    chat_redraw_next_frame: NextFrame,
+    #[rust]
+    chat_redraw_pending: bool,
+    #[rust]
     next_git_request_id: u64,
     #[rust]
     git_status_timer: Timer,
@@ -3801,6 +3805,8 @@ impl ScriptHook for App {}
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         self.terminal_poll_next_frame = NextFrame::default();
+        self.chat_redraw_next_frame = NextFrame::default();
+        self.chat_redraw_pending = false;
         self.git_status_timer = cx.start_interval(2.0);
         self.right_sidebar_width = 280.0;
         let (tx, rx) = channel::<GuiAgentEvent>();
@@ -4848,7 +4854,6 @@ impl AppMain for App {
         crate::components::script_mod(vm);
         self::script_mod(vm)
     }
-
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if self.handle_clipboard_image_paste(cx, event) {
             return;
@@ -4866,6 +4871,10 @@ impl AppMain for App {
         }
         self.match_event(cx, event);
         self.poll_agent_events(cx);
+        if self.chat_redraw_next_frame.is_event(event).is_some() {
+            self.chat_redraw_pending = false;
+            self.ui.view(cx, ids!(chat_panel)).redraw(cx);
+        }
         self.poll_update_status(cx);
         if self.terminal_poll_next_frame.is_event(event).is_some() {
             self.poll_terminal_output(cx);
@@ -5018,6 +5027,12 @@ fn format_capabilities_summary(skills: &[SkillMetadata], agents: &[AgentConfig])
 }
 
 impl App {
+    fn schedule_chat_redraw(&mut self, cx: &mut Cx) {
+        if !self.chat_redraw_pending {
+            self.chat_redraw_pending = true;
+            self.chat_redraw_next_frame = cx.new_next_frame();
+        }
+    }
     fn enqueue_steer_interrupt(
         &mut self,
         _cx: &mut Cx,
@@ -5053,7 +5068,7 @@ impl App {
             workspace.chat.push_chat(MsgRole::User, visible);
             workspace.ui.attachments.clear();
         }
-    }
+        }
 
     fn open_providers_modal(&mut self, cx: &mut Cx) {
         let mut show_extensions = false;
@@ -5820,7 +5835,10 @@ impl App {
         {
             let chip = self.ui.button(cx, path);
             if let Some(name) = names.get(index) {
-                chip.set_text(cx, &format!("{name}  ×"));
+                chip.set_text(
+                    cx,
+                    &format!("{} ×", crate::path_utils::truncate_middle_chars(name, 24)),
+                );
                 chip.set_visible(cx, true);
             } else {
                 chip.set_visible(cx, false);
@@ -8884,7 +8902,7 @@ impl App {
             }
         }
 
-        self.ui.view(cx, ids!(chat_panel)).redraw(cx);
+        self.schedule_chat_redraw(cx);
     }
 }
 

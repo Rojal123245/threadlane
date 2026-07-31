@@ -583,7 +583,6 @@ impl TaskSidebar {
         self.current_session_id = current_session_id;
         self.view.redraw(cx);
     }
-
     pub fn toggle_session(&mut self, cx: &mut Cx, session_id: &str) {
         let expanded = self
             .expanded_sessions
