@@ -146,7 +146,7 @@ impl SessionTree {
         let value = value.into();
 
         if let Some(ref path) = self.file_path {
-            let _guard = session_file_lock().lock().unwrap();
+            let _guard = session_file_lock().lock().unwrap_or_else(|e| e.into_inner());
             let mut file = OpenOptions::new().create(true).append(true).open(path)?;
             let record = SessionRecord::GlobalFact {
                 key: key.clone(),
@@ -173,7 +173,7 @@ impl SessionTree {
     }
 
     pub fn append_plan_to_file(path: &Path, plan: &SessionPlan) -> std::io::Result<()> {
-        let _guard = session_file_lock().lock().unwrap();
+        let _guard = session_file_lock().lock().unwrap_or_else(|e| e.into_inner());
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
         let record = SessionRecord::Plan {
             explanation: plan.explanation.clone(),
@@ -197,7 +197,7 @@ impl SessionTree {
             // Reload while holding the same process-wide lock used by node
             // appends. This closes the read/replace window: nodes appended by
             // the normal agent turn are included in the title rewrite.
-            let _guard = session_file_lock().lock().unwrap();
+            let _guard = session_file_lock().lock().unwrap_or_else(|e| e.into_inner());
             let mut latest = match Self::load_from_file(&path) {
                 Ok(tree) => tree,
                 Err(error) => {
@@ -234,7 +234,7 @@ impl SessionTree {
             return Ok(());
         };
 
-        let _guard = session_file_lock().lock().unwrap();
+        let _guard = session_file_lock().lock().unwrap_or_else(|e| e.into_inner());
         let mut latest = if path.exists() {
             match Self::load_from_file(&path) {
                 Ok(tree) => tree,
@@ -266,7 +266,7 @@ impl SessionTree {
             self.title_attempted = true;
             return Ok(true);
         };
-        let _guard = session_file_lock().lock().unwrap();
+        let _guard = session_file_lock().lock().unwrap_or_else(|e| e.into_inner());
         let mut latest = Self::load_from_file(&path)?;
         if latest.title_attempted {
             self.title_attempted = true;
@@ -334,7 +334,7 @@ impl SessionTree {
         }
 
         if let Some(ref path) = self.file_path {
-            let _guard = session_file_lock().lock().unwrap();
+            let _guard = session_file_lock().lock().unwrap_or_else(|e| e.into_inner());
             if self.append_node_and_metadata_to_file(path, &node).is_err() {
                 self.nodes.remove(&node_id);
                 self.node_order.pop();
@@ -388,7 +388,7 @@ impl SessionTree {
         next.active_node_id = active_node_id;
 
         if let Some(path) = next.file_path.clone() {
-            let _guard = session_file_lock().lock().unwrap();
+            let _guard = session_file_lock().lock().unwrap_or_else(|e| e.into_inner());
             next.save_transactionally(&path)
                 .map_err(|error| format!("Failed to persist passive branch: {error}"))?;
         }
@@ -446,7 +446,7 @@ impl SessionTree {
         is_error: bool,
     ) -> bool {
         if let Some(path) = self.file_path.clone() {
-            let _guard = session_file_lock().lock().unwrap();
+            let _guard = session_file_lock().lock().unwrap_or_else(|e| e.into_inner());
             let Ok(mut latest) = Self::load_from_file(&path) else {
                 return false;
             };
@@ -515,7 +515,7 @@ impl SessionTree {
             return false;
         }
         if let Some(path) = self.file_path.clone() {
-            let _guard = session_file_lock().lock().unwrap();
+            let _guard = session_file_lock().lock().unwrap_or_else(|e| e.into_inner());
             let old_active = self.active_node_id.clone();
             self.active_node_id = Some(node_id.to_string());
             if self.append_metadata_to_file(&path).is_err() {
