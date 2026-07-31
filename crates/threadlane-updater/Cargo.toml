@@ -1,0 +1,8 @@
+[package]
+name = "threadlane-updater"
+version = "0.1.0"
+edition = "2021"
+description = "Signed application update checks and background downloads for threadlane agent"
+
+[dependencies]
+cargo-packager-updater = "=0.2.3"

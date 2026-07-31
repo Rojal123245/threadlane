@@ -3037,7 +3037,6 @@ version = "0.0.7"
 dependencies = [
  "arboard",
  "base64",
- "cargo-packager-updater",
  "directories",
  "makepad-terminal-core",
  "makepad-widgets",
@@ -3050,8 +3049,10 @@ dependencies = [
  "serde_json",
  "threadlane-agent",
  "threadlane-coding-agent",
+ "threadlane-git",
  "threadlane-provider",
  "threadlane-tools",
+ "threadlane-updater",
  "tokio",
  "unicode-segmentation 1.13.3",
 ]
@@ -3084,10 +3085,36 @@ dependencies = [
  "serde_yaml",
  "tempfile",
  "threadlane-agent",
+ "threadlane-mcp",
  "threadlane-provider",
+ "threadlane-skills",
  "threadlane-tools",
+ "threadlane-wasi",
  "tokio",
- "wasmi",
+]
+
+[[package]]
+name = "threadlane-git"
+version = "0.1.0"
+
+[[package]]
+name = "threadlane-hashline"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "threadlane-mcp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "serde",
+ "serde_json",
+ "threadlane-agent",
+ "tokio",
 ]
 
 [[package]]
@@ -3109,12 +3136,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "threadlane-skills"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "directories",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "threadlane-agent",
+]
+
+[[package]]
 name = "threadlane-tools"
 version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "threadlane-hashline",
+]
+
+[[package]]
+name = "threadlane-updater"
+version = "0.1.0"
+dependencies = [
+ "cargo-packager-updater",
+]
+
+[[package]]
+name = "threadlane-wasi"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "directories",
+ "md5",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "threadlane-agent",
+ "wasmi",
 ]
 
 [[package]]
