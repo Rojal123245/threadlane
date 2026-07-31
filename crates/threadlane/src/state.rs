@@ -17,6 +17,7 @@ pub use crate::path_utils::truncate_chars;
 #[derive(Clone)]
 pub struct CapabilitySkillRow {
     pub id: String,
+    #[allow(dead_code)]
     pub description: String,
     pub scope_label: String,
     pub file_path: PathBuf,
@@ -216,11 +217,7 @@ pub enum GuiAgentEvent {
         operation: String,
         result: Result<(), String>,
     },
-    GitHubPullRequestFinished {
-        request_id: u64,
-        work_dir: PathBuf,
-        result: Result<String, String>,
-    },
+
     GitDiffLoaded {
         request_id: u64,
         path: String,

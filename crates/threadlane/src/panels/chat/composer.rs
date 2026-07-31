@@ -15,7 +15,13 @@ pub fn accepts_generation_event(
 ) -> bool {
     match event {
         GenerationEvent::CommandOutput => {
-            active_generation == Some(generation) || terminal_generation == Some(generation)
+            if active_generation == Some(generation) {
+                true
+            } else if active_generation.is_none() {
+                terminal_generation == Some(generation)
+            } else {
+                false
+            }
         }
         GenerationEvent::AgentEnd | GenerationEvent::AgentError => {
             active_generation == Some(generation)

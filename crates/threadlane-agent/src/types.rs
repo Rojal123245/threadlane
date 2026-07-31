@@ -192,6 +192,20 @@ pub struct ImageAttachment {
     pub data_url: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeferredHandle {
+    pub handle_id: String,
+    pub provider: String,
+    pub model: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentUsageSummary {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_subagents: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "snake_case")]
 pub enum AgentMessage {
@@ -210,6 +224,10 @@ pub enum AgentMessage {
         content: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         tool_calls: Option<Vec<ToolCall>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deferred_handle: Option<DeferredHandle>,
     },
     Tool {
         tool_call_id: String,

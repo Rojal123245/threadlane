@@ -29,20 +29,20 @@ script_mod! {
 
         draw_bg +: {
             border_size: 1.0
-            border_radius: 6.0
-            color: theme.color_background
-            color_hover: theme.color_card
+            border_radius: theme.radius_sm
+            color: theme.color_transparent
+            color_hover: theme.color_accent
             color_focus: theme.color_secondary
             color_down: theme.color_primary
-            border_color: theme.color_border
-            border_color_hover: theme.color_primary
-            border_color_focus: theme.color_primary
+            border_color: theme.color_transparent
+            border_color_hover: theme.color_border
+            border_color_focus: theme.color_border
             border_color_down: theme.color_primary
         }
         draw_text +: {
-            color: theme.color_primary
+            color: theme.color_muted_foreground
             color_hover: theme.color_foreground
-            color_focus: theme.color_primary_foreground
+            color_focus: theme.color_foreground
             color_down: theme.color_primary_foreground
             text_style +: { font_size: 9.5 }
         }
@@ -54,19 +54,19 @@ script_mod! {
                     from: {all: Forward {duration: 0.}}
                     apply: {
                         draw_bg: {
-                            color: theme.color_background
-                            color_hover: theme.color_card
+                            color: theme.color_transparent
+                            color_hover: theme.color_accent
                             color_focus: theme.color_secondary
                             color_down: theme.color_primary
-                            border_color: theme.color_border
-                            border_color_hover: theme.color_primary
-                            border_color_focus: theme.color_primary
+                            border_color: theme.color_transparent
+                            border_color_hover: theme.color_border
+                            border_color_focus: theme.color_border
                             border_color_down: theme.color_primary
                         }
                         draw_text: {
-                            color: theme.color_primary
+                            color: theme.color_muted_foreground
                             color_hover: theme.color_foreground
-                            color_focus: theme.color_primary_foreground
+                            color_focus: theme.color_foreground
                             color_down: theme.color_primary_foreground
                         }
                     }

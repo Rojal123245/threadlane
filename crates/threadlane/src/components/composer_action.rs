@@ -11,15 +11,15 @@ script_mod! {
         padding: Inset{left: 9 right: 9 top: 2 bottom: 2}
         draw_bg +: {
             color: theme.color_secondary
-            color_hover: theme.color_secondary
+            color_hover: theme.color_accent
             color_down: theme.color_input
             border_color: theme.color_border
-            border_color_hover: theme.color_input
+            border_color_hover: theme.color_border
             border_size: 1.0
-            border_radius: 6.0
+            border_radius: theme.radius_sm
         }
         draw_text +: {
-            color: theme.color_card_foreground
+            color: theme.color_foreground
             color_hover: theme.color_foreground
             color_down: theme.color_primary_foreground
             text_style +: { font_size: 9.0 }
@@ -46,7 +46,7 @@ script_mod! {
             color: theme.color_primary
             color_hover: theme.color_primary
             color_down: theme.color_primary
-            border_radius: 7.0
+            border_radius: theme.radius_sm
         }
         draw_text +: {
             color: theme.color_primary_foreground

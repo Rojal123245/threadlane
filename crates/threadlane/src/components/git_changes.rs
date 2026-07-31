@@ -104,15 +104,15 @@ script_mod! {
                     text: ""
                     draw_bg +: {
                         color: theme.color_transparent
-                        color_hover: theme.color_card
+                        color_hover: theme.color_accent
                         color_down: theme.color_secondary
                         border_color: theme.color_transparent
                         border_size: 0.0
-                        border_radius: 4.0
+                        border_radius: theme.radius_xs
                     }
                     draw_text +: {
                         color: theme.color_foreground
-                        color_hover: theme.color_primary_foreground
+                        color_hover: theme.color_foreground
                         text_style: theme.font_code { font_size: 8.5 }
                     }
                 }
@@ -261,8 +261,7 @@ impl Widget for GitChanges {
             let uid = self.widget_uid();
             let list = self.view.portal_list(cx, ids!(list));
             for (index, row) in list.items_with_actions(actions) {
-                let Some(GitChangesRow::File { index: file_index }) =
-                    self.rows.get(index).copied()
+                let Some(GitChangesRow::File { index: file_index }) = self.rows.get(index).copied()
                 else {
                     continue;
                 };

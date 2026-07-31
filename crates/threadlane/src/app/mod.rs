@@ -5,6 +5,7 @@
 use crate::components::file_tree::{FileTree, FileTreeAction};
 use crate::components::git_changes::{GitChanges, GitChangesAction};
 use crate::components::git_diff::GitDiffView;
+use crate::components::context_window::ContextWindowWidgetRefExt;
 use crate::components::model_dropdown::IconDropDownWidgetRefExt;
 use crate::components::session_row::ProjectHeaderAction;
 use crate::components::task_sidebar::{
@@ -17,6 +18,9 @@ use crate::panels::chat::{
     ChatListWidgetRefExt, ComposerState, ComposerStatus, GenerationEvent, StarterPromptAction,
     SubagentRail, ToolFoldHeader,
 };
+use crate::panels::chat::state::{
+    harness_activities_from_oplog, reduce_harness_event, HarnessActivity,
+};
 use crate::panels::command_palette::*;
 
 use crate::panels::sessions::{
@@ -27,8 +31,10 @@ use crate::state::{
     active_session_entry, archive_session, begin_title_generation, builtin_commands,
     create_new_session, delete_session, end_title_generation, is_project_working,
     is_session_working, normalize_session_title, project_work_dir_at_row, refresh_sessions,
+    session_health,
     session_entry_at_row, session_entry_for_file, session_overflow_at_row, session_title_eligible,
-    set_active_project, set_active_session, set_session_context_target, set_session_working,
+    set_active_project, set_active_session, set_session_context_target, set_session_health,
+    set_session_working,
     title_prompt_for_submission, toggle_project_collapsed, toggle_project_show_all, truncate_chars,
     CapabilityState, CommandInfo, GuiAgentEvent, MsgRole, SessionEntry, ToolStatus,
 };
@@ -38,11 +44,15 @@ use base64::Engine as _;
 use makepad_widgets::text::selection::Cursor;
 use makepad_widgets::*;
 use robius_file_picker::FileDialog;
-use threadlane_agent::{get_runtime, AgentEvent, ImageAttachment, ReasoningEffort, SessionPlan};
+use threadlane_agent::{
+    get_runtime, load_op_records_from_file, AgentEvent, ImageAttachment, ReasoningEffort,
+    SessionPlan, TokenUsage,
+};
 use threadlane_coding_agent::{
-    default_global_threadlane_dir, discover_agents, AgentConfig, AgentScope, CapabilityCatalog,
-    CodingAgent, CodingAgentOptions, ExtensionManager, ExtensionScope, HarnessSupervisor,
-    ProjectContext, SkillMetadata, SkillSettings, TaskRecord,
+    cancel_open_subagent_operations, default_global_threadlane_dir, discover_agents, AgentConfig,
+    AgentScope, CapabilityCatalog, CodingAgent, CodingAgentOptions, CodingAgentWorkHandle,
+    ExtensionManager, ExtensionScope, HarnessSupervisor, ProjectContext, SkillMetadata,
+    SkillSettings, TaskRecord,
 };
 use threadlane_provider::auth;
 use threadlane_provider::openai::{fetch_available_models, OpenAIClient};
@@ -67,6 +77,8 @@ const MAX_TERMINAL_OUTPUT: usize = 256 * 1024;
 const RIGHT_SIDEBAR_MIN_WIDTH: f64 = 220.0;
 const RIGHT_SIDEBAR_MAX_WIDTH: f64 = 520.0;
 const RIGHT_SIDEBAR_MIN_MAIN_WIDTH: f64 = 360.0;
+const DEFAULT_CONTEXT_WINDOW: u32 = 258_000;
+const CONTEXT_USAGE_FACT: &str = "context_window_usage";
 
 fn normalize_generated_commit_message(raw: &str) -> String {
     let line = raw
@@ -82,6 +94,17 @@ fn normalize_generated_commit_message(raw: &str) -> String {
         .unwrap_or(line)
         .trim();
     truncate_chars(line, 72)
+}
+
+fn context_window_limit(_model: &str) -> u32 {
+    DEFAULT_CONTEXT_WINDOW
+}
+
+fn restore_harness_activities(session_file: &Path) -> Vec<HarnessActivity> {
+    let oplog_file = session_file.with_extension("oplog.jsonl");
+    load_op_records_from_file(&oplog_file)
+        .map(|records| harness_activities_from_oplog(&records))
+        .unwrap_or_default()
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -316,385 +339,79 @@ script_mod! {
                 }
             }
 
-            // Workspace path subtitle
-            workspace_path_lbl := Label {
+            // Workspace path subtitle badge
+            workspace_path_wrap := RoundedView {
                 width: Fit
                 height: Fit
-                text: ""
-                margin: Inset{bottom: 28}
-                draw_text +: {
-                    color: theme.color_muted_foreground
-                    text_style +: { font_size: 10.5 }
+                flow: Right
+                align: Align{y: 0.5}
+                spacing: 6
+                margin: Inset{bottom: 24}
+                padding: Inset{left: 10 top: 4 right: 10 bottom: 4}
+                draw_bg +: {
+                    color: theme.color_card
+                    border_color: theme.color_border
+                    border_size: 1.0
+                    border_radius: theme.radius_sm
+                }
+                workspace_folder_icon := Icon {
+                    width: 14
+                    height: 14
+                    icon_walk: Walk{width: 14 height: 14}
+                    draw_icon +: {
+                        svg: crate_resource("self:resources/icons/folder.svg")
+                        color: theme.color_primary
+                    }
+                }
+                workspace_path_lbl := Label {
+                    width: Fit
+                    height: Fit
+                    text: ""
+                    draw_text +: {
+                        color: theme.color_muted_foreground
+                        text_style +: { font_size: 10.0 }
+                    }
                 }
             }
 
             // Action suggestion cards
-            cards_row := View {
-                width: Fit
-                height: Fit
-                flow: Right
-                spacing: 10
+                cards_row := View {
+                    width: Fit
+                    height: Fit
+                    flow: Right
+                    spacing: 10
 
-                explore_card := RoundedView {
-                    width: 160
-                    height: 108
-                    flow: Overlay
-                    draw_bg +: {
-                        color: theme.color_card
-                        border_color: theme.color_input
-                        border_size: 1.0
-                        border_radius: 10.0
+                    explore_card := mod.components.StarterPromptCard {
+                        content.header.icon_wrap.draw_bg.color: theme.color_primary_tint
+                        content.header.icon_wrap.draw_bg.border_color: theme.color_primary_tint
+                        content.header.icon_wrap.icon.draw_icon.svg: crate_resource("self:resources/icons/read-file.svg")
+                        content.header.title.text: "Explore code"
+                        content.description.text: "Understand the structure and key files"
                     }
-                    explore_content := View {
-                        width: Fill
-                        height: Fill
-                        flow: Down
-                        spacing: 10
-                        padding: Inset{left: 14 top: 14 right: 14 bottom: 14}
-                        explore_header := View {
-                            width: Fill
-                            height: 26
-                            flow: Right
-                            spacing: 9
-                            align: Align{y: 0.5}
-                            explore_icon_wrap := RoundedView {
-                                width: 26
-                                height: 26
-                                align: Align{x: 0.5 y: 0.5}
-                                draw_bg +: {
-                                    color: theme.color_primary_tint
-                                    border_color: theme.color_primary_tint
-                                    border_size: 1.0
-                                    border_radius: 7.0
-                                }
-                                explore_icon := Icon {
-                                    width: 14
-                                    height: 14
-                                    icon_walk: Walk{width: 14 height: 14}
-                                    draw_icon +: {
-                                        svg: crate_resource("self:resources/icons/read-file.svg")
-                                        color: theme.color_primary
-                                    }
-                                }
-                            }
-                            explore_lbl := Label {
-                                width: Fill
-                                height: Fit
-                                text: "Explore code"
-                                draw_text +: {
-                                    color: theme.color_primary_foreground
-                                    text_style: theme.font_bold { font_size: 11.0 }
-                                }
-                            }
-                        }
-                        explore_desc_lbl := Label {
-                            width: Fill
-                            height: Fit
-                            text: "Understand the structure and key files"
-                            draw_text +: {
-                                color: theme.color_primary
-                                text_style +: { font_size: 9.5 }
-                            }
-                        }
+                    build_card := mod.components.StarterPromptCard {
+                        content.header.icon_wrap.draw_bg.color: theme.color_accent_tint
+                        content.header.icon_wrap.draw_bg.border_color: theme.color_accent_tint
+                        content.header.icon_wrap.icon.draw_icon.svg: crate_resource("self:resources/icons/write-file.svg")
+                        content.header.title.text: "Build something"
+                        content.description.text: "Start a feature, app, or tool"
                     }
-                    explore_btn := Button {
-                        width: Fill
-                        height: Fill
-                        text: "Explore code"
-                        padding: 0
-                        spacing: 0
-                        icon_walk: Walk{width: 0 height: 0}
-                        draw_bg +: {
-                            color: theme.color_transparent
-                            color_hover: theme.color_primary_tint
-                            color_focus: theme.color_primary_tint
-                            color_down: theme.color_primary_tint
-                            border_color: theme.color_transparent
-                            border_color_hover: theme.color_transparent
-                            border_color_focus: theme.color_transparent
-                            border_color_down: theme.color_transparent
-                            border_size: 0.0
-                            border_radius: 10.0
-                        }
-                        draw_text +: {
-                            color: theme.color_transparent
-                            color_hover: theme.color_transparent
-                            color_focus: theme.color_transparent
-                            color_down: theme.color_transparent
-                        }
+                    review_card := mod.components.StarterPromptCard {
+                        content.header.icon_wrap.draw_bg.color: theme.color_success_tint
+                        content.header.icon_wrap.draw_bg.border_color: theme.color_success_tint
+                        content.header.icon_wrap.icon.draw_icon.svg: crate_resource("self:resources/icons/edit-file.svg")
+                        content.header.icon_wrap.icon.draw_icon.color: theme.color_success
+                        content.header.title.text: "Review code"
+                        content.description.text: "Find bugs and simplify changes"
+                    }
+                    fix_card := mod.components.StarterPromptCard {
+                        content.header.icon_wrap.draw_bg.color: theme.color_destructive_tint
+                        content.header.icon_wrap.draw_bg.border_color: theme.color_destructive_tint
+                        content.header.icon_wrap.icon.draw_icon.svg: crate_resource("self:resources/icons/tool.svg")
+                        content.header.icon_wrap.icon.draw_icon.color: theme.color_warning
+                        content.header.title.text: "Fix an issue"
+                        content.description.text: "Diagnose errors and failures"
                     }
                 }
-
-                build_card := RoundedView {
-                    width: 160
-                    height: 108
-                    flow: Overlay
-                    draw_bg +: {
-                        color: theme.color_card
-                        border_color: theme.color_input
-                        border_size: 1.0
-                        border_radius: 10.0
-                    }
-                    build_content := View {
-                        width: Fill
-                        height: Fill
-                        flow: Down
-                        spacing: 10
-                        padding: Inset{left: 14 top: 14 right: 14 bottom: 14}
-                        build_header := View {
-                            width: Fill
-                            height: 26
-                            flow: Right
-                            spacing: 9
-                            align: Align{y: 0.5}
-                            build_icon_wrap := RoundedView {
-                                width: 26
-                                height: 26
-                                align: Align{x: 0.5 y: 0.5}
-                                draw_bg +: {
-                                    color: theme.color_accent_tint
-                                    border_color: theme.color_accent_tint
-                                    border_size: 1.0
-                                    border_radius: 7.0
-                                }
-                                build_icon := Icon {
-                                    width: 14
-                                    height: 14
-                                    icon_walk: Walk{width: 14 height: 14}
-                                    draw_icon +: {
-                                        svg: crate_resource("self:resources/icons/write-file.svg")
-                                        color: theme.color_primary
-                                    }
-                                }
-                            }
-                            build_lbl := Label {
-                                width: Fill
-                                height: Fit
-                                text: "Build something"
-                                draw_text +: {
-                                    color: theme.color_primary_foreground
-                                    text_style: theme.font_bold { font_size: 11.0 }
-                                }
-                            }
-                        }
-                        build_desc_lbl := Label {
-                            width: Fill
-                            height: Fit
-                            text: "Start a feature, app, or tool"
-                            draw_text +: {
-                                color: theme.color_primary
-                                text_style +: { font_size: 9.5 }
-                            }
-                        }
-                    }
-                    build_btn := Button {
-                        width: Fill
-                        height: Fill
-                        text: "Build something"
-                        padding: 0
-                        spacing: 0
-                        icon_walk: Walk{width: 0 height: 0}
-                        draw_bg +: {
-                            color: theme.color_transparent
-                            color_hover: theme.color_accent_tint
-                            color_focus: theme.color_accent_tint
-                            color_down: theme.color_accent_tint
-                            border_color: theme.color_transparent
-                            border_color_hover: theme.color_transparent
-                            border_color_focus: theme.color_transparent
-                            border_color_down: theme.color_transparent
-                            border_size: 0.0
-                            border_radius: 10.0
-                        }
-                        draw_text +: {
-                            color: theme.color_transparent
-                            color_hover: theme.color_transparent
-                            color_focus: theme.color_transparent
-                            color_down: theme.color_transparent
-                        }
-                    }
-                }
-
-                review_card := RoundedView {
-                    width: 160
-                    height: 108
-                    flow: Overlay
-                    draw_bg +: {
-                        color: theme.color_card
-                        border_color: theme.color_input
-                        border_size: 1.0
-                        border_radius: 10.0
-                    }
-                    review_content := View {
-                        width: Fill
-                        height: Fill
-                        flow: Down
-                        spacing: 10
-                        padding: Inset{left: 14 top: 14 right: 14 bottom: 14}
-                        review_header := View {
-                            width: Fill
-                            height: 26
-                            flow: Right
-                            spacing: 9
-                            align: Align{y: 0.5}
-                            review_icon_wrap := RoundedView {
-                                width: 26
-                                height: 26
-                                align: Align{x: 0.5 y: 0.5}
-                                draw_bg +: {
-                                    color: theme.color_success_tint
-                                    border_color: theme.color_success_tint
-                                    border_size: 1.0
-                                    border_radius: 7.0
-                                }
-                                review_icon := Icon {
-                                    width: 14
-                                    height: 14
-                                    icon_walk: Walk{width: 14 height: 14}
-                                    draw_icon +: {
-                                        svg: crate_resource("self:resources/icons/edit-file.svg")
-                                        color: theme.color_success
-                                    }
-                                }
-                            }
-                            review_lbl := Label {
-                                width: Fill
-                                height: Fit
-                                text: "Review code"
-                                draw_text +: {
-                                    color: theme.color_primary_foreground
-                                    text_style: theme.font_bold { font_size: 11.0 }
-                                }
-                            }
-                        }
-                        review_desc_lbl := Label {
-                            width: Fill
-                            height: Fit
-                            text: "Find bugs and simplify changes"
-                            draw_text +: {
-                                color: theme.color_primary
-                                text_style +: { font_size: 9.5 }
-                            }
-                        }
-                    }
-                    review_btn := Button {
-                        width: Fill
-                        height: Fill
-                        text: "Review code"
-                        padding: 0
-                        spacing: 0
-                        icon_walk: Walk{width: 0 height: 0}
-                        draw_bg +: {
-                            color: theme.color_transparent
-                            color_hover: theme.color_success_tint
-                            color_focus: theme.color_success_tint
-                            color_down: theme.color_success_tint
-                            border_color: theme.color_transparent
-                            border_color_hover: theme.color_transparent
-                            border_color_focus: theme.color_transparent
-                            border_color_down: theme.color_transparent
-                            border_size: 0.0
-                            border_radius: 10.0
-                        }
-                        draw_text +: {
-                            color: theme.color_transparent
-                            color_hover: theme.color_transparent
-                            color_focus: theme.color_transparent
-                            color_down: theme.color_transparent
-                        }
-                    }
-                }
-
-                fix_card := RoundedView {
-                    width: 160
-                    height: 108
-                    flow: Overlay
-                    draw_bg +: {
-                        color: theme.color_card
-                        border_color: theme.color_input
-                        border_size: 1.0
-                        border_radius: 10.0
-                    }
-                    fix_content := View {
-                        width: Fill
-                        height: Fill
-                        flow: Down
-                        spacing: 10
-                        padding: Inset{left: 14 top: 14 right: 14 bottom: 14}
-                        fix_header := View {
-                            width: Fill
-                            height: 26
-                            flow: Right
-                            spacing: 9
-                            align: Align{y: 0.5}
-                            fix_icon_wrap := RoundedView {
-                                width: 26
-                                height: 26
-                                align: Align{x: 0.5 y: 0.5}
-                                draw_bg +: {
-                                    color: theme.color_destructive_tint
-                                    border_color: theme.color_destructive_tint
-                                    border_size: 1.0
-                                    border_radius: 7.0
-                                }
-                                fix_icon := Icon {
-                                    width: 14
-                                    height: 14
-                                    icon_walk: Walk{width: 14 height: 14}
-                                    draw_icon +: {
-                                        svg: crate_resource("self:resources/icons/tool.svg")
-                                        color: theme.color_warning
-                                    }
-                                }
-                            }
-                            fix_lbl := Label {
-                                width: Fill
-                                height: Fit
-                                text: "Fix an issue"
-                                draw_text +: {
-                                    color: theme.color_primary_foreground
-                                    text_style: theme.font_bold { font_size: 11.0 }
-                                }
-                            }
-                        }
-                        fix_desc_lbl := Label {
-                            width: Fill
-                            height: Fit
-                            text: "Diagnose errors and failures"
-                            draw_text +: {
-                                color: theme.color_primary
-                                text_style +: { font_size: 9.5 }
-                            }
-                        }
-                    }
-                    fix_btn := Button {
-                        width: Fill
-                        height: Fill
-                        text: "Fix an issue"
-                        padding: 0
-                        spacing: 0
-                        icon_walk: Walk{width: 0 height: 0}
-                        draw_bg +: {
-                            color: theme.color_transparent
-                            color_hover: theme.color_destructive_tint
-                            color_focus: theme.color_destructive_tint
-                            color_down: theme.color_destructive_tint
-                            border_color: theme.color_transparent
-                            border_color_hover: theme.color_transparent
-                            border_color_focus: theme.color_transparent
-                            border_color_down: theme.color_transparent
-                            border_size: 0.0
-                            border_radius: 10.0
-                        }
-                        draw_text +: {
-                            color: theme.color_transparent
-                            color_hover: theme.color_transparent
-                            color_focus: theme.color_transparent
-                            color_down: theme.color_transparent
-                        }
-                    }
-                }
-            }
         }
 
         list := PortalList {
@@ -1076,8 +793,6 @@ script_mod! {
         }
     }
 
-
-
     // -------------------------------------------------------------------
     let SessionList = #(SessionList::register_widget(vm)) {
         width: Fill
@@ -1089,12 +804,12 @@ script_mod! {
             draw_bg +: {
                 color: theme.color_background
                 color_hover: theme.color_card
-                border_color: theme.color_primary
+                border_color: theme.color_border
                 border_size: 1.0
             }
             project_toggle_surface +: {
                 folder_icon +: { draw_icon +: { color: theme.color_primary } }
-                name_lbl +: { draw_text +: { color: theme.color_primary_foreground } }
+                name_lbl +: { draw_text +: { color: theme.color_foreground } }
             }
         }
 
@@ -1154,18 +869,18 @@ script_mod! {
                     is_active: 1.0
                     color: theme.color_secondary
                     color_hover: theme.color_accent
-                    border_color: theme.color_transparent
-                    border_size: 0.0
-                    border_radius: 7.0
+                    border_color: theme.color_border
+                    border_size: 1.0
+                    border_radius: theme.radius_sm
                 }
                 title_surface +: {
                     title_lbl +: {
-                        draw_text +: { color: theme.color_primary_foreground }
+                        draw_text +: { color: theme.color_foreground }
                     }
                 }
                 time_lbl +: {
                     draw_text +: {
-                        color: theme.color_card_foreground
+                        color: theme.color_muted_foreground
                     }
                 }
             }
@@ -1181,19 +896,19 @@ script_mod! {
             mod.components.SessionRowContextBase = SessionRowBase {
                 draw_bg +: {
                     color: theme.color_card
-                    color_hover: theme.color_primary
-                    border_color: theme.color_primary
+                    color_hover: theme.color_accent
+                    border_color: theme.color_border
                     border_size: 1.0
-                    border_radius: 6.0
+                    border_radius: theme.radius_sm
                 }
                 title_surface +: {
                     title_lbl +: {
-                        draw_text +: { color: theme.color_primary_foreground }
+                        draw_text +: { color: theme.color_foreground }
                     }
                 }
                 time_lbl +: {
                     draw_text +: {
-                        color: theme.color_primary
+                        color: theme.color_muted_foreground
                     }
                 }
             }
@@ -1389,8 +1104,8 @@ script_mod! {
                         draw_icon +: {
                             svg: crate_resource("self:resources/icons/close.svg")
                             color: theme.color_muted_foreground
-                            color_hover: theme.color_primary_foreground
-                            color_focus: theme.color_primary_foreground
+                            color_hover: theme.color_foreground
+                            color_focus: theme.color_foreground
                             color_down: theme.color_primary_foreground
                         }
                     }
@@ -2379,8 +2094,8 @@ script_mod! {
                                                 }
                                                 draw_text +: {
                                                     color: theme.color_foreground
-                                                    color_hover: theme.color_primary_foreground
-                                                    color_focus: theme.color_primary_foreground
+                                                    color_hover: theme.color_foreground
+                                                    color_focus: theme.color_foreground
                                                     color_empty: theme.color_muted_foreground
                                                     color_empty_hover: theme.color_muted_foreground
                                                     color_empty_focus: theme.color_muted_foreground
@@ -2411,15 +2126,6 @@ script_mod! {
                                             text_style +: { font_size: 8.5 }
                                         }
                                     }
-
-
-
-                                    git_branch_drop := mod.components.GitBranchDropDown {
-                                        width: 132
-                                        height: 28
-                                        labels: ["Git"]
-                                    }
-
                                     attach_btn := mod.components.IconButton {
                                         width: 30
                                         height: 28
@@ -2499,10 +2205,16 @@ script_mod! {
 
                                     }
 
+                                    context_window := mod.components.ContextWindow {
+                                        width: 28
+                                        height: 28
+                                        visible: false
+                                    }
+
                                     composer_action_slot := View {
-                                        width: 34
+                                        width: 68
                                         height: 30
-                                        flow: Overlay
+                                        flow: Right
 
                                         send_btn := mod.components.ComposerAction {
                                             width: 34
@@ -2548,6 +2260,89 @@ script_mod! {
                                                 color_down: theme.color_primary_foreground
                                             }
                                         }
+                                    }
+                                }
+                            }
+                            checkout_target_row := View {
+                                width: Fill
+                                height: Fit
+                                flow: Down
+                                spacing: 4
+                                padding: Inset{left: 9 right: 7 bottom: 5}
+
+                                checkout_target_controls := RoundedView {
+                                    width: Fill
+                                    height: 32
+                                    flow: Right
+                                    spacing: 6
+                                    padding: Inset{left: 8 right: 8}
+                                    align: Align{y: 0.5}
+                                    draw_bg +: {
+                                        color: theme.color_card
+                                        border_color: theme.color_border
+                                        border_size: 1.0
+                                        border_radius: theme.radius_sm
+                                    }
+
+                                    checkout_target_drop := mod.components.IconDropDown {
+                                        width: 142
+                                        height: 28
+                                        labels: ["New worktree…", "Current checkout"]
+                                        use_provider_icons: false
+                                        padding: Inset{left: 10 right: 22}
+                                        icon_walk: Walk{width: 14 height: 14 margin: Inset{right: 6}}
+                                        draw_icon +: {
+                                            svg: crate_resource("self:resources/icons/folder.svg")
+                                            color: theme.color_primary
+                                        }
+                                        popup_menu: mod.components.IconPopupMenu {
+                                            width: 142
+                                            menu_item: mod.components.IconPopupMenuItem {
+                                                use_provider_icons: false
+                                            }
+                                        }
+                                    }
+
+                                    flex_spacer := View {
+                                        width: Fill
+                                        height: 28
+                                    }
+
+                                    git_branch_drop := mod.components.GitBranchDropDown {
+                                        width: 132
+                                        height: 28
+                                        labels: ["Git"]
+                                    }
+                                }
+
+                                worktree_prompt_row := View {
+                                    width: Fill
+                                    height: 28
+                                    visible: false
+                                    flow: Right
+                                    spacing: 4
+
+                                    worktree_name := mod.components.SearchInput {
+                                        width: 110
+                                        empty_text: "Worktree name"
+                                        margin: 0
+                                    }
+                                    worktree_path := mod.components.SearchInput {
+                                        width: Fill
+                                        empty_text: "Path"
+                                        margin: 0
+                                    }
+                                    worktree_create_btn := mod.components.HeaderChipButton {
+                                        width: Fit
+                                        height: 28
+                                        text: "Create"
+                                        padding: Inset{left: 7 right: 7 top: 4 bottom: 4}
+                                    }
+                                    worktree_cancel_btn := mod.components.HeaderChipButton {
+                                        width: Fit
+                                        height: 28
+                                        text: "Cancel"
+                                        padding: Inset{left: 7 right: 7 top: 4 bottom: 4}
                                     }
                                 }
                             }
@@ -3031,6 +2826,7 @@ script_mod! {
         }
     }
 }
+
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -3836,6 +3632,7 @@ fn task_sidebar_items(
                 status: record.status,
                 cancellable,
                 started_at_ms: record.started_at_ms,
+                finished_at_ms: record.finished_at_ms,
             }
         })
         .collect()
@@ -3848,6 +3645,7 @@ struct GenerationRun {
 
 struct SessionRuntime {
     agent: Arc<tokio::sync::Mutex<CodingAgent>>,
+    work_handle: CodingAgentWorkHandle,
     session_file: Option<PathBuf>,
     generation: Option<GenerationRun>,
     terminal_generation_id: Option<u64>,
@@ -3858,6 +3656,7 @@ struct SessionRuntime {
     model: String,
     reasoning_effort: ReasoningEffort,
     plan: SessionPlan,
+    latest_usage: Option<TokenUsage>,
 }
 
 #[derive(Clone)]
@@ -3871,8 +3670,10 @@ impl SessionRuntime {
     fn new(agent: CodingAgent, model: String, reasoning_effort: ReasoningEffort) -> Self {
         let session_file = agent.session_tree.file_path.clone();
         let plan = agent.current_plan();
+        let work_handle = agent.work_handle();
         Self {
             agent: Arc::new(tokio::sync::Mutex::new(agent)),
+            work_handle,
             session_file,
             generation: None,
             terminal_generation_id: None,
@@ -3883,6 +3684,7 @@ impl SessionRuntime {
             model,
             reasoning_effort,
             plan,
+            latest_usage: None,
         }
     }
 }
@@ -3954,6 +3756,12 @@ pub struct App {
     #[rust]
     git_status: HashMap<PathBuf, GitStatus>,
     #[rust]
+    checkout_targets: HashMap<SessionKey, PathBuf>,
+    #[rust]
+    worktree_prompt_open: bool,
+    #[rust]
+    pending_worktree_path: Option<PathBuf>,
+    #[rust]
     git_new_branch_open: bool,
     #[rust]
     git_diff_open: bool,
@@ -3967,8 +3775,7 @@ pub struct App {
     git_operation_request_id: u64,
     #[rust]
     git_pr_pending: bool,
-    #[rust]
-    git_pr_request_id: u64,
+
     #[rust]
     git_pr_created: bool,
     #[rust]
@@ -4231,17 +4038,31 @@ impl MatchEvent for App {
             .active_key()
             .cloned()
             .unwrap_or_else(|| SessionKey::project_draft(work_dir));
+        let latest_usage = coding_agent
+            .session_tree
+            .get_fact(CONTEXT_USAGE_FACT)
+            .and_then(|value| serde_json::from_str::<TokenUsage>(value).ok());
         if let Some(entry) = initial_entry {
             let messages = coding_agent.session_tree.get_active_branch_messages();
-            self.workspace_state
-                .workspace_mut(SessionKey::new(entry.work_dir, entry.id))
-                .chat
-                .replace_from_agent_messages(&messages);
+            let session_file = entry.session_file.clone();
+            let workspace = self
+                .workspace_state
+                .workspace_mut(SessionKey::new(entry.work_dir.clone(), entry.id.clone()));
+            workspace.chat.replace_from_agent_messages(&messages);
+            workspace.chat.harness_activities = restore_harness_activities(&session_file);
+            set_session_health(
+                &entry.work_dir,
+                &entry.id,
+                session_health(&workspace.chat.harness_activities),
+            );
         }
-        self.session_runtimes.insert(
-            initial_key,
-            SessionRuntime::new(coding_agent, initial_model.clone(), ReasoningEffort::Medium),
+        let mut runtime = SessionRuntime::new(
+            coding_agent,
+            initial_model.clone(),
+            ReasoningEffort::Medium,
         );
+        runtime.latest_usage = latest_usage;
+        self.session_runtimes.insert(initial_key, runtime);
         self.set_model_dropup_options(cx, self.available_models.clone(), &initial_model);
 
         self.spawn_model_fetch(api_key, account_id_opt);
@@ -4249,6 +4070,7 @@ impl MatchEvent for App {
         self.sync_terminal_project(cx);
         self.request_git_status();
         self.sync_task_sidebar(cx);
+        self.sync_context_window(cx);
 
         cx.redraw_all();
     }
@@ -4520,8 +4342,6 @@ impl MatchEvent for App {
             }
         }
 
-
-
         if self
             .ui
             .button(cx, ids!(git_select_all_btn))
@@ -4583,6 +4403,46 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(file_tree_tab_btn)).clicked(actions) {
             self.right_sidebar_tab = RightSidebarTab::FileTree;
             self.sync_right_sidebar(cx);
+        }
+
+        if self
+            .ui
+            .icon_drop_down(cx, ids!(checkout_target_drop))
+            .selected(actions)
+            .is_some()
+        {
+            let selected = self
+                .ui
+                .icon_drop_down(cx, ids!(checkout_target_drop))
+                .selected_label();
+            if selected == "New worktree…" {
+                self.set_worktree_prompt_visible(cx, true);
+            } else {
+                self.pending_worktree_path = None;
+                if let Some(key) = self.workspace_state.active_key().cloned() {
+                    self.checkout_targets.remove(&key);
+                }
+                self.set_worktree_prompt_visible(cx, false);
+                self.rebind_active_runtime_to_target(cx);
+                self.sync_git_branch_picker(cx);
+                self.request_git_status();
+            }
+        }
+
+        if self.ui.button(cx, ids!(worktree_cancel_btn)).clicked(actions) {
+            self.pending_worktree_path = None;
+            self.set_worktree_prompt_visible(cx, false);
+            self.sync_git_branch_picker(cx);
+        }
+
+        if self.ui.button(cx, ids!(worktree_create_btn)).clicked(actions)
+            || self
+                .ui
+                .text_input(cx, ids!(worktree_path))
+                .returned(actions)
+                .is_some()
+        {
+            self.start_create_worktree(cx);
         }
 
         if self
@@ -4666,7 +4526,6 @@ impl MatchEvent for App {
             }
         }
 
-
         let task_sidebar_uid = self.ui.widget(cx, ids!(task_sidebar)).widget_uid();
         if let Some(action) = actions.find_widget_action(task_sidebar_uid) {
             match action.cast::<TaskSidebarAction>() {
@@ -4731,6 +4590,18 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(stop_btn)).clicked(actions) {
             let active_key = self.workspace_state.active_key().cloned();
             if let Some(key) = active_key {
+                if let Some(session_file) = self
+                    .session_runtimes
+                    .get(&key)
+                    .and_then(|runtime| runtime.session_file.as_deref())
+                {
+                    if let Err(error) = cancel_open_subagent_operations(session_file) {
+                        self.push_chat(
+                            MsgRole::System,
+                            format!("Could not persist subagent cancellation: {error}"),
+                        );
+                    }
+                }
                 let current_draft = self.prompt_text(cx);
                 let (restored_draft, restored_attachments) = self
                     .session_runtimes
@@ -4951,14 +4822,25 @@ impl MatchEvent for App {
 
         let submit_prompt = self.ui.button(cx, ids!(send_btn)).clicked(actions)
             || cti.text_input_ref(cx).returned(actions).is_some();
-        if submit_prompt && !self.busy {
+        if submit_prompt {
             let input_text = cti.text_input_ref(cx).text();
             let has_attachments = self
                 .workspace_state
                 .active_workspace()
                 .is_some_and(|workspace| !workspace.ui.attachments.is_empty());
             if !input_text.trim().is_empty() || has_attachments {
-                self.dispatch_input(cx, input_text, InputOrigin::Composer);
+                if self.busy {
+                    let attachments = self
+                        .workspace_state
+                        .active_workspace()
+                        .map(|workspace| workspace.ui.attachments.clone())
+                        .unwrap_or_default();
+                    self.enqueue_steer_interrupt(cx, &input_text, attachments);
+                    cti.text_input_ref(cx).set_text(cx, "");
+                    self.refresh_attachment_ui(cx);
+                } else {
+                    self.dispatch_input(cx, input_text, InputOrigin::Composer);
+                }
             }
         }
     }
@@ -5151,6 +5033,43 @@ impl App {
             self.chat_redraw_next_frame = cx.new_next_frame();
         }
     }
+    fn enqueue_steer_interrupt(
+        &mut self,
+        _cx: &mut Cx,
+        input_text: &str,
+        attachments: Vec<ImageAttachment>,
+    ) {
+        let Some(key) = self.workspace_state.active_key().cloned() else {
+            return;
+        };
+        if let Some(runtime) = self.session_runtimes.get(&key) {
+            runtime
+                .work_handle
+                .queue_follow_up_with_images(input_text.to_string(), attachments.clone());
+            let agent = runtime.agent.clone();
+            let _ = get_runtime().spawn(async move {
+                agent.lock().await.run_scheduled_agent_work().await;
+                SignalToUI::set_ui_signal();
+            });
+        }
+        if let Some(workspace) = self.workspace_state.active_workspace_mut() {
+            let attachment_names = attachments
+                .iter()
+                .map(|attachment| attachment.display_name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let visible = if attachment_names.is_empty() {
+                input_text.to_string()
+            } else if input_text.trim().is_empty() {
+                format!("Attached: {attachment_names}")
+            } else {
+                format!("{input_text}\n\nAttached: {attachment_names}")
+            };
+            workspace.chat.push_chat(MsgRole::User, visible);
+            workspace.ui.attachments.clear();
+        }
+        }
+
     fn open_providers_modal(&mut self, cx: &mut Cx) {
         let mut show_extensions = false;
         let mut show_skills = false;
@@ -5867,6 +5786,28 @@ impl App {
         effort_drop.set_selected_item(cx, ordered.len() - 1);
     }
 
+    fn sync_context_window(&self, cx: &mut Cx) {
+        let indicator = self.ui.context_window(cx, ids!(context_window));
+        let Some(key) = self.workspace_state.active_key() else {
+            indicator.clear_usage(cx);
+            return;
+        };
+        let Some(runtime) = self.session_runtimes.get(key) else {
+            indicator.clear_usage(cx);
+            return;
+        };
+        let Some(usage) = &runtime.latest_usage else {
+            indicator.clear_usage(cx);
+            return;
+        };
+        indicator.set_usage(
+            cx,
+            usage.input_tokens,
+            usage.total_tokens,
+            context_window_limit(&runtime.model),
+        );
+    }
+
     fn refresh_attachment_ui(&self, cx: &mut Cx) {
         let names = self
             .workspace_state
@@ -6270,9 +6211,47 @@ impl App {
     }
 
     fn active_work_dir(&self) -> Option<&Path> {
-        self.workspace_state
-            .active_key()
-            .map(|key| key.work_dir.as_path())
+        let key = self.workspace_state.active_key()?;
+        Some(
+            self.checkout_targets
+                .get(key)
+                .map_or(key.work_dir.as_path(), PathBuf::as_path),
+        )
+    }
+
+    fn rebind_active_runtime_to_target(&mut self, cx: &mut Cx) {
+        let Some(key) = self.workspace_state.active_key().cloned() else {
+            return;
+        };
+        let Some((model, reasoning_effort, session_file)) = self
+            .session_runtimes
+            .get(&key)
+            .map(|runtime| {
+                (
+                    runtime.model.clone(),
+                    runtime.reasoning_effort,
+                    runtime.session_file.clone(),
+                )
+            })
+        else {
+            return;
+        };
+        let (api_key, account_id) = self.current_credentials(cx);
+        let Some(work_dir) = self.active_work_dir().map(Path::to_path_buf) else {
+            return;
+        };
+        let agent = CodingAgent::new(CodingAgentOptions {
+            api_key,
+            account_id,
+            model: model.clone(),
+            work_dir,
+            session_file,
+            system_prompt: Default::default(),
+        });
+        self.session_runtimes.insert(
+            key,
+            SessionRuntime::new(agent, model, reasoning_effort),
+        );
     }
 
     fn request_git_status(&mut self) {
@@ -6310,6 +6289,57 @@ impl App {
         let picker = self.ui.icon_drop_down(cx, ids!(git_branch_drop));
         picker.set_labels(cx, labels);
         picker.set_selected_item(cx, selected);
+        let target_selected = self
+            .workspace_state
+            .active_key()
+            .and_then(|key| self.checkout_targets.get(key))
+            .map_or(1, |_| 0);
+        let target_picker = self.ui.icon_drop_down(cx, ids!(checkout_target_drop));
+        target_picker.set_selected_item(cx, target_selected);
+        target_picker.set_visible(cx, status.is_some());
+    }
+
+    fn set_worktree_prompt_visible(&mut self, cx: &mut Cx, visible: bool) {
+        self.worktree_prompt_open = visible;
+        self.ui
+            .view(cx, ids!(worktree_prompt_row))
+            .set_visible(cx, visible);
+        if visible {
+            self.ui
+                .text_input(cx, ids!(worktree_name))
+                .set_text(cx, "");
+            self.ui
+                .text_input(cx, ids!(worktree_path))
+                .set_text(cx, "");
+            self.ui
+                .text_input(cx, ids!(worktree_name))
+                .set_key_focus(cx);
+        }
+    }
+
+    fn start_create_worktree(&mut self, cx: &mut Cx) {
+        let Some(work_dir) = self.active_work_dir().map(Path::to_path_buf) else {
+            return;
+        };
+        let name = self.ui.text_input(cx, ids!(worktree_name)).text();
+        let path_text = self.ui.text_input(cx, ids!(worktree_path)).text();
+        let branch = self
+            .ui
+            .icon_drop_down(cx, ids!(git_branch_drop))
+            .selected_label();
+        let path = PathBuf::from(path_text.trim());
+        if name.trim().is_empty() || path_text.trim().is_empty() {
+            self.git_feedback = Some((false, "Enter a worktree name and path.".into()));
+            return;
+        }
+        if branch.is_empty() || branch == "Git" || branch == "detached HEAD" {
+            self.git_feedback = Some((false, "Select a branch before creating a worktree.".into()));
+            return;
+        }
+        self.pending_worktree_path = Some(path.clone());
+        self.start_git_operation(cx, format!("create worktree `{name}`"), move |_| {
+            crate::git::create_worktree(&work_dir, &path, &branch)
+        });
     }
 
     fn sync_right_sidebar(&mut self, cx: &mut Cx) {
@@ -6382,12 +6412,13 @@ impl App {
 
                 self.sync_git_commit_button(cx);
 
-                self.ui.button(cx, ids!(git_commit_btn)).set_visible(cx, true);
+                self.ui
+                    .button(cx, ids!(git_commit_btn))
+                    .set_visible(cx, true);
 
-                self.ui.button(cx, ids!(git_push_btn)).set_visible(
-                    cx,
-                    has_remote && (status.ahead > 0 || !status.has_upstream),
-                );
+                self.ui
+                    .button(cx, ids!(git_push_btn))
+                    .set_visible(cx, has_remote && (status.ahead > 0 || !status.has_upstream));
                 self.ui.button(cx, ids!(git_push_btn)).set_enabled(
                     cx,
                     (status.ahead > 0 || !status.has_upstream) && !self.git_operation_pending,
@@ -6401,14 +6432,12 @@ impl App {
                     },
                 );
 
-                self.ui.button(cx, ids!(git_pull_btn)).set_visible(
-                    cx,
-                    has_remote && status.behind > 0,
-                );
-                self.ui.button(cx, ids!(git_pull_btn)).set_enabled(
-                    cx,
-                    status.behind > 0 && !self.git_operation_pending,
-                );
+                self.ui
+                    .button(cx, ids!(git_pull_btn))
+                    .set_visible(cx, has_remote && status.behind > 0);
+                self.ui
+                    .button(cx, ids!(git_pull_btn))
+                    .set_enabled(cx, status.behind > 0 && !self.git_operation_pending);
 
                 let has_github_remote = status
                     .remote
@@ -6431,9 +6460,7 @@ impl App {
         let show_git_changes = show_git && !self.git_diff_open;
         let show_git_diff = show_git && self.git_diff_open;
 
-        self.ui
-            .view(cx, ids!(right_sidebar))
-            .set_visible(cx, true);
+        self.ui.view(cx, ids!(right_sidebar)).set_visible(cx, true);
         self.ui
             .view(cx, ids!(right_sidebar_resize_handle))
             .set_visible(cx, true);
@@ -6471,11 +6498,7 @@ impl App {
             .set_visible(cx, show_file_tree);
 
         if show_file_tree {
-            if let Some(mut tree) = self
-                .ui
-                .widget(cx, ids!(file_tree))
-                .borrow_mut::<FileTree>()
-            {
+            if let Some(mut tree) = self.ui.widget(cx, ids!(file_tree)).borrow_mut::<FileTree>() {
                 tree.set_work_dir(cx, self.active_work_dir().map(Path::to_path_buf));
             }
         }
@@ -7651,9 +7674,7 @@ impl App {
             .and_then(|key| self.session_runtimes.get(key))
             .is_some_and(|runtime| runtime.generation.is_some());
         let show_stop = presentation.show_stop(has_generation);
-        self.ui
-            .button(cx, ids!(send_btn))
-            .set_visible(cx, !show_stop);
+        self.ui.button(cx, ids!(send_btn)).set_visible(cx, true);
         self.ui
             .button(cx, ids!(stop_btn))
             .set_visible(cx, show_stop);
@@ -7793,15 +7814,29 @@ impl App {
                 system_prompt: Default::default(),
             });
             let model = agent.session_tree.model.clone().unwrap_or(model);
+            let latest_usage = agent
+                .session_tree
+                .get_fact(CONTEXT_USAGE_FACT)
+                .and_then(|value| serde_json::from_str::<TokenUsage>(value).ok());
             let messages = agent.session_tree.get_active_branch_messages();
-            self.session_runtimes.insert(
-                key.clone(),
-                SessionRuntime::new(agent, model, reasoning_effort),
-            );
+            let mut runtime = SessionRuntime::new(agent, model, reasoning_effort);
+            runtime.latest_usage = latest_usage;
+            self.session_runtimes.insert(key.clone(), runtime);
             self.workspace_state
                 .workspace_mut(key.clone())
                 .chat
                 .replace_from_agent_messages(&messages);
+            let activities = restore_harness_activities(&entry.session_file);
+            let health = session_health(&activities);
+            self.workspace_state
+                .workspace_mut(key.clone())
+                .chat
+                .harness_activities = activities;
+            set_session_health(
+                &entry.work_dir,
+                &entry.id,
+                health,
+            );
         }
 
         if let Some((model, reasoning_effort)) = self
@@ -7816,6 +7851,7 @@ impl App {
         self.refresh_project_capabilities(cx, &entry.work_dir);
         self.restore_active_status(cx);
         self.sync_task_sidebar(cx);
+        self.sync_context_window(cx);
         cx.redraw_all();
     }
 
@@ -8080,7 +8116,7 @@ impl App {
                     generation_id,
                     work_dir: event_work_dir.clone(),
                     session_id: event_session_id.clone(),
-                    output: out,
+                    output: out.unwrap_or_else(|error| error),
                 });
                 SignalToUI::set_ui_signal();
             }
@@ -8312,7 +8348,7 @@ impl App {
             // AgentEnd closes one agent loop, but CodingAgent may still run
             // hooks or scheduled work. GenerationFinished is the terminal event.
             AgentEvent::AgentEnd { .. } if generation.is_none() => (),
-            AgentEvent::AgentEnd { .. } => {
+            AgentEvent::AgentEnd { usage } => {
                 let Some((key, id)) = generation else { return };
                 let accepted = self.session_runtimes.get(&key).is_some_and(|runtime| {
                     accepts_generation_event(
@@ -8325,6 +8361,17 @@ impl App {
                 if !accepted {
                     return;
                 }
+                if let Some(runtime) = self.session_runtimes.get_mut(&key) {
+                    runtime.latest_usage = Some(usage.clone());
+                    let agent = runtime.agent.clone();
+                    get_runtime().spawn(async move {
+                        let mut agent = agent.lock().await;
+                        if let Ok(value) = serde_json::to_string(&usage) {
+                            let _ = agent.session_tree.set_fact(CONTEXT_USAGE_FACT, value);
+                        }
+                    });
+                }
+                self.sync_context_window(cx);
                 self.workspace_state
                     .workspace_mut(key.clone())
                     .chat
@@ -8428,11 +8475,21 @@ impl App {
                     self.sync_task_sidebar(cx);
                 }
             }
-            AgentEvent::TurnStart { .. }
-            | AgentEvent::MessageStart { .. }
-            | AgentEvent::SubagentQueued { .. }
+            event @ (AgentEvent::SubagentQueued { .. }
             | AgentEvent::SubagentStarted { .. }
-            | AgentEvent::SubagentFinished { .. } => {}
+            | AgentEvent::SubagentFinished { .. }
+            | AgentEvent::SubagentRecovery { .. }) => {
+                let Some(key) = target_key else { return };
+                let health = {
+                    let chat = &mut self.workspace_state.workspace_mut(key.clone()).chat;
+                    reduce_harness_event(chat, event);
+                    session_health(&chat.harness_activities)
+                };
+                set_session_health(&key.work_dir, &key.session_id, health);
+                self.ui.widget(cx, ids!(session_list)).redraw(cx);
+            }
+            AgentEvent::TurnStart { .. }
+            | AgentEvent::MessageStart { .. } => {}
         }
     }
 
@@ -8686,10 +8743,24 @@ impl App {
                                     .text_input(cx, ids!(git_commit_message))
                                     .set_text(cx, "");
                             }
+                            if operation.starts_with("create worktree ") {
+                                if let (Some(key), Some(path)) = (
+                                    self.workspace_state.active_key().cloned(),
+                                    self.pending_worktree_path.take(),
+                                ) {
+                                    self.checkout_targets.insert(key, path);
+                                }
+                                self.set_worktree_prompt_visible(cx, false);
+                                self.rebind_active_runtime_to_target(cx);
+                                self.sync_git_branch_picker(cx);
+                            }
                             let message = format!("Git {operation} completed.");
                             self.git_feedback = Some((true, message));
                         }
                         Err(error) => {
+                            if operation.starts_with("create worktree ") {
+                                self.pending_worktree_path = None;
+                            }
                             let message = format!("Git {operation} failed: {error}");
                             self.git_feedback = Some((false, message));
                         }
@@ -8698,32 +8769,7 @@ impl App {
                     self.git_status.remove(&work_dir);
                     self.request_git_status();
                 }
-                GuiAgentEvent::GitHubPullRequestFinished {
-                    request_id,
-                    work_dir,
-                    result,
-                } => {
-                    if request_id != self.git_pr_request_id
-                        || self
-                            .active_work_dir()
-                            .is_none_or(|active| active != work_dir)
-                    {
-                        continue;
-                    }
-                    self.git_pr_pending = false;
-                    match result {
-                        Ok(url) => {
-                            self.git_pr_created = true;
-                            self.git_feedback = Some((true, "Pull request created.".to_owned()));
-                            let _ = robius_open::Uri::new(&url).open();
-                        }
-                        Err(error) => {
-                            let message = format!("Could not create pull request: {error}");
-                            self.git_feedback = Some((false, message));
-                        }
-                    }
-                    self.sync_right_sidebar(cx);
-                }
+
                 GuiAgentEvent::GitDiffLoaded {
                     request_id,
                     path,
@@ -8863,12 +8909,14 @@ mod workspace_header_tests {
         aggregate_extension_reload_results, append_antigravity_models, clear_composer_for_dispatch,
         compact_workspace_path, extension_reload_matches, extension_reload_status,
         model_credential_error, normalize_generated_commit_message, ordered_model_options,
-        project_name, session_reload_count, task_sidebar_items, truncate_terminal_output,
-        InputOrigin, ANTIGRAVITY_MODELS, MAX_TERMINAL_OUTPUT,
+        project_name, reduce_harness_event, session_reload_count, task_sidebar_items,
+        restore_harness_activities, truncate_terminal_output, InputOrigin, ANTIGRAVITY_MODELS,
+        MAX_TERMINAL_OUTPUT,
     };
+    use crate::panels::chat::state::HarnessActivityStatus;
     use crate::workspace::WorkspaceUiState;
     use std::path::{Path, PathBuf};
-    use threadlane_agent::ImageAttachment;
+    use threadlane_agent::{AgentEvent, ImageAttachment, OpOutcome, OpRecord, SubagentRecoveryStatus};
     use threadlane_coding_agent::{ExtensionScope, TaskKind, TaskRecord, TaskStatus};
 
     #[test]
@@ -8881,6 +8929,57 @@ mod workspace_header_tests {
             normalize_generated_commit_message("feat: add generated commit messages\nDetails"),
             "feat: add generated commit messages"
         );
+    }
+
+    #[test]
+    fn restore_harness_activities_reads_the_session_oplog() {
+        let session_file = std::env::temp_dir().join(format!(
+            "threadlane-harness-restore-{}.jsonl",
+            std::process::id()
+        ));
+        let oplog_file = session_file.with_extension("oplog.jsonl");
+        let records = [
+            OpRecord::OperationStarted {
+                id: "run-restore".into(),
+                seq: 1,
+                lane: "subagent-lane".into(),
+                timestamp: 1,
+                source_leaf_id: None,
+                kind: "subagent".into(),
+                system_prompt_override: None,
+            },
+            OpRecord::TaskAttempt {
+                id: "attempt-restore".into(),
+                seq: 2,
+                lane: "subagent-lane".into(),
+                timestamp: 2,
+                run_id: "run-restore".into(),
+                task: "Inspect persisted history".into(),
+                attempt: 1,
+            },
+            OpRecord::OperationFinished {
+                id: "finish-restore".into(),
+                seq: 3,
+                lane: "subagent-lane".into(),
+                timestamp: 3,
+                run_id: "run-restore".into(),
+                outcome: OpOutcome::Aborted,
+                error: None,
+            },
+        ];
+        let contents = records
+            .iter()
+            .map(|record| serde_json::to_string(record).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&oplog_file, contents).unwrap();
+
+        let activities = restore_harness_activities(&session_file);
+
+        assert_eq!(activities.len(), 1);
+        assert_eq!(activities[0].key, "run-restore");
+        assert_eq!(activities[0].status, HarnessActivityStatus::Cancelled);
+        let _ = std::fs::remove_file(oplog_file);
     }
 
     #[test]
@@ -8907,6 +9006,40 @@ mod workspace_header_tests {
         assert_eq!(items[0].session_label, "Architecture review");
         assert_eq!(items[0].session_file.as_ref(), Some(&session_file));
         assert!(items[0].cancellable);
+    }
+
+    #[test]
+    fn partial_journal_start_and_recovery_share_one_harness_activity() {
+        let mut chat = crate::panels::chat::ChatData::default();
+        for event in [
+            AgentEvent::SubagentQueued {
+                run_id: 7,
+                task_index: 0,
+                agent: "scout".into(),
+                task: "Inspect the repository".into(),
+            },
+            AgentEvent::SubagentFinished {
+                run_id: 7,
+                task_index: 0,
+                journal_run_id: "subagent-run-41".into(),
+                succeeded: false,
+                error: Some("Failed to append subagent lane journal".into()),
+            },
+            AgentEvent::SubagentRecovery {
+                run_id: "subagent-run-41".into(),
+                status: SubagentRecoveryStatus::Recovered,
+                detail: Some("Recovered prior work".into()),
+            },
+        ] {
+            reduce_harness_event(&mut chat, event);
+        }
+
+        assert_eq!(chat.harness_activities.len(), 1);
+        assert_eq!(chat.harness_activities[0].key, "subagent-run-41");
+        assert_eq!(
+            chat.harness_activities[0].status,
+            HarnessActivityStatus::Recovered
+        );
     }
 
     #[test]

@@ -11,7 +11,7 @@ pub struct ProjectContext {
     pub context_files: Vec<PathBuf>,
     pub instructions: Vec<ProjectInstruction>,
     pub combined_instructions: String,
-    pub memory_content: Option<String>,
+    pub(crate) memory_content: Option<String>,
 }
 
 impl ProjectContext {

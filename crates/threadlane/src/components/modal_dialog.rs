@@ -28,10 +28,10 @@ script_mod! {
         padding: 0
         spacing: 0
         draw_bg +: {
-            color: theme.color_background
-            border_radius: 12.0
+            color: theme.color_popover
+            border_radius: theme.radius_xl
             border_size: 1.0
-            border_color: theme.color_card
+            border_color: theme.color_border
         }
     }
 

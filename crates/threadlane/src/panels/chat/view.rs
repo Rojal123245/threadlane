@@ -1,6 +1,9 @@
 //! Chat panel main view & transcript list widget.
 
-use super::state::{ChatMessage, MsgRole, StreamingKind, SubagentRailItem, ToolIcon, ToolStatus};
+use super::state::{
+    ChatMessage, HarnessActivity, HarnessActivityStatus, MsgRole, StreamingKind, SubagentRailItem,
+    ToolIcon, ToolStatus,
+};
 use crate::components::tool_fold_header::ToolFoldHeaderAction;
 use crate::path_utils::{compact_workspace_path, truncate_chars};
 use crate::workspace::AppState;
@@ -58,7 +61,6 @@ struct CachedActivityGroup {
 
 #[derive(Clone, Debug)]
 struct CachedSubagentTool {
-    message_index: usize,
     rail_items: Vec<SubagentRailItem>,
     preview: String,
 }
@@ -138,10 +140,20 @@ fn is_activity(message: &ChatMessage) -> bool {
     }
 }
 
+#[cfg(test)]
 fn display_rows(
     messages: &[ChatMessage],
     streaming_kind: Option<StreamingKind>,
     streaming_text: &str,
+) -> Vec<DisplayRow> {
+    display_rows_with_harness(messages, streaming_kind, streaming_text, &[])
+}
+
+fn display_rows_with_harness(
+    messages: &[ChatMessage],
+    streaming_kind: Option<StreamingKind>,
+    streaming_text: &str,
+    activities: &[HarnessActivity],
 ) -> Vec<DisplayRow> {
     let mut interim = Vec::new();
     let owned_subagent_runs = super::state::owned_subagent_child_runs(messages);
@@ -198,7 +210,7 @@ fn display_rows(
         }
     }
 
-    interim
+    let mut rows = interim
         .into_iter()
         .map(|row| match row {
             InterimRow::StreamingAssistant => DisplayRow::StreamingAssistant,
@@ -292,7 +304,7 @@ fn display_rows(
                         ..
                     } => {
                         if name == "subagent" || presentation.icon == ToolIcon::Subagent {
-                            let rail_items = super::state::subagent_rail_items(
+                            let rail_items = super::state::subagent_rail_items_with_harness(
                                 arguments,
                                 output,
                                 *status,
@@ -327,7 +339,6 @@ fn display_rows(
                                 )
                             };
                             DisplayRow::SubagentTool(CachedSubagentTool {
-                                message_index,
                                 rail_items,
                                 preview,
                             })
@@ -343,7 +354,81 @@ fn display_rows(
                 }
             }
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    let mut matched = vec![false; activities.len()];
+    for row in &mut rows {
+        let DisplayRow::SubagentTool(row) = row else {
+            continue;
+        };
+        let mut row_activities = Vec::new();
+        for (index, activity) in activities.iter().enumerate() {
+            if row
+                .rail_items
+                .iter()
+                .any(|item| item.key.as_deref() == Some(activity.key.as_str()))
+            {
+                matched[index] = true;
+                row_activities.push(activity.clone());
+            }
+        }
+        for item in row.rail_items.iter_mut().filter(|item| item.key.is_none()) {
+            let Some((index, activity)) = activities.iter().enumerate().find(|(index, activity)| {
+                !matched[*index]
+                    && item.task
+                        == super::state::normalize_whitespace_bounded(&activity.task, 160)
+                    && item.agent == activity.agent
+            }) else {
+                continue;
+            };
+            item.key = Some(activity.key.clone());
+            matched[index] = true;
+            row_activities.push(activity.clone());
+        }
+        if !row_activities.is_empty() {
+            super::state::merge_harness_activities(&mut row.rail_items, &row_activities);
+            row.preview = harness_activity_preview(&row_activities);
+        }
+    }
+
+    for (index, activity) in activities.iter().enumerate() {
+        if !matched[index] {
+            let mut rail_items = Vec::new();
+            super::state::merge_harness_activities(
+                &mut rail_items,
+                std::slice::from_ref(activity),
+            );
+            rows.push(DisplayRow::SubagentTool(CachedSubagentTool {
+                rail_items,
+                preview: harness_activity_preview(std::slice::from_ref(activity)),
+            }));
+        }
+    }
+
+    rows
+}
+
+fn harness_activity_preview(activities: &[HarnessActivity]) -> String {
+    let status = [
+        HarnessActivityStatus::Aborted,
+        HarnessActivityStatus::Retrying,
+        HarnessActivityStatus::Recovering,
+        HarnessActivityStatus::Working,
+        HarnessActivityStatus::Queued,
+        HarnessActivityStatus::Recovered,
+        HarnessActivityStatus::Cancelled,
+    ]
+    .into_iter()
+    .find(|status| activities.iter().any(|activity| activity.status == *status))
+    .expect("non-empty harness activities");
+    let label = super::state::harness_activity_label(
+        activities
+            .iter()
+            .find(|activity| activity.status == status)
+            .expect("selected harness activity status"),
+    );
+    let count = activities.len();
+    format!("{label} · {count} {}", if count == 1 { "task" } else { "tasks" })
 }
 
 fn activity_kind(name: &str, icon: ToolIcon) -> ActivityKind {
@@ -614,13 +699,11 @@ pub enum StarterPromptAction {
 pub struct ChatList {
     #[deref]
     view: View,
-    /// Cached display rows; stable assistant rows are reused while their Markdown text streams.
+    /// Cached display rows; rebuilt only when message count or streaming kind changes.
     #[rust]
     cached_rows: Vec<DisplayRow>,
     #[rust]
     cached_base_rows: Vec<DisplayRow>,
-    #[rust]
-    cached_messages: Vec<ChatMessage>,
     #[rust]
     cached_base_revision: u64,
     #[rust]
@@ -630,9 +713,7 @@ pub struct ChatList {
     #[rust]
     cached_streaming_text_len: usize,
     #[rust]
-    cached_streaming_text: String,
-    #[rust]
-    cached_has_streaming_row: bool,
+    cached_revision: u64,
     #[rust]
     hovered_starter: Option<StarterPromptAction>,
     #[rust]
@@ -679,17 +760,27 @@ impl Widget for SubagentRail {
             let row = self.rows.get_or_insert(cx, row_id, |cx| {
                 cx.with_vm(|vm| WidgetRef::script_from_value(vm, template))
             });
+            let display_agent = if item.parent_lane.is_some() {
+                format!("└─ {}", item.agent)
+            } else {
+                item.agent.clone()
+            };
             let title = row.label(cx, ids!(title_lbl));
-            if title.text() != item.agent {
-                title.set_text(cx, &item.agent);
+            if title.text() != display_agent {
+                title.set_text(cx, &display_agent);
             }
             let preview = row.label(cx, ids!(preview_lbl));
             if preview.text() != item.task {
                 preview.set_text(cx, &item.task);
             }
+            let display_status = if let Some(usage) = &item.token_usage {
+                format!("{} ({})", item.status, usage)
+            } else {
+                item.status.clone()
+            };
             let status = row.label(cx, ids!(status_lbl));
-            if status.text() != item.status {
-                status.set_text(cx, &item.status);
+            if status.text() != display_status {
+                status.set_text(cx, &display_status);
             }
             let mut md = row.markdown(cx, ids!(detail_md));
             if md.text() != item.detail {
@@ -715,60 +806,56 @@ impl Widget for SubagentRail {
 
 impl Widget for ChatList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-
-        let is_empty = {
-            let Some(data) = scope
-                .data
-                .get::<AppState>()
-                .and_then(AppState::active_workspace)
-                .map(|workspace| &workspace.chat)
-            else {
-                return DrawStep::done();
-            };
-
-            // Rebuild display rows only when the message list or streaming shape changes.
-            let msg_count = data.messages.len();
-            let streaming_text_len = data.streaming_text.len();
-            let base_changed = msg_count != self.cached_msg_count
-                || data.revision != self.cached_base_revision;
-            let streaming_kind_changed = data.streaming_kind != self.cached_streaming_kind;
-            let has_streaming_row = data.streaming_kind == Some(StreamingKind::Assistant)
-                && !data.streaming_text.is_empty();
-            let streaming_shape_changed = streaming_kind_changed
-                || (data.streaming_kind == Some(StreamingKind::Assistant)
-                    && has_streaming_row != self.cached_has_streaming_row)
-                || (data.streaming_kind != Some(StreamingKind::Assistant)
-                    && streaming_text_len != self.cached_streaming_text_len);
-
-            if base_changed || streaming_shape_changed {
-                if base_changed {
-                    self.cached_base_rows = display_rows(&data.messages, None, "");
-                    self.cached_base_revision = data.revision;
-                    self.cached_messages = data.messages.clone();
-                }
-
-                if data.streaming_kind == Some(StreamingKind::Assistant) {
-                    self.cached_rows = self.cached_base_rows.clone();
-                    if has_streaming_row {
-                        self.cached_rows.push(DisplayRow::StreamingAssistant);
-                    }
-                } else {
-                    self.cached_rows =
-                        display_rows(&data.messages, data.streaming_kind, &data.streaming_text);
-                }
-
-                self.cached_msg_count = msg_count;
-                self.cached_streaming_kind = data.streaming_kind;
-                self.cached_has_streaming_row = has_streaming_row;
-            }
-            if streaming_text_len != self.cached_streaming_text_len {
-                self.cached_streaming_text = data.streaming_text.clone();
-                self.cached_streaming_text_len = streaming_text_len;
-            }
-
-            self.cached_messages.is_empty() && self.cached_streaming_text.is_empty()
+        let Some(data) = scope
+            .data
+            .get::<AppState>()
+            .and_then(AppState::active_workspace)
+            .map(|workspace| workspace.chat.clone())
+        else {
+            return DrawStep::done();
         };
+
+        // Rebuild display rows only when the message list or streaming state changes.
+        let msg_count = data.messages.len();
+        let streaming_text_len = data.streaming_text.len();
+        if msg_count != self.cached_msg_count
+            || data.streaming_kind != self.cached_streaming_kind
+            || streaming_text_len != self.cached_streaming_text_len
+            || data.revision != self.cached_revision
+        {
+            if msg_count != self.cached_msg_count || data.revision != self.cached_base_revision {
+                self.cached_base_rows = display_rows_with_harness(
+                    &data.messages,
+                    None,
+                    "",
+                    &data.harness_activities,
+                );
+                self.cached_base_revision = data.revision;
+            }
+
+            if data.streaming_kind == Some(StreamingKind::Assistant) {
+                self.cached_rows = self.cached_base_rows.clone();
+                if !data.streaming_text.is_empty() {
+                    self.cached_rows.push(DisplayRow::StreamingAssistant);
+                }
+            } else {
+                self.cached_rows = display_rows_with_harness(
+                    &data.messages,
+                    data.streaming_kind,
+                    &data.streaming_text,
+                    &data.harness_activities,
+                );
+            }
+            self.cached_msg_count = msg_count;
+            self.cached_streaming_kind = data.streaming_kind;
+            self.cached_streaming_text_len = streaming_text_len;
+            self.cached_revision = data.revision;
+        }
         let rows = &self.cached_rows;
+
+        let is_empty = data.messages.is_empty()
+            && data.streaming_text.is_empty()
+            && data.harness_activities.is_empty();
 
         // Toggle the empty-state overlay — it lives as a sibling to the PortalList
         // so it can use height: Fill and truly center its content.
@@ -813,7 +900,7 @@ impl Widget for ChatList {
                                 cx,
                                 item_id,
                                 id!(AssistantMsg),
-                                &self.cached_streaming_text,
+                                &data.streaming_text,
                             );
                         }
                         DisplayRow::ActivityGroup(group) => {
@@ -839,12 +926,6 @@ impl Widget for ChatList {
                             item_widget.draw_all_unscoped(cx);
                         }
                         DisplayRow::SubagentTool(tool) => {
-                            let Some(message) = self.cached_messages.get(tool.message_index) else {
-                                continue;
-                            };
-                            let ChatMessage::Tool { status, .. } = message else {
-                                continue;
-                            };
                             let item_widget = list.item(cx, item_id, id!(SubagentMsg));
                             item_widget
                                 .label(cx, ids!(preview_lbl))
@@ -852,9 +933,18 @@ impl Widget for ChatList {
                             update_activity_status(
                                 cx,
                                 &item_widget,
-                                *status == ToolStatus::Running,
-                                *status == ToolStatus::Error,
-                                *status == ToolStatus::Cancelled,
+                                tool.rail_items.iter().any(|item| {
+                                    matches!(item.status.as_str(), "Working" | "Recovering")
+                                }),
+                                tool.rail_items.iter().any(|item| {
+                                    matches!(
+                                        item.status.as_str(),
+                                        "Retrying recovery" | "Aborted · unsafe tool"
+                                    )
+                                }),
+                                tool.rail_items
+                                    .iter()
+                                    .any(|item| item.status == "Cancelled"),
                             );
                             let rail = item_widget.widget(cx, ids!(rail));
                             if let Some(mut rail) = rail.as_subagent_rail().borrow_mut() {
@@ -865,7 +955,7 @@ impl Widget for ChatList {
                             item_widget.draw_all_unscoped(cx);
                         }
                         DisplayRow::Tool(tool) => {
-                            let Some(message) = self.cached_messages.get(tool.message_index) else {
+                            let Some(message) = data.messages.get(tool.message_index) else {
                                 continue;
                             };
                             let ChatMessage::Tool {
@@ -963,7 +1053,7 @@ impl Widget for ChatList {
                             item_widget.draw_all_unscoped(cx);
                         }
                         DisplayRow::Message(message_index) => {
-                            let Some(message) = self.cached_messages.get(*message_index) else {
+                            let Some(message) = data.messages.get(*message_index) else {
                                 continue;
                             };
                             match message {
@@ -1064,10 +1154,10 @@ impl Widget for ChatList {
 impl ChatList {
     fn focused_starter_action(&self, cx: &Cx) -> Option<StarterPromptAction> {
         [
-            (ids!(explore_btn), StarterPromptAction::Explore),
-            (ids!(build_btn), StarterPromptAction::Build),
-            (ids!(review_btn), StarterPromptAction::Review),
-            (ids!(fix_btn), StarterPromptAction::Fix),
+            (ids!(empty_state.cards_row.explore_card.btn), StarterPromptAction::Explore),
+            (ids!(empty_state.cards_row.build_card.btn), StarterPromptAction::Build),
+            (ids!(empty_state.cards_row.review_card.btn), StarterPromptAction::Review),
+            (ids!(empty_state.cards_row.fix_card.btn), StarterPromptAction::Fix),
         ]
         .into_iter()
         .find_map(|(path, action)| {
@@ -1219,6 +1309,184 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert!(matches!(rows[0], DisplayRow::ActivityGroup(_)));
         assert!(matches!(rows[1], DisplayRow::Message(3)));
+    }
+
+    #[test]
+    fn harness_activity_uses_one_existing_subagent_rail_row() {
+        let activities = vec![super::super::state::HarnessActivity {
+            key: "lane-a".into(),
+            task: "Recover interrupted work".into(),
+            agent: "scout".into(),
+            status: super::super::state::HarnessActivityStatus::Recovering,
+            detail: "Recovered checkpoint".into(),
+        }];
+
+        let rows = display_rows_with_harness(&[], None, "", &activities);
+
+        assert_eq!(rows.len(), 1);
+        let DisplayRow::SubagentTool(row) = &rows[0] else {
+            panic!("expected a subagent rail row");
+        };
+        assert_eq!(row.rail_items.len(), 1);
+        assert_eq!(row.rail_items[0].key.as_deref(), Some("lane-a"));
+        assert_eq!(row.rail_items[0].status, "Recovering");
+    }
+
+    #[test]
+    fn harness_activity_updates_repeated_task_names_by_durable_key() {
+        let subagent = |id: &str, run_id: &str| ChatMessage::Tool {
+            id: id.into(),
+            name: "subagent".into(),
+            arguments: "{}".into(),
+            output: serde_json::json!([{
+                "run_id": run_id,
+                "task": "Same task",
+                "agent": "scout",
+                "status": "Done",
+                "thinking": "",
+                "inner_tools": [],
+                "output": "completed"
+            }])
+            .to_string(),
+            status: ToolStatus::Done,
+            presentation: super::super::state::tool_presentation("subagent", "{}"),
+            result_preview: String::new(),
+            result_metadata: String::new(),
+            started_at: Instant::now(),
+        };
+        let messages = vec![
+            subagent("delegate-a", "lane-a"),
+            subagent("delegate-b", "lane-b"),
+        ];
+        let activities = vec![
+            super::super::state::HarnessActivity {
+                key: "lane-a".into(),
+                task: "Same task".into(),
+                agent: "scout".into(),
+                status: super::super::state::HarnessActivityStatus::Recovered,
+                detail: "First complete".into(),
+            },
+            super::super::state::HarnessActivity {
+                key: "lane-b".into(),
+                task: "Same task".into(),
+                agent: "scout".into(),
+                status: super::super::state::HarnessActivityStatus::Recovering,
+                detail: "Second recovering".into(),
+            },
+        ];
+
+        let rows = display_rows_with_harness(&messages, None, "", &activities);
+
+        assert_eq!(rows.len(), 2);
+        let [DisplayRow::SubagentTool(first), DisplayRow::SubagentTool(second)] = &rows[..]
+        else {
+            panic!("expected two delegation rows");
+        };
+        assert_eq!(first.rail_items[0].key.as_deref(), Some("lane-a"));
+        assert_eq!(first.rail_items[0].status, "Recovered");
+        assert_eq!(second.rail_items[0].key.as_deref(), Some("lane-b"));
+        assert_eq!(second.rail_items[0].status, "Recovering");
+        assert_eq!(second.rail_items.len(), 1);
+    }
+
+    #[test]
+    fn harness_activity_preserves_keys_for_multiple_sessions_in_one_result() {
+        let message = ChatMessage::Tool {
+            id: "delegate".into(),
+            name: "subagent".into(),
+            arguments: "{}".into(),
+            output: serde_json::json!([
+                {
+                    "run_id": "lane-a",
+                    "task": "First task",
+                    "agent": "scout",
+                    "status": "Done",
+                    "thinking": "",
+                    "inner_tools": [],
+                    "output": "completed"
+                },
+                {
+                    "run_id": "lane-b",
+                    "task": "Second task",
+                    "agent": "reviewer",
+                    "status": "Done",
+                    "thinking": "",
+                    "inner_tools": [],
+                    "output": "completed"
+                }
+            ])
+            .to_string(),
+            status: ToolStatus::Done,
+            presentation: super::super::state::tool_presentation("subagent", "{}"),
+            result_preview: String::new(),
+            result_metadata: String::new(),
+            started_at: Instant::now(),
+        };
+        let activities = vec![
+            super::super::state::HarnessActivity {
+                key: "lane-a".into(),
+                task: "First task".into(),
+                agent: "scout".into(),
+                status: super::super::state::HarnessActivityStatus::Recovered,
+                detail: "First complete".into(),
+            },
+            super::super::state::HarnessActivity {
+                key: "lane-b".into(),
+                task: "Second task".into(),
+                agent: "reviewer".into(),
+                status: super::super::state::HarnessActivityStatus::Recovering,
+                detail: "Second recovering".into(),
+            },
+        ];
+
+        let rows = display_rows_with_harness(&[message], None, "", &activities);
+
+        assert_eq!(rows.len(), 1);
+        let DisplayRow::SubagentTool(row) = &rows[0] else {
+            panic!("expected one delegation row");
+        };
+        assert_eq!(row.rail_items.len(), 2);
+        assert_eq!(row.rail_items[0].key.as_deref(), Some("lane-a"));
+        assert_eq!(row.rail_items[0].status, "Recovered");
+        assert_eq!(row.rail_items[1].key.as_deref(), Some("lane-b"));
+        assert_eq!(row.rail_items[1].status, "Recovering");
+        assert_eq!(row.preview, "Recovering · 2 tasks");
+    }
+
+    #[test]
+    fn cancelled_live_subagent_activity_updates_the_existing_tool_row() {
+        let arguments = serde_json::json!({
+            "parallel": true,
+            "tasks": [{"agent": "scout", "task": "Inspect the repository"}]
+        })
+        .to_string();
+        let message = ChatMessage::Tool {
+            id: "delegate".into(),
+            name: "subagent".into(),
+            arguments,
+            output: String::new(),
+            status: ToolStatus::Running,
+            presentation: super::super::state::tool_presentation("subagent", "{}"),
+            result_preview: String::new(),
+            result_metadata: String::new(),
+            started_at: Instant::now(),
+        };
+        let activities = vec![super::super::state::HarnessActivity {
+            key: "subagent-run-1".into(),
+            task: "Inspect the repository".into(),
+            agent: "scout".into(),
+            status: super::super::state::HarnessActivityStatus::Cancelled,
+            detail: "Cancelled".into(),
+        }];
+
+        let rows = display_rows_with_harness(&[message], None, "", &activities);
+
+        assert_eq!(rows.len(), 1);
+        let DisplayRow::SubagentTool(row) = &rows[0] else {
+            panic!("expected one delegation row");
+        };
+        assert_eq!(row.rail_items[0].status, "Cancelled");
+        assert_eq!(row.preview, "Cancelled · 1 task");
     }
 
     #[test]

@@ -8,6 +8,7 @@ pub struct ProjectTerminalSession {
 }
 
 impl ProjectTerminalSession {
+    #[allow(dead_code)]
     pub fn new(pty: Pty, emulator: Terminal) -> Self {
         Self { pty, emulator }
     }

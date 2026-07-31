@@ -4,6 +4,7 @@ use crate::git::GitStatus;
 use std::collections::HashSet;
 
 #[derive(Clone, Debug, Default)]
+#[allow(dead_code)]
 pub struct GitUiState {
     pub status: GitStatus,
     pub active_diff_file: Option<String>,
@@ -15,6 +16,7 @@ pub struct GitUiState {
     pub is_generating_commit_msg: bool,
 }
 
+#[allow(dead_code)]
 impl GitUiState {
     pub fn clear_feedback(&mut self) {
         self.feedback_error = None;

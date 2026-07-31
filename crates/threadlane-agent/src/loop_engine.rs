@@ -14,7 +14,9 @@ use crate::types::{
 };
 use serde_json::Value;
 use std::collections::HashSet;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use threadlane_provider::openai::{clamp_prompt_cache_key, ProviderUsage, StreamEvent, ToolCall};
 use threadlane_provider::router::{PayloadFormat, PayloadSource, ProviderClient};
@@ -22,6 +24,14 @@ use threadlane_tools::{
     execute_tool, execute_tool_in_workspace, get_available_tools, get_codex_tools,
 };
 use tokio::sync::{broadcast, mpsc, Mutex};
+
+fn normalized_tool_call_id(id: &str, empty_index: usize) -> String {
+    if id.is_empty() {
+        format!("call_{empty_index}")
+    } else {
+        id.to_string()
+    }
+}
 
 /// Removes an assistant tool-call turn that was interrupted before every call
 /// received a tool result. Provider APIs reject replaying such incomplete turns.
@@ -41,24 +51,18 @@ pub fn repair_interrupted_tool_turn(messages: &mut Vec<AgentMessage>) -> bool {
             continue;
         }
 
-        let expected_ids: HashSet<&str> = tool_calls
+        let expected_ids: HashSet<String> = tool_calls
             .iter()
-            .map(|call| {
-                if call.id.is_empty() {
-                    "call_0"
-                } else {
-                    call.id.as_str()
-                }
-            })
+            .enumerate()
+            .map(|(idx, call)| normalized_tool_call_id(&call.id, idx))
             .collect();
         let mut completed_ids = HashSet::new();
         let mut next = index + 1;
+        let mut tool_index = 0;
         while let Some(AgentMessage::Tool { tool_call_id, .. }) = messages.get(next) {
-            completed_ids.insert(if tool_call_id.is_empty() {
-                "call_0"
-            } else {
-                tool_call_id.as_str()
-            });
+            let id = normalized_tool_call_id(tool_call_id, tool_index);
+            tool_index += 1;
+            completed_ids.insert(id);
             next += 1;
         }
 
@@ -90,6 +94,7 @@ fn token_usage_from_provider(usage: ProviderUsage) -> TokenUsage {
 }
 
 pub fn convert_to_llm(messages: &[AgentMessage]) -> Vec<Value> {
+    let messages = normalize_tool_call_ids(messages);
     messages
         .iter()
         .filter_map(|msg| match msg {
@@ -126,6 +131,7 @@ pub fn convert_to_llm(messages: &[AgentMessage]) -> Vec<Value> {
             AgentMessage::Assistant {
                 content,
                 tool_calls,
+                ..
             } => {
                 let mut map = serde_json::Map::new();
                 map.insert("role".into(), "assistant".into());
@@ -169,10 +175,11 @@ pub fn convert_to_llm(messages: &[AgentMessage]) -> Vec<Value> {
 }
 
 pub fn convert_to_codex_llm(messages: &[AgentMessage]) -> (String, Vec<Value>) {
+    let messages = normalize_tool_call_ids(messages);
     let mut instructions = String::new();
     let mut items = Vec::new();
 
-    for msg in messages {
+    for msg in &messages {
         match msg {
             AgentMessage::System { content } => {
                 if !instructions.is_empty() {
@@ -211,6 +218,7 @@ pub fn convert_to_codex_llm(messages: &[AgentMessage]) -> (String, Vec<Value>) {
             AgentMessage::Assistant {
                 content,
                 tool_calls,
+                ..
             } => {
                 if let Some(c) = content {
                     if !c.trim().is_empty() {
@@ -225,7 +233,7 @@ pub fn convert_to_codex_llm(messages: &[AgentMessage]) -> (String, Vec<Value>) {
                     for tc in t_calls {
                         items.push(serde_json::json!({
                             "type": "function_call",
-                            "call_id": if tc.id.is_empty() { "call_0" } else { &tc.id },
+                            "call_id": tc.id,
                             "name": tc.function.name,
                             "arguments": tc.function.arguments
                         }));
@@ -237,14 +245,9 @@ pub fn convert_to_codex_llm(messages: &[AgentMessage]) -> (String, Vec<Value>) {
                 content,
                 ..
             } => {
-                let call_id = if tool_call_id.is_empty() {
-                    "call_0"
-                } else {
-                    tool_call_id
-                };
                 items.push(serde_json::json!({
                     "type": "function_call_output",
-                    "call_id": call_id,
+                    "call_id": tool_call_id,
                     "output": content
                 }));
             }
@@ -266,16 +269,75 @@ pub fn convert_to_codex_llm(messages: &[AgentMessage]) -> (String, Vec<Value>) {
     (instructions, items)
 }
 
+fn normalize_tool_call_ids(messages: &[AgentMessage]) -> Vec<AgentMessage> {
+    let mut tool_index = 0;
+    messages
+        .iter()
+        .map(|message| match message {
+            AgentMessage::Assistant {
+                content,
+                tool_calls: Some(tool_calls),
+                stop_reason,
+                deferred_handle,
+            } => {
+                tool_index = 0;
+                AgentMessage::Assistant {
+                    content: content.clone(),
+                    tool_calls: Some(
+                        tool_calls
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, call)| {
+                                let mut call = call.clone();
+                                call.id = normalized_tool_call_id(&call.id, idx);
+                                call
+                            })
+                            .collect(),
+                    ),
+                    stop_reason: stop_reason.clone(),
+                    deferred_handle: deferred_handle.clone(),
+                }
+            }
+            AgentMessage::Tool {
+                tool_call_id,
+                name,
+                content,
+                is_error,
+            } => {
+                let normalized = normalized_tool_call_id(tool_call_id, tool_index);
+                tool_index += 1;
+                AgentMessage::Tool {
+                    tool_call_id: normalized,
+                    name: name.clone(),
+                    content: content.clone(),
+                    is_error: *is_error,
+                }
+            }
+            other => {
+                tool_index = 0;
+                other.clone()
+            }
+        })
+        .collect()
+}
+
 #[derive(Clone)]
 struct ToolExecutorRoute {
     executor: Arc<dyn ToolExecutor>,
     tool_names: HashSet<String>,
 }
 
+pub type ToolIntentRecorder = Arc<
+    dyn Fn(&str, &str, &str) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>
+        + Send
+        + Sync,
+>;
+
 #[derive(Clone)]
 struct ToolRunContext {
     before_hook: Option<Arc<dyn BeforeToolCallHook>>,
     after_hook: Option<Arc<dyn AfterToolCallHook>>,
+    intent_recorder: Option<ToolIntentRecorder>,
     event_tx: broadcast::Sender<AgentEvent>,
     state: Arc<Mutex<AgentState>>,
     tool_routes: Vec<ToolExecutorRoute>,
@@ -295,6 +357,7 @@ pub struct AgentLoop {
     follow_up_queue: PendingMessageQueue,
     pub before_tool_call_hook: Option<Arc<dyn BeforeToolCallHook>>,
     pub after_tool_call_hook: Option<Arc<dyn AfterToolCallHook>>,
+    pub tool_intent_recorder: Option<ToolIntentRecorder>,
     transform_context_hook: Option<Arc<dyn TransformContextHook>>,
     should_stop_hook: Option<Arc<dyn ShouldStopAfterTurnHook>>,
     pub event_tx: broadcast::Sender<AgentEvent>,
@@ -332,6 +395,7 @@ impl AgentLoop {
             follow_up_queue: PendingMessageQueue::new(QueueMode::All),
             before_tool_call_hook: None,
             after_tool_call_hook: None,
+            tool_intent_recorder: None,
             transform_context_hook: None,
             should_stop_hook: None,
             event_tx,
@@ -809,6 +873,8 @@ impl AgentLoop {
                 } else {
                     Some(captured_tool_calls.clone())
                 },
+                stop_reason: None,
+                deferred_handle: None,
             };
 
             {
@@ -883,6 +949,23 @@ impl AgentLoop {
     }
 
     pub async fn execute_tools(&self, tool_calls: &[ToolCall]) -> Vec<AgentToolResult> {
+        self.execute_tools_with_intent_recorder(tool_calls, self.tool_intent_recorder.clone())
+            .await
+    }
+
+    pub async fn execute_tools_without_intent_recording(
+        &self,
+        tool_calls: &[ToolCall],
+    ) -> Vec<AgentToolResult> {
+        self.execute_tools_with_intent_recorder(tool_calls, None)
+            .await
+    }
+
+    async fn execute_tools_with_intent_recorder(
+        &self,
+        tool_calls: &[ToolCall],
+        intent_recorder: Option<ToolIntentRecorder>,
+    ) -> Vec<AgentToolResult> {
         let mut results = Vec::new();
         let tool_routes = self.tool_execution_routes().await;
         let allowed_tool_names = self.allowed_tool_names.clone();
@@ -890,7 +973,12 @@ impl AgentLoop {
         if self.tool_execution_mode == ToolExecutionMode::Sequential {
             for tc in tool_calls {
                 let res = self
-                    .execute_single_tool(tc, tool_routes.clone(), allowed_tool_names.clone())
+                    .execute_single_tool(
+                        tc,
+                        tool_routes.clone(),
+                        allowed_tool_names.clone(),
+                        intent_recorder.clone(),
+                    )
                     .await;
                 results.push(res);
             }
@@ -902,6 +990,7 @@ impl AgentLoop {
                 let context = ToolRunContext {
                     before_hook: self.before_tool_call_hook.clone(),
                     after_hook: self.after_tool_call_hook.clone(),
+                    intent_recorder: intent_recorder.clone(),
                     event_tx: self.event_tx.clone(),
                     state: self.state.clone(),
                     tool_routes: tool_routes.clone(),
@@ -945,12 +1034,14 @@ impl AgentLoop {
         tc: &ToolCall,
         tool_routes: Vec<ToolExecutorRoute>,
         allowed_tool_names: Option<HashSet<String>>,
+        intent_recorder: Option<ToolIntentRecorder>,
     ) -> AgentToolResult {
         Self::run_tool_with_hooks(
             tc.clone(),
             ToolRunContext {
                 before_hook: self.before_tool_call_hook.clone(),
                 after_hook: self.after_tool_call_hook.clone(),
+                intent_recorder,
                 event_tx: self.event_tx.clone(),
                 state: self.state.clone(),
                 tool_routes,
@@ -1017,6 +1108,24 @@ impl AgentLoop {
                     result: res.clone(),
                 });
                 return res;
+            }
+        }
+
+        if let Some(recorder) = &context.intent_recorder {
+            if let Err(error) = recorder(&tc.id, &tc.function.name, &arguments).await {
+                let result = AgentToolResult {
+                    tool_call_id: tc.id.clone(),
+                    name: tc.function.name.clone(),
+                    content: error,
+                    is_error: true,
+                    terminate: false,
+                };
+                let _ = context.event_tx.send(AgentEvent::ToolExecutionEnd {
+                    tool_call_id: tc.id,
+                    name: tc.function.name,
+                    result: result.clone(),
+                });
+                return result;
             }
         }
 
@@ -1166,6 +1275,8 @@ fn normalize_tool_arguments(
 #[cfg(test)]
 mod normalize_tool_arguments_tests {
     use super::*;
+    use std::sync::Mutex as StdMutex;
+    use threadlane_provider::openai::{ToolCall, ToolCallFunction};
 
     #[test]
     fn fills_missing_file_paths_from_the_workspace() {
@@ -1173,5 +1284,170 @@ mod normalize_tool_arguments_tests {
             normalize_tool_arguments("read_file", "{}", Some(std::path::Path::new("/workspace")));
 
         assert_eq!(arguments, r#"{"path":"/workspace"}"#);
+    }
+
+    #[test]
+    fn normalizes_empty_tool_ids_by_tool_index() {
+        let messages = vec![
+            AgentMessage::Assistant {
+                content: None,
+                tool_calls: Some(vec![
+                    ToolCall {
+                        id: String::new(),
+                        r#type: "function".into(),
+                        function: ToolCallFunction {
+                            name: "read_file".into(),
+                            arguments: "{}".into(),
+                        },
+                        thought_signature: None,
+                    },
+                    ToolCall {
+                        id: String::new(),
+                        r#type: "function".into(),
+                        function: ToolCallFunction {
+                            name: "list_dir".into(),
+                            arguments: "{}".into(),
+                        },
+                        thought_signature: None,
+                    },
+                ]),
+                stop_reason: None,
+                deferred_handle: None,
+            },
+            AgentMessage::Tool {
+                tool_call_id: String::new(),
+                name: "read_file".into(),
+                content: "one".into(),
+                is_error: false,
+            },
+            AgentMessage::Tool {
+                tool_call_id: String::new(),
+                name: "list_dir".into(),
+                content: "two".into(),
+                is_error: false,
+            },
+        ];
+
+        let chat = convert_to_llm(&messages);
+        assert_eq!(chat[1]["tool_call_id"], "call_0");
+        assert_eq!(chat[2]["tool_call_id"], "call_1");
+
+        let (_, codex) = convert_to_codex_llm(&messages);
+        assert_eq!(codex[2]["call_id"], "call_0");
+        assert_eq!(codex[3]["call_id"], "call_1");
+    }
+
+    #[test]
+    fn normalizes_empty_tool_ids_after_explicit_ids() {
+        let messages = vec![
+            AgentMessage::Assistant {
+                content: None,
+                tool_calls: Some(vec![
+                    ToolCall {
+                        id: "provider-call".into(),
+                        r#type: "function".into(),
+                        function: ToolCallFunction {
+                            name: "read_file".into(),
+                            arguments: "{}".into(),
+                        },
+                        thought_signature: None,
+                    },
+                    ToolCall {
+                        id: String::new(),
+                        r#type: "function".into(),
+                        function: ToolCallFunction {
+                            name: "list_dir".into(),
+                            arguments: "{}".into(),
+                        },
+                        thought_signature: None,
+                    },
+                ]),
+                stop_reason: None,
+                deferred_handle: None,
+            },
+            AgentMessage::Tool {
+                tool_call_id: "provider-call".into(),
+                name: "read_file".into(),
+                content: "one".into(),
+                is_error: false,
+            },
+            AgentMessage::Tool {
+                tool_call_id: String::new(),
+                name: "list_dir".into(),
+                content: "two".into(),
+                is_error: false,
+            },
+        ];
+
+        let chat = convert_to_llm(&messages);
+        assert_eq!(chat[2]["tool_call_id"], "call_1");
+    }
+
+    #[tokio::test]
+    async fn tool_intent_recorder_sees_normalized_arguments_before_execution() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut agent = AgentLoop::new("", None, "test");
+        agent.work_dir = Some(dir.path().to_path_buf());
+        let recorded = Arc::new(StdMutex::new(None));
+        let recorded_for_callback = recorded.clone();
+        agent.tool_intent_recorder = Some(Arc::new(move |id, name, arguments| {
+            let recorded = recorded_for_callback.clone();
+            let value = (id.to_string(), name.to_string(), arguments.to_string());
+            Box::pin(async move {
+                *recorded.lock().unwrap() = Some(value);
+                Ok(())
+            })
+        }));
+
+        let results = agent
+            .execute_tools(&[ToolCall {
+                id: "call-1".into(),
+                r#type: "function".into(),
+                function: ToolCallFunction {
+                    name: "list_dir".into(),
+                    arguments: "{}".into(),
+                },
+                thought_signature: None,
+            }])
+            .await;
+
+        assert_eq!(
+            recorded.lock().unwrap().as_ref(),
+            Some(&(
+                "call-1".into(),
+                "list_dir".into(),
+                format!(r#"{{"path":"{}"}}"#, dir.path().display())
+            ))
+        );
+        assert!(!results[0].is_error);
+    }
+
+    #[tokio::test]
+    async fn tool_intent_recorder_failure_prevents_execution() {
+        let mut agent = AgentLoop::new("", None, "test");
+        agent.tool_intent_recorder = Some(Arc::new(|_, _, _| {
+            Box::pin(async { Err("intent append failed".into()) })
+        }));
+        let mut events = agent.event_tx.subscribe();
+
+        let results = agent
+            .execute_tools(&[ToolCall {
+                id: "call-1".into(),
+                r#type: "function".into(),
+                function: ToolCallFunction {
+                    name: "list_dir".into(),
+                    arguments: "{}".into(),
+                },
+                thought_signature: None,
+            }])
+            .await;
+
+        assert!(results[0].is_error);
+        assert_eq!(results[0].content, "intent append failed");
+        assert!(matches!(
+            events.try_recv(),
+            Ok(AgentEvent::ToolExecutionEnd { .. })
+        ));
+        assert!(events.try_recv().is_err());
     }
 }

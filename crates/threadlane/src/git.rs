@@ -34,6 +34,7 @@ pub struct GitFile {
 }
 
 impl GitFile {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn status_for_section(&self, staged_section: bool) -> char {
         if staged_section {
             self.index_status
@@ -249,6 +250,31 @@ pub fn checkout(work_dir: &Path, name: &str) -> Result<(), GitError> {
     Ok(())
 }
 
+pub fn create_worktree(work_dir: &Path, path: &Path, branch: &str) -> Result<(), GitError> {
+    let branch = validate_branch_name(work_dir, branch)?;
+    if !path.is_absolute() {
+        return Err(GitError {
+            work_dir: work_dir.to_path_buf(),
+            message: "worktree path must be absolute".to_owned(),
+        });
+    }
+    if path == work_dir {
+        return Err(GitError {
+            work_dir: work_dir.to_path_buf(),
+            message: "worktree path must differ from the current checkout".to_owned(),
+        });
+    }
+    if path.exists() {
+        return Err(GitError {
+            work_dir: work_dir.to_path_buf(),
+            message: "worktree path already exists".to_owned(),
+        });
+    }
+    let path = path.to_string_lossy().into_owned();
+    command(work_dir, &["worktree", "add", &path, &branch])?;
+    Ok(())
+}
+
 pub fn commit_staged(work_dir: &Path, message: &str) -> Result<(), GitError> {
     let message = message.trim();
     if message.is_empty() {
@@ -349,7 +375,10 @@ pub fn commit_message_diff(work_dir: &Path) -> Result<String, GitError> {
     }
 
     let mut diff = command(work_dir, &["diff", "--"])?;
-    let untracked = command(work_dir, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    let untracked = command(
+        work_dir,
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+    )?;
     for path in untracked.split('\0').filter(|path| !path.is_empty()) {
         let file_diff = diff_file(work_dir, path)?;
         if !file_diff.trim().is_empty() {
@@ -424,51 +453,6 @@ pub fn open_browser_url(cx: &mut makepad_widgets::Cx, url: &str) {
     cx.open_url(url, OpenUrlInPlace::No);
 }
 
-pub async fn create_github_pull_request(
-    remote: &str,
-    head: &str,
-    base: &str,
-    title: &str,
-    body: &str,
-    draft: bool,
-) -> Result<String, String> {
-    let token =
-        std::env::var("GITHUB_TOKEN").map_err(|_| "GITHUB_TOKEN is not configured".to_owned())?;
-    let (owner, repository) =
-        github_repository(remote).ok_or_else(|| "origin is not a GitHub repository".to_owned())?;
-    let response = reqwest::Client::new()
-        .post(format!(
-            "https://api.github.com/repos/{owner}/{repository}/pulls"
-        ))
-        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-        .header(reqwest::header::USER_AGENT, "threadlane")
-        .bearer_auth(token)
-        .json(&serde_json::json!({
-            "title": title.trim(),
-            "body": body,
-            "head": head,
-            "base": base,
-            "draft": draft,
-        }))
-        .send()
-        .await
-        .map_err(|error| error.to_string())?;
-    let status = response.status();
-    let payload: serde_json::Value = response.json().await.map_err(|error| error.to_string())?;
-    if !status.is_success() {
-        return Err(payload
-            .get("message")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("GitHub rejected the pull request")
-            .to_owned());
-    }
-    payload
-        .get("html_url")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| "GitHub response did not include a pull request URL".to_owned())
-}
-
 fn validate_branch_name(work_dir: &Path, name: &str) -> Result<String, GitError> {
     let name = name.trim();
     if name.is_empty() {
@@ -514,7 +498,11 @@ mod tests {
         assert!(status.staged_changes);
         assert!(status.unstaged_changes);
         assert!(status.has_changes);
-        let mixed = status.files.iter().find(|file| file.path == "mixed.rs").unwrap();
+        let mixed = status
+            .files
+            .iter()
+            .find(|file| file.path == "mixed.rs")
+            .unwrap();
         assert_eq!(mixed.status, "MM");
         assert_eq!(mixed.status_for_section(true), 'M');
         assert_eq!(mixed.status_for_section(false), 'M');
@@ -527,6 +515,13 @@ mod tests {
         let status = parse_status(Path::new("/tmp/project"), "## HEAD\n");
         assert!(status.detached);
         assert!(status.branch.is_none());
+    }
+
+    #[test]
+    fn worktree_creation_rejects_relative_and_current_paths() {
+        let repo = Path::new("/tmp/project");
+        assert!(create_worktree(repo, Path::new("relative"), "main").is_err());
+        assert!(create_worktree(repo, repo, "main").is_err());
     }
 
     #[test]
@@ -571,7 +566,11 @@ mod tests {
             Some(("owner".to_owned(), "repo".to_owned()))
         );
         assert_eq!(
-            github_compare_url("git@github.com:owner/repo.git", "enhancements", Some("main")),
+            github_compare_url(
+                "git@github.com:owner/repo.git",
+                "enhancements",
+                Some("main")
+            ),
             Some("https://github.com/owner/repo/compare/main...enhancements?expand=1".to_owned())
         );
     }

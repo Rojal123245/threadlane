@@ -1,6 +1,7 @@
 //! Sessions panel state: projects, session discovery, file operations, and active selection.
 
 use crate::path_utils::{canonicalize_path, truncate_chars};
+use crate::panels::chat::state::{HarnessActivity, HarnessActivityStatus};
 use threadlane_agent::{AgentMessage, SessionTree};
 
 use std::collections::{HashMap, HashSet};
@@ -25,6 +26,27 @@ pub struct ProjectGroup {
     pub available: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionHealth {
+    Healthy,
+    Recovering,
+    Warning,
+}
+
+pub fn session_health(activities: &[HarnessActivity]) -> SessionHealth {
+    activities.iter().fold(SessionHealth::Healthy, |health, activity| {
+        match activity.status {
+            HarnessActivityStatus::Retrying | HarnessActivityStatus::Aborted => {
+                SessionHealth::Warning
+            }
+            HarnessActivityStatus::Recovering if health == SessionHealth::Healthy => {
+                SessionHealth::Recovering
+            }
+            _ => health,
+        }
+    })
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum SessionListRow {
     ProjectHeader {
@@ -46,6 +68,8 @@ pub struct SessionsData {
     pub projects: Vec<ProjectGroup>,
     /// O(1) lookup for spinner visibility per row in draw_walk.
     pub working_sessions: HashMap<PathBuf, HashSet<String>>,
+    /// Only unresolved recovery/abort states are retained for sidebar rows.
+    pub session_health: HashMap<PathBuf, HashMap<String, SessionHealth>>,
     pub active_session_id: Option<String>,
     pub active_work_dir: PathBuf,
     pub context_session_id: Option<String>,
@@ -63,6 +87,14 @@ impl SessionsData {
 
     pub fn is_context_target(&self, work_dir: &Path, session_id: &str) -> bool {
         self.context_session_id.as_deref() == Some(session_id) && self.context_work_dir == work_dir
+    }
+
+    pub fn session_health_for(&self, work_dir: &Path, session_id: &str) -> SessionHealth {
+        self.session_health
+            .get(work_dir)
+            .and_then(|sessions| sessions.get(session_id))
+            .copied()
+            .unwrap_or(SessionHealth::Healthy)
     }
 
     fn rebuild_rows(&self) -> Vec<SessionListRow> {
@@ -234,19 +266,23 @@ pub fn first_existing_user_prompt(tree: &SessionTree) -> Option<String> {
 
 pub fn begin_title_generation(work_dir: &Path, session_id: &str) -> bool {
     let key = (canonicalize_path(work_dir), session_id.to_string());
-    // This is deliberately a lifetime attempt marker, not an in-flight guard.
-    // Failed requests must not become eligible again later in this process.
     TITLE_ATTEMPTED.write().unwrap().insert(key)
 }
+
+pub fn reset_title_attempt(work_dir: &Path, session_id: &str) {
+    let key = (canonicalize_path(work_dir), session_id.to_string());
+    TITLE_ATTEMPTED.write().unwrap().remove(&key);
+}
+
 pub fn end_title_generation(_work_dir: &Path, _session_id: &str) {
-    // Kept as a no-op for callers that finish the detached task. Never clear
-    // the marker: one attempt is allowed per session per application lifetime.
+    // Kept as a no-op for completed title runs.
 }
 
 pub static SESSIONS_DATA: LazyLock<RwLock<SessionsData>> = LazyLock::new(|| {
     RwLock::new(SessionsData {
         projects: Vec::new(),
         working_sessions: HashMap::new(),
+        session_health: HashMap::new(),
         active_session_id: None,
         active_work_dir: PathBuf::new(),
         context_session_id: None,
@@ -453,6 +489,25 @@ pub fn is_session_working(work_dir: &Path, session_id: &str) -> bool {
         .is_some_and(|sessions| sessions.contains(session_id))
 }
 
+pub fn set_session_health(work_dir: &Path, session_id: &str, health: SessionHealth) {
+    let mut data = SESSIONS_DATA.write().unwrap();
+    let work_dir = canonicalize_path(work_dir);
+    if health == SessionHealth::Healthy {
+        let remove_project = data.session_health.get_mut(&work_dir).is_some_and(|sessions| {
+            sessions.remove(session_id);
+            sessions.is_empty()
+        });
+        if remove_project {
+            data.session_health.remove(&work_dir);
+        }
+    } else {
+        data.session_health
+            .entry(work_dir)
+            .or_default()
+            .insert(session_id.into(), health);
+    }
+}
+
 pub fn set_session_context_target(entry: Option<&SessionEntry>) {
     let mut data = SESSIONS_DATA.write().unwrap();
     if let Some(entry) = entry {
@@ -645,6 +700,7 @@ pub fn relative_time_label(updated_at: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::panels::chat::state::{HarnessActivity, HarnessActivityStatus};
 
     fn test_project(session_count: usize) -> ProjectGroup {
         let work_dir = PathBuf::from("/project");
@@ -662,6 +718,63 @@ mod tests {
                 .collect(),
             available: true,
         }
+    }
+
+    fn harness_activity(status: HarnessActivityStatus) -> HarnessActivity {
+        HarnessActivity {
+            key: "lane".into(),
+            task: "task".into(),
+            agent: "agent".into(),
+            status,
+            detail: String::new(),
+        }
+    }
+
+    #[test]
+    fn session_health_only_marks_unresolved_recovery_or_unsafe_abort() {
+        assert_eq!(session_health(&[]), SessionHealth::Healthy);
+        assert_eq!(
+            session_health(&[harness_activity(HarnessActivityStatus::Retrying)]),
+            SessionHealth::Warning
+        );
+        assert_eq!(
+            session_health(&[harness_activity(HarnessActivityStatus::Aborted)]),
+            SessionHealth::Warning
+        );
+        assert_eq!(
+            session_health(&[harness_activity(HarnessActivityStatus::Recovering)]),
+            SessionHealth::Recovering
+        );
+    }
+
+    #[test]
+    fn session_health_state_removes_healthy_sessions() {
+        let work_dir = unique_test_dir("session-health");
+        assert_eq!(
+            SESSIONS_DATA
+                .read()
+                .unwrap()
+                .session_health_for(&work_dir, "session"),
+            SessionHealth::Healthy
+        );
+
+        set_session_health(&work_dir, "session", SessionHealth::Warning);
+        assert_eq!(
+            SESSIONS_DATA
+                .read()
+                .unwrap()
+                .session_health_for(&work_dir, "session"),
+            SessionHealth::Warning
+        );
+
+        set_session_health(&work_dir, "session", SessionHealth::Healthy);
+        assert_eq!(
+            SESSIONS_DATA
+                .read()
+                .unwrap()
+                .session_health_for(&work_dir, "session"),
+            SessionHealth::Healthy
+        );
     }
 
     #[test]
@@ -686,6 +799,7 @@ mod tests {
         SessionsData {
             projects: vec![test_project(session_count)],
             working_sessions: HashMap::new(),
+            session_health: HashMap::new(),
             active_session_id: None,
             active_work_dir: PathBuf::from("/project"),
             context_session_id: None,
@@ -853,6 +967,8 @@ mod tests {
         tree.add_message(AgentMessage::Assistant {
             content: Some("reply".into()),
             tool_calls: None,
+            stop_reason: None,
+            deferred_handle: None,
         });
         tree.add_message(AgentMessage::User {
             content: "Later request".into(),
