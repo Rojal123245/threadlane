@@ -4555,15 +4555,6 @@ impl MatchEvent for App {
                     }
                     self.sync_task_sidebar(cx);
                 }
-                TaskSidebarAction::SetFilter(filter) => {
-                    if let Some(mut sidebar) = self
-                        .ui
-                        .widget(cx, ids!(task_sidebar))
-                        .borrow_mut::<TaskSidebar>()
-                    {
-                        sidebar.set_filter(cx, filter);
-                    }
-                }
                 TaskSidebarAction::ToggleSession(session_id) => {
                     if let Some(mut sidebar) = self
                         .ui
