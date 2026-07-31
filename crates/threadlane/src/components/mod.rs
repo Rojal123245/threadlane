@@ -26,6 +26,7 @@ pub mod modal_dialog;
 pub mod model_dropdown;
 pub mod nav_button;
 pub mod notice_banner;
+pub mod page_header;
 pub mod panel_header;
 pub mod panel_surface;
 pub mod project_header;
@@ -43,6 +44,7 @@ pub mod task_sidebar;
 pub mod terminal_panel;
 pub mod tool_fold_header;
 pub mod tool_section;
+pub mod workspace_badge;
 
 pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     init::script_mod(vm);
@@ -52,6 +54,8 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     status_dot::script_mod(vm);
     notice_banner::script_mod(vm);
     section_header::script_mod(vm);
+    page_header::script_mod(vm);
+    workspace_badge::script_mod(vm);
     activity_header::script_mod(vm);
     activity_loader::script_mod(vm);
     auth_row::script_mod(vm);

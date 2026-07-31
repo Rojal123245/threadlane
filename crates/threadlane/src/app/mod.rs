@@ -313,69 +313,19 @@ script_mod! {
                 align: Align{y: 0.5}
                 margin: Inset{bottom: 6}
 
-                headline_pre_lbl := Label {
-                    width: Fit
-                    height: Fit
+                headline_pre_lbl := mod.components.HeadlineLabel {
                     text: "What should we build in "
-                    draw_text +: {
-                        color: theme.color_card_foreground
-                        text_style: theme.font_bold { font_size: 20.0 }
-                    }
                 }
-                project_name_inline_lbl := Label {
-                    width: Fit
-                    height: Fit
+                project_name_inline_lbl := mod.components.HeadlineAccentLabel {
                     text: ""
-                    draw_text +: {
-                        color: theme.color_foreground
-                        text_style: theme.font_bold { font_size: 20.0 }
-                    }
                 }
-                headline_post_lbl := Label {
-                    width: Fit
-                    height: Fit
+                headline_post_lbl := mod.components.HeadlineLabel {
                     text: "?"
-                    draw_text +: {
-                        color: theme.color_card_foreground
-                        text_style: theme.font_bold { font_size: 20.0 }
-                    }
                 }
             }
 
             // Workspace path subtitle badge
-            workspace_path_wrap := RoundedView {
-                width: Fit
-                height: Fit
-                flow: Right
-                align: Align{y: 0.5}
-                spacing: 6
-                margin: Inset{bottom: 24}
-                padding: Inset{left: 10 top: 4 right: 10 bottom: 4}
-                draw_bg +: {
-                    color: theme.color_card
-                    border_color: theme.color_border
-                    border_size: 1.0
-                    border_radius: theme.radius_sm
-                }
-                workspace_folder_icon := Icon {
-                    width: 14
-                    height: 14
-                    icon_walk: Walk{width: 14 height: 14}
-                    draw_icon +: {
-                        svg: crate_resource("self:resources/icons/folder.svg")
-                        color: theme.color_primary
-                    }
-                }
-                workspace_path_lbl := Label {
-                    width: Fit
-                    height: Fit
-                    text: ""
-                    draw_text +: {
-                        color: theme.color_muted_foreground
-                        text_style +: { font_size: 10.0 }
-                    }
-                }
-            }
+            workspace_path_wrap := mod.components.WorkspaceBadge {}
 
             // Action suggestion cards
                 cards_row := View {
@@ -1014,15 +964,9 @@ script_mod! {
                     border_size: 1.0
                 }
 
-                providers_category_lbl := Label {
-                    width: Fill
-                    height: Fit
+                providers_category_lbl := mod.components.CategoryHeaderLabel {
                     margin: Inset{bottom: 4}
                     text: "PROVIDERS"
-                    draw_text +: {
-                        color: theme.color_muted_foreground
-                        text_style: theme.font_bold { font_size: 9.0 }
-                    }
                 }
 
                 settings_nav_google_btn := mod.components.NavButton {
@@ -1033,15 +977,9 @@ script_mod! {
                     text: "OpenAI / ChatGPT"
                 }
 
-                advanced_category_lbl := Label {
-                    width: Fill
-                    height: Fit
+                advanced_category_lbl := mod.components.CategoryHeaderLabel {
                     margin: Inset{top: 18 bottom: 4}
                     text: "ADVANCED"
-                    draw_text +: {
-                        color: theme.color_muted_foreground
-                        text_style: theme.font_bold { font_size: 9.0 }
-                    }
                 }
 
                 settings_nav_capabilities_btn := mod.components.NavButton {
@@ -1120,24 +1058,12 @@ script_mod! {
                     flow: Down
                     spacing: 14
 
-                    google_page_title := Label {
-                        width: Fill
-                        height: Fit
+                    google_page_title := mod.components.PageTitleLabel {
                         text: "Google Antigravity"
-                        draw_text +: {
-                            color: theme.color_foreground
-                            text_style: theme.font_bold { font_size: 18.0 }
-                        }
                     }
 
-                    google_page_desc := Label {
-                        width: Fill
-                        height: Fit
+                    google_page_desc := mod.components.PageDescriptionLabel {
                         text: "Connect your AI model providers to use them in Threadlane."
-                        draw_text +: {
-                            color: theme.color_muted_foreground
-                            text_style +: { font_size: 10.0 }
-                        }
                     }
 
                     antigravity_card := mod.components.ProviderCard {
@@ -1206,24 +1132,12 @@ script_mod! {
                     spacing: 14
                     visible: false
 
-                    openai_page_title := Label {
-                        width: Fill
-                        height: Fit
+                    openai_page_title := mod.components.PageTitleLabel {
                         text: "OpenAI / ChatGPT"
-                        draw_text +: {
-                            color: theme.color_foreground
-                            text_style: theme.font_bold { font_size: 18.0 }
-                        }
                     }
 
-                    openai_page_desc := Label {
-                        width: Fill
-                        height: Fit
+                    openai_page_desc := mod.components.PageDescriptionLabel {
                         text: "Connect your AI model providers to use them in Threadlane."
-                        draw_text +: {
-                            color: theme.color_muted_foreground
-                            text_style +: { font_size: 10.0 }
-                        }
                     }
 
                     openai_card := mod.components.ProviderCard {
@@ -1279,16 +1193,11 @@ script_mod! {
                         spacing: 6
                         align: Align{y: 0.5}
 
-                        capability_page_title := Label {
-                            width: Fill
+                        capability_page_title := mod.components.PageTitleLabel {
                             height: 28
                             padding: 0
                             align: Align{y: 0.5}
                             text: "WASI Extensions"
-                            draw_text +: {
-                                color: theme.color_foreground
-                                text_style: theme.font_bold { font_size: 18.0 }
-                            }
                         }
 
                         capability_install_scope_lbl := Label {
@@ -1327,15 +1236,9 @@ script_mod! {
                         }
                     }
 
-                    capability_page_desc := Label {
-                        width: Fill
-                        height: Fit
+                    capability_page_desc := mod.components.PageDescriptionLabel {
                         padding: 0
                         text: "Choose a compiled .wasm file. Threadlane never runs Cargo or build scripts."
-                        draw_text +: {
-                            color: theme.color_muted_foreground
-                            text_style +: { font_size: 10.0 }
-                        }
                     }
 
                     capability_build_command := mod.components.CodeLabel {
@@ -1382,16 +1285,11 @@ script_mod! {
                         spacing: 6
                         align: Align{y: 0.5}
 
-                        skill_page_title := Label {
-                            width: Fill
+                        skill_page_title := mod.components.PageTitleLabel {
                             height: 28
                             padding: 0
                             align: Align{y: 0.5}
                             text: "Skills"
-                            draw_text +: {
-                                color: theme.color_foreground
-                                text_style: theme.font_bold { font_size: 18.0 }
-                            }
                         }
 
                         skill_refresh_btn := mod.components.IconButton {
@@ -1401,15 +1299,9 @@ script_mod! {
                         }
                     }
 
-                    skill_page_desc := Label {
-                        width: Fill
-                        height: Fit
+                    skill_page_desc := mod.components.PageDescriptionLabel {
                         padding: 0
                         text: "Enable or disable discovered skills for this project. Disabled skills are hidden from the composer and the model."
-                        draw_text +: {
-                            color: theme.color_muted_foreground
-                            text_style +: { font_size: 10.0 }
-                        }
                     }
 
                     skill_list := PortalList {
@@ -1451,16 +1343,11 @@ script_mod! {
                         spacing: 6
                         align: Align{y: 0.5}
 
-                        mcp_page_title := Label {
-                            width: Fill
+                        mcp_page_title := mod.components.PageTitleLabel {
                             height: 28
                             padding: 0
                             align: Align{y: 0.5}
                             text: "MCP Servers"
-                            draw_text +: {
-                                color: theme.color_foreground
-                                text_style: theme.font_bold { font_size: 18.0 }
-                            }
                         }
 
                         mcp_scope_global_btn := SettingsActionButton {
@@ -1484,15 +1371,9 @@ script_mod! {
                         }
                     }
 
-                    mcp_page_desc := Label {
-                        width: Fill
-                        height: Fit
+                    mcp_page_desc := mod.components.PageDescriptionLabel {
                         padding: 0
                         text: "Model Context Protocol servers providing external tools over stdio."
-                        draw_text +: {
-                            color: theme.color_muted_foreground
-                            text_style +: { font_size: 10.0 }
-                        }
                     }
 
                     mcp_add_card := RoundedView {
@@ -1624,14 +1505,8 @@ script_mod! {
                             }
                         }
 
-                        about_title_lbl := Label {
-                            width: Fill
-                            height: Fit
+                        about_title_lbl := mod.components.PageTitleLabel {
                             text: "Threadlane"
-                            draw_text +: {
-                                color: theme.color_foreground
-                                text_style: theme.font_bold { font_size: 18.0 }
-                            }
                         }
                         }
 
@@ -1655,14 +1530,8 @@ script_mod! {
                         }
                     }
 
-                    about_detail_lbl := Label {
-                        width: Fill
-                        height: Fit
+                    about_detail_lbl := mod.components.PageDescriptionLabel {
                         text: "Keep projects, sessions, and provider connections together in one calm, native desktop app."
-                        draw_text +: {
-                            color: theme.color_muted_foreground
-                            text_style +: { font_size: 10.0 }
-                        }
                     }
                 }
             }
