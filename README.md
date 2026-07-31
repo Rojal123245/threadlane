@@ -92,6 +92,18 @@ cd threadlane
 
 # Start the native desktop app.
 cargo run -p threadlane
+
+# Start the interactive Ratatui TUI in your terminal
+cargo run -p threadlane-cli
+
+# Install the standalone `threadlane` CLI binary locally:
+cargo install --path crates/threadlane-cli
+
+# Launch the TUI using the binary name:
+threadlane
+
+# Or execute a one-shot headless query directly in your shell:
+threadlane -p "Summarize git diff"
 ```
 
 On first launch, use the in-app authorization flow or provide credentials through the supported provider configuration. Threadlane persists device-flow credentials under `~/.threadlane/auth.json`.
@@ -144,10 +156,17 @@ Treat these directories as user data. Back them up before manually migrating or 
 | Crate | Responsibility |
 | --- | --- |
 | [`threadlane`](crates/threadlane) | Makepad desktop application, chat UI, composer, projects, sessions, updater, and application event loop. |
+| [`threadlane-cli`](crates/threadlane-cli) | Headless CLI & Ratatui TUI binary (`threadlane`). |
+| [`threadlane-auth`](crates/threadlane-auth) | Trait-based authentication (`AuthProvider`), device flow, and token storage. |
 | [`threadlane-coding-agent`](crates/threadlane-coding-agent) | Coding-agent orchestration, project context, skills, prompts, subagents, and WASI extension hosting. |
 | [`threadlane-agent`](crates/threadlane-agent) | Agent execution loop, message/session trees, context compaction, hooks, and tool-call dispatch. |
-| [`threadlane-provider`](crates/threadlane-provider) | OpenAI-compatible and Codex-oriented streaming clients, model access, and authentication. |
+| [`threadlane-provider`](crates/threadlane-provider) | `ModelProvider` trait, OpenAI-compatible and Codex-oriented streaming clients. |
+| [`threadlane-git`](crates/threadlane-git) | Low-level Git status inspection, branch creation, worktrees, and diff generation. |
 | [`threadlane-tools`](crates/threadlane-tools) | Workspace file operations, search, directory access, and sandboxed process execution. |
+| [`threadlane-mcp`](crates/threadlane-mcp) | Model Context Protocol JSON-RPC client engine (`McpManager`, `McpToolExecutor`). |
+| [`threadlane-skills`](crates/threadlane-skills) | SKILL.md directory scanner, YAML frontmatter parser, and skill registry. |
+| [`threadlane-wasi`](crates/threadlane-wasi) | WASI WebAssembly extension sandbox host and capability broker. |
+| [`threadlane-hashline`](crates/threadlane-hashline) | Precision line:hash anchor calculation and string replacement engine. |
 
 The desktop application is further organized by responsibility:
 
