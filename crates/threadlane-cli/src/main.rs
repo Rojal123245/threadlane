@@ -113,6 +113,11 @@ mod tests {
             dispatch_input(&mut state, input::InputEvent::Submit),
             Action::Submit("inspect the project".into())
         );
+        state.begin_generation();
+        assert_eq!(
+            dispatch_input(&mut state, input::InputEvent::Submit),
+            Action::None
+        );
     }
 
     #[test]

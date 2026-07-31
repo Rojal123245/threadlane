@@ -486,6 +486,69 @@ impl Drop for SubagentCancellationGuard {
     }
 }
 
+struct ActiveRun {
+    id: u64,
+    handle: tokio::task::AbortHandle,
+}
+
+#[derive(Default)]
+struct ActiveRunState {
+    next_id: u64,
+    active: Option<ActiveRun>,
+    cancellation_guard: Option<SubagentCancellationGuard>,
+}
+
+#[derive(Clone)]
+pub struct CodingAgentCancellation {
+    state: Arc<std::sync::Mutex<ActiveRunState>>,
+    journal: Option<SubagentLaneJournal>,
+    event_tx: broadcast::Sender<AgentEvent>,
+}
+
+impl CodingAgentCancellation {
+    pub fn track_active_run(&self, handle: tokio::task::AbortHandle) -> Result<u64, String> {
+        let mut state = self.state.lock().map_err(|error| error.to_string())?;
+        if state.active.is_some() {
+            return Err("A generation is already running".into());
+        }
+        state.next_id = state.next_id.wrapping_add(1);
+        let id = state.next_id;
+        state.active = Some(ActiveRun { id, handle });
+        Ok(id)
+    }
+
+    pub fn finish_active_run(&self, id: u64) {
+        if let Ok(mut state) = self.state.lock() {
+            if state.active.as_ref().is_some_and(|active| active.id == id) {
+                state.active = None;
+            }
+        }
+    }
+
+    pub fn clear_cancellation_guard(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.cancellation_guard = None;
+        }
+    }
+
+    pub fn cancel(&self) -> Result<(), String> {
+        let handle = {
+            let mut state = self.state.lock().map_err(|error| error.to_string())?;
+            if let Some(journal) = self.journal.as_ref() {
+                state.cancellation_guard = Some(journal.begin_cancellation()?);
+            }
+            state.active.take().map(|active| active.handle)
+        };
+        if let Some(handle) = handle {
+            handle.abort();
+        }
+        let _ = self.event_tx.send(AgentEvent::AgentError {
+            error: "Generation cancelled".into(),
+        });
+        Ok(())
+    }
+}
+
 pub(crate) fn abort_open_subagent_operations(
     session_file: &Path,
 ) -> Result<SubagentCancellationGuard, String> {
@@ -1807,7 +1870,7 @@ pub struct CodingAgent {
     dispatch_parent_leaf: Arc<std::sync::Mutex<Option<String>>>,
     completed_subagent_lanes: Arc<std::sync::Mutex<Vec<CompletedSubagentLane>>>,
     interrupted_subagent_journal: Option<SubagentLaneJournal>,
-    cancellation_guard: Option<SubagentCancellationGuard>,
+    cancellation: CodingAgentCancellation,
     interrupted_subagent_recovery: InterruptedSubagentRecoveryState,
     #[cfg(test)]
     subagent_work_observer: SubagentObserverState,
@@ -2215,6 +2278,11 @@ impl CodingAgent {
         let plan_store =
             SessionPlanStore::new(session_tree.plan().clone(), session_tree.file_path.clone());
         let mut agent = Agent::new(&options.api_key, options.account_id, &effective_model);
+        let cancellation = CodingAgentCancellation {
+            state: Arc::default(),
+            journal: interrupted_subagent_journal.clone(),
+            event_tx: agent.loop_engine.event_tx.clone(),
+        };
 
         agent.set_prompt_cache_key(Some(session_tree.session_id.clone()));
 
@@ -2408,7 +2476,7 @@ impl CodingAgent {
             dispatch_parent_leaf,
             completed_subagent_lanes,
             interrupted_subagent_journal,
-            cancellation_guard: None,
+            cancellation,
             interrupted_subagent_recovery,
             #[cfg(test)]
             subagent_work_observer,
@@ -2433,14 +2501,12 @@ impl CodingAgent {
         self.agent.subscribe()
     }
 
-    pub fn cancel(&mut self) -> Result<(), String> {
-        if let Some(journal) = self.interrupted_subagent_journal.as_ref() {
-            self.cancellation_guard = Some(journal.begin_cancellation()?);
-        }
-        let _ = self.agent.loop_engine.event_tx.send(AgentEvent::AgentError {
-            error: "Generation cancelled".into(),
-        });
-        Ok(())
+    pub fn cancellation_handle(&self) -> CodingAgentCancellation {
+        self.cancellation.clone()
+    }
+
+    pub fn cancel(&self) -> Result<(), String> {
+        self.cancellation.cancel()
     }
 
     pub fn current_plan(&self) -> threadlane_agent::SessionPlan {
@@ -3030,7 +3096,7 @@ impl CodingAgent {
         input: &str,
         images: Vec<ImageAttachment>,
     ) -> Option<Result<String, String>> {
-        self.cancellation_guard = None;
+        self.cancellation.clear_cancellation_guard();
         if let Err(error) = self.recover_interrupted_subagent_lanes().await {
             return Some(Err(error));
         }
@@ -5589,6 +5655,52 @@ mod tests {
         assert!(matches!(
             events.try_recv(),
             Ok(AgentEvent::AgentError { error }) if error == "Generation cancelled"
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancel_aborts_active_run_without_a_session_file_before_the_next_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = CodingAgent::new(coding_agent_options(dir.path().to_path_buf()));
+        let cancellation = agent.cancellation_handle();
+        let mut events = agent.subscribe();
+        let event_tx = agent.agent.loop_engine.event_tx.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (_release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let run = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            let _ = release_rx.await;
+            let _ = event_tx.send(AgentEvent::MessageUpdate {
+                text_delta: Some("late".into()),
+                reasoning_delta: None,
+                tool_call_name: None,
+            });
+        });
+        started_rx.await.unwrap();
+        cancellation.track_active_run(run.abort_handle()).unwrap();
+
+        cancellation.cancel().unwrap();
+
+        assert!(run.await.unwrap_err().is_cancelled());
+        assert!(matches!(
+            events.try_recv(),
+            Ok(AgentEvent::AgentError { error }) if error == "Generation cancelled"
+        ));
+        assert!(matches!(events.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Empty)));
+
+        let event_tx = agent.agent.loop_engine.event_tx.clone();
+        let next = tokio::spawn(async move {
+            let _ = event_tx.send(AgentEvent::MessageUpdate {
+                text_delta: Some("next".into()),
+                reasoning_delta: None,
+                tool_call_name: None,
+            });
+        });
+        cancellation.track_active_run(next.abort_handle()).unwrap();
+        next.await.unwrap();
+        assert!(matches!(
+            events.try_recv(),
+            Ok(AgentEvent::MessageUpdate { text_delta: Some(text), .. }) if text == "next"
         ));
     }
 

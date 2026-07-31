@@ -6,8 +6,8 @@ use crate::{
 use crossterm::event;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use threadlane_agent::AgentEvent;
-use threadlane_coding_agent::{CodingAgent, CodingAgentOptions};
-use tokio::{sync::Mutex, task::JoinHandle};
+use threadlane_coding_agent::{CodingAgent, CodingAgentCancellation, CodingAgentOptions};
+use tokio::sync::Mutex;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Action {
@@ -19,7 +19,9 @@ pub(crate) enum Action {
 
 pub(crate) fn dispatch_input(state: &mut AppState, input: InputEvent) -> Action {
     match input {
-        InputEvent::Submit => Action::Submit(state.composer.clone()),
+        InputEvent::Submit if !matches!(state.status, RunStatus::Running) => {
+            Action::Submit(state.composer.clone())
+        }
         InputEvent::CancelOrQuit => {
             if matches!(state.status, RunStatus::Running) {
                 Action::Cancel
@@ -43,28 +45,25 @@ pub(crate) fn dispatch_input(state: &mut AppState, input: InputEvent) -> Action 
             state.scroll_down();
             Action::None
         }
-        InputEvent::Resize | InputEvent::Character(_) | InputEvent::Backspace => Action::None,
+        InputEvent::Resize | InputEvent::Submit | InputEvent::Character(_) | InputEvent::Backspace => Action::None,
     }
 }
 
 pub(crate) fn spawn_prompt(
     agent: Arc<Mutex<CodingAgent>>,
+    cancellation: CodingAgentCancellation,
     prompt: String,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
+) -> Result<(), String> {
+    let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+    let completion = cancellation.clone();
+    let task = tokio::spawn(async move {
+        let Ok(run_id) = start_rx.await else { return };
         let mut agent = agent.lock().await;
         let _ = agent.handle_input_with_images(&prompt, vec![]).await;
-    })
-}
-
-async fn cancel_prompt(
-    agent: &Arc<Mutex<CodingAgent>>,
-    prompt: &mut Option<JoinHandle<()>>,
-) -> Result<(), String> {
-    if let Some(prompt) = prompt.take() {
-        prompt.abort();
-    }
-    agent.lock().await.cancel()
+        completion.finish_active_run(run_id);
+    });
+    let run_id = cancellation.track_active_run(task.abort_handle())?;
+    start_tx.send(run_id).map_err(|_| "Generation ended before it could start".to_string())
 }
 
 pub(crate) async fn run_tui(
@@ -83,8 +82,8 @@ pub(crate) async fn run_tui(
         system_prompt: Default::default(),
     });
     let mut event_rx = agent.subscribe();
+    let cancellation = agent.cancellation_handle();
     let agent = Arc::new(Mutex::new(agent));
-    let mut prompt = None;
 
     loop {
         terminal.draw(|frame| crate::ui::render(frame, &state))?;
@@ -99,10 +98,12 @@ pub(crate) async fn run_tui(
                             content: submission.clone(),
                         });
                         state.begin_generation();
-                        prompt = Some(spawn_prompt(Arc::clone(&agent), submission));
+                        if let Err(error) = spawn_prompt(Arc::clone(&agent), cancellation.clone(), submission) {
+                            reduce_agent_event(&mut state, AgentEvent::AgentError { error });
+                        }
                     }
                     Action::Cancel => {
-                        if let Err(error) = cancel_prompt(&agent, &mut prompt).await {
+                        if let Err(error) = cancellation.cancel() {
                             reduce_agent_event(&mut state, AgentEvent::AgentError { error });
                         }
                     }
@@ -115,13 +116,10 @@ pub(crate) async fn run_tui(
         while let Ok(event) = event_rx.try_recv() {
             reduce_agent_event(&mut state, event);
         }
-        if prompt.as_ref().is_some_and(JoinHandle::is_finished) {
-            prompt = None;
-        }
     }
 
     if matches!(state.status, RunStatus::Running) {
-        if let Err(error) = cancel_prompt(&agent, &mut prompt).await {
+        if let Err(error) = cancellation.cancel() {
             reduce_agent_event(&mut state, AgentEvent::AgentError { error });
         }
     }

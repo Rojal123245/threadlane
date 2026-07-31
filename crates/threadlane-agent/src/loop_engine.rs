@@ -25,6 +25,30 @@ use threadlane_tools::{
 };
 use tokio::sync::{broadcast, mpsc, Mutex};
 
+struct AbortOnDrop<T> {
+    handle: Option<tokio::task::JoinHandle<T>>,
+}
+
+impl<T> AbortOnDrop<T> {
+    fn new(handle: tokio::task::JoinHandle<T>) -> Self {
+        Self { handle: Some(handle) }
+    }
+
+    async fn join(mut self) -> Result<T, tokio::task::JoinError> {
+        let result = self.handle.as_mut().expect("task handle missing").await;
+        self.handle = None;
+        result
+    }
+}
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.handle {
+            handle.abort();
+        }
+    }
+}
+
 fn normalized_tool_call_id(id: &str, empty_index: usize) -> String {
     if id.is_empty() {
         format!("call_{empty_index}")
@@ -765,11 +789,11 @@ impl AgentLoop {
             let client = self.provider_client.clone();
             let prompt_cache_key = self.prompt_cache_key.clone();
 
-            tokio::spawn(async move {
+            let _stream_task = AbortOnDrop::new(tokio::spawn(async move {
                 client
                     .stream_chat_completion(payload_source, prompt_cache_key, stream_tx)
                     .await;
-            });
+            }));
 
             let _ = self.event_tx.send(AgentEvent::MessageStart {
                 role: "assistant".into(),
@@ -999,13 +1023,14 @@ impl AgentLoop {
                 };
 
                 let handle_tool_call = tc.clone();
-                let handle =
-                    tokio::spawn(async move { Self::run_tool_with_hooks(tc_clone, context).await });
+                let handle = AbortOnDrop::new(
+                    tokio::spawn(async move { Self::run_tool_with_hooks(tc_clone, context).await }),
+                );
                 handles.push((handle_tool_call, handle));
             }
 
             for (tool_call, handle) in handles {
-                match handle.await {
+                match handle.join().await {
                     Ok(result) => results.push(result),
                     Err(error) => {
                         let result = AgentToolResult {

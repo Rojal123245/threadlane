@@ -120,7 +120,20 @@ pub fn reduce_agent_event(state: &mut AppState, event: AgentEvent) {
             if let Some(item) = activity(state, &id) { item.id = journal_run_id; item.detail = truncate(error.as_deref().unwrap_or("Completed")); item.status = if succeeded { ActivityStatus::Succeeded } else if error.as_deref().is_some_and(cancellation) { ActivityStatus::Cancelled } else { ActivityStatus::Failed }; }
         }
         AgentEvent::PlanUpdated { plan } => state.plan = Some(plan),
-        AgentEvent::AgentError { error } => { state.status = if cancellation(&error) { RunStatus::Cancelled } else { RunStatus::Failed }; state.messages.push(TranscriptMessage { msg_type: MessageType::Error, content: error }); state.streaming = None; }
+        AgentEvent::AgentError { error } => {
+            let cancelled = cancellation(&error);
+            state.status = if cancelled { RunStatus::Cancelled } else { RunStatus::Failed };
+            if cancelled {
+                if let Some(streaming) = state.streaming.take() {
+                    if !streaming.text.is_empty() {
+                        state.messages.push(TranscriptMessage { msg_type: MessageType::Assistant, content: streaming.text });
+                    }
+                }
+            } else {
+                state.streaming = None;
+            }
+            state.messages.push(TranscriptMessage { msg_type: MessageType::Error, content: error });
+        }
         AgentEvent::TurnStart { .. } | AgentEvent::TurnEnd { .. } | AgentEvent::SubagentRecovery { .. } | AgentEvent::StreamRuleTriggered { .. } => {}
     }
 }
@@ -145,6 +158,19 @@ mod tests {
         reduce_agent_event(&mut state, AgentEvent::MessageUpdate { text_delta: Some("hel".into()), reasoning_delta: None, tool_call_name: None });
         reduce_agent_event(&mut state, AgentEvent::MessageUpdate { text_delta: Some("lo".into()), reasoning_delta: None, tool_call_name: None });
         assert_eq!(state.streaming_text(), "hello");
+    }
+
+    #[test]
+    fn cancellation_commits_partial_streaming_assistant_text() {
+        let mut state = AppState::test_state();
+        reduce_agent_event(&mut state, AgentEvent::MessageStart { role: "assistant".into() });
+        reduce_agent_event(&mut state, AgentEvent::MessageUpdate { text_delta: Some("partial".into()), reasoning_delta: None, tool_call_name: None });
+        reduce_agent_event(&mut state, AgentEvent::AgentError { error: "Generation cancelled".into() });
+
+        assert!(state.streaming.is_none());
+        assert_eq!(state.messages.last().unwrap().content, "Generation cancelled");
+        assert_eq!(state.messages[state.messages.len() - 2].content, "partial");
+        assert_eq!(state.status, RunStatus::Cancelled);
     }
 
     #[test]
