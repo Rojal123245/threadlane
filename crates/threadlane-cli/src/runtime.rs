@@ -80,7 +80,7 @@ fn refresh_completion(state: &mut AppState, models: &[String]) -> Action {
     Action::None
 }
 
-fn accept_completion(state: &mut AppState) {
+fn accept_completion(state: &mut AppState, models: &[String], open_model_picker: bool) -> Action {
     let Some(candidate) = state
         .completion
         .candidates
@@ -88,13 +88,21 @@ fn accept_completion(state: &mut AppState) {
         .cloned()
     else {
         state.close_completion();
-        return;
+        return Action::None;
     };
+    if open_model_picker
+        && state.completion.mode == Some(CompletionMode::Command)
+        && candidate == "/model"
+    {
+        state.composer = candidate;
+        return show_model_completion(state, models);
+    }
     state.composer = match state.completion.mode {
         Some(CompletionMode::Model) => format!("/model {candidate}"),
         _ => candidate,
     };
     state.close_completion();
+    Action::None
 }
 
 pub(crate) fn dispatch_input_with_models(
@@ -104,9 +112,11 @@ pub(crate) fn dispatch_input_with_models(
 ) -> Action {
     if state.completion.visible {
         match input {
-            InputEvent::Submit | InputEvent::Tab => {
-                accept_completion(state);
-                return Action::None;
+            InputEvent::Submit => {
+                return accept_completion(state, models, true);
+            }
+            InputEvent::Tab => {
+                return accept_completion(state, models, false);
             }
             InputEvent::CancelOrQuit => {
                 state.close_completion();
@@ -388,6 +398,30 @@ mod tests {
         );
         assert_eq!(state.composer, "/model gpt-5");
         assert!(!state.completion.visible);
+    }
+
+    #[test]
+    fn enter_on_model_command_completion_opens_model_picker() {
+        let models = vec!["gpt-4o".to_string(), "gpt-5".to_string()];
+        let mut state = AppState::test_state();
+
+        for character in "/model".chars() {
+            assert_eq!(
+                dispatch_input_with_models(&mut state, InputEvent::Character(character), &models),
+                Action::None
+            );
+        }
+        assert_eq!(state.completion.mode, Some(CompletionMode::Command));
+
+        assert_eq!(
+            dispatch_input_with_models(&mut state, InputEvent::Submit, &models),
+            Action::None
+        );
+
+        assert_eq!(state.composer, "/model");
+        assert!(state.completion.visible);
+        assert_eq!(state.completion.mode, Some(CompletionMode::Model));
+        assert_eq!(state.completion.candidates, models);
     }
 
     #[test]
