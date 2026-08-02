@@ -1,5 +1,8 @@
 use super::state::{ActivityStatus, AppState, CompletionMode, MessageType, RunStatus};
-use crate::commands::command_description;
+use crate::{
+    commands::command_description,
+    login::{LoginMode, LoginProvider, LoginState},
+};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -15,7 +18,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     render_transcript(frame, state, sections.transcript);
     render_activity(frame, state, sections.activity);
     render_plan(frame, state, sections.plan);
-    render_completion(frame, state, sections.popup);
+    render_popup(frame, state, sections.popup);
     render_input(frame, state, sections.composer);
     render_footer(frame, sections.footer);
 }
@@ -102,11 +105,6 @@ fn section_height(items: usize, cap: u16) -> u16 {
 }
 
 fn popup_height(area: Rect, state: &AppState, has_activity: bool, has_plan: bool) -> u16 {
-    if !state.completion.visible {
-        return 0;
-    }
-
-    let inner_height = area.height.saturating_sub(2);
     let reserved = 3
         + 3
         + 1
@@ -120,9 +118,24 @@ fn popup_height(area: Rect, state: &AppState, has_activity: bool, has_plan: bool
         } else {
             0
         };
-    let available = inner_height.saturating_sub(reserved + 1);
-    let height = section_height(state.completion.candidates.len().max(1), 8).min(available);
+    let available = area.height.saturating_sub(2).saturating_sub(reserved + 1);
+    let requested = if let Some(login) = state.login.as_ref() {
+        login_popup_height(login)
+    } else if state.completion.visible {
+        section_height(state.completion.candidates.len().max(1), 8)
+    } else {
+        0
+    };
+    let height = requested.min(available);
     (height >= 3).then_some(height).unwrap_or(0)
+}
+
+fn login_popup_height(login: &LoginState) -> u16 {
+    let rows = match login.mode {
+        LoginMode::ProviderPicker => LoginProvider::ALL.len() + usize::from(login.status().is_some()),
+        LoginMode::OpenAiKey => 1 + usize::from(login.status().is_some()),
+    };
+    section_height(rows.max(1), 8)
 }
 
 fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
@@ -280,6 +293,79 @@ fn render_plan(frame: &mut Frame, state: &AppState, area: Rect) {
             .wrap(Wrap { trim: true }),
         area,
     );
+}
+
+fn render_popup(frame: &mut Frame, state: &AppState, area: Rect) {
+    if let Some(login) = state.login.as_ref() {
+        render_login(frame, login, area);
+    } else {
+        render_completion(frame, state, area);
+    }
+}
+
+fn render_login(frame: &mut Frame, login: &LoginState, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let selected_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let mut lines = match login.mode {
+        LoginMode::ProviderPicker => LoginProvider::ALL
+            .iter()
+            .enumerate()
+            .map(|(index, provider)| {
+                let style = if login.selected_provider() == *provider {
+                    selected_style
+                } else {
+                    Style::default()
+                };
+                let _ = index;
+                Line::from(vec![Span::styled(
+                    truncate_plain(provider.label(), inner_width),
+                    style,
+                )])
+            })
+            .collect::<Vec<_>>(),
+        LoginMode::OpenAiKey => vec![Line::from(vec![Span::styled(
+            truncate_plain(LoginProvider::OpenAi.label(), inner_width),
+            selected_style,
+        )])],
+    };
+
+    if let Some(status) = login.status() {
+        lines.push(Line::from(vec![Span::styled(
+            truncate_plain(&inline_status(status), inner_width),
+            login_status_style(status),
+        )]));
+    }
+
+    let title = match login.mode {
+        LoginMode::ProviderPicker => " Login Providers ",
+        LoginMode::OpenAiKey => " Login Status ",
+    };
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title)),
+        area,
+    );
+}
+
+fn inline_status(status: &str) -> String {
+    status.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn login_status_style(status: &str) -> Style {
+    let lower = status.to_ascii_lowercase();
+    let color = if lower.contains("saved") || lower.contains("complete") {
+        Color::Green
+    } else if lower.contains("failed") || lower.contains("cannot") || lower.contains("error") {
+        Color::Red
+    } else {
+        Color::Yellow
+    };
+    Style::default().fg(color)
 }
 
 fn render_completion(frame: &mut Frame, state: &AppState, area: Rect) {
@@ -440,16 +526,32 @@ fn text_width(text: &str) -> usize {
 }
 
 fn render_input(frame: &mut Frame, state: &AppState, area: Rect) {
-    let color = if matches!(state.status, RunStatus::Running) {
-        Color::DarkGray
+    let (title, text, color) = if let Some(login) = state.login.as_ref() {
+        (
+            match login.mode {
+                LoginMode::ProviderPicker => " Login ",
+                LoginMode::OpenAiKey => " OpenAI API Key ",
+            },
+            match login.mode {
+                LoginMode::ProviderPicker => "",
+                LoginMode::OpenAiKey => login.masked_key(),
+            },
+            if login.pending {
+                Color::DarkGray
+            } else {
+                Color::Yellow
+            },
+        )
+    } else if matches!(state.status, RunStatus::Running) {
+        (" Prompt ", state.composer.as_str(), Color::DarkGray)
     } else {
-        Color::Yellow
+        (" Prompt ", state.composer.as_str(), Color::Yellow)
     };
     frame.render_widget(
-        Paragraph::new(state.composer.as_str()).block(
+        Paragraph::new(text).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Prompt ")
+                .title(title)
                 .style(Style::default().fg(color)),
         ),
         area,
@@ -489,6 +591,7 @@ fn render_footer(frame: &mut Frame, area: Rect) {
 mod tests {
     use super::*;
     use super::super::state::CompletionMode;
+    use crate::login::LoginProvider;
     use ratatui::{backend::TestBackend, Terminal};
 
     #[test]
@@ -648,6 +751,89 @@ mod tests {
 
         let (selected_x, selected_y) = find_text(buffer, "/quit").unwrap();
         assert_eq!(buffer[(selected_x, selected_y)].fg, Color::Yellow);
+    }
+
+    #[test]
+    fn render_shows_login_provider_picker_with_existing_popup_geometry() {
+        let mut state = AppState::test_state_with_plan(20);
+        state.activities = (0..20)
+            .map(|index| super::super::state::ActivityItem {
+                id: index.to_string(),
+                name: "tool".into(),
+                detail: "detail".into(),
+                status: super::super::state::ActivityStatus::Running,
+            })
+            .collect();
+        state.open_login();
+        state
+            .login
+            .as_mut()
+            .unwrap()
+            .select_next_provider();
+
+        let sections = layout_sections(Rect::new(0, 0, 100, 30), &state);
+        assert!(sections.popup.height > 0);
+        assert_eq!(
+            sections.popup.y + sections.popup.height,
+            sections.composer.y
+        );
+
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &state)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert!(find_text(buffer, "Codex").is_some());
+        assert!(find_text(buffer, "OpenAI").is_some());
+        assert!(find_text(buffer, "Antigravity").is_some());
+
+        let (selected_x, selected_y) = find_text(buffer, "OpenAI").unwrap();
+        assert_eq!(buffer[(selected_x, selected_y)].fg, Color::Yellow);
+    }
+
+    #[test]
+    fn render_masks_openai_key_entry_and_hides_raw_key() {
+        let mut state = AppState::test_state();
+        state.open_login();
+        let masked = {
+            let login = state.login.as_mut().unwrap();
+            login.select_provider(LoginProvider::OpenAi);
+            login.push_paste("sk-secret-123");
+            login.masked_key().to_string()
+        };
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &state)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert!(find_text(buffer, "OpenAI API Key").is_some());
+        assert!(find_text(buffer, &masked).is_some());
+        assert!(find_text(buffer, "sk-secret-123").is_none());
+    }
+
+    #[test]
+    fn render_shows_bounded_secret_free_login_status() {
+        let mut state = AppState::test_state();
+        state.open_login();
+        let login = state.login.as_mut().unwrap();
+        login.select_provider(LoginProvider::OpenAi);
+        login.push_paste("sk-secret-123");
+        login.set_status("OpenAI API key cannot be empty. Paste a key and try again.");
+
+        let backend = TestBackend::new(28, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &state)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rendered = (0..buffer.area.height)
+            .map(|y| row_text(buffer, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("OpenAI API key"));
+        assert!(rendered.contains('…'));
+        assert!(!rendered.contains("sk-secret-123"));
     }
 
     #[test]
