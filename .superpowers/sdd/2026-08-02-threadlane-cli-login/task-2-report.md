@@ -65,3 +65,18 @@ Notes:
 
 - Renderer/UI presentation was intentionally left untouched for Task 3.
 - The existing untracked plan file under `docs/superpowers/plans/2026-08-02-threadlane-cli-login.md` was left alone.
+
+Review round 1 fix:
+
+- Fixed the pending-login cancellation hole where Escape only closed the CLI login modal while the detached Codex device polling or Antigravity OAuth task kept running.
+- The CLI runtime now owns the active login task abort handle, aborts it on pending-login Escape and on TUI shutdown, and ignores stale completion events by attempt ID / modal presence.
+- Credential persistence was moved out of the background login task completion path:
+  - Codex/OpenAI device polling now has a no-save variant used by the CLI login task.
+  - Antigravity token exchange now has a no-save variant used by the CLI login task.
+  - Credentials are only written after the runtime verifies the completion event still belongs to the active login flow.
+- Added a regression test covering cancellation + stale completion ignoring without real network calls.
+
+Additional verification for review round 1:
+
+- `cargo test -p threadlane-cli` → passed (`45 passed`)
+- `cargo test -p threadlane-auth` → passed (`13 passed`)

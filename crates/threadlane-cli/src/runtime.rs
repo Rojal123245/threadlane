@@ -13,6 +13,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use threadlane_agent::AgentEvent;
 use threadlane_coding_agent::{CodingAgent, CodingAgentCancellation, CodingAgentOptions};
 use tokio::sync::Mutex;
+use tokio::task::AbortHandle;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Action {
@@ -22,6 +23,7 @@ pub(crate) enum Action {
     Message(String),
     OpenLogin,
     StartLogin(LoginProvider),
+    CancelLogin,
     None,
 }
 
@@ -123,7 +125,7 @@ fn dispatch_login_input(state: &mut AppState, input: InputEvent) -> Action {
 
     if login.pending {
         if matches!(input, InputEvent::CancelOrQuit) {
-            state.close_login();
+            return Action::CancelLogin;
         }
         return Action::None;
     }
@@ -286,11 +288,19 @@ fn push_assistant_message(state: &mut AppState, content: String) {
     });
 }
 
+fn cancel_login_task(state: &mut AppState, active_login: &mut Option<AbortHandle>) {
+    if let Some(handle) = active_login.take() {
+        handle.abort();
+    }
+    state.close_login();
+}
+
 fn handle_login_event(state: &mut AppState, event: LoginEvent) {
     let attempt_id = match &event {
         LoginEvent::DeviceCodePrompt { attempt_id, .. }
         | LoginEvent::BrowserPrompt { attempt_id, .. }
-        | LoginEvent::Finished { attempt_id, .. }
+        | LoginEvent::CodexTokens { attempt_id, .. }
+        | LoginEvent::AntigravityCredentials { attempt_id, .. }
         | LoginEvent::Failed { attempt_id, .. } => *attempt_id,
     };
 
@@ -317,7 +327,23 @@ fn handle_login_event(state: &mut AppState, event: LoginEvent) {
                 format!("Open this URL in your browser to finish Antigravity login:\n{url}"),
             );
         }
-        LoginEvent::Finished { message, .. } => {
+        LoginEvent::CodexTokens { tokens, .. } => {
+            let message = match threadlane_auth::save_credentials(&tokens) {
+                Ok(()) => "Codex login complete.".to_string(),
+                Err(error) => error,
+            };
+            state.close_login();
+            push_assistant_message(state, message);
+        }
+        LoginEvent::AntigravityCredentials { credentials, .. } => {
+            let account = credentials
+                .account_email
+                .clone()
+                .unwrap_or_else(|| "the active account".to_string());
+            let message = match threadlane_auth::save_antigravity_credentials(&credentials) {
+                Ok(()) => format!("Antigravity login complete for {account}."),
+                Err(error) => error,
+            };
             state.close_login();
             push_assistant_message(state, message);
         }
@@ -368,6 +394,7 @@ pub(crate) async fn run_tui(
     let mut available_models: Option<Vec<String>> = None;
     let (login_tx, mut login_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut next_login_attempt = 0_u64;
+    let mut active_login: Option<AbortHandle> = None;
 
     loop {
         terminal.draw(|frame| crate::ui::render(frame, &state))?;
@@ -429,6 +456,9 @@ pub(crate) async fn run_tui(
                     }
                     Action::OpenLogin => state.open_login(),
                     Action::StartLogin(provider) => {
+                        if let Some(handle) = active_login.take() {
+                            handle.abort();
+                        }
                         next_login_attempt = next_login_attempt.wrapping_add(1);
                         let attempt_id = next_login_attempt;
                         if let Some(login) = state.login.as_mut() {
@@ -447,8 +477,9 @@ pub(crate) async fn run_tui(
                                 );
                             }
                         }
-                        spawn_provider_login(provider, attempt_id, login_tx.clone());
+                        active_login = Some(spawn_provider_login(provider, attempt_id, login_tx.clone()));
                     }
+                    Action::CancelLogin => cancel_login_task(&mut state, &mut active_login),
                     Action::Quit => break,
                     Action::Message(content) => push_assistant_message(&mut state, content),
                     Action::Submit(_) | Action::None => {}
@@ -469,6 +500,7 @@ pub(crate) async fn run_tui(
             reduce_agent_event(&mut state, AgentEvent::AgentError { error });
         }
     }
+    cancel_login_task(&mut state, &mut active_login);
     while let Ok(event) = event_rx.try_recv() {
         reduce_agent_event(&mut state, event);
     }
@@ -728,5 +760,103 @@ mod tests {
             Action::None
         );
         assert_eq!(state.composer, "hello");
+    }
+
+    #[tokio::test]
+    async fn cancelling_pending_login_aborts_task_and_ignores_stale_completion() {
+        use std::fs;
+        use std::path::PathBuf;
+        use std::sync::{Mutex, OnceLock};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+            static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+            GUARD.get_or_init(|| Mutex::new(())).lock().unwrap()
+        }
+
+        struct HomeGuard {
+            _lock: std::sync::MutexGuard<'static, ()>,
+            saved_home: Option<std::ffi::OsString>,
+            home: PathBuf,
+        }
+
+        impl HomeGuard {
+            fn new() -> Self {
+                let lock = test_guard();
+                let saved_home = std::env::var_os("HOME");
+                let home = std::env::temp_dir().join(format!(
+                    "threadlane-cli-login-cancel-{}-{}",
+                    std::process::id(),
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
+                fs::create_dir_all(&home).unwrap();
+                std::env::set_var("HOME", &home);
+                Self {
+                    _lock: lock,
+                    saved_home,
+                    home,
+                }
+            }
+        }
+
+        impl Drop for HomeGuard {
+            fn drop(&mut self) {
+                if let Some(saved_home) = self.saved_home.take() {
+                    std::env::set_var("HOME", saved_home);
+                } else {
+                    std::env::remove_var("HOME");
+                }
+                let _ = fs::remove_dir_all(&self.home);
+            }
+        }
+
+        let env = HomeGuard::new();
+        let mut state = AppState::test_state();
+        state.open_login();
+        state
+            .login
+            .as_mut()
+            .unwrap()
+            .begin_provider_flow(LoginProvider::Codex, 41, "Starting Codex login...");
+
+        let blocker = tokio::spawn(async {
+            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+        });
+        let handle = blocker.abort_handle();
+        let mut active_login = Some(handle);
+        let baseline_messages = state.messages.len();
+
+        assert_eq!(
+            dispatch_input(&mut state, InputEvent::CancelOrQuit),
+            Action::CancelLogin
+        );
+
+        cancel_login_task(&mut state, &mut active_login);
+        assert!(state.login.is_none());
+        assert!(active_login.is_none());
+        assert!(blocker.await.unwrap_err().is_cancelled());
+
+        handle_login_event(
+            &mut state,
+            LoginEvent::CodexTokens {
+                attempt_id: 41,
+                tokens: Box::new(threadlane_auth::OAuthTokens {
+                    access_token: "token-should-not-save".into(),
+                    refresh_token: Some("refresh-should-not-save".into()),
+                    expires_in: Some(60),
+                    id_token: None,
+                    account_id: Some("acct".into()),
+                }),
+            },
+        );
+
+        assert_eq!(state.messages.len(), baseline_messages);
+        assert!(
+            !env.home.join(".threadlane").join("credentials.json").exists(),
+            "stale login completion must not persist credentials after cancellation"
+        );
     }
 }

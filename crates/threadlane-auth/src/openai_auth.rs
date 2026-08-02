@@ -349,6 +349,15 @@ pub async fn poll_device_token(
     device_auth_id: &str,
     user_code: &str,
 ) -> Result<OAuthTokens, String> {
+    let tokens = poll_device_token_without_saving(device_auth_id, user_code).await?;
+    let _ = save_credentials(&tokens);
+    Ok(tokens)
+}
+
+pub async fn poll_device_token_without_saving(
+    device_auth_id: &str,
+    user_code: &str,
+) -> Result<OAuthTokens, String> {
     let client = reqwest::Client::new();
     let res = client
         .post("https://auth.openai.com/api/accounts/deviceauth/token")
@@ -387,7 +396,6 @@ pub async fn poll_device_token(
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
         };
-        let _ = save_credentials(&tokens);
         return Ok(tokens);
     }
 
@@ -397,13 +405,19 @@ pub async fn poll_device_token(
         .and_then(|v| v.as_str());
 
     if let Some(code) = code_opt {
-        return exchange_authorization_code(code).await;
+        return exchange_authorization_code_without_saving(code).await;
     }
 
     Err(format!("Unexpected OAuth token response: {body}"))
 }
 
 async fn exchange_authorization_code(code: &str) -> Result<OAuthTokens, String> {
+    let tokens = exchange_authorization_code_without_saving(code).await?;
+    let _ = save_credentials(&tokens);
+    Ok(tokens)
+}
+
+async fn exchange_authorization_code_without_saving(code: &str) -> Result<OAuthTokens, String> {
     let client = reqwest::Client::new();
     let res = client
         .post("https://auth.openai.com/oauth/token")
@@ -438,7 +452,6 @@ async fn exchange_authorization_code(code: &str) -> Result<OAuthTokens, String> 
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
         };
-        let _ = save_credentials(&tokens);
         return Ok(tokens);
     }
 

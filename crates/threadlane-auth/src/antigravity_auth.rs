@@ -50,7 +50,7 @@ pub fn load_antigravity_credentials() -> Option<AntigravityCredentials> {
     None
 }
 
-fn save_antigravity_credentials(creds: &AntigravityCredentials) -> Result<(), String> {
+pub fn save_antigravity_credentials(creds: &AntigravityCredentials) -> Result<(), String> {
     let path = get_antigravity_credentials_path();
     let json = serde_json::to_string_pretty(creds).map_err(|e| e.to_string())?;
     fs::write(path, json).map_err(|e| e.to_string())
@@ -113,6 +113,15 @@ pub fn build_authorization_url(code_challenge: &str, state: &str) -> String {
 }
 
 pub async fn exchange_code_for_tokens(
+    code: &str,
+    code_verifier: &str,
+) -> Result<AntigravityCredentials, String> {
+    let creds = exchange_code_for_tokens_without_saving(code, code_verifier).await?;
+    save_antigravity_credentials(&creds)?;
+    Ok(creds)
+}
+
+pub async fn exchange_code_for_tokens_without_saving(
     code: &str,
     code_verifier: &str,
 ) -> Result<AntigravityCredentials, String> {
@@ -182,7 +191,6 @@ pub async fn exchange_code_for_tokens(
         project_id: std::env::var("ANTIGRAVITY_PROJECT_ID").ok(),
     };
 
-    save_antigravity_credentials(&creds)?;
     Ok(creds)
 }
 

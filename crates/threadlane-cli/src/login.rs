@@ -1,4 +1,5 @@
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::task::AbortHandle;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoginMode {
@@ -216,9 +217,13 @@ pub enum LoginEvent {
         attempt_id: u64,
         url: String,
     },
-    Finished {
+    CodexTokens {
         attempt_id: u64,
-        message: String,
+        tokens: Box<threadlane_auth::OAuthTokens>,
+    },
+    AntigravityCredentials {
+        attempt_id: u64,
+        credentials: Box<threadlane_auth::AntigravityCredentials>,
     },
     Failed {
         attempt_id: u64,
@@ -230,14 +235,15 @@ pub fn spawn_provider_login(
     provider: LoginProvider,
     attempt_id: u64,
     tx: UnboundedSender<LoginEvent>,
-) {
-    tokio::spawn(async move {
+) -> AbortHandle {
+    let task = tokio::spawn(async move {
         match provider {
             LoginProvider::Codex => run_codex_login(attempt_id, tx).await,
             LoginProvider::Antigravity => run_antigravity_login(attempt_id, tx).await,
             LoginProvider::OpenAi => {}
         }
     });
+    task.abort_handle()
 }
 
 async fn run_codex_login(attempt_id: u64, tx: UnboundedSender<LoginEvent>) {
@@ -250,13 +256,15 @@ async fn run_codex_login(attempt_id: u64, tx: UnboundedSender<LoginEvent>) {
             });
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(response.interval.max(3))).await;
-                match threadlane_auth::poll_device_token(&response.device_auth_id, &response.user_code)
-                    .await
-                {
-                    Ok(_) => {
-                        let _ = tx.send(LoginEvent::Finished {
+                match threadlane_auth::poll_device_token_without_saving(
+                    &response.device_auth_id,
+                    &response.user_code,
+                )
+                .await {
+                    Ok(tokens) => {
+                        let _ = tx.send(LoginEvent::CodexTokens {
                             attempt_id,
-                            message: "Codex login complete.".into(),
+                            tokens: Box::new(tokens),
                         });
                         break;
                     }
@@ -294,14 +302,13 @@ async fn run_antigravity_login(attempt_id: u64, tx: UnboundedSender<LoginEvent>)
     });
 
     match threadlane_auth::listen_for_oauth_callback(state).await {
-        Ok(code) => match threadlane_auth::exchange_code_for_tokens(&code, &verifier).await {
+        Ok(code) => match threadlane_auth::exchange_code_for_tokens_without_saving(&code, &verifier)
+            .await
+        {
             Ok(credentials) => {
-                let account = credentials
-                    .account_email
-                    .unwrap_or_else(|| "the active account".to_string());
-                let _ = tx.send(LoginEvent::Finished {
+                let _ = tx.send(LoginEvent::AntigravityCredentials {
                     attempt_id,
-                    message: format!("Antigravity login complete for {account}."),
+                    credentials: Box::new(credentials),
                 });
             }
             Err(error) => {
