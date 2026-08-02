@@ -45,3 +45,15 @@
 
 - `cargo test -p threadlane-cli` → passed (`32 passed`)
 - `git diff --check -- crates/threadlane-cli/src/render.rs .superpowers/sdd/2026-08-02-threadlane-cli-command-popups/task-3-report.md` → passed
+
+## Fix Round 3
+
+- Reviewer issue: single-line popup rows fixed selection scrolling, but long command label/description text could clip abruptly on narrow terminals.
+- Root cause: popup rows were rendered as single lines without explicit truncation to the popup inner width.
+- Fix: truncated the combined command label/description to the popup inner width in `render.rs`, preserving one-line rows, bounded popup height, and existing selected-row scroll behavior.
+- Regression test added: on a narrow terminal, a long command row stays single-line, remains bounded, and shows an explicit ellipsis instead of wrapping.
+
+### Fix Round 3 Verification
+
+- `cargo test -p threadlane-cli` → passed (`33 passed`)
+- `git diff --check -- crates/threadlane-cli/src/render.rs .superpowers/sdd/2026-08-02-threadlane-cli-command-popups/task-3-report.md` → passed

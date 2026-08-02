@@ -296,7 +296,9 @@ fn render_completion(frame: &mut Frame, state: &AppState, area: Rect) {
         .candidates
         .iter()
         .enumerate()
-        .map(|(index, candidate)| completion_line(state, index, candidate))
+        .map(|(index, candidate)| {
+            completion_line(state, index, candidate, area.width.saturating_sub(2) as usize)
+        })
         .collect::<Vec<_>>();
     frame.render_widget(
         Paragraph::new(lines)
@@ -319,25 +321,32 @@ fn completion_scroll(state: &AppState, area: Rect) -> u16 {
         .min(max_scroll) as u16
 }
 
-fn completion_line(state: &AppState, index: usize, candidate: &str) -> Line<'static> {
+fn completion_line(
+    state: &AppState,
+    index: usize,
+    candidate: &str,
+    inner_width: usize,
+) -> Line<'static> {
     let selected = state.completion.selected == index;
     let selected_style = Style::default()
         .fg(Color::Yellow)
         .add_modifier(Modifier::BOLD);
-    let style = if selected {
-        selected_style
-    } else {
-        Style::default()
-    };
 
     match state.completion.mode {
         Some(CompletionMode::Command) => {
             let detail = command_detail(candidate);
-            let mut spans = vec![Span::styled(candidate.to_string(), style)];
+            let mut spans = vec![styled_text(
+                candidate,
+                if selected {
+                    selected_style
+                } else {
+                    Style::default()
+                },
+            )];
             if !detail.is_empty() {
-                spans.push(Span::raw(" "));
-                spans.push(Span::styled(
-                    detail.to_string(),
+                spans.push(styled_text(" ", Style::default()));
+                spans.push(styled_text(
+                    detail,
                     if selected {
                         selected_style
                     } else {
@@ -345,10 +354,67 @@ fn completion_line(state: &AppState, index: usize, candidate: &str) -> Line<'sta
                     },
                 ));
             }
-            Line::from(spans)
+            Line::from(truncate_spans(spans, inner_width))
         }
-        _ => Line::from(Span::styled(candidate.to_string(), style)),
+        _ => Line::from(vec![Span::styled(
+            truncate_plain(candidate, inner_width),
+            if selected {
+                selected_style
+            } else {
+                Style::default()
+            },
+        )]),
     }
+}
+
+fn styled_text(text: &str, style: Style) -> (String, Style) {
+    (text.to_string(), style)
+}
+
+fn truncate_spans(spans: Vec<(String, Style)>, max_width: usize) -> Vec<Span<'static>> {
+    if max_width == 0 {
+        return Vec::new();
+    }
+
+    let total_width = spans.iter().map(|(text, _)| text.chars().count()).sum::<usize>();
+    if total_width <= max_width {
+        return spans
+            .into_iter()
+            .map(|(text, style)| Span::styled(text, style))
+            .collect();
+    }
+
+    let mut remaining = max_width.saturating_sub(1);
+    let mut truncated = Vec::new();
+    let mut last_style = Style::default();
+
+    for (text, style) in spans {
+        if remaining == 0 {
+            break;
+        }
+        let piece = text.chars().take(remaining).collect::<String>();
+        let width = piece.chars().count();
+        if width == 0 {
+            continue;
+        }
+        remaining = remaining.saturating_sub(width);
+        last_style = style;
+        truncated.push(Span::styled(piece, style));
+    }
+
+    truncated.push(Span::styled("…".to_string(), last_style));
+    truncated
+}
+
+fn truncate_plain(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if text.chars().count() <= max_width {
+        return text.to_string();
+    }
+    let head = text.chars().take(max_width.saturating_sub(1)).collect::<String>();
+    format!("{head}…")
 }
 
 fn command_detail(candidate: &str) -> &'static str {
@@ -570,6 +636,33 @@ mod tests {
     }
 
     #[test]
+    fn render_truncates_long_command_rows_on_narrow_terminal_without_wrapping() {
+        let mut state = AppState::test_state();
+        state.show_completion(
+            CompletionMode::Command,
+            vec!["/reasoning".into(), "/help".into()],
+        );
+        state.completion.selected = 0;
+
+        let backend = TestBackend::new(18, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &state)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let sections = layout_sections(buffer.area, &state);
+        let popup_inner_width = sections.popup.width.saturating_sub(2) as usize;
+        let popup_row = row_text(buffer, sections.popup.y + 1);
+
+        assert!(sections.popup.height <= 8);
+        assert_eq!(popup_row.chars().count(), buffer.area.width as usize);
+        assert!(popup_row.contains('…'));
+        assert!(popup_row.contains("/reasoning"));
+        assert!(!popup_row.contains("set reasoning"));
+        assert!(find_text(buffer, "/help").is_some());
+        assert!(popup_inner_width < "/reasoning set reasoning".chars().count());
+    }
+
+    #[test]
     fn follow_tail_tracks_manual_scroll_back_to_end() {
         let mut state = AppState::test_state();
         assert!(state.follow_tail);
@@ -583,13 +676,17 @@ mod tests {
 
     fn find_text(buffer: &ratatui::buffer::Buffer, needle: &str) -> Option<(u16, u16)> {
         for y in 0..buffer.area.height {
-            let row = (0..buffer.area.width)
-                .map(|x| buffer[(x, y)].symbol())
-                .collect::<String>();
+            let row = row_text(buffer, y);
             if let Some(offset) = row.find(needle) {
                 return Some((offset as u16, y));
             }
         }
         None
+    }
+
+    fn row_text(buffer: &ratatui::buffer::Buffer, y: u16) -> String {
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect::<String>()
     }
 }
