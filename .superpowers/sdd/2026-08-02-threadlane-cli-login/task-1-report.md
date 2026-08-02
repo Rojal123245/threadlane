@@ -41,6 +41,20 @@ Verification after the fix:
 - `cargo test -p threadlane-auth` ✅
 - `git -c core.fsmonitor=false diff --check` ✅
 
+## Round 3 Fix Notes
+
+Reviewer feedback addressed:
+
+- Removed the non-Unix `.bak` fallback entirely.
+- Preserved the canonical key path without removing the live file first.
+- Kept the secure temp-file + `0600` Unix path and used a direct truncate/write portable fallback without backup files.
+- Added a regression test that confirms repeated saves do not leave an `.bak` path behind.
+
+Verification after the fix:
+
+- `cargo test -p threadlane-auth` ✅
+- `git -c core.fsmonitor=false diff --check` ✅
+
 ## Round 2 Fix Notes
 
 Reviewer feedback addressed:
