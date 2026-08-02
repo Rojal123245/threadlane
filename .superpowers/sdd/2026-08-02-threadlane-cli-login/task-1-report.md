@@ -27,3 +27,16 @@ Verification:
 Notes:
 
 - The repo already had an unrelated untracked plan file under `docs/superpowers/plans/2026-08-02-threadlane-cli-login.md`; I left it untouched.
+
+## Round 1 Fix Notes
+
+Reviewer feedback addressed:
+
+- Closed the OpenAI key file permission window by writing to a temp file created with restrictive permissions and then renaming it into place.
+- Restored `HOME` after each test via an RAII guard, and kept test execution serialized with a crate-local mutex.
+- Kept Codex fallback behavior unchanged.
+
+Verification after the fix:
+
+- `cargo test -p threadlane-auth` ✅
+- `git -c core.fsmonitor=false diff --check` ✅

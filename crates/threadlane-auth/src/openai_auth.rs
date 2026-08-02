@@ -144,11 +144,27 @@ fn get_openai_api_key_path() -> PathBuf {
 }
 
 fn write_secure_text_file(path: &PathBuf, contents: &str) -> Result<(), String> {
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(path)
+    let parent = path.parent().ok_or_else(|| "Failed to store OpenAI API key".to_string())?;
+    let tmp_path = parent.join(format!(
+        ".openai_api_key.tmp-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "Failed to store OpenAI API key".to_string())?
+            .as_nanos()
+    ));
+
+    let mut options = OpenOptions::new();
+    options.create_new(true).truncate(true).write(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let mut file = options
+        .open(&tmp_path)
         .map_err(|e| format!("Failed to store OpenAI API key: {e}"))?;
 
     file.write_all(contents.as_bytes())
@@ -160,9 +176,14 @@ fn write_secure_text_file(path: &PathBuf, contents: &str) -> Result<(), String> 
     {
         use std::os::unix::fs::PermissionsExt;
 
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600))
             .map_err(|e| format!("Failed to store OpenAI API key: {e}"))?;
     }
+
+    if path.exists() {
+        fs::remove_file(path).map_err(|e| format!("Failed to store OpenAI API key: {e}"))?;
+    }
+    fs::rename(&tmp_path, path).map_err(|e| format!("Failed to store OpenAI API key: {e}"))?;
 
     Ok(())
 }
@@ -395,6 +416,7 @@ impl AuthProvider for OpenAiAuthProvider {
 mod tests {
     use super::*;
     use std::fs;
+    use std::ffi::OsString;
     use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
 
@@ -417,8 +439,38 @@ mod tests {
         home
     }
 
-    fn set_home(home: &PathBuf) {
-        std::env::set_var("HOME", home);
+    struct TestHomeGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        previous_home: Option<OsString>,
+        home: PathBuf,
+    }
+
+    impl TestHomeGuard {
+        fn new(name: &str) -> Self {
+            let lock = test_guard();
+            let previous_home = std::env::var_os("HOME");
+            let home = temp_home(name);
+            std::env::set_var("HOME", &home);
+            Self {
+                _lock: lock,
+                previous_home,
+                home,
+            }
+        }
+
+        fn home(&self) -> &PathBuf {
+            &self.home
+        }
+    }
+
+    impl Drop for TestHomeGuard {
+        fn drop(&mut self) {
+            match self.previous_home.take() {
+                Some(home) => std::env::set_var("HOME", home),
+                None => std::env::remove_var("HOME"),
+            }
+            let _ = fs::remove_dir_all(&self.home);
+        }
     }
 
     #[test]
@@ -447,29 +499,22 @@ mod tests {
 
     #[test]
     fn test_save_and_load_openai_api_key_round_trip() {
-        let _guard = test_guard();
-        let home = temp_home("round-trip");
-        set_home(&home);
+        let env = TestHomeGuard::new("round-trip");
 
         save_openai_api_key("sk-test-123").unwrap();
 
         assert_eq!(load_openai_api_key().as_deref(), Some("sk-test-123"));
-
-        let _ = fs::remove_dir_all(home);
+        assert!(env.home().join(".threadlane").join("openai_api_key").exists());
     }
 
     #[test]
     fn test_save_openai_api_key_rejects_empty_key() {
-        let _guard = test_guard();
-        let home = temp_home("empty");
-        set_home(&home);
+        let _env = TestHomeGuard::new("empty");
 
         let err = save_openai_api_key("   ").unwrap_err();
         assert!(err.to_lowercase().contains("empty"));
         assert!(!err.contains("sk-test-123"));
         assert!(load_openai_api_key().is_none());
-
-        let _ = fs::remove_dir_all(home);
     }
 
     #[cfg(unix)]
@@ -477,17 +522,13 @@ mod tests {
     fn test_save_openai_api_key_sets_restrictive_permissions() {
         use std::os::unix::fs::PermissionsExt;
 
-        let _guard = test_guard();
-        let home = temp_home("perms");
-        set_home(&home);
+        let env = TestHomeGuard::new("perms");
 
         save_openai_api_key("sk-permissions").unwrap();
 
-        let path = home.join(".threadlane").join("openai_api_key");
+        let path = env.home().join(".threadlane").join("openai_api_key");
         let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
-
-        let _ = fs::remove_dir_all(home);
     }
 
     #[cfg(unix)]
@@ -495,29 +536,22 @@ mod tests {
     fn test_save_openai_api_key_does_not_echo_secret_on_write_error() {
         use std::os::unix::fs::PermissionsExt;
 
-        let _guard = test_guard();
-        let home = temp_home("write-error");
-        set_home(&home);
+        let env = TestHomeGuard::new("write-error");
 
-        let threadlane = home.join(".threadlane");
+        let threadlane = env.home().join(".threadlane");
         fs::create_dir_all(&threadlane).unwrap();
         fs::set_permissions(&threadlane, fs::Permissions::from_mode(0o555)).unwrap();
 
         let secret = "sk-super-secret";
         let err = save_openai_api_key(secret).unwrap_err();
         assert!(!err.contains(secret));
-
-        let _ = fs::set_permissions(&threadlane, fs::Permissions::from_mode(0o755));
-        let _ = fs::remove_dir_all(home);
     }
 
     #[test]
     fn test_load_credentials_still_reads_codex_openai_api_key() {
-        let _guard = test_guard();
-        let home = temp_home("codex");
-        set_home(&home);
+        let env = TestHomeGuard::new("codex");
 
-        let codex_dir = home.join(".codex");
+        let codex_dir = env.home().join(".codex");
         fs::create_dir_all(&codex_dir).unwrap();
         fs::write(
             codex_dir.join("auth.json"),
@@ -528,7 +562,5 @@ mod tests {
         let creds = load_credentials().unwrap();
         assert_eq!(creds.access_token, "codex-secret");
         assert_eq!(creds.source, "~/.codex/auth.json");
-
-        let _ = fs::remove_dir_all(home);
     }
 }
