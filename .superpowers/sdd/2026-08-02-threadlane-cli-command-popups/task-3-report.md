@@ -57,3 +57,16 @@
 
 - `cargo test -p threadlane-cli` → passed (`33 passed`)
 - `git diff --check -- crates/threadlane-cli/src/render.rs .superpowers/sdd/2026-08-02-threadlane-cli-command-popups/task-3-report.md` → passed
+
+## Fix Round 4
+
+- Reviewer issue: popup command-row truncation used character count, so wide Unicode labels could exceed the popup's terminal display width.
+- Root cause: `truncate_spans` and `truncate_plain` budgeted with `.chars().count()` while Ratatui renders by terminal cell width.
+- Fix: reused Ratatui `Span::width()` in the existing truncation helpers; no new dependency or UI abstraction.
+- Regression test added: a CJK command label truncates to the requested terminal display width and ends with an ellipsis.
+
+### Fix Round 4 Verification
+
+- `cargo test -p threadlane-cli command_row_truncation_uses_terminal_display_width` → failed before the fix, then passed after the fix.
+- `cargo test -p threadlane-cli` → passed (`34 passed`)
+- `git diff --check` → passed

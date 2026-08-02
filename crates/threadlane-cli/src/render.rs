@@ -376,7 +376,7 @@ fn truncate_spans(spans: Vec<(String, Style)>, max_width: usize) -> Vec<Span<'st
         return Vec::new();
     }
 
-    let total_width = spans.iter().map(|(text, _)| text.chars().count()).sum::<usize>();
+    let total_width = spans.iter().map(|(text, _)| text_width(text)).sum::<usize>();
     if total_width <= max_width {
         return spans
             .into_iter()
@@ -392,8 +392,16 @@ fn truncate_spans(spans: Vec<(String, Style)>, max_width: usize) -> Vec<Span<'st
         if remaining == 0 {
             break;
         }
-        let piece = text.chars().take(remaining).collect::<String>();
-        let width = piece.chars().count();
+        let mut piece = String::new();
+        let mut width = 0;
+        for ch in text.chars() {
+            let ch_width = text_width(&ch.to_string());
+            if width + ch_width > remaining {
+                break;
+            }
+            piece.push(ch);
+            width += ch_width;
+        }
         if width == 0 {
             continue;
         }
@@ -410,11 +418,24 @@ fn truncate_plain(text: &str, max_width: usize) -> String {
     if max_width == 0 {
         return String::new();
     }
-    if text.chars().count() <= max_width {
+    if text_width(text) <= max_width {
         return text.to_string();
     }
-    let head = text.chars().take(max_width.saturating_sub(1)).collect::<String>();
+    let mut head = String::new();
+    let mut width = 0;
+    for ch in text.chars() {
+        let ch_width = text_width(&ch.to_string());
+        if width + ch_width > max_width.saturating_sub(1) {
+            break;
+        }
+        head.push(ch);
+        width += ch_width;
+    }
     format!("{head}…")
+}
+
+fn text_width(text: &str) -> usize {
+    Span::raw(text.to_string()).width()
 }
 
 fn command_detail(candidate: &str) -> &'static str {
@@ -660,6 +681,17 @@ mod tests {
         assert!(!popup_row.contains("set reasoning"));
         assert!(find_text(buffer, "/help").is_some());
         assert!(popup_inner_width < "/reasoning set reasoning".chars().count());
+    }
+
+    #[test]
+    fn command_row_truncation_uses_terminal_display_width() {
+        let mut state = AppState::test_state();
+        state.show_completion(CompletionMode::Command, vec!["/模型abc".into()]);
+
+        let line = completion_line(&state, 0, "/模型abc", 6);
+
+        assert!(line.width() <= 6);
+        assert_eq!(line.spans.last().unwrap().content, "…");
     }
 
     #[test]
