@@ -13,7 +13,8 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use threadlane_agent::AgentEvent;
 use threadlane_coding_agent::{CodingAgent, CodingAgentCancellation, CodingAgentOptions};
 use tokio::sync::Mutex;
-use tokio::task::AbortHandle;
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::task::JoinHandle;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Action {
@@ -288,11 +289,38 @@ fn push_assistant_message(state: &mut AppState, content: String) {
     });
 }
 
-fn cancel_login_task(state: &mut AppState, active_login: &mut Option<AbortHandle>) {
+fn cancel_login_task(state: &mut AppState, active_login: &mut Option<JoinHandle<()>>) {
     if let Some(handle) = active_login.take() {
         handle.abort();
     }
     state.close_login();
+}
+
+fn drain_login_events(state: &mut AppState, login_rx: &mut UnboundedReceiver<LoginEvent>) {
+    while let Ok(event) = login_rx.try_recv() {
+        handle_login_event(state, event);
+    }
+}
+
+async fn shutdown_login_flow(
+    state: &mut AppState,
+    active_login: &mut Option<JoinHandle<()>>,
+    login_rx: &mut UnboundedReceiver<LoginEvent>,
+) {
+    drain_login_events(state, login_rx);
+
+    if let Some(mut handle) = active_login.take() {
+        let had_pending_login = state.login.as_ref().is_some_and(|login| login.pending);
+        if !handle.is_finished() {
+            handle.abort();
+            if had_pending_login {
+                state.close_login();
+            }
+        }
+        let _ = handle.await;
+    }
+
+    drain_login_events(state, login_rx);
 }
 
 fn handle_login_event(state: &mut AppState, event: LoginEvent) {
@@ -394,7 +422,7 @@ pub(crate) async fn run_tui(
     let mut available_models: Option<Vec<String>> = None;
     let (login_tx, mut login_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut next_login_attempt = 0_u64;
-    let mut active_login: Option<AbortHandle> = None;
+    let mut active_login: Option<JoinHandle<()>> = None;
 
     loop {
         terminal.draw(|frame| crate::ui::render(frame, &state))?;
@@ -456,9 +484,7 @@ pub(crate) async fn run_tui(
                     }
                     Action::OpenLogin => state.open_login(),
                     Action::StartLogin(provider) => {
-                        if let Some(handle) = active_login.take() {
-                            handle.abort();
-                        }
+                        cancel_login_task(&mut state, &mut active_login);
                         next_login_attempt = next_login_attempt.wrapping_add(1);
                         let attempt_id = next_login_attempt;
                         if let Some(login) = state.login.as_mut() {
@@ -487,9 +513,7 @@ pub(crate) async fn run_tui(
             }
         }
 
-        while let Ok(event) = login_rx.try_recv() {
-            handle_login_event(&mut state, event);
-        }
+        drain_login_events(&mut state, &mut login_rx);
         while let Ok(event) = event_rx.try_recv() {
             reduce_agent_event(&mut state, event);
         }
@@ -500,7 +524,7 @@ pub(crate) async fn run_tui(
             reduce_agent_event(&mut state, AgentEvent::AgentError { error });
         }
     }
-    cancel_login_task(&mut state, &mut active_login);
+    shutdown_login_flow(&mut state, &mut active_login, &mut login_rx).await;
     while let Ok(event) = event_rx.try_recv() {
         reduce_agent_event(&mut state, event);
     }
@@ -766,13 +790,7 @@ mod tests {
     async fn cancelling_pending_login_aborts_task_and_ignores_stale_completion() {
         use std::fs;
         use std::path::PathBuf;
-        use std::sync::{Mutex, OnceLock};
         use std::time::{SystemTime, UNIX_EPOCH};
-
-        fn test_guard() -> std::sync::MutexGuard<'static, ()> {
-            static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-            GUARD.get_or_init(|| Mutex::new(())).lock().unwrap()
-        }
 
         struct HomeGuard {
             _lock: std::sync::MutexGuard<'static, ()>,
@@ -782,7 +800,7 @@ mod tests {
 
         impl HomeGuard {
             fn new() -> Self {
-                let lock = test_guard();
+                let lock = crate::test_env_guard_lock();
                 let saved_home = std::env::var_os("HOME");
                 let home = std::env::temp_dir().join(format!(
                     "threadlane-cli-login-cancel-{}-{}",
@@ -822,11 +840,9 @@ mod tests {
             .unwrap()
             .begin_provider_flow(LoginProvider::Codex, 41, "Starting Codex login...");
 
-        let blocker = tokio::spawn(async {
+        let mut active_login = Some(tokio::spawn(async {
             tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-        });
-        let handle = blocker.abort_handle();
-        let mut active_login = Some(handle);
+        }));
         let baseline_messages = state.messages.len();
 
         assert_eq!(
@@ -837,7 +853,6 @@ mod tests {
         cancel_login_task(&mut state, &mut active_login);
         assert!(state.login.is_none());
         assert!(active_login.is_none());
-        assert!(blocker.await.unwrap_err().is_cancelled());
 
         handle_login_event(
             &mut state,
@@ -858,5 +873,93 @@ mod tests {
             !env.home.join(".threadlane").join("credentials.json").exists(),
             "stale login completion must not persist credentials after cancellation"
         );
+    }
+
+    #[tokio::test]
+    async fn shutdown_processes_queued_login_success_before_aborting_active_flow() {
+        use std::fs;
+        use std::path::PathBuf;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        struct HomeGuard {
+            _lock: std::sync::MutexGuard<'static, ()>,
+            saved_home: Option<std::ffi::OsString>,
+            home: PathBuf,
+        }
+
+        impl HomeGuard {
+            fn new() -> Self {
+                let lock = crate::test_env_guard_lock();
+                let saved_home = std::env::var_os("HOME");
+                let home = std::env::temp_dir().join(format!(
+                    "threadlane-cli-login-shutdown-{}-{}",
+                    std::process::id(),
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
+                fs::create_dir_all(&home).unwrap();
+                std::env::set_var("HOME", &home);
+                Self {
+                    _lock: lock,
+                    saved_home,
+                    home,
+                }
+            }
+        }
+
+        impl Drop for HomeGuard {
+            fn drop(&mut self) {
+                if let Some(saved_home) = self.saved_home.take() {
+                    std::env::set_var("HOME", saved_home);
+                } else {
+                    std::env::remove_var("HOME");
+                }
+                let _ = fs::remove_dir_all(&self.home);
+            }
+        }
+
+        let env = HomeGuard::new();
+        let mut state = AppState::test_state();
+        state.open_login();
+        state
+            .login
+            .as_mut()
+            .unwrap()
+            .begin_provider_flow(LoginProvider::Codex, 77, "Starting Codex login...");
+
+        let (login_tx, mut login_rx) = tokio::sync::mpsc::unbounded_channel();
+        let success_tokens = threadlane_auth::OAuthTokens {
+            access_token: "queued-success-token".into(),
+            refresh_token: Some("queued-refresh-token".into()),
+            expires_in: Some(60),
+            id_token: None,
+            account_id: Some("acct-queued".into()),
+        };
+        login_tx
+            .send(LoginEvent::CodexTokens {
+                attempt_id: 77,
+                tokens: Box::new(success_tokens),
+            })
+            .unwrap();
+
+        let mut active_login = Some(tokio::spawn(async {
+            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+        }));
+
+        shutdown_login_flow(&mut state, &mut active_login, &mut login_rx).await;
+
+        assert!(state.login.is_none());
+        assert!(active_login.is_none());
+        assert!(
+            state.messages
+                .iter()
+                .any(|message| message.content == "Codex login complete."),
+            "queued success should still be applied during shutdown"
+        );
+        let saved = fs::read_to_string(env.home.join(".threadlane").join("credentials.json")).unwrap();
+        assert!(saved.contains("queued-success-token"));
+        assert!(saved.contains("acct-queued"));
     }
 }

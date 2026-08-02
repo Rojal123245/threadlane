@@ -12,6 +12,8 @@ use std::env;
 #[cfg(test)]
 use std::ffi::OsString;
 use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
 use threadlane_agent::AgentEvent;
 use threadlane_coding_agent::{CodingAgent, CodingAgentOptions};
 use threadlane_auth::{load_credentials, load_openai_api_key};
@@ -113,15 +115,15 @@ pub(crate) fn resolve_credentials() -> (String, Option<String>) {
 }
 
 #[cfg(test)]
+pub(crate) fn test_env_guard_lock() -> std::sync::MutexGuard<'static, ()> {
+    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+    GUARD.get_or_init(|| Mutex::new(())).lock().unwrap()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
-    use std::sync::{Mutex, OnceLock};
-
-    fn test_guard() -> std::sync::MutexGuard<'static, ()> {
-        static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-        GUARD.get_or_init(|| Mutex::new(())).lock().unwrap()
-    }
 
     struct EnvGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
@@ -133,7 +135,7 @@ mod tests {
 
     impl EnvGuard {
         fn new(name: &str) -> Self {
-            let lock = test_guard();
+            let lock = crate::test_env_guard_lock();
             let saved_home = env::var_os("HOME");
             let saved_openai_key = env::var_os("OPENAI_API_KEY");
             let saved_account_id = env::var_os("CHATGPT_ACCOUNT_ID");

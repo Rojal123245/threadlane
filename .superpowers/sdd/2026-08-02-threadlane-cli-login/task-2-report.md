@@ -80,3 +80,16 @@ Additional verification for review round 1:
 
 - `cargo test -p threadlane-cli` → passed (`45 passed`)
 - `cargo test -p threadlane-auth` → passed (`13 passed`)
+
+Review round 2 fix:
+
+- Fixed the TUI shutdown ordering race where `run_tui` aborted the active login task before draining `login_rx`, which could drop a valid queued success event and skip credential persistence.
+- The CLI now keeps the active login `JoinHandle`, drains queued login events before shutdown cancellation, then aborts only still-running flows, awaits task completion, and drains once more.
+- This preserves valid active-attempt completion already queued at shutdown, still cancels genuinely pending flows, and continues to ignore stale events by attempt ID / modal state.
+- Added a shutdown regression test covering queued login success during shutdown without real network calls.
+- Unified CLI test HOME-mutation guards behind one crate-level lock so credential-path tests stop racing each other.
+
+Additional verification for review round 2:
+
+- `cargo test -p threadlane-cli` → passed (`46 passed`)
+- `cargo test -p threadlane-auth` → passed (`13 passed`)

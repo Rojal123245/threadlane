@@ -1,5 +1,5 @@
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::task::AbortHandle;
+use tokio::task::JoinHandle;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoginMode {
@@ -235,15 +235,14 @@ pub fn spawn_provider_login(
     provider: LoginProvider,
     attempt_id: u64,
     tx: UnboundedSender<LoginEvent>,
-) -> AbortHandle {
-    let task = tokio::spawn(async move {
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
         match provider {
             LoginProvider::Codex => run_codex_login(attempt_id, tx).await,
             LoginProvider::Antigravity => run_antigravity_login(attempt_id, tx).await,
             LoginProvider::OpenAi => {}
         }
-    });
-    task.abort_handle()
+    })
 }
 
 async fn run_codex_login(attempt_id: u64, tx: UnboundedSender<LoginEvent>) {
