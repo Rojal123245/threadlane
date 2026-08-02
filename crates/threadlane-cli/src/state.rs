@@ -1,5 +1,19 @@
 use threadlane_agent::{AgentEvent, AgentMessage, ReasoningEffort, SessionPlan};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompletionMode {
+    Command,
+    Model,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CompletionState {
+    pub visible: bool,
+    pub candidates: Vec<String>,
+    pub selected: usize,
+    pub mode: Option<CompletionMode>,
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub model: String,
@@ -13,6 +27,7 @@ pub struct AppState {
     pub status: RunStatus,
     pub scroll: u16,
     pub follow_tail: bool,
+    pub completion: CompletionState,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -83,6 +98,7 @@ impl AppState {
             status: RunStatus::Ready,
             scroll: 0,
             follow_tail: true,
+            completion: CompletionState::default(),
         }
     }
 
@@ -133,6 +149,35 @@ impl AppState {
     pub fn scroll_down(&mut self) {
         self.scroll = self.scroll.saturating_sub(1);
         self.follow_tail = self.scroll == 0;
+    }
+
+    pub fn show_completion(&mut self, mode: CompletionMode, candidates: Vec<String>) {
+        if candidates.is_empty() {
+            self.close_completion();
+            return;
+        }
+        self.completion.visible = true;
+        self.completion.candidates = candidates;
+        self.completion.selected = 0;
+        self.completion.mode = Some(mode);
+    }
+
+    pub fn close_completion(&mut self) {
+        self.completion = CompletionState::default();
+    }
+
+    pub fn select_next_completion(&mut self) {
+        let count = self.completion.candidates.len();
+        if count > 0 {
+            self.completion.selected = (self.completion.selected + 1) % count;
+        }
+    }
+
+    pub fn select_previous_completion(&mut self) {
+        let count = self.completion.candidates.len();
+        if count > 0 {
+            self.completion.selected = (self.completion.selected + count - 1) % count;
+        }
     }
 }
 
@@ -486,6 +531,42 @@ mod tests {
             },
         );
         assert_eq!(state.status, RunStatus::Succeeded);
+    }
+
+    #[test]
+    fn completion_selection_wraps_in_both_directions() {
+        let mut state = AppState::test_state();
+        state.show_completion(
+            CompletionMode::Command,
+            vec!["/model".into(), "/models".into(), "/help".into()],
+        );
+
+        assert_eq!(state.completion.selected, 0);
+
+        state.select_previous_completion();
+        assert_eq!(state.completion.selected, 2);
+
+        state.select_next_completion();
+        assert_eq!(state.completion.selected, 0);
+
+        state.select_next_completion();
+        assert_eq!(state.completion.selected, 1);
+    }
+
+    #[test]
+    fn closing_completion_clears_candidates_and_mode() {
+        let mut state = AppState::test_state();
+        state.show_completion(
+            CompletionMode::Model,
+            vec!["gpt-4o".into(), "gpt-5".into()],
+        );
+
+        state.close_completion();
+
+        assert!(!state.completion.visible);
+        assert!(state.completion.candidates.is_empty());
+        assert_eq!(state.completion.selected, 0);
+        assert!(state.completion.mode.is_none());
     }
 
     #[test]

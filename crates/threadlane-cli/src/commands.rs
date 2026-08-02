@@ -2,6 +2,56 @@ use crate::ui::{AppState, RunStatus};
 use threadlane_agent::{PlanItemStatus, ReasoningEffort};
 use threadlane_coding_agent::CodingAgent;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CommandDescription {
+    pub label: &'static str,
+    pub usage: &'static str,
+    pub description: &'static str,
+}
+
+const COMMAND_DESCRIPTIONS: [CommandDescription; 8] = [
+    CommandDescription {
+        label: "/model",
+        usage: "/model [provider/model]",
+        description: "Show or set the active model.",
+    },
+    CommandDescription {
+        label: "/models",
+        usage: "/models",
+        description: "List available models.",
+    },
+    CommandDescription {
+        label: "/reasoning",
+        usage: "/reasoning [off|minimal|low|medium|high|xhigh]",
+        description: "Show or set reasoning effort.",
+    },
+    CommandDescription {
+        label: "/plan",
+        usage: "/plan",
+        description: "Show the current plan.",
+    },
+    CommandDescription {
+        label: "/clear",
+        usage: "/clear",
+        description: "Clear the transcript.",
+    },
+    CommandDescription {
+        label: "/session",
+        usage: "/session",
+        description: "Show session details.",
+    },
+    CommandDescription {
+        label: "/help",
+        usage: "/help",
+        description: "List commands.",
+    },
+    CommandDescription {
+        label: "/quit",
+        usage: "/quit",
+        description: "Exit the CLI.",
+    },
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Command {
     ShowModel,
@@ -31,6 +81,30 @@ impl std::fmt::Display for CommandError {
             }
         }
     }
+}
+
+pub(crate) fn command_descriptions() -> &'static [CommandDescription] {
+    &COMMAND_DESCRIPTIONS
+}
+
+pub(crate) fn filter_command_labels(query: &str) -> Vec<String> {
+    let query = query.trim().trim_start_matches('/').to_ascii_lowercase();
+    command_descriptions()
+        .iter()
+        .filter(|command| {
+            query.is_empty() || command.label[1..].to_ascii_lowercase().starts_with(&query)
+        })
+        .map(|command| command.label.to_string())
+        .collect()
+}
+
+pub(crate) fn filter_model_labels(query: &str, models: &[String]) -> Vec<String> {
+    let query = query.trim().to_ascii_lowercase();
+    models
+        .iter()
+        .filter(|model| query.is_empty() || model.to_ascii_lowercase().contains(&query))
+        .cloned()
+        .collect()
 }
 
 pub(crate) fn parse_command(input: &str) -> Result<Command, CommandError> {
@@ -155,7 +229,14 @@ pub(crate) async fn execute_command(
             context.state.reasoning_effort.label()
         )),
         Command::Help => CommandResult::Message(
-            "Commands: /model [provider/model], /models, /reasoning [off|minimal|low|medium|high|xhigh], /plan, /clear, /session, /help, /quit".into(),
+            format!(
+                "Commands: {}",
+                command_descriptions()
+                    .iter()
+                    .map(|command| command.usage)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         ),
         Command::Quit => CommandResult::Quit,
     }
@@ -166,6 +247,35 @@ mod tests {
     use super::*;
     use threadlane_agent::ReasoningEffort;
     use threadlane_coding_agent::CodingAgentOptions;
+
+    #[test]
+    fn filters_command_labels_from_known_commands() {
+        assert_eq!(
+            filter_command_labels("mo"),
+            vec!["/model".to_string(), "/models".to_string()]
+        );
+        assert_eq!(filter_command_labels("rea"), vec!["/reasoning".to_string()]);
+        assert!(filter_command_labels("zzz").is_empty());
+    }
+
+    #[test]
+    fn filters_model_labels_case_insensitively() {
+        let models = vec![
+            "gpt-4o".to_string(),
+            "antigravity/gemini".to_string(),
+            "GPT-5".to_string(),
+        ];
+
+        assert_eq!(
+            filter_model_labels("gPt", &models),
+            vec!["gpt-4o".to_string(), "GPT-5".to_string()]
+        );
+        assert_eq!(
+            filter_model_labels("gravity", &models),
+            vec!["antigravity/gemini".to_string()]
+        );
+        assert!(filter_model_labels("claude", &models).is_empty());
+    }
 
     #[test]
     fn parses_model_and_reasoning_commands() {
