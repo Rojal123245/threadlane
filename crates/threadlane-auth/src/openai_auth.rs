@@ -6,7 +6,21 @@ use std::fmt;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+
+#[cfg(windows)]
+const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+#[cfg(windows)]
+const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn MoveFileExW(existing_file_name: *const u16, new_file_name: *const u16, flags: u32) -> i32;
+}
 
 const CLIENT_ID: &str = "app-8Nl2J3k7mP0xQ1vR";
 
@@ -143,20 +157,43 @@ fn get_openai_api_key_path() -> PathBuf {
     path
 }
 
-fn write_secure_text_file(path: &PathBuf, contents: &str) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        write_secure_text_file_unix(path, contents)
-    }
+#[cfg(windows)]
+fn replace_file(temp_path: &Path, destination: &Path) -> std::io::Result<()> {
+    let temp: Vec<u16> = temp_path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
 
-    #[cfg(not(unix))]
+    if unsafe {
+        MoveFileExW(
+            temp.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } != 0
     {
-        write_secure_text_file_portable(path, contents)
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
     }
 }
 
-#[cfg(unix)]
-fn write_secure_text_file_unix(path: &PathBuf, contents: &str) -> Result<(), String> {
+#[cfg(not(windows))]
+fn replace_file(temp_path: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::rename(temp_path, destination)
+}
+
+fn write_secure_text_file(path: &Path, contents: &str) -> Result<(), String> {
+    write_secure_text_file_with_replacer(path, contents, replace_file)
+}
+
+fn write_secure_text_file_with_replacer(
+    path: &Path,
+    contents: &str,
+    replace: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), String> {
     let parent = path.parent().ok_or_else(|| "Failed to store OpenAI API key".to_string())?;
     let tmp_path = parent.join(format!(
         ".openai_api_key.tmp-{}-{}",
@@ -180,36 +217,30 @@ fn write_secure_text_file_unix(path: &PathBuf, contents: &str) -> Result<(), Str
         .open(&tmp_path)
         .map_err(|e| format!("Failed to store OpenAI API key: {e}"))?;
 
-    file.write_all(contents.as_bytes())
-        .map_err(|e| format!("Failed to store OpenAI API key: {e}"))?;
-    file.sync_all()
-        .map_err(|e| format!("Failed to store OpenAI API key: {e}"))?;
+    let write_result = file
+        .write_all(contents.as_bytes())
+        .and_then(|_| file.sync_all());
+    drop(file);
+
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("Failed to store OpenAI API key: {error}"));
+    }
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
-        fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("Failed to store OpenAI API key: {e}"))?;
+        if let Err(error) = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600)) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(format!("Failed to store OpenAI API key: {error}"));
+        }
     }
 
-    fs::rename(&tmp_path, path).map_err(|e| format!("Failed to store OpenAI API key: {e}"))?;
-
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn write_secure_text_file_portable(path: &PathBuf, contents: &str) -> Result<(), String> {
-    let mut options = OpenOptions::new();
-    options.create(true).truncate(true).write(true);
-    let mut file = options
-        .open(path)
-        .map_err(|e| format!("Failed to store OpenAI API key: {e}"))?;
-
-    file.write_all(contents.as_bytes())
-        .map_err(|e| format!("Failed to store OpenAI API key: {e}"))?;
-    file.sync_all()
-        .map_err(|e| format!("Failed to store OpenAI API key: {e}"))?;
+    if let Err(error) = replace(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("Failed to store OpenAI API key: {error}"));
+    }
 
     Ok(())
 }
@@ -573,7 +604,6 @@ mod tests {
         assert!(!err.contains(secret));
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_save_openai_api_key_overwrites_without_backup_path() {
         let env = TestHomeGuard::new("no-backup");
@@ -588,6 +618,26 @@ mod tests {
             .join("openai_api_key.bak");
 
         assert_eq!(fs::read_to_string(&key_path).unwrap(), "sk-second");
+        assert!(!backup_path.exists());
+    }
+
+    #[test]
+    fn test_failed_api_key_replacement_preserves_existing_key() {
+        let env = TestHomeGuard::new("failed-replacement");
+
+        save_openai_api_key("sk-first").unwrap();
+
+        let key_path = env.home().join(".threadlane").join("openai_api_key");
+        let backup_path = key_path.with_extension("bak");
+        let err = write_secure_text_file_with_replacer(
+            &key_path,
+            "sk-second",
+            |_, _| Err(std::io::Error::new(std::io::ErrorKind::Other, "forced failure")),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("forced failure"));
+        assert_eq!(fs::read_to_string(&key_path).unwrap(), "sk-first");
         assert!(!backup_path.exists());
     }
 

@@ -67,3 +67,18 @@ Verification after the fix:
 
 - `cargo test -p threadlane-auth` ✅
 - `git -c core.fsmonitor=false diff --check` ✅
+
+## Round 4 Fix Notes
+
+Reviewer feedback addressed:
+
+- Replaced the non-Unix in-place truncate/write fallback with the same staged write path used on Unix.
+- Reused the repository's native Windows `MoveFileExW` replacement pattern with replace-existing and write-through flags; no dependency was added.
+- Kept the previous canonical key untouched until the staged file is fully written, synced, and successfully replaced, and removed the staged file on failure without creating a cleartext `.bak`.
+- Preserved Unix `0600` creation before writing, `TestHomeGuard`, and existing Codex credential loading behavior.
+- Added failure-injection coverage proving a replacement error preserves the prior key, and made overwrite/no-backup coverage platform-independent.
+
+Verification after the fix:
+
+- `cargo test -p threadlane-auth` ✅ (13 passed)
+- `git diff --check` ✅
