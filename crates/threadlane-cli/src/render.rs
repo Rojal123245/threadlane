@@ -1,4 +1,5 @@
-use super::state::{ActivityStatus, AppState, MessageType, RunStatus};
+use super::state::{ActivityStatus, AppState, CompletionMode, MessageType, RunStatus};
+use crate::commands::command_usages;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -14,6 +15,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     render_transcript(frame, state, sections.transcript);
     render_activity(frame, state, sections.activity);
     render_plan(frame, state, sections.plan);
+    render_completion(frame, state, sections.popup);
     render_input(frame, state, sections.composer);
     render_footer(frame, sections.footer);
 }
@@ -24,6 +26,7 @@ pub struct LayoutSections {
     pub transcript: Rect,
     pub activity: Rect,
     pub plan: Rect,
+    pub popup: Rect,
     pub composer: Rect,
     pub footer: Rect,
 }
@@ -46,6 +49,10 @@ pub fn layout_sections(area: Rect, state: &AppState) -> LayoutSections {
             state.plan.as_ref().unwrap().items.len(),
             5,
         )));
+    }
+    let popup_height = popup_height(area, state, has_activity, has_plan);
+    if popup_height > 0 {
+        constraints.push(Constraint::Length(popup_height));
     }
     constraints.extend([Constraint::Length(3), Constraint::Length(1)]);
 
@@ -72,11 +79,19 @@ pub fn layout_sections(area: Rect, state: &AppState) -> LayoutSections {
     } else {
         empty(activity.y + activity.height)
     };
+    let popup = if popup_height > 0 {
+        let rect = chunks[next];
+        next += 1;
+        rect
+    } else {
+        empty(plan.y + plan.height)
+    };
     LayoutSections {
         header,
         transcript,
         activity,
         plan,
+        popup,
         composer: chunks[next],
         footer: chunks[next + 1],
     }
@@ -84,6 +99,29 @@ pub fn layout_sections(area: Rect, state: &AppState) -> LayoutSections {
 
 fn section_height(items: usize, cap: u16) -> u16 {
     items.saturating_add(2).min(cap as usize) as u16
+}
+
+fn popup_height(area: Rect, state: &AppState, has_activity: bool, has_plan: bool) -> u16 {
+    if !state.completion.visible || state.completion.candidates.is_empty() {
+        return 0;
+    }
+
+    let inner_height = area.height.saturating_sub(2);
+    let reserved = 3
+        + 3
+        + 1
+        + if has_activity {
+            section_height(state.activities.len(), 5)
+        } else {
+            0
+        }
+        + if has_plan {
+            section_height(state.plan.as_ref().unwrap().items.len(), 5)
+        } else {
+            0
+        };
+    let available = inner_height.saturating_sub(reserved + 1);
+    section_height(state.completion.candidates.len(), 8).min(available)
 }
 
 fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
@@ -243,6 +281,80 @@ fn render_plan(frame: &mut Frame, state: &AppState, area: Rect) {
     );
 }
 
+fn render_completion(frame: &mut Frame, state: &AppState, area: Rect) {
+    if area.height == 0 || !state.completion.visible || state.completion.candidates.is_empty() {
+        return;
+    }
+
+    let title = match state.completion.mode {
+        Some(CompletionMode::Command) => " Commands ",
+        Some(CompletionMode::Model) => " Models ",
+        None => " Completion ",
+    };
+    let lines = state
+        .completion
+        .candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| completion_line(state, index, candidate))
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(title))
+            .wrap(Wrap { trim: true }),
+        area,
+    );
+}
+
+fn completion_line(state: &AppState, index: usize, candidate: &str) -> Line<'static> {
+    let selected = state.completion.selected == index;
+    let selected_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let style = if selected {
+        selected_style
+    } else {
+        Style::default()
+    };
+
+    match state.completion.mode {
+        Some(CompletionMode::Command) => {
+            let detail = command_detail(candidate);
+            let mut spans = vec![Span::styled(candidate.to_string(), style)];
+            if !detail.is_empty() {
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(
+                    detail.to_string(),
+                    if selected {
+                        selected_style
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                ));
+            }
+            Line::from(spans)
+        }
+        _ => Line::from(Span::styled(candidate.to_string(), style)),
+    }
+}
+
+fn command_detail(candidate: &str) -> &'static str {
+    match candidate {
+        "/model" => "switch model",
+        "/models" => "list models",
+        "/reasoning" => "set reasoning",
+        "/plan" => "show plan",
+        "/clear" => "clear transcript",
+        "/session" => "show session",
+        "/help" => "show help",
+        "/quit" => "quit",
+        _ => command_usages()
+            .iter()
+            .find_map(|usage| usage.strip_prefix(candidate).map(str::trim))
+            .unwrap_or(""),
+    }
+}
+
 fn render_input(frame: &mut Frame, state: &AppState, area: Rect) {
     let color = if matches!(state.status, RunStatus::Running) {
         Color::DarkGray
@@ -292,6 +404,8 @@ fn render_footer(frame: &mut Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::state::CompletionMode;
+    use ratatui::{backend::TestBackend, Terminal};
 
     #[test]
     fn empty_activity_and_plan_do_not_create_empty_sections() {
@@ -299,6 +413,7 @@ mod tests {
         let sections = layout_sections(Rect::new(0, 0, 100, 30), &state);
         assert_eq!(sections.activity.height, 0);
         assert_eq!(sections.plan.height, 0);
+        assert_eq!(sections.popup.height, 0);
         assert!(sections.transcript.height > 0);
         assert_eq!(sections.composer.height, 3);
 
@@ -310,6 +425,7 @@ mod tests {
         let empty_plan_sections = layout_sections(Rect::new(0, 0, 100, 30), &empty_plan);
         assert_eq!(empty_plan_sections.activity.height, 0);
         assert_eq!(empty_plan_sections.plan.height, 0);
+        assert_eq!(empty_plan_sections.popup.height, 0);
         assert_eq!(empty_plan_sections.transcript, sections.transcript);
         assert_eq!(empty_plan_sections.composer, sections.composer);
     }
@@ -332,6 +448,65 @@ mod tests {
     }
 
     #[test]
+    fn completion_popup_is_bounded_and_sits_above_the_prompt() {
+        let mut state = AppState::test_state_with_plan(20);
+        state.activities = (0..20)
+            .map(|index| super::super::state::ActivityItem {
+                id: index.to_string(),
+                name: "tool".into(),
+                detail: "detail".into(),
+                status: super::super::state::ActivityStatus::Running,
+            })
+            .collect();
+        state.show_completion(
+            CompletionMode::Command,
+            (0..20).map(|index| format!("/cmd-{index}")).collect(),
+        );
+
+        let sections = layout_sections(Rect::new(0, 0, 100, 24), &state);
+
+        assert!(sections.popup.height > 0);
+        assert!(sections.popup.height <= 8);
+        assert_eq!(
+            sections.popup.y + sections.popup.height,
+            sections.composer.y
+        );
+        assert_eq!(sections.composer.height, 3);
+        assert_eq!(sections.footer.height, 1);
+    }
+
+    #[test]
+    fn render_shows_command_descriptions_and_selected_yellow_row() {
+        let mut state = AppState::test_state();
+        state.show_completion(
+            CompletionMode::Command,
+            vec!["/model".into(), "/help".into()],
+        );
+        state.completion.selected = 1;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &state)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let area = buffer.area;
+        let mut text = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+
+        assert!(text.contains("Commands"));
+        assert!(text.contains("/model switch model"));
+        assert!(text.contains("/help show help"));
+
+        let (selected_x, selected_y) = find_text(buffer, "/help").unwrap();
+        assert_eq!(buffer[(selected_x, selected_y)].fg, Color::Yellow);
+    }
+
+    #[test]
     fn follow_tail_tracks_manual_scroll_back_to_end() {
         let mut state = AppState::test_state();
         assert!(state.follow_tail);
@@ -341,5 +516,17 @@ mod tests {
         state.scroll_down();
         assert!(state.follow_tail);
         assert_eq!(state.scroll, 0);
+    }
+
+    fn find_text(buffer: &ratatui::buffer::Buffer, needle: &str) -> Option<(u16, u16)> {
+        for y in 0..buffer.area.height {
+            let row = (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>();
+            if let Some(offset) = row.find(needle) {
+                return Some((offset as u16, y));
+            }
+        }
+        None
     }
 }
