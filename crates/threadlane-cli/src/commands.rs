@@ -1,0 +1,246 @@
+use crate::ui::{AppState, RunStatus};
+use threadlane_agent::{PlanItemStatus, ReasoningEffort};
+use threadlane_coding_agent::CodingAgent;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Command {
+    ShowModel,
+    SetModel(String),
+    Models,
+    ShowReasoning,
+    SetReasoning(ReasoningEffort),
+    Plan,
+    Clear,
+    Session,
+    Help,
+    Quit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CommandError {
+    Unknown(String),
+    InvalidArguments(String),
+}
+
+impl std::fmt::Display for CommandError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unknown(command) => write!(formatter, "Unknown command: /{command}"),
+            Self::InvalidArguments(command) => {
+                write!(formatter, "Invalid arguments for /{command}")
+            }
+        }
+    }
+}
+
+pub(crate) fn parse_command(input: &str) -> Result<Command, CommandError> {
+    let mut parts = input
+        .trim()
+        .strip_prefix('/')
+        .ok_or_else(|| CommandError::Unknown(input.trim().to_string()))?
+        .split_whitespace();
+    let command = parts.next().unwrap_or_default();
+    let argument = parts.next();
+    if parts.next().is_some() {
+        return Err(CommandError::InvalidArguments(command.into()));
+    }
+
+    match (command, argument) {
+        ("model", None) => Ok(Command::ShowModel),
+        ("model", Some(model)) if !model.is_empty() => Ok(Command::SetModel(model.into())),
+        ("models", None) => Ok(Command::Models),
+        ("reasoning", None) => Ok(Command::ShowReasoning),
+        ("reasoning", Some(level)) => ReasoningEffort::from_label(level)
+            .map(Command::SetReasoning)
+            .ok_or_else(|| CommandError::InvalidArguments("reasoning".into())),
+        ("plan", None) => Ok(Command::Plan),
+        ("clear", None) => Ok(Command::Clear),
+        ("session", None) => Ok(Command::Session),
+        ("help", None) => Ok(Command::Help),
+        ("quit", None) => Ok(Command::Quit),
+        ("model", _) => Err(CommandError::InvalidArguments("model".into())),
+        (known, Some(_))
+            if matches!(
+                known,
+                "models" | "plan" | "clear" | "session" | "help" | "quit"
+            ) =>
+        {
+            Err(CommandError::InvalidArguments(known.into()))
+        }
+        (unknown, _) => Err(CommandError::Unknown(unknown.into())),
+    }
+}
+
+pub(crate) enum CommandResult {
+    Message(String),
+    Quit,
+}
+
+pub(crate) struct CommandContext<'a> {
+    pub agent: &'a mut CodingAgent,
+    pub state: &'a mut AppState,
+}
+
+fn running(state: &AppState, command: &Command) -> bool {
+    matches!(state.status, RunStatus::Running)
+        && matches!(
+            command,
+            Command::SetModel(_) | Command::SetReasoning(_) | Command::Clear
+        )
+}
+
+fn format_plan(state: &AppState) -> String {
+    let Some(plan) = &state.plan else {
+        return "No active plan.".into();
+    };
+    if plan.items.is_empty() {
+        return "No active plan.".into();
+    }
+    let mut lines = plan.explanation.clone().into_iter().collect::<Vec<_>>();
+    lines.extend(plan.items.iter().map(|item| {
+        let marker = match item.status {
+            PlanItemStatus::Pending => "[ ]",
+            PlanItemStatus::InProgress => "[>]",
+            PlanItemStatus::Completed => "[x]",
+        };
+        format!("{marker} {}", item.step)
+    }));
+    lines.join("\n")
+}
+
+pub(crate) async fn execute_command(
+    context: &mut CommandContext<'_>,
+    command: Command,
+) -> CommandResult {
+    if running(context.state, &command) {
+        return CommandResult::Message(
+            "Cannot change settings while generation is running.".into(),
+        );
+    }
+
+    match command {
+        Command::ShowModel => CommandResult::Message(format!("Current model: {}", context.state.model)),
+        Command::SetModel(model) => match context.agent.set_model(model.clone()).await {
+            Ok(()) => {
+                context.state.model = model.clone();
+                CommandResult::Message(format!("Switched model to: {model}"))
+            }
+            Err(error) => CommandResult::Message(error),
+        },
+        Command::Models => {
+            let models = context.agent.available_models().await;
+            CommandResult::Message(format!("Available models:\n{}", models.join("\n")))
+        }
+        Command::ShowReasoning => CommandResult::Message(format!(
+            "Current reasoning effort: {}",
+            context.state.reasoning_effort.label()
+        )),
+        Command::SetReasoning(effort) => {
+            context.agent.set_reasoning_effort(effort).await;
+            context.state.reasoning_effort = effort;
+            CommandResult::Message(format!("Reasoning effort: {}", effort.label()))
+        }
+        Command::Plan => CommandResult::Message(format_plan(context.state)),
+        Command::Clear => {
+            context.state.messages.clear();
+            context.state.streaming = None;
+            context.state.scroll = 0;
+            context.state.follow_tail = true;
+            CommandResult::Message("Transcript cleared.".into())
+        }
+        Command::Session => CommandResult::Message(format!(
+            "Workspace: {}\nModel: {}\nReasoning: {}",
+            context.state.work_dir,
+            context.state.model,
+            context.state.reasoning_effort.label()
+        )),
+        Command::Help => CommandResult::Message(
+            "Commands: /model [provider/model], /models, /reasoning [off|minimal|low|medium|high|xhigh], /plan, /clear, /session, /help, /quit".into(),
+        ),
+        Command::Quit => CommandResult::Quit,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use threadlane_agent::ReasoningEffort;
+    use threadlane_coding_agent::CodingAgentOptions;
+
+    #[test]
+    fn parses_model_and_reasoning_commands() {
+        assert_eq!(parse_command("/model").unwrap(), Command::ShowModel);
+        assert_eq!(
+            parse_command("/model antigravity/gemini").unwrap(),
+            Command::SetModel("antigravity/gemini".into())
+        );
+        assert_eq!(
+            parse_command("/reasoning high").unwrap(),
+            Command::SetReasoning(ReasoningEffort::High)
+        );
+        assert_eq!(parse_command("/help").unwrap(), Command::Help);
+    }
+
+    #[test]
+    fn rejects_unknown_commands_and_extra_model_arguments() {
+        assert!(matches!(
+            parse_command("/wat"),
+            Err(CommandError::Unknown(_))
+        ));
+        assert!(parse_command("/model a b").is_err());
+    }
+
+    #[tokio::test]
+    async fn model_command_persists_the_provider_prefixed_model() {
+        let mut agent = CodingAgent::new(CodingAgentOptions {
+            api_key: String::new(),
+            account_id: None,
+            model: "gpt-4o".into(),
+            work_dir: std::env::current_dir().unwrap(),
+            session_file: None,
+            system_prompt: Default::default(),
+        });
+        let mut state = AppState::test_state();
+        let result = execute_command(
+            &mut CommandContext {
+                agent: &mut agent,
+                state: &mut state,
+            },
+            Command::SetModel("antigravity/gemini".into()),
+        )
+        .await;
+
+        assert!(
+            matches!(result, CommandResult::Message(message) if message == "Switched model to: antigravity/gemini")
+        );
+        assert_eq!(state.model, "antigravity/gemini");
+        assert_eq!(
+            agent.session_tree.model.as_deref(),
+            Some("antigravity/gemini")
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_mutating_commands_while_running() {
+        let mut agent = CodingAgent::new(CodingAgentOptions {
+            api_key: String::new(),
+            account_id: None,
+            model: "gpt-4o".into(),
+            work_dir: std::env::current_dir().unwrap(),
+            session_file: None,
+            system_prompt: Default::default(),
+        });
+        let mut state = AppState::test_state_generating();
+        let result = execute_command(
+            &mut CommandContext {
+                agent: &mut agent,
+                state: &mut state,
+            },
+            Command::SetReasoning(ReasoningEffort::High),
+        )
+        .await;
+
+        assert!(matches!(result, CommandResult::Message(message) if message.contains("running")));
+        assert_eq!(state.reasoning_effort, ReasoningEffort::Medium);
+    }
+}

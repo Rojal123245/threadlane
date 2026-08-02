@@ -4,4 +4,6 @@ mod render;
 mod state;
 
 pub use render::render;
-pub use state::{reduce_agent_event, ActivityItem, ActivityStatus, AppState, MessageType, RunStatus, StreamingMessage, TranscriptMessage};
+pub use state::{
+    reduce_agent_event, AppState, MessageType, RunStatus, TranscriptMessage,
+};

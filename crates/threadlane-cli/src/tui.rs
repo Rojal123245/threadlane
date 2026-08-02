@@ -21,18 +21,25 @@ pub struct TerminalGuard {
 
 impl TerminalGuard {
     pub fn restore(&mut self) -> io::Result<()> {
-        self.cleanup.lock().expect("terminal cleanup lock poisoned").restore()
+        self.cleanup
+            .lock()
+            .expect("terminal cleanup lock poisoned")
+            .restore()
     }
 }
 
 impl Deref for TerminalGuard {
     type Target = Tui;
 
-    fn deref(&self) -> &Self::Target { &self.terminal }
+    fn deref(&self) -> &Self::Target {
+        &self.terminal
+    }
 }
 
 impl DerefMut for TerminalGuard {
-    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.terminal }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.terminal
+    }
 }
 
 impl Drop for TerminalGuard {
@@ -71,7 +78,10 @@ impl CleanupState {
 
     #[cfg(test)]
     pub(crate) fn new_for_test() -> Self {
-        Self { test_mode: true, ..Self::new() }
+        Self {
+            test_mode: true,
+            ..Self::new()
+        }
     }
 
     pub fn restore(&mut self) -> io::Result<()> {
@@ -123,7 +133,9 @@ impl CleanupState {
     }
 
     #[cfg(test)]
-    pub(crate) fn is_restored(&self) -> bool { self.restored }
+    pub(crate) fn is_restored(&self) -> bool {
+        self.restored
+    }
 }
 
 /// Initializes terminal raw mode and alternate screen buffer.
@@ -166,11 +178,18 @@ pub fn init() -> io::Result<TerminalGuard> {
     let previous_panic_hook: PanicHook = Arc::from(std::panic::take_hook());
     let panic_hook_for_handler = Arc::clone(&previous_panic_hook);
     std::panic::set_hook(Box::new(move |panic_info| {
-        let _ = panic_cleanup.lock().map_err(|_| ()).and_then(|mut cleanup| cleanup.restore().map_err(|_| ()));
+        let _ = panic_cleanup
+            .lock()
+            .map_err(|_| ())
+            .and_then(|mut cleanup| cleanup.restore().map_err(|_| ()));
         panic_hook_for_handler(panic_info);
     }));
 
-    Ok(TerminalGuard { terminal, cleanup, previous_panic_hook: Some(previous_panic_hook) })
+    Ok(TerminalGuard {
+        terminal,
+        cleanup,
+        previous_panic_hook: Some(previous_panic_hook),
+    })
 }
 
 /// Restores terminal state back to original mode for callers without a guard.

@@ -1,15 +1,16 @@
-mod tui;
+mod commands;
 mod input;
 mod runtime;
+mod tui;
 mod ui;
 
 use clap::Parser;
+#[cfg(test)]
+use runtime::{dispatch_input, Action};
 use std::env;
 use std::path::PathBuf;
 use threadlane_agent::AgentEvent;
 use threadlane_coding_agent::{CodingAgent, CodingAgentOptions};
-#[cfg(test)]
-use runtime::{dispatch_input, Action};
 #[cfg(test)]
 use ui::{AppState, RunStatus};
 

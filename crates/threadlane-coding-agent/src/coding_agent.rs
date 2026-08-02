@@ -28,6 +28,7 @@ use threadlane_agent::{
     ImageAttachment, OpOutcome, OpRecord, ReasoningEffort, SessionTree, SubagentRecoveryStatus,
     ToolExecutor,
 };
+use threadlane_provider::openai::fetch_available_models;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::broadcast;
 use tokio::time::{timeout, Duration};
@@ -3085,6 +3086,24 @@ impl CodingAgent {
 
     pub async fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
         self.agent.set_reasoning_effort(effort).await;
+    }
+
+    pub async fn set_model(&mut self, model: String) -> Result<(), String> {
+        let model = model.trim();
+        if model.is_empty() {
+            return Err("model cannot be empty".into());
+        }
+        self.session_tree
+            .set_model(model.to_string())
+            .map_err(|error| format!("Could not persist model switch: {error}"))?;
+        self.agent.loop_engine.state.lock().await.model = model.to_string();
+        Ok(())
+    }
+
+    pub async fn available_models(&self) -> Vec<String> {
+        let api_key = self.agent.loop_engine.api_key.clone();
+        let account_id = self.agent.loop_engine.account_id.clone();
+        fetch_available_models(&api_key, account_id.as_deref()).await
     }
 
     pub(crate) async fn handle_input(&mut self, input: &str) -> Option<Result<String, String>> {

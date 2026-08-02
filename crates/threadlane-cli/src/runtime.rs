@@ -1,4 +1,5 @@
 use crate::{
+    commands::{execute_command, parse_command, CommandContext, CommandResult},
     input::{self, InputEvent},
     resolve_credentials, tui,
     ui::{reduce_agent_event, AppState, MessageType, RunStatus, TranscriptMessage},
@@ -45,7 +46,10 @@ pub(crate) fn dispatch_input(state: &mut AppState, input: InputEvent) -> Action 
             state.scroll_down();
             Action::None
         }
-        InputEvent::Resize | InputEvent::Submit | InputEvent::Character(_) | InputEvent::Backspace => Action::None,
+        InputEvent::Resize
+        | InputEvent::Submit
+        | InputEvent::Character(_)
+        | InputEvent::Backspace => Action::None,
     }
 }
 
@@ -63,7 +67,9 @@ pub(crate) fn spawn_prompt(
         completion.finish_active_run(run_id);
     });
     let run_id = cancellation.track_active_run(task.abort_handle())?;
-    start_tx.send(run_id).map_err(|_| "Generation ended before it could start".to_string())
+    start_tx
+        .send(run_id)
+        .map_err(|_| "Generation ended before it could start".to_string())
 }
 
 pub(crate) async fn run_tui(
@@ -93,13 +99,41 @@ pub(crate) async fn run_tui(
                 match dispatch_input(&mut state, input) {
                     Action::Submit(submission) if !submission.trim().is_empty() => {
                         state.composer.clear();
-                        state.messages.push(TranscriptMessage {
-                            msg_type: MessageType::User,
-                            content: submission.clone(),
-                        });
-                        state.begin_generation();
-                        if let Err(error) = spawn_prompt(Arc::clone(&agent), cancellation.clone(), submission) {
-                            reduce_agent_event(&mut state, AgentEvent::AgentError { error });
+                        if submission.starts_with('/') {
+                            let result = match parse_command(&submission) {
+                                Ok(command) => {
+                                    let mut agent = agent.lock().await;
+                                    execute_command(
+                                        &mut CommandContext {
+                                            agent: &mut agent,
+                                            state: &mut state,
+                                        },
+                                        command,
+                                    )
+                                    .await
+                                }
+                                Err(error) => CommandResult::Message(error.to_string()),
+                            };
+                            match result {
+                                CommandResult::Message(content) => {
+                                    state.messages.push(TranscriptMessage {
+                                        msg_type: MessageType::Assistant,
+                                        content,
+                                    })
+                                }
+                                CommandResult::Quit => break,
+                            }
+                        } else {
+                            state.messages.push(TranscriptMessage {
+                                msg_type: MessageType::User,
+                                content: submission.clone(),
+                            });
+                            state.begin_generation();
+                            if let Err(error) =
+                                spawn_prompt(Arc::clone(&agent), cancellation.clone(), submission)
+                            {
+                                reduce_agent_event(&mut state, AgentEvent::AgentError { error });
+                            }
                         }
                     }
                     Action::Cancel => {

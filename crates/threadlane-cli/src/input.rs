@@ -40,13 +40,34 @@ mod tests {
 
     #[test]
     fn maps_cli_keys_to_input_events() {
-        assert_eq!(map_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)), Some(InputEvent::Submit));
-        assert_eq!(map_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)), Some(InputEvent::CancelOrQuit));
-        assert_eq!(map_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)), Some(InputEvent::CancelOrQuit));
-        assert_eq!(map_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)), Some(InputEvent::Character('x')));
-        assert_eq!(map_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)), Some(InputEvent::Backspace));
-        assert_eq!(map_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)), Some(InputEvent::ScrollUp));
-        assert_eq!(map_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)), Some(InputEvent::ScrollDown));
+        assert_eq!(
+            map_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(InputEvent::Submit)
+        );
+        assert_eq!(
+            map_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(InputEvent::CancelOrQuit)
+        );
+        assert_eq!(
+            map_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(InputEvent::CancelOrQuit)
+        );
+        assert_eq!(
+            map_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+            Some(InputEvent::Character('x'))
+        );
+        assert_eq!(
+            map_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+            Some(InputEvent::Backspace)
+        );
+        assert_eq!(
+            map_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            Some(InputEvent::ScrollUp)
+        );
+        assert_eq!(
+            map_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Some(InputEvent::ScrollDown)
+        );
     }
 
     #[test]
