@@ -2,54 +2,35 @@ use crate::ui::{AppState, RunStatus};
 use threadlane_agent::{PlanItemStatus, ReasoningEffort};
 use threadlane_coding_agent::CodingAgent;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CommandDescription {
-    pub label: &'static str,
-    pub usage: &'static str,
-    pub description: &'static str,
-}
+const MODEL_COMMAND_NAME: &str = "model";
+const MODELS_COMMAND_NAME: &str = "models";
+const REASONING_COMMAND_NAME: &str = "reasoning";
+const PLAN_COMMAND_NAME: &str = "plan";
+const CLEAR_COMMAND_NAME: &str = "clear";
+const SESSION_COMMAND_NAME: &str = "session";
+const HELP_COMMAND_NAME: &str = "help";
+const QUIT_COMMAND_NAME: &str = "quit";
 
-const COMMAND_DESCRIPTIONS: [CommandDescription; 8] = [
-    CommandDescription {
-        label: "/model",
-        usage: "/model [provider/model]",
-        description: "Show or set the active model.",
-    },
-    CommandDescription {
-        label: "/models",
-        usage: "/models",
-        description: "List available models.",
-    },
-    CommandDescription {
-        label: "/reasoning",
-        usage: "/reasoning [off|minimal|low|medium|high|xhigh]",
-        description: "Show or set reasoning effort.",
-    },
-    CommandDescription {
-        label: "/plan",
-        usage: "/plan",
-        description: "Show the current plan.",
-    },
-    CommandDescription {
-        label: "/clear",
-        usage: "/clear",
-        description: "Clear the transcript.",
-    },
-    CommandDescription {
-        label: "/session",
-        usage: "/session",
-        description: "Show session details.",
-    },
-    CommandDescription {
-        label: "/help",
-        usage: "/help",
-        description: "List commands.",
-    },
-    CommandDescription {
-        label: "/quit",
-        usage: "/quit",
-        description: "Exit the CLI.",
-    },
+const COMMAND_LABELS: [&str; 8] = [
+    "/model",
+    "/models",
+    "/reasoning",
+    "/plan",
+    "/clear",
+    "/session",
+    "/help",
+    "/quit",
+];
+
+const COMMAND_USAGES: [&str; 8] = [
+    "/model [provider/model]",
+    "/models",
+    "/reasoning [off|minimal|low|medium|high|xhigh]",
+    "/plan",
+    "/clear",
+    "/session",
+    "/help",
+    "/quit",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,18 +64,16 @@ impl std::fmt::Display for CommandError {
     }
 }
 
-pub(crate) fn command_descriptions() -> &'static [CommandDescription] {
-    &COMMAND_DESCRIPTIONS
+pub(crate) fn command_usages() -> &'static [&'static str] {
+    &COMMAND_USAGES
 }
 
 pub(crate) fn filter_command_labels(query: &str) -> Vec<String> {
     let query = query.trim().trim_start_matches('/').to_ascii_lowercase();
-    command_descriptions()
+    COMMAND_LABELS
         .iter()
-        .filter(|command| {
-            query.is_empty() || command.label[1..].to_ascii_lowercase().starts_with(&query)
-        })
-        .map(|command| command.label.to_string())
+        .filter(|label| query.is_empty() || label[1..].to_ascii_lowercase().starts_with(&query))
+        .map(|label| (*label).to_string())
         .collect()
 }
 
@@ -120,23 +99,28 @@ pub(crate) fn parse_command(input: &str) -> Result<Command, CommandError> {
     }
 
     match (command, argument) {
-        ("model", None) => Ok(Command::ShowModel),
-        ("model", Some(model)) if !model.is_empty() => Ok(Command::SetModel(model.into())),
-        ("models", None) => Ok(Command::Models),
-        ("reasoning", None) => Ok(Command::ShowReasoning),
-        ("reasoning", Some(level)) => ReasoningEffort::from_label(level)
+        (MODEL_COMMAND_NAME, None) => Ok(Command::ShowModel),
+        (MODEL_COMMAND_NAME, Some(model)) if !model.is_empty() => Ok(Command::SetModel(model.into())),
+        (MODELS_COMMAND_NAME, None) => Ok(Command::Models),
+        (REASONING_COMMAND_NAME, None) => Ok(Command::ShowReasoning),
+        (REASONING_COMMAND_NAME, Some(level)) => ReasoningEffort::from_label(level)
             .map(Command::SetReasoning)
-            .ok_or_else(|| CommandError::InvalidArguments("reasoning".into())),
-        ("plan", None) => Ok(Command::Plan),
-        ("clear", None) => Ok(Command::Clear),
-        ("session", None) => Ok(Command::Session),
-        ("help", None) => Ok(Command::Help),
-        ("quit", None) => Ok(Command::Quit),
-        ("model", _) => Err(CommandError::InvalidArguments("model".into())),
+            .ok_or_else(|| CommandError::InvalidArguments(REASONING_COMMAND_NAME.into())),
+        (PLAN_COMMAND_NAME, None) => Ok(Command::Plan),
+        (CLEAR_COMMAND_NAME, None) => Ok(Command::Clear),
+        (SESSION_COMMAND_NAME, None) => Ok(Command::Session),
+        (HELP_COMMAND_NAME, None) => Ok(Command::Help),
+        (QUIT_COMMAND_NAME, None) => Ok(Command::Quit),
+        (MODEL_COMMAND_NAME, _) => Err(CommandError::InvalidArguments(MODEL_COMMAND_NAME.into())),
         (known, Some(_))
             if matches!(
                 known,
-                "models" | "plan" | "clear" | "session" | "help" | "quit"
+                MODELS_COMMAND_NAME
+                    | PLAN_COMMAND_NAME
+                    | CLEAR_COMMAND_NAME
+                    | SESSION_COMMAND_NAME
+                    | HELP_COMMAND_NAME
+                    | QUIT_COMMAND_NAME
             ) =>
         {
             Err(CommandError::InvalidArguments(known.into()))
@@ -228,16 +212,7 @@ pub(crate) async fn execute_command(
             context.state.model,
             context.state.reasoning_effort.label()
         )),
-        Command::Help => CommandResult::Message(
-            format!(
-                "Commands: {}",
-                command_descriptions()
-                    .iter()
-                    .map(|command| command.usage)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        ),
+        Command::Help => CommandResult::Message(format!("Commands: {}", command_usages().join(", "))),
         Command::Quit => CommandResult::Quit,
     }
 }
@@ -275,6 +250,27 @@ mod tests {
             vec!["antigravity/gemini".to_string()]
         );
         assert!(filter_model_labels("claude", &models).is_empty());
+    }
+
+    #[test]
+    fn command_usages_are_the_shared_source_for_help_and_completion() {
+        assert_eq!(
+            command_usages(),
+            &[
+                "/model [provider/model]",
+                "/models",
+                "/reasoning [off|minimal|low|medium|high|xhigh]",
+                "/plan",
+                "/clear",
+                "/session",
+                "/help",
+                "/quit",
+            ]
+        );
+        assert_eq!(
+            filter_command_labels("mo"),
+            vec!["/model".to_string(), "/models".to_string()]
+        );
     }
 
     #[test]
