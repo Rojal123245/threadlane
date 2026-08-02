@@ -4,6 +4,7 @@ use crate::{
         CommandResult,
     },
     input::{self, InputEvent},
+    login::{spawn_provider_login, LoginEvent, LoginMode, LoginProvider},
     resolve_credentials, tui,
     ui::{reduce_agent_event, AppState, CompletionMode, MessageType, RunStatus, TranscriptMessage},
 };
@@ -19,6 +20,8 @@ pub(crate) enum Action {
     Cancel,
     Quit,
     Message(String),
+    OpenLogin,
+    StartLogin(LoginProvider),
     None,
 }
 
@@ -27,6 +30,9 @@ pub(crate) fn dispatch_input(state: &mut AppState, input: InputEvent) -> Action 
 }
 
 fn needs_model_catalog(state: &AppState, input: &InputEvent) -> bool {
+    if state.login.is_some() {
+        return false;
+    }
     if matches!(state.status, RunStatus::Running) {
         return false;
     }
@@ -106,11 +112,90 @@ fn accept_completion(state: &mut AppState, models: &[String], open_model_picker:
     Action::None
 }
 
+fn append_text(target: &mut String, text: &str) {
+    target.push_str(text);
+}
+
+fn dispatch_login_input(state: &mut AppState, input: InputEvent) -> Action {
+    let Some(login) = state.login.as_mut() else {
+        return Action::None;
+    };
+
+    if login.pending {
+        if matches!(input, InputEvent::CancelOrQuit) {
+            state.close_login();
+        }
+        return Action::None;
+    }
+
+    match login.mode {
+        LoginMode::ProviderPicker => match input {
+            InputEvent::Submit => match login.selected_provider() {
+                LoginProvider::OpenAi => {
+                    login.select_provider(LoginProvider::OpenAi);
+                    Action::None
+                }
+                provider => Action::StartLogin(provider),
+            },
+            InputEvent::Previous => {
+                login.select_previous_provider();
+                Action::None
+            }
+            InputEvent::Next => {
+                login.select_next_provider();
+                Action::None
+            }
+            InputEvent::CancelOrQuit => {
+                state.close_login();
+                Action::None
+            }
+            InputEvent::Resize
+            | InputEvent::Tab
+            | InputEvent::Backspace
+            | InputEvent::Character(_)
+            | InputEvent::Paste(_) => Action::None,
+        },
+        LoginMode::OpenAiKey => match input {
+            InputEvent::Submit => match login.save_openai_key() {
+                Ok(message) => {
+                    state.close_login();
+                    Action::Message(message)
+                }
+                Err(message) => Action::Message(message),
+            },
+            InputEvent::CancelOrQuit => {
+                state.close_login();
+                Action::None
+            }
+            InputEvent::Backspace => {
+                login.backspace_key();
+                Action::None
+            }
+            InputEvent::Character(character) => {
+                login.push_char(character);
+                Action::None
+            }
+            InputEvent::Paste(text) => {
+                login.push_paste(&text);
+                Action::None
+            }
+            InputEvent::Previous
+            | InputEvent::Next
+            | InputEvent::Resize
+            | InputEvent::Tab => Action::None,
+        },
+    }
+}
+
 pub(crate) fn dispatch_input_with_models(
     state: &mut AppState,
     input: InputEvent,
     models: &[String],
 ) -> Action {
+    if state.login.is_some() {
+        return dispatch_login_input(state, input);
+    }
+
     if state.completion.visible {
         match input {
             InputEvent::Submit => {
@@ -135,6 +220,10 @@ pub(crate) fn dispatch_input_with_models(
                 state.composer.push(character);
                 return refresh_completion(state, models);
             }
+            InputEvent::Paste(text) if !matches!(state.status, RunStatus::Running) => {
+                append_text(&mut state.composer, &text);
+                return refresh_completion(state, models);
+            }
             InputEvent::Backspace if !matches!(state.status, RunStatus::Running) => {
                 state.composer.pop();
                 return refresh_completion(state, models);
@@ -144,6 +233,10 @@ pub(crate) fn dispatch_input_with_models(
     }
 
     match input {
+        InputEvent::Submit if state.composer.trim() == "/login" => {
+            state.open_login();
+            Action::OpenLogin
+        }
         InputEvent::Submit if state.composer.trim() == "/model" => {
             show_model_completion(state, models)
         }
@@ -159,6 +252,10 @@ pub(crate) fn dispatch_input_with_models(
         }
         InputEvent::Character(character) if !matches!(state.status, RunStatus::Running) => {
             state.composer.push(character);
+            refresh_completion(state, models)
+        }
+        InputEvent::Paste(text) if !matches!(state.status, RunStatus::Running) => {
+            append_text(&mut state.composer, &text);
             refresh_completion(state, models)
         }
         InputEvent::Backspace if !matches!(state.status, RunStatus::Running) => {
@@ -177,7 +274,57 @@ pub(crate) fn dispatch_input_with_models(
         | InputEvent::Submit
         | InputEvent::Tab
         | InputEvent::Character(_)
+        | InputEvent::Paste(_)
         | InputEvent::Backspace => Action::None,
+    }
+}
+
+fn push_assistant_message(state: &mut AppState, content: String) {
+    state.messages.push(TranscriptMessage {
+        msg_type: MessageType::Assistant,
+        content,
+    });
+}
+
+fn handle_login_event(state: &mut AppState, event: LoginEvent) {
+    let attempt_id = match &event {
+        LoginEvent::DeviceCodePrompt { attempt_id, .. }
+        | LoginEvent::BrowserPrompt { attempt_id, .. }
+        | LoginEvent::Finished { attempt_id, .. }
+        | LoginEvent::Failed { attempt_id, .. } => *attempt_id,
+    };
+
+    if state.login.as_ref().map(|login| login.attempt_id) != Some(attempt_id) {
+        return;
+    }
+
+    match event {
+        LoginEvent::DeviceCodePrompt { user_code, url, .. } => {
+            if let Some(login) = state.login.as_mut() {
+                login.set_status("Waiting for ChatGPT device approval...");
+            }
+            push_assistant_message(
+                state,
+                format!("Open {url} and enter code {user_code} to finish Codex login."),
+            );
+        }
+        LoginEvent::BrowserPrompt { url, .. } => {
+            if let Some(login) = state.login.as_mut() {
+                login.set_status("Waiting for Google OAuth callback...");
+            }
+            push_assistant_message(
+                state,
+                format!("Open this URL in your browser to finish Antigravity login:\n{url}"),
+            );
+        }
+        LoginEvent::Finished { message, .. } => {
+            state.close_login();
+            push_assistant_message(state, message);
+        }
+        LoginEvent::Failed { message, .. } => {
+            state.close_login();
+            push_assistant_message(state, message);
+        }
     }
 }
 
@@ -219,6 +366,8 @@ pub(crate) async fn run_tui(
     let cancellation = agent.cancellation_handle();
     let agent = Arc::new(Mutex::new(agent));
     let mut available_models: Option<Vec<String>> = None;
+    let (login_tx, mut login_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut next_login_attempt = 0_u64;
 
     loop {
         terminal.draw(|frame| crate::ui::render(frame, &state))?;
@@ -256,12 +405,8 @@ pub(crate) async fn run_tui(
                                 Err(error) => CommandResult::Message(error.to_string()),
                             };
                             match result {
-                                CommandResult::Message(content) => {
-                                    state.messages.push(TranscriptMessage {
-                                        msg_type: MessageType::Assistant,
-                                        content,
-                                    })
-                                }
+                                CommandResult::Message(content) => push_assistant_message(&mut state, content),
+                                CommandResult::OpenLogin => state.open_login(),
                                 CommandResult::Quit => break,
                             }
                         } else {
@@ -282,16 +427,38 @@ pub(crate) async fn run_tui(
                             reduce_agent_event(&mut state, AgentEvent::AgentError { error });
                         }
                     }
+                    Action::OpenLogin => state.open_login(),
+                    Action::StartLogin(provider) => {
+                        next_login_attempt = next_login_attempt.wrapping_add(1);
+                        let attempt_id = next_login_attempt;
+                        if let Some(login) = state.login.as_mut() {
+                            login.begin_provider_flow(
+                                provider,
+                                attempt_id,
+                                format!("Starting {} login...", provider.label()),
+                            );
+                        } else {
+                            state.open_login();
+                            if let Some(login) = state.login.as_mut() {
+                                login.begin_provider_flow(
+                                    provider,
+                                    attempt_id,
+                                    format!("Starting {} login...", provider.label()),
+                                );
+                            }
+                        }
+                        spawn_provider_login(provider, attempt_id, login_tx.clone());
+                    }
                     Action::Quit => break,
-                    Action::Message(content) => state.messages.push(TranscriptMessage {
-                        msg_type: MessageType::Assistant,
-                        content,
-                    }),
+                    Action::Message(content) => push_assistant_message(&mut state, content),
                     Action::Submit(_) | Action::None => {}
                 }
             }
         }
 
+        while let Ok(event) = login_rx.try_recv() {
+            handle_login_event(&mut state, event);
+        }
         while let Ok(event) = event_rx.try_recv() {
             reduce_agent_event(&mut state, event);
         }
@@ -488,5 +655,78 @@ mod tests {
             dispatch_input(&mut state, InputEvent::CancelOrQuit),
             Action::Cancel
         );
+    }
+
+    #[test]
+    fn login_command_opens_provider_picker_and_blocks_prompt_submission() {
+        let mut state = AppState::test_state();
+        state.composer = "/login".into();
+
+        assert_eq!(dispatch_input(&mut state, InputEvent::Submit), Action::OpenLogin);
+        assert_eq!(state.login.as_ref().unwrap().mode, LoginMode::ProviderPicker);
+
+        state.composer = "should stay blocked".into();
+        assert_eq!(
+            dispatch_input(&mut state, InputEvent::Character('!')),
+            Action::None
+        );
+        assert_eq!(state.composer, "should stay blocked");
+    }
+
+    #[test]
+    fn login_provider_picker_selects_openai_and_escape_cancels() {
+        let mut state = AppState::test_state();
+        state.open_login();
+
+        assert_eq!(
+            dispatch_input(&mut state, InputEvent::Submit),
+            Action::StartLogin(LoginProvider::Codex)
+        );
+
+        state.open_login();
+        assert_eq!(dispatch_input(&mut state, InputEvent::Next), Action::None);
+        assert_eq!(
+            dispatch_input(&mut state, InputEvent::Submit),
+            Action::None
+        );
+        assert_eq!(state.login.as_ref().unwrap().mode, LoginMode::OpenAiKey);
+
+        assert_eq!(
+            dispatch_input(&mut state, InputEvent::CancelOrQuit),
+            Action::None
+        );
+        assert!(state.login.is_none());
+    }
+
+    #[test]
+    fn login_openai_key_rejects_empty_submit_and_accepts_paste() {
+        let mut state = AppState::test_state();
+        state.open_login();
+        assert_eq!(dispatch_input(&mut state, InputEvent::Next), Action::None);
+        assert_eq!(dispatch_input(&mut state, InputEvent::Submit), Action::None);
+
+        assert_eq!(
+            dispatch_input(&mut state, InputEvent::Submit),
+            Action::Message("OpenAI API key cannot be empty.".into())
+        );
+        assert_eq!(
+            dispatch_input(&mut state, InputEvent::Paste("sk-secret".into())),
+            Action::None
+        );
+        assert_eq!(
+            state.login.as_ref().unwrap().masked_key(),
+            "*********"
+        );
+    }
+
+    #[test]
+    fn paste_appends_to_normal_composer_when_login_is_closed() {
+        let mut state = AppState::test_state();
+
+        assert_eq!(
+            dispatch_input(&mut state, InputEvent::Paste("hello".into())),
+            Action::None
+        );
+        assert_eq!(state.composer, "hello");
     }
 }

@@ -7,6 +7,7 @@ pub enum InputEvent {
     Tab,
     Backspace,
     Character(char),
+    Paste(String),
     Previous,
     Next,
     Resize,
@@ -15,6 +16,7 @@ pub enum InputEvent {
 pub fn map_event(event: Event) -> Option<InputEvent> {
     match event {
         Event::Key(key) => map_key_event(key),
+        Event::Paste(text) => Some(InputEvent::Paste(text)),
         Event::Resize(_, _) => Some(InputEvent::Resize),
         _ => None,
     }
@@ -59,6 +61,10 @@ mod tests {
             Some(InputEvent::Character('x'))
         );
         assert_eq!(
+            map_event(Event::Paste("sk-test".into())),
+            Some(InputEvent::Paste("sk-test".into()))
+        );
+        assert_eq!(
             map_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Some(InputEvent::Tab)
         );
@@ -79,6 +85,10 @@ mod tests {
     #[test]
     fn maps_resize_and_ignores_unhandled_events() {
         assert_eq!(map_event(Event::Resize(80, 24)), Some(InputEvent::Resize));
+        assert_eq!(
+            map_event(Event::Paste("hello".into())),
+            Some(InputEvent::Paste("hello".into()))
+        );
         assert_eq!(map_event(Event::FocusGained), None);
     }
 }

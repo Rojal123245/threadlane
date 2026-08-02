@@ -8,6 +8,7 @@ const REASONING_COMMAND_NAME: &str = "reasoning";
 const PLAN_COMMAND_NAME: &str = "plan";
 const CLEAR_COMMAND_NAME: &str = "clear";
 const SESSION_COMMAND_NAME: &str = "session";
+const LOGIN_COMMAND_NAME: &str = "login";
 const HELP_COMMAND_NAME: &str = "help";
 const QUIT_COMMAND_NAME: &str = "quit";
 
@@ -17,7 +18,7 @@ struct CommandMetadata {
     description: &'static str,
 }
 
-const COMMAND_METADATA: [CommandMetadata; 8] = [
+const COMMAND_METADATA: [CommandMetadata; 9] = [
     CommandMetadata {
         label: "/model",
         usage: "/model [provider/model]",
@@ -49,6 +50,11 @@ const COMMAND_METADATA: [CommandMetadata; 8] = [
         description: "show session",
     },
     CommandMetadata {
+        label: "/login",
+        usage: "/login",
+        description: "log in to a provider",
+    },
+    CommandMetadata {
         label: "/help",
         usage: "/help",
         description: "show help",
@@ -70,6 +76,7 @@ pub(crate) enum Command {
     Plan,
     Clear,
     Session,
+    Login,
     Help,
     Quit,
 }
@@ -148,6 +155,7 @@ pub(crate) fn parse_command(input: &str) -> Result<Command, CommandError> {
         (PLAN_COMMAND_NAME, None) => Ok(Command::Plan),
         (CLEAR_COMMAND_NAME, None) => Ok(Command::Clear),
         (SESSION_COMMAND_NAME, None) => Ok(Command::Session),
+        (LOGIN_COMMAND_NAME, None) => Ok(Command::Login),
         (HELP_COMMAND_NAME, None) => Ok(Command::Help),
         (QUIT_COMMAND_NAME, None) => Ok(Command::Quit),
         (MODEL_COMMAND_NAME, _) => Err(CommandError::InvalidArguments(MODEL_COMMAND_NAME.into())),
@@ -158,6 +166,7 @@ pub(crate) fn parse_command(input: &str) -> Result<Command, CommandError> {
                     | PLAN_COMMAND_NAME
                     | CLEAR_COMMAND_NAME
                     | SESSION_COMMAND_NAME
+                    | LOGIN_COMMAND_NAME
                     | HELP_COMMAND_NAME
                     | QUIT_COMMAND_NAME
             ) =>
@@ -170,6 +179,7 @@ pub(crate) fn parse_command(input: &str) -> Result<Command, CommandError> {
 
 pub(crate) enum CommandResult {
     Message(String),
+    OpenLogin,
     Quit,
 }
 
@@ -251,6 +261,7 @@ pub(crate) async fn execute_command(
             context.state.model,
             context.state.reasoning_effort.label()
         )),
+        Command::Login => CommandResult::OpenLogin,
         Command::Help => CommandResult::Message(format!("Commands: {}", command_usages().join(", "))),
         Command::Quit => CommandResult::Quit,
     }
@@ -302,6 +313,7 @@ mod tests {
                 "/plan",
                 "/clear",
                 "/session",
+                "/login",
                 "/help",
                 "/quit",
             ]
@@ -324,6 +336,7 @@ mod tests {
             parse_command("/reasoning high").unwrap(),
             Command::SetReasoning(ReasoningEffort::High)
         );
+        assert_eq!(parse_command("/login").unwrap(), Command::Login);
         assert_eq!(parse_command("/help").unwrap(), Command::Help);
     }
 

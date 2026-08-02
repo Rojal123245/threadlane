@@ -1,5 +1,6 @@
 mod commands;
 mod input;
+mod login;
 mod runtime;
 mod tui;
 mod ui;
@@ -8,9 +9,12 @@ use clap::Parser;
 #[cfg(test)]
 use runtime::{dispatch_input, Action};
 use std::env;
+#[cfg(test)]
+use std::ffi::OsString;
 use std::path::PathBuf;
 use threadlane_agent::AgentEvent;
 use threadlane_coding_agent::{CodingAgent, CodingAgentOptions};
+use threadlane_auth::{load_credentials, load_openai_api_key};
 #[cfg(test)]
 use ui::{AppState, RunStatus};
 
@@ -93,14 +97,90 @@ async fn run_headless(
 }
 
 pub(crate) fn resolve_credentials() -> (String, Option<String>) {
-    let api_key = env::var("OPENAI_API_KEY").unwrap_or_default();
     let account_id = env::var("CHATGPT_ACCOUNT_ID").ok();
-    (api_key, account_id)
+    if let Ok(api_key) = env::var("OPENAI_API_KEY") {
+        if !api_key.trim().is_empty() {
+            return (api_key, account_id);
+        }
+    }
+    if let Some(credentials) = load_credentials() {
+        return (credentials.access_token, credentials.account_id.or(account_id));
+    }
+    if let Some(api_key) = load_openai_api_key() {
+        return (api_key, account_id);
+    }
+    (String::new(), account_id)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::sync::{Mutex, OnceLock};
+
+    fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+        GUARD.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    struct EnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        saved_home: Option<OsString>,
+        saved_openai_key: Option<OsString>,
+        saved_account_id: Option<OsString>,
+        home: PathBuf,
+    }
+
+    impl EnvGuard {
+        fn new(name: &str) -> Self {
+            let lock = test_guard();
+            let saved_home = env::var_os("HOME");
+            let saved_openai_key = env::var_os("OPENAI_API_KEY");
+            let saved_account_id = env::var_os("CHATGPT_ACCOUNT_ID");
+            env::remove_var("OPENAI_API_KEY");
+            env::remove_var("CHATGPT_ACCOUNT_ID");
+
+            let home = std::env::temp_dir().join(format!(
+                "threadlane-cli-{name}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&home).unwrap();
+            env::set_var("HOME", &home);
+
+            Self {
+                _lock: lock,
+                saved_home,
+                saved_openai_key,
+                saved_account_id,
+                home,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(value) = self.saved_home.take() {
+                env::set_var("HOME", value);
+            } else {
+                env::remove_var("HOME");
+            }
+            if let Some(value) = self.saved_openai_key.take() {
+                env::set_var("OPENAI_API_KEY", value);
+            } else {
+                env::remove_var("OPENAI_API_KEY");
+            }
+            if let Some(value) = self.saved_account_id.take() {
+                env::set_var("CHATGPT_ACCOUNT_ID", value);
+            } else {
+                env::remove_var("CHATGPT_ACCOUNT_ID");
+            }
+            let _ = fs::remove_dir_all(&self.home);
+        }
+    }
 
     #[test]
     fn enter_submits_only_when_idle_and_composer_is_nonempty() {
@@ -133,5 +213,16 @@ mod tests {
             dispatch_input(&mut state, input::InputEvent::CancelOrQuit),
             Action::Quit
         );
+    }
+
+    #[test]
+    fn resolve_credentials_falls_back_to_saved_openai_key() {
+        let _env = EnvGuard::new("saved-openai-key");
+        threadlane_auth::save_openai_api_key("sk-saved").unwrap();
+
+        let (api_key, account_id) = resolve_credentials();
+
+        assert_eq!(api_key, "sk-saved");
+        assert_eq!(account_id, None);
     }
 }

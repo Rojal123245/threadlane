@@ -1,4 +1,5 @@
 use threadlane_agent::{AgentEvent, AgentMessage, ReasoningEffort, SessionPlan};
+use crate::login::LoginState;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompletionMode {
@@ -28,6 +29,7 @@ pub struct AppState {
     pub scroll: u16,
     pub follow_tail: bool,
     pub completion: CompletionState,
+    pub login: Option<LoginState>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -99,6 +101,7 @@ impl AppState {
             scroll: 0,
             follow_tail: true,
             completion: CompletionState::default(),
+            login: None,
         }
     }
 
@@ -164,6 +167,15 @@ impl AppState {
 
     pub fn close_completion(&mut self) {
         self.completion = CompletionState::default();
+    }
+
+    pub fn open_login(&mut self) {
+        self.close_completion();
+        self.login = Some(LoginState::new());
+    }
+
+    pub fn close_login(&mut self) {
+        self.login = None;
     }
 
     pub fn select_next_completion(&mut self) {
