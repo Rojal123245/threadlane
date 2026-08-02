@@ -301,9 +301,23 @@ fn render_completion(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_widget(
         Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).title(title))
+            .scroll((completion_scroll(state, area), 0))
             .wrap(Wrap { trim: true }),
         area,
     );
+}
+
+fn completion_scroll(state: &AppState, area: Rect) -> u16 {
+    let viewport = area.height.saturating_sub(2) as usize;
+    if viewport == 0 {
+        return 0;
+    }
+    let max_scroll = state.completion.candidates.len().saturating_sub(viewport);
+    state
+        .completion
+        .selected
+        .saturating_sub(viewport.saturating_sub(1))
+        .min(max_scroll) as u16
 }
 
 fn completion_line(state: &AppState, index: usize, candidate: &str) -> Line<'static> {
@@ -503,6 +517,27 @@ mod tests {
         assert!(text.contains("/help show help"));
 
         let (selected_x, selected_y) = find_text(buffer, "/help").unwrap();
+        assert_eq!(buffer[(selected_x, selected_y)].fg, Color::Yellow);
+    }
+
+    #[test]
+    fn render_keeps_selected_model_visible_in_capped_popup() {
+        let mut state = AppState::test_state();
+        state.show_completion(
+            CompletionMode::Model,
+            (0..12).map(|index| format!("model-{index}")).collect(),
+        );
+        state.completion.selected = 11;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &state)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert!(find_text(buffer, "model-11").is_some());
+        assert!(find_text(buffer, "model-0").is_none());
+
+        let (selected_x, selected_y) = find_text(buffer, "model-11").unwrap();
         assert_eq!(buffer[(selected_x, selected_y)].fg, Color::Yellow);
     }
 
