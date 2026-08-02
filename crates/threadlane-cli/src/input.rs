@@ -4,10 +4,11 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 pub enum InputEvent {
     Submit,
     CancelOrQuit,
+    Tab,
     Backspace,
     Character(char),
-    ScrollUp,
-    ScrollDown,
+    Previous,
+    Next,
     Resize,
 }
 
@@ -26,10 +27,11 @@ pub fn map_key_event(key: KeyEvent) -> Option<InputEvent> {
     match key.code {
         KeyCode::Enter => Some(InputEvent::Submit),
         KeyCode::Esc => Some(InputEvent::CancelOrQuit),
+        KeyCode::Tab => Some(InputEvent::Tab),
         KeyCode::Backspace => Some(InputEvent::Backspace),
         KeyCode::Char(character) => Some(InputEvent::Character(character)),
-        KeyCode::Up => Some(InputEvent::ScrollUp),
-        KeyCode::Down => Some(InputEvent::ScrollDown),
+        KeyCode::Up => Some(InputEvent::Previous),
+        KeyCode::Down => Some(InputEvent::Next),
         _ => None,
     }
 }
@@ -57,16 +59,20 @@ mod tests {
             Some(InputEvent::Character('x'))
         );
         assert_eq!(
+            map_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Some(InputEvent::Tab)
+        );
+        assert_eq!(
             map_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
             Some(InputEvent::Backspace)
         );
         assert_eq!(
             map_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
-            Some(InputEvent::ScrollUp)
+            Some(InputEvent::Previous)
         );
         assert_eq!(
             map_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
-            Some(InputEvent::ScrollDown)
+            Some(InputEvent::Next)
         );
     }
 

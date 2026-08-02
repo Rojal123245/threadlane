@@ -5,5 +5,5 @@ mod state;
 
 pub use render::render;
 pub use state::{
-    reduce_agent_event, AppState, MessageType, RunStatus, TranscriptMessage,
+    reduce_agent_event, AppState, CompletionMode, MessageType, RunStatus, TranscriptMessage,
 };
