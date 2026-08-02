@@ -301,8 +301,7 @@ fn render_completion(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_widget(
         Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).title(title))
-            .scroll((completion_scroll(state, area), 0))
-            .wrap(Wrap { trim: true }),
+            .scroll((completion_scroll(state, area), 0)),
         area,
     );
 }
@@ -538,6 +537,35 @@ mod tests {
         assert!(find_text(buffer, "model-0").is_none());
 
         let (selected_x, selected_y) = find_text(buffer, "model-11").unwrap();
+        assert_eq!(buffer[(selected_x, selected_y)].fg, Color::Yellow);
+    }
+
+    #[test]
+    fn render_keeps_selected_command_visible_on_narrow_terminal_without_wrap_drift() {
+        let mut state = AppState::test_state();
+        state.show_completion(
+            CompletionMode::Command,
+            vec![
+                "/reasoning".into(),
+                "/session".into(),
+                "/model".into(),
+                "/models".into(),
+                "/reasoning".into(),
+                "/session".into(),
+                "/model".into(),
+                "/quit".into(),
+            ],
+        );
+        state.completion.selected = 7;
+
+        let backend = TestBackend::new(22, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &state)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert!(find_text(buffer, "/quit").is_some());
+
+        let (selected_x, selected_y) = find_text(buffer, "/quit").unwrap();
         assert_eq!(buffer[(selected_x, selected_y)].fg, Color::Yellow);
     }
 

@@ -33,3 +33,15 @@
 
 - `cargo test -p threadlane-cli` → passed (`31 passed`)
 - `git diff --check -- crates/threadlane-cli/src/render.rs .superpowers/sdd/2026-08-02-threadlane-cli-command-popups/task-3-report.md` → passed
+
+## Fix Round 2
+
+- Reviewer issue: popup scroll math assumed one visual line per candidate, but wrapped command rows could consume multiple terminal lines on narrow widths and drift selection visibility.
+- Root cause: completion popup used per-candidate scroll math while still enabling `Paragraph::wrap(...)` during popup rendering.
+- Fix: made popup rows non-wrapping in `render.rs`, keeping render height and scroll math aligned at one visual row per candidate.
+- Regression test added: on a narrow terminal with long command rows, the selected command remains visible and highlighted inside the capped popup.
+
+### Fix Round 2 Verification
+
+- `cargo test -p threadlane-cli` → passed (`32 passed`)
+- `git diff --check -- crates/threadlane-cli/src/render.rs .superpowers/sdd/2026-08-02-threadlane-cli-command-popups/task-3-report.md` → passed
