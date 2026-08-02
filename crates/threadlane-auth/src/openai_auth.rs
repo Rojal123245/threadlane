@@ -180,12 +180,48 @@ fn write_secure_text_file(path: &PathBuf, contents: &str) -> Result<(), String> 
             .map_err(|e| format!("Failed to store OpenAI API key: {e}"))?;
     }
 
-    if path.exists() {
-        fs::remove_file(path).map_err(|e| format!("Failed to store OpenAI API key: {e}"))?;
-    }
-    fs::rename(&tmp_path, path).map_err(|e| format!("Failed to store OpenAI API key: {e}"))?;
+    replace_secure_file(&tmp_path, path)?;
 
     Ok(())
+}
+
+fn replace_secure_file(tmp_path: &PathBuf, path: &PathBuf) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        fs::rename(tmp_path, path).map_err(|e| format!("Failed to store OpenAI API key: {e}"))
+    }
+
+    #[cfg(not(unix))]
+    {
+        let backup_path = if path.exists() {
+            let backup_path = path.with_extension("bak");
+            if backup_path.exists() {
+                fs::remove_file(&backup_path)
+                    .map_err(|e| format!("Failed to store OpenAI API key: {e}"))?;
+            }
+            fs::rename(path, &backup_path)
+                .map_err(|e| format!("Failed to store OpenAI API key: {e}"))?;
+            Some(backup_path)
+        } else {
+            None
+        };
+
+        let rename_result = fs::rename(tmp_path, path);
+        match rename_result {
+            Ok(()) => {
+                if let Some(backup_path) = backup_path {
+                    let _ = fs::remove_file(backup_path);
+                }
+                Ok(())
+            }
+            Err(err) => {
+                if let Some(backup_path) = backup_path {
+                    let _ = fs::rename(&backup_path, path);
+                }
+                Err(format!("Failed to store OpenAI API key: {err}"))
+            }
+        }
+    }
 }
 
 pub fn save_openai_api_key(key: &str) -> Result<(), String> {

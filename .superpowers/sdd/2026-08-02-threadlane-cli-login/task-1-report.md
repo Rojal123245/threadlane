@@ -40,3 +40,16 @@ Verification after the fix:
 
 - `cargo test -p threadlane-auth` ✅
 - `git -c core.fsmonitor=false diff --check` ✅
+
+## Round 2 Fix Notes
+
+Reviewer feedback addressed:
+
+- Removed the destination-delete step before replacement.
+- Kept the secure temp-file write with `0600` before write.
+- Preserved the prior key until replacement succeeds by using atomic rename on Unix and a backup-based fallback on non-Unix targets.
+
+Verification after the fix:
+
+- `cargo test -p threadlane-auth` ✅
+- `git -c core.fsmonitor=false diff --check` ✅
