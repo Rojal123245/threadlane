@@ -30,23 +30,18 @@ fn needs_model_catalog(state: &AppState, input: &InputEvent) -> bool {
     if matches!(state.status, RunStatus::Running) {
         return false;
     }
-    let next = match input {
-        InputEvent::Character(character) => {
-            let mut next = state.composer.clone();
-            next.push(*character);
-            next
-        }
-        InputEvent::Backspace => {
-            let mut next = state.composer.clone();
-            next.pop();
-            next
-        }
-        InputEvent::Submit | InputEvent::Tab => state.composer.clone(),
-        _ => return false,
-    };
     matches!(state.completion.mode, Some(CompletionMode::Model))
-        || next.trim() == "/model"
-        || next.starts_with("/model ")
+        || matches!(
+            input,
+            InputEvent::Submit
+                if state.composer.trim() == "/model"
+                    || (state.completion.mode == Some(CompletionMode::Command)
+                        && state
+                            .completion
+                            .candidates
+                            .get(state.completion.selected)
+                            .is_some_and(|candidate| candidate == "/model"))
+        )
 }
 
 fn show_model_completion(state: &mut AppState, models: &[String]) -> Action {
@@ -57,15 +52,21 @@ fn show_model_completion(state: &mut AppState, models: &[String]) -> Action {
         .trim();
     let candidates = filter_model_labels(query, models);
     if candidates.is_empty() {
-        state.close_completion();
-        Action::Message("No available models found; keeping current model.".into())
+        state.completion.visible = true;
+        state.completion.candidates = candidates;
+        state.completion.selected = 0;
+        state.completion.mode = Some(CompletionMode::Model);
     } else {
         state.show_completion(CompletionMode::Model, candidates);
-        Action::None
     }
+    Action::None
 }
 
 fn refresh_completion(state: &mut AppState, models: &[String]) -> Action {
+    if state.completion.mode == Some(CompletionMode::Model) || state.composer.starts_with("/model ")
+    {
+        return show_model_completion(state, models);
+    }
     if state.composer == "/" || state.composer.starts_with('/') && !state.composer.contains(' ') {
         state.show_completion(
             CompletionMode::Command,
@@ -73,7 +74,7 @@ fn refresh_completion(state: &mut AppState, models: &[String]) -> Action {
         );
         return Action::None;
     }
-    if state.composer.trim() == "/model" || state.composer.starts_with("/model ") {
+    if state.composer.trim() == "/model" {
         return show_model_completion(state, models);
     }
     state.close_completion();
@@ -335,11 +336,14 @@ mod tests {
         assert_eq!(state.composer, "/model");
         assert!(!state.completion.visible);
 
+        assert_eq!(dispatch_input(&mut state, InputEvent::Submit), Action::None);
+        assert!(state.completion.visible);
+        assert_eq!(state.completion.mode, Some(CompletionMode::Model));
+        assert!(state.completion.candidates.is_empty());
         assert_eq!(
-            dispatch_input(&mut state, InputEvent::Submit),
-            Action::Message("No available models found; keeping current model.".into())
+            dispatch_input(&mut state, InputEvent::CancelOrQuit),
+            Action::None
         );
-        assert!(!state.completion.visible);
 
         state.composer = "/".into();
         assert_eq!(
@@ -398,6 +402,47 @@ mod tests {
         );
         assert_eq!(state.composer, "/model gpt-5");
         assert!(!state.completion.visible);
+    }
+
+    #[test]
+    fn empty_model_filter_stays_open_and_escape_cancels_it() {
+        let models = vec!["gpt-4o".to_string()];
+        let mut state = AppState::test_state();
+        state.composer = "/model".into();
+
+        assert_eq!(
+            dispatch_input_with_models(&mut state, InputEvent::Submit, &models),
+            Action::None
+        );
+        assert_eq!(
+            dispatch_input_with_models(&mut state, InputEvent::Character('z'), &models),
+            Action::None
+        );
+        assert!(state.completion.visible);
+        assert_eq!(state.completion.mode, Some(CompletionMode::Model));
+        assert!(state.completion.candidates.is_empty());
+
+        assert_eq!(
+            dispatch_input_with_models(&mut state, InputEvent::Character('z'), &models),
+            Action::None
+        );
+        assert_eq!(
+            dispatch_input_with_models(&mut state, InputEvent::CancelOrQuit, &models),
+            Action::None
+        );
+        assert!(!state.completion.visible);
+    }
+
+    #[test]
+    fn typing_exact_model_command_does_not_request_model_catalog() {
+        let mut state = AppState::test_state();
+        state.composer = "/mode".into();
+        state.show_completion(CompletionMode::Command, vec!["/model".into()]);
+
+        assert!(!needs_model_catalog(&state, &InputEvent::Character('l')));
+
+        state.composer.push('l');
+        assert!(needs_model_catalog(&state, &InputEvent::Submit));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use super::state::{ActivityStatus, AppState, CompletionMode, MessageType, RunStatus};
-use crate::commands::command_usages;
+use crate::commands::command_description;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -102,7 +102,7 @@ fn section_height(items: usize, cap: u16) -> u16 {
 }
 
 fn popup_height(area: Rect, state: &AppState, has_activity: bool, has_plan: bool) -> u16 {
-    if !state.completion.visible || state.completion.candidates.is_empty() {
+    if !state.completion.visible {
         return 0;
     }
 
@@ -121,7 +121,8 @@ fn popup_height(area: Rect, state: &AppState, has_activity: bool, has_plan: bool
             0
         };
     let available = inner_height.saturating_sub(reserved + 1);
-    section_height(state.completion.candidates.len(), 8).min(available)
+    let height = section_height(state.completion.candidates.len().max(1), 8).min(available);
+    (height >= 3).then_some(height).unwrap_or(0)
 }
 
 fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
@@ -282,7 +283,7 @@ fn render_plan(frame: &mut Frame, state: &AppState, area: Rect) {
 }
 
 fn render_completion(frame: &mut Frame, state: &AppState, area: Rect) {
-    if area.height == 0 || !state.completion.visible || state.completion.candidates.is_empty() {
+    if area.height == 0 || !state.completion.visible {
         return;
     }
 
@@ -334,7 +335,7 @@ fn completion_line(
 
     match state.completion.mode {
         Some(CompletionMode::Command) => {
-            let detail = command_detail(candidate);
+            let detail = command_description(candidate);
             let mut spans = vec![styled_text(
                 candidate,
                 if selected {
@@ -436,23 +437,6 @@ fn truncate_plain(text: &str, max_width: usize) -> String {
 
 fn text_width(text: &str) -> usize {
     Span::raw(text.to_string()).width()
-}
-
-fn command_detail(candidate: &str) -> &'static str {
-    match candidate {
-        "/model" => "switch model",
-        "/models" => "list models",
-        "/reasoning" => "set reasoning",
-        "/plan" => "show plan",
-        "/clear" => "clear transcript",
-        "/session" => "show session",
-        "/help" => "show help",
-        "/quit" => "quit",
-        _ => command_usages()
-            .iter()
-            .find_map(|usage| usage.strip_prefix(candidate).map(str::trim))
-            .unwrap_or(""),
-    }
 }
 
 fn render_input(frame: &mut Frame, state: &AppState, area: Rect) {
@@ -573,6 +557,16 @@ mod tests {
         );
         assert_eq!(sections.composer.height, 3);
         assert_eq!(sections.footer.height, 1);
+    }
+
+    #[test]
+    fn tiny_terminal_omits_popup_without_an_inner_viewport() {
+        let mut state = AppState::test_state();
+        state.show_completion(CompletionMode::Model, vec!["gpt-4o".into()]);
+
+        let sections = layout_sections(Rect::new(0, 0, 80, 12), &state);
+
+        assert_eq!(sections.popup.height, 0);
     }
 
     #[test]

@@ -11,26 +11,53 @@ const SESSION_COMMAND_NAME: &str = "session";
 const HELP_COMMAND_NAME: &str = "help";
 const QUIT_COMMAND_NAME: &str = "quit";
 
-const COMMAND_LABELS: [&str; 8] = [
-    "/model",
-    "/models",
-    "/reasoning",
-    "/plan",
-    "/clear",
-    "/session",
-    "/help",
-    "/quit",
-];
+struct CommandMetadata {
+    label: &'static str,
+    usage: &'static str,
+    description: &'static str,
+}
 
-const COMMAND_USAGES: [&str; 8] = [
-    "/model [provider/model]",
-    "/models",
-    "/reasoning [off|minimal|low|medium|high|xhigh]",
-    "/plan",
-    "/clear",
-    "/session",
-    "/help",
-    "/quit",
+const COMMAND_METADATA: [CommandMetadata; 8] = [
+    CommandMetadata {
+        label: "/model",
+        usage: "/model [provider/model]",
+        description: "switch model",
+    },
+    CommandMetadata {
+        label: "/models",
+        usage: "/models",
+        description: "list models",
+    },
+    CommandMetadata {
+        label: "/reasoning",
+        usage: "/reasoning [off|minimal|low|medium|high|xhigh]",
+        description: "set reasoning",
+    },
+    CommandMetadata {
+        label: "/plan",
+        usage: "/plan",
+        description: "show plan",
+    },
+    CommandMetadata {
+        label: "/clear",
+        usage: "/clear",
+        description: "clear transcript",
+    },
+    CommandMetadata {
+        label: "/session",
+        usage: "/session",
+        description: "show session",
+    },
+    CommandMetadata {
+        label: "/help",
+        usage: "/help",
+        description: "show help",
+    },
+    CommandMetadata {
+        label: "/quit",
+        usage: "/quit",
+        description: "quit",
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,16 +91,28 @@ impl std::fmt::Display for CommandError {
     }
 }
 
-pub(crate) fn command_usages() -> &'static [&'static str] {
-    &COMMAND_USAGES
+pub(crate) fn command_usages() -> Vec<&'static str> {
+    COMMAND_METADATA
+        .iter()
+        .map(|command| command.usage)
+        .collect()
+}
+
+pub(crate) fn command_description(label: &str) -> &'static str {
+    COMMAND_METADATA
+        .iter()
+        .find(|command| command.label == label)
+        .map_or("", |command| command.description)
 }
 
 pub(crate) fn filter_command_labels(query: &str) -> Vec<String> {
     let query = query.trim().trim_start_matches('/').to_ascii_lowercase();
-    COMMAND_LABELS
+    COMMAND_METADATA
         .iter()
-        .filter(|label| query.is_empty() || label[1..].to_ascii_lowercase().starts_with(&query))
-        .map(|label| (*label).to_string())
+        .filter(|command| {
+            query.is_empty() || command.label[1..].to_ascii_lowercase().starts_with(&query)
+        })
+        .map(|command| command.label.to_string())
         .collect()
 }
 
@@ -271,6 +310,7 @@ mod tests {
             filter_command_labels("mo"),
             vec!["/model".to_string(), "/models".to_string()]
         );
+        assert_eq!(command_description("/model"), "switch model");
     }
 
     #[test]
