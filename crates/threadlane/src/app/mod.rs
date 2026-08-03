@@ -144,6 +144,27 @@ fn include_connected_provider_models(mut models: Vec<String>) -> Vec<String> {
     models
 }
 
+/// Adds a pseudo-model per enabled ACP agent.
+///
+/// Reuses the `provider/model` id convention so external agents appear in the
+/// existing picker, persist per session, and work with `/model`, instead of
+/// needing a second selection mechanism.
+fn append_acp_models(models: &mut Vec<String>, global_dir: Option<&Path>, work_dir: Option<&Path>) {
+    let manager = threadlane_coding_agent::AcpManager::new(
+        global_dir.map(Path::to_path_buf),
+        work_dir.map(Path::to_path_buf),
+    );
+    for config in manager.configs() {
+        if !config.enabled {
+            continue;
+        }
+        let model = threadlane_coding_agent::acp_model_id(&config.id);
+        if !models.iter().any(|existing| *existing == model) {
+            models.push(model);
+        }
+    }
+}
+
 /// Whether the user can talk to at least one LLM right now, via any
 /// supported provider (not just OpenAI/ChatGPT specifically).
 fn has_connected_provider() -> bool {
@@ -3295,8 +3316,26 @@ struct GenerationRun {
     handle: tokio::task::JoinHandle<()>,
 }
 
+/// A live ACP conversation attached to one chat session.
+///
+/// The update channel is created with the session and outlives a single turn:
+/// the handler owns the sender for as long as the session lives, so a follow-up
+/// turn must reuse this receiver rather than making a fresh one, which would
+/// have no sender and yield nothing.
+#[derive(Clone)]
+pub struct AcpChat {
+    session: Arc<threadlane_coding_agent::AcpSession>,
+    updates: Arc<
+        tokio::sync::Mutex<
+            tokio::sync::mpsc::UnboundedReceiver<threadlane_coding_agent::AcpSessionNotification>,
+        >,
+    >,
+}
+
 struct SessionRuntime {
     agent: Arc<tokio::sync::Mutex<CodingAgent>>,
+    /// Live external agent conversation, when this chat is driven over ACP.
+    acp: Option<AcpChat>,
     work_handle: CodingAgentWorkHandle,
     session_file: Option<PathBuf>,
     generation: Option<GenerationRun>,
@@ -3325,6 +3364,7 @@ impl SessionRuntime {
         let work_handle = agent.work_handle();
         Self {
             agent: Arc::new(tokio::sync::Mutex::new(agent)),
+            acp: None,
             work_handle,
             session_file,
             generation: None,
@@ -4730,6 +4770,13 @@ impl App {
                     let generation = runtime.generation.take()?;
                     let generation_id = generation.id;
                     generation.handle.abort();
+                    // Aborting the task stops us listening, but the external
+                    // agent keeps working until it is told to stop.
+                    if let Some(chat) = runtime.acp.clone() {
+                        get_runtime().spawn(async move {
+                            let _ = chat.session.cancel().await;
+                        });
+                    }
                     runtime.terminal_generation_id = None;
                     let draft = draft_for_cancellation(
                         Some(generation_id),
@@ -5656,7 +5703,194 @@ impl App {
     }
 
 
-    fn set_model_dropup_options(&mut self, cx: &mut Cx, models: Vec<String>, selected_model: &str) {
+    /// Runs one chat turn against an external ACP agent.
+    ///
+    /// The session is created on first use and kept on the runtime, so a
+    /// follow-up turn continues the same conversation. Updates are translated
+    /// to `AgentEvent` and forwarded exactly like a built-in generation.
+    #[allow(clippy::too_many_arguments)]
+    fn start_acp_generation(
+        &mut self,
+        cx: &mut Cx,
+        key: SessionKey,
+        generation_id: u64,
+        agent_id: String,
+        input: String,
+        consumes_composer: bool,
+        submitted_draft: String,
+        attachments: Vec<ImageAttachment>,
+        origin: InputOrigin,
+    ) {
+        let Some(tx) = self.tx.clone() else {
+            return;
+        };
+        if !attachments.is_empty() {
+            // Routed to this turn's session: another workspace may be active
+            // by the time a dispatch lands.
+            self.push_chat_to(
+                key.clone(),
+                MsgRole::System,
+                "Attachments are not sent to ACP agents yet; only the text was sent.".to_string(),
+            );
+        }
+
+        let existing = self
+            .session_runtimes
+            .get(&key)
+            .and_then(|runtime| runtime.acp.clone());
+        let global_dir = threadlane_coding_agent::default_global_threadlane_dir();
+        let work_dir = key.work_dir.clone();
+        let event_work_dir = key.work_dir.clone();
+        let event_session_id = key.session_id.clone();
+        let session_tx = tx.clone();
+
+        let handle = get_runtime().spawn(async move {
+            let forward = |event: threadlane_agent::AgentEvent| {
+                let _ = tx.send(GuiAgentEvent::GenerationAgent {
+                    generation_id,
+                    work_dir: event_work_dir.clone(),
+                    session_id: event_session_id.clone(),
+                    event,
+                });
+                SignalToUI::set_ui_signal();
+            };
+            let finish = || {
+                let _ = tx.send(GuiAgentEvent::GenerationFinished {
+                    generation_id,
+                    work_dir: event_work_dir.clone(),
+                    session_id: event_session_id.clone(),
+                });
+                SignalToUI::set_ui_signal();
+            };
+
+            // The update channel belongs to the session, not the turn: the
+            // handler owns the sender for as long as the session lives, so a
+            // follow-up turn reuses this receiver instead of making a fresh one
+            // that would have no sender.
+            let chat = match existing {
+                Some(chat) => chat,
+                None => {
+                    let (update_tx, update_rx) = tokio::sync::mpsc::unbounded_channel();
+                    let handler: Arc<dyn threadlane_coding_agent::AcpClientHandler> = Arc::new(
+                        threadlane_coding_agent::AcpWorkspaceClient::new(work_dir.clone())
+                            .with_permission_policy(
+                                threadlane_coding_agent::AcpPermissionPolicy::AllowOnce,
+                            )
+                            .with_update_sender(update_tx),
+                    );
+                    let manager = threadlane_coding_agent::AcpManager::new(
+                        global_dir,
+                        Some(work_dir.clone()),
+                    );
+                    match manager.start_session(&agent_id, &work_dir, handler).await {
+                        Ok(session) => {
+                            let chat = AcpChat {
+                                session: Arc::new(session),
+                                updates: Arc::new(tokio::sync::Mutex::new(update_rx)),
+                            };
+                            let _ = session_tx.send(GuiAgentEvent::AcpSessionStarted {
+                                work_dir: event_work_dir.clone(),
+                                session_id: event_session_id.clone(),
+                                chat: chat.clone(),
+                            });
+                            SignalToUI::set_ui_signal();
+                            chat
+                        }
+                        Err(error) => {
+                            forward(threadlane_agent::AgentEvent::AgentError {
+                                error: format!("Could not start ACP agent: {error}"),
+                            });
+                            finish();
+                            return;
+                        }
+                    }
+                }
+            };
+            let session = Arc::clone(&chat.session);
+            let mut update_rx = chat.updates.lock().await;
+
+            forward(threadlane_agent::AgentEvent::AgentStart);
+            forward(threadlane_agent::AgentEvent::MessageStart {
+                role: "assistant".to_string(),
+            });
+
+            let prompt = session.prompt_text(&input);
+            tokio::pin!(prompt);
+            let mut listening = true;
+            let outcome = loop {
+                tokio::select! {
+                    result = &mut prompt => break result,
+                    update = update_rx.recv(), if listening => match update {
+                        Some(notification) => {
+                            for event in
+                                threadlane_coding_agent::agent_events_for(notification.update)
+                            {
+                                forward(event);
+                            }
+                        }
+                        // Only reachable once the session's handler is gone.
+                        // Disable the branch rather than spinning on it.
+                        None => listening = false,
+                    }
+                }
+            };
+
+            // Drain whatever the agent emitted between its last update and the
+            // stop reason, or the tail of a turn is lost.
+            while let Ok(notification) = update_rx.try_recv() {
+                for event in threadlane_coding_agent::agent_events_for(notification.update) {
+                    forward(event);
+                }
+            }
+
+            match outcome {
+                Ok(stop) => {
+                    if !matches!(stop, threadlane_coding_agent::AcpStopReason::EndTurn) {
+                        forward(threadlane_agent::AgentEvent::AgentError {
+                            error: format!("Agent stopped: {stop:?}"),
+                        });
+                    }
+                }
+                Err(error) => forward(threadlane_agent::AgentEvent::AgentError {
+                    error: format!("ACP turn failed: {error}"),
+                }),
+            }
+            forward(threadlane_agent::AgentEvent::AgentEnd {
+                usage: threadlane_agent::TokenUsage::default(),
+            });
+            finish();
+        });
+
+        if let Some(runtime) = self.session_runtimes.get_mut(&key) {
+            runtime.generation = Some(GenerationRun {
+                id: generation_id,
+                handle,
+            });
+            runtime.terminal_generation_id = None;
+            if consumes_composer {
+                runtime.submitted_draft = Some((generation_id, submitted_draft));
+                runtime.submitted_attachments = Some((generation_id, attachments));
+            }
+        }
+        if let Some(workspace) = self.workspace_state.active_workspace_mut() {
+            clear_composer_for_dispatch(origin, &mut workspace.ui);
+        }
+        let _ = cx;
+    }
+
+    fn set_model_dropup_options(
+        &mut self,
+        cx: &mut Cx,
+        mut models: Vec<String>,
+        selected_model: &str,
+    ) {
+        // Injected here rather than at each call site so every path that
+        // repopulates the picker shows configured ACP agents.
+        append_acp_models(
+            &mut models,
+            threadlane_coding_agent::default_global_threadlane_dir().as_deref(),
+            self.active_work_dir(),
+        );
         let Some((canonical, display)) = ordered_model_options(models, selected_model) else {
             return;
         };
@@ -7700,6 +7934,25 @@ impl App {
         let event_work_dir = key.work_dir.clone();
         let event_session_id = key.session_id.clone();
         let generation_attachments = attachments.clone();
+
+        // An ACP model routes the turn to an external agent instead of the
+        // built-in loop. Its updates are mapped onto the same `AgentEvent`
+        // stream, so the transcript renders identically either way.
+        if let Some(agent_id) = threadlane_coding_agent::acp_agent_id(&model_name) {
+            self.start_acp_generation(
+                cx,
+                key.clone(),
+                generation_id,
+                agent_id.to_string(),
+                input_str,
+                consumes_composer,
+                submitted_draft,
+                attachments,
+                origin,
+            );
+            return;
+        }
+
         let generation_handle = get_runtime().spawn(async move {
             let mut agent_lock = agent_arc.lock().await;
             agent_lock.set_reasoning_effort(reasoning_effort).await;
@@ -8496,6 +8749,16 @@ impl App {
                     {
                         modal.set_mcp_rows(cx, self.capability_state.mcp_servers.clone());
                         modal.set_mcp_status(cx, "");
+                    }
+                }
+                GuiAgentEvent::AcpSessionStarted {
+                    work_dir,
+                    session_id,
+                    chat,
+                } => {
+                    let key = SessionKey::new(work_dir, session_id);
+                    if let Some(runtime) = self.session_runtimes.get_mut(&key) {
+                        runtime.acp = Some(chat);
                     }
                 }
                 GuiAgentEvent::AcpRefreshCompleted(records) => {

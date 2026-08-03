@@ -269,7 +269,7 @@ a name and the command that starts it, and press Add:
 | Agent | Command |
 | --- | --- |
 | Gemini CLI | `gemini --experimental-acp` |
-| Claude Code | `npx -y @zed-industries/claude-code-acp` |
+| Claude Code | `npx -y @agentclientprotocol/claude-agent-acp` |
 
 Refresh launches each enabled agent, completes the ACP handshake, and reports
 the agent name, negotiated protocol version, and whether it still needs to be
@@ -293,6 +293,20 @@ The configuration file can also be edited directly:
   ]
 }
 ```
+
+### Chatting with an ACP agent
+
+An enabled agent appears in the model picker as `acp/<id>`. Select it and the
+chat turn is routed to that agent instead of the built-in loop: streamed text,
+reasoning, tool activity, and plans render in the transcript exactly as they do
+for a native model, because ACP updates are mapped onto the same event stream.
+Stop sends `session/cancel`, and the session is kept per chat so a follow-up
+turn continues the same conversation.
+
+Two current limits: attachments are not sent to ACP agents (the text is sent and
+a note appears in the transcript), and tool-permission requests are auto-approved
+for the turn rather than prompting, since the agent was explicitly selected as
+the chat backend. Filesystem access stays workspace-scoped either way.
 
 ACP has no HTTP transport, so an agent is always a local command. Threadlane
 grants a connected agent workspace-scoped file access only: reads and writes

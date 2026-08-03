@@ -265,6 +265,13 @@ pub enum GuiAgentEvent {
     },
     McpRefreshCompleted(Vec<threadlane_coding_agent::McpServerRecord>),
     AcpRefreshCompleted(Vec<threadlane_coding_agent::AcpAgentRecord>),
+    /// A chat session opened its external agent session; the UI stores it so
+    /// follow-up turns and cancellation reuse the same conversation.
+    AcpSessionStarted {
+        work_dir: PathBuf,
+        session_id: String,
+        chat: crate::app::AcpChat,
+    },
 }
 
 #[cfg(test)]
