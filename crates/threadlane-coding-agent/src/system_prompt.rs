@@ -158,6 +158,7 @@ pub(crate) fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> Stri
         }
         if available_tool_names.contains("update_plan") {
             add_tool_guideline("For multi-step work, maintain a concise plan with `update_plan`; keep at most one item in progress and skip plans for simple requests.");
+            add_tool_guideline("Update the plan throughout the work, not only at the end: mark a step in_progress when you start it, mark it completed immediately after it succeeds, and update the next step before continuing. Keep the plan statuses accurate after every meaningful milestone.");
         }
         for guideline in &options.config.guidelines {
             add_tool_guideline(guideline);

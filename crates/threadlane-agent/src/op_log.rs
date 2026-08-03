@@ -233,7 +233,9 @@ impl LaneQueue {
 
 /// Appends a single operation record to a sidecar `.oplog.jsonl` file under session file lock.
 pub fn append_op_record_to_file(path: &Path, record: &OpRecord) -> std::io::Result<()> {
-    let _guard = session_file_lock().lock().unwrap();
+    let _guard = session_file_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     let line = serde_json::to_string(record)?;
     writeln!(file, "{}", line)?;
@@ -244,7 +246,9 @@ pub fn append_op_record_to_file(path: &Path, record: &OpRecord) -> std::io::Resu
 
 /// Reads all operation records from a sidecar `.oplog.jsonl` file under session file lock.
 pub fn load_op_records_from_file(path: &Path) -> std::io::Result<Vec<OpRecord>> {
-    let _guard = session_file_lock().lock().unwrap();
+    let _guard = session_file_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     if !path.exists() {
         return Ok(Vec::new());
     }

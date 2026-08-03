@@ -390,7 +390,7 @@ pub struct AgentLoop {
     /// `register_tool_executor` so ordering and schema conflicts are validated.
     extension_manager: Option<Arc<dyn ToolExecutor>>,
     pub work_dir: Option<PathBuf>,
-    stream_rules: Vec<crate::rules::StreamRule>,
+    stream_rules: Vec<(crate::rules::StreamRule, regex::Regex)>,
 }
 
 impl AgentLoop {
@@ -447,6 +447,17 @@ impl AgentLoop {
     /// default behavior where all registered, state, and core tools are available.
     pub fn set_allowed_tool_names(&mut self, allowed_tool_names: Option<HashSet<String>>) {
         self.allowed_tool_names = allowed_tool_names;
+    }
+
+    pub fn set_stream_rules(&mut self, rules: Vec<crate::rules::StreamRule>) {
+        self.stream_rules = rules
+            .into_iter()
+            .filter_map(|rule| {
+                regex::Regex::new(&rule.pattern)
+                    .ok()
+                    .map(|re| (rule, re))
+            })
+            .collect();
     }
 
     /// Returns the core and registered executor schemas in provider order,
