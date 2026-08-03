@@ -406,6 +406,13 @@ struct SessionState {
     exit_message: String,
     #[serde(default)]
     expression: String,
+    /// True between a stop and the program exiting.
+    ///
+    /// The host persists one state slot per extension across tool calls, so a
+    /// later `debug_continue` has to be able to tell "stopped at a breakpoint"
+    /// from "nothing is running" without re-deriving it from the adapter.
+    #[serde(default)]
+    session_active: bool,
 }
 
 impl SessionState {
@@ -432,6 +439,66 @@ impl SessionState {
 
 fn load_state(invocation: &Invocation) -> SessionState {
     serde_json::from_value(invocation.state.clone()).unwrap_or_default()
+}
+
+/// True when this invocation is the host resuming a tool call after answering
+/// broker requests, rather than the agent starting a new one.
+///
+/// Phase alone cannot tell these apart: extension state is persisted per
+/// extension, so a fresh `debug_continue` still arrives carrying whatever phase
+/// the previous `debug_run` left behind.
+fn is_continuation(invocation: &Invocation) -> bool {
+    invocation
+        .events
+        .iter()
+        .any(|event| event.topic == "broker_response")
+}
+
+/// Loads state for a newly started tool call.
+///
+/// Continuation bookkeeping is cleared, but the DAP sequence counter and the
+/// stopped-thread id carry over: the adapter is the same live process, so its
+/// sequence numbers have to keep increasing.
+fn begin_state(invocation: &Invocation) -> SessionState {
+    let mut state = load_state(invocation);
+    state.phase.clear();
+    state.pump_steps = 0;
+    state.pending_seq = 0;
+    state
+}
+
+/// Builds a terminal response that persists `state`.
+///
+/// Every terminal path must go through this. Returning a response without state
+/// leaves the previous phase persisted, and the next tool call then starts in a
+/// transient phase it cannot handle.
+fn finish(mut state: SessionState, message: impl Into<String>) -> (Response, Vec<BrokerRequest>) {
+    state.pump_steps = 0;
+    state.pending_seq = 0;
+    (
+        Response {
+            message: message.into(),
+            error: None,
+            continue_after_broker: false,
+            state: Some(state.to_value()),
+        },
+        Vec::new(),
+    )
+}
+
+/// Terminal response for a session that is stopped and can be resumed.
+fn finish_stopped(
+    mut state: SessionState,
+    message: impl Into<String>,
+) -> (Response, Vec<BrokerRequest>) {
+    state.phase = "stopped".into();
+    state.session_active = true;
+    finish(state, message)
+}
+
+/// Terminal response for a session that is over; the next call starts clean.
+fn finish_ended(message: impl Into<String>) -> (Response, Vec<BrokerRequest>) {
+    finish(SessionState::default(), message)
 }
 
 /// The single DAP message delivered by this continuation, if any.
@@ -554,7 +621,13 @@ fn format_evaluate(expression: &str, body: &serde_json::Value) -> String {
 ///
 /// Phases: spawn -> initialize -> launch -> breakpoints -> configure -> run.
 fn run_debug(invocation: &Invocation) -> Result<(Response, Vec<BrokerRequest>), Response> {
-    let mut state = load_state(invocation);
+    // A fresh tool call starts a new run whatever phase the previous one left
+    // persisted; only a continuation resumes the phase machine.
+    let mut state = if is_continuation(invocation) {
+        load_state(invocation)
+    } else {
+        SessionState::default()
+    };
     if !state.charge_pump() {
         return Err(Response::error(
             "Debug session did not reach a stop within the step budget.",
@@ -599,6 +672,11 @@ fn run_debug(invocation: &Invocation) -> Result<(Response, Vec<BrokerRequest>), 
                     state.to_value(),
                 ),
                 vec![
+                    // Spawn is idempotent and would otherwise re-attach to an
+                    // adapter left mid-session by a previous run. The broker
+                    // dispatches these in order, so the kill lands first; it
+                    // fails harmlessly when nothing is running.
+                    process_request("kill", serde_json::json!({ "name": ADAPTER_PROCESS_NAME })),
                     process_request(
                         "spawn",
                         serde_json::json!({
@@ -738,13 +816,12 @@ fn run_debug(invocation: &Invocation) -> Result<(Response, Vec<BrokerRequest>), 
                     body,
                     ..
                 } if command == "stackTrace" => {
-                    if !success {
-                        return Ok((
-                            Response::ok(format!("Stopped ({}).", state.stop_reason)),
-                            vec![],
-                        ));
-                    }
-                    Ok((Response::ok(format_stop(&state.stop_reason, &body)), vec![]))
+                    let message = if success {
+                        format_stop(&state.stop_reason, &body)
+                    } else {
+                        format!("Stopped ({}).", state.stop_reason)
+                    };
+                    Ok(finish_stopped(state, message))
                 }
                 _ => Ok((
                     pump(&mut state, "Collecting the stack trace."),
@@ -815,7 +892,7 @@ fn finish_or_pump(
             ))
         }
         DapMessage::Event { event, body } if event == "exited" || event == "terminated" => {
-            Ok((Response::ok(format_exit(&body)), vec![]))
+            Ok(finish_ended(format_exit(&body)))
         }
         _ => Ok((pump(&mut state, waiting_for), vec![recv_frame()])),
     }
@@ -853,7 +930,17 @@ fn continue_command(mode: &str) -> Result<&'static str, Response> {
 }
 
 fn resume_debug(invocation: &Invocation) -> Result<(Response, Vec<BrokerRequest>), Response> {
-    let mut state = load_state(invocation);
+    let mut state = if is_continuation(invocation) {
+        load_state(invocation)
+    } else {
+        let state = begin_state(invocation);
+        if !state.session_active {
+            return Err(Response::error(
+                "No debug session is stopped. Run debug_run first.",
+            ));
+        }
+        state
+    };
     if !state.charge_pump() {
         return Err(Response::error(
             "Debug session did not reach a stop within the step budget.",
@@ -868,11 +955,17 @@ fn resume_debug(invocation: &Invocation) -> Result<(Response, Vec<BrokerRequest>
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("continue");
             let command = continue_command(mode)?;
+            // Default to the thread the session actually stopped on, which is
+            // what the tool description promises.
             let thread_id = invocation
                 .arguments
                 .get("thread_id")
                 .and_then(serde_json::Value::as_u64)
-                .unwrap_or(1);
+                .unwrap_or(if state.thread_id == 0 {
+                    1
+                } else {
+                    state.thread_id
+                });
             state.thread_id = thread_id;
             state.phase = "running".into();
             let seq = state.take_seq();
@@ -899,7 +992,8 @@ fn resume_debug(invocation: &Invocation) -> Result<(Response, Vec<BrokerRequest>
                     body,
                     ..
                 } if command == "stackTrace" && success => {
-                    Ok((Response::ok(format_stop(&state.stop_reason, &body)), vec![]))
+                    let message = format_stop(&state.stop_reason, &body);
+                    Ok(finish_stopped(state, message))
                 }
                 _ => Ok((
                     pump(&mut state, "Collecting the stack trace."),
@@ -918,7 +1012,17 @@ fn resume_debug(invocation: &Invocation) -> Result<(Response, Vec<BrokerRequest>
 // ---------------------------------------------------------------------------
 
 fn eval_debug(invocation: &Invocation) -> Result<(Response, Vec<BrokerRequest>), Response> {
-    let mut state = load_state(invocation);
+    let mut state = if is_continuation(invocation) {
+        load_state(invocation)
+    } else {
+        let state = begin_state(invocation);
+        if !state.session_active {
+            return Err(Response::error(
+                "No debug session is stopped. Run debug_run first.",
+            ));
+        }
+        state
+    };
     if !state.charge_pump() {
         return Err(Response::error(
             "Debug adapter did not answer the evaluate request in time.",
@@ -965,20 +1069,18 @@ fn eval_debug(invocation: &Invocation) -> Result<(Response, Vec<BrokerRequest>),
                     message,
                     ..
                 } if command == "evaluate" => {
-                    if !success {
-                        return Ok((
-                            Response::ok(format!(
-                                "Could not evaluate {}: {}",
-                                state.expression,
-                                message.unwrap_or_else(|| "no reason given".into())
-                            )),
-                            vec![],
-                        ));
-                    }
-                    Ok((
-                        Response::ok(format_evaluate(&state.expression, &body)),
-                        vec![],
-                    ))
+                    let text = if success {
+                        format_evaluate(&state.expression, &body)
+                    } else {
+                        format!(
+                            "Could not evaluate {}: {}",
+                            state.expression,
+                            message.unwrap_or_else(|| "no reason given".into())
+                        )
+                    };
+                    // The program is still stopped either way, so the session
+                    // stays resumable.
+                    Ok(finish_stopped(state, text))
                 }
                 _ => Ok((
                     pump(&mut state, "Waiting for the evaluate response."),
@@ -997,8 +1099,10 @@ fn eval_debug(invocation: &Invocation) -> Result<(Response, Vec<BrokerRequest>),
 // ---------------------------------------------------------------------------
 
 fn stop_debug() -> (Response, Vec<BrokerRequest>) {
+    // Clear the persisted session so the next tool call starts clean.
+    let (response, _) = finish_ended("Debug session stopped.");
     (
-        Response::ok("Debug session stopped."),
+        response,
         vec![process_request(
             "kill",
             serde_json::json!({ "name": ADAPTER_PROCESS_NAME }),
@@ -1211,6 +1315,24 @@ mod tests {
         }
     }
 
+    /// A fresh tool call carrying the state a finished `debug_run` leaves behind.
+    fn stopped_invocation(name: &str, arguments: serde_json::Value) -> Invocation {
+        Invocation {
+            name: name.to_string(),
+            arguments,
+            state: SessionState {
+                phase: "stopped".into(),
+                session_active: true,
+                next_seq: 9,
+                thread_id: 7,
+                stop_reason: "breakpoint".into(),
+                ..Default::default()
+            }
+            .to_value(),
+            events: Vec::new(),
+        }
+    }
+
     fn with_message(name: &str, state: &SessionState, message: serde_json::Value) -> Invocation {
         Invocation {
             name: name.to_string(),
@@ -1362,17 +1484,20 @@ mod tests {
         .unwrap();
 
         assert!(response.continue_after_broker);
-        assert_eq!(requests.len(), 3);
-        assert_eq!(requests[0].operation, "spawn");
-        assert_eq!(requests[0].arguments["program"], "lldb-dap");
-        assert_eq!(requests[0].arguments["name"], ADAPTER_PROCESS_NAME);
-        assert_eq!(requests[1].operation, "send");
-        assert!(requests[1].arguments["data"]
+        assert_eq!(requests.len(), 4);
+        // A stale adapter is killed first; spawn is idempotent and would
+        // otherwise re-attach to a process left mid-session.
+        assert_eq!(requests[0].operation, "kill");
+        assert_eq!(requests[1].operation, "spawn");
+        assert_eq!(requests[1].arguments["program"], "lldb-dap");
+        assert_eq!(requests[1].arguments["name"], ADAPTER_PROCESS_NAME);
+        assert_eq!(requests[2].operation, "send");
+        assert!(requests[2].arguments["data"]
             .as_str()
             .unwrap()
             .contains("\"command\":\"initialize\""));
-        assert_eq!(requests[2].operation, "recv");
-        assert_eq!(requests[2].arguments["framing"], "content-length");
+        assert_eq!(requests[3].operation, "recv");
+        assert_eq!(requests[3].arguments["framing"], "content-length");
 
         let state: SessionState = serde_json::from_value(response.state.unwrap()).unwrap();
         assert_eq!(state.phase, "initialize");
@@ -1617,8 +1742,11 @@ mod tests {
 
     #[test]
     fn resume_sends_the_requested_step_command() {
-        let (response, requests) =
-            resume_debug(&invocation("debug_continue", json!({ "mode": "step_in" }))).unwrap();
+        let (response, requests) = resume_debug(&stopped_invocation(
+            "debug_continue",
+            json!({ "mode": "step_in" }),
+        ))
+        .unwrap();
         let next: SessionState = serde_json::from_value(response.state.unwrap()).unwrap();
         assert_eq!(next.phase, "running");
         assert!(requests[0].arguments["data"]
@@ -1629,14 +1757,17 @@ mod tests {
 
     #[test]
     fn resume_rejects_an_unknown_mode() {
-        let error =
-            resume_debug(&invocation("debug_continue", json!({ "mode": "sideways" }))).unwrap_err();
+        let error = resume_debug(&stopped_invocation(
+            "debug_continue",
+            json!({ "mode": "sideways" }),
+        ))
+        .unwrap_err();
         assert!(error.error.unwrap().contains("Unknown mode"));
     }
 
     #[test]
     fn eval_sends_an_evaluate_request_and_formats_the_result() {
-        let (response, requests) = eval_debug(&invocation(
+        let (response, requests) = eval_debug(&stopped_invocation(
             "debug_eval",
             json!({ "expression": "counter", "frame_id": 4 }),
         ))
@@ -1669,6 +1800,7 @@ mod tests {
         let state = SessionState {
             phase: "evaluating".into(),
             expression: "missing".into(),
+            session_active: true,
             ..Default::default()
         };
         let invocation = with_message(
@@ -1700,6 +1832,139 @@ mod tests {
     fn unknown_tools_are_rejected() {
         let response = handle_invocation(&invocation("debug_teleport", json!({})));
         assert!(response.error.unwrap().contains("Unknown tool"));
+    }
+
+    #[test]
+    fn a_new_tool_call_ignores_the_phase_left_by_the_previous_one() {
+        // The host persists one state slot per extension, so a finished
+        // `debug_run` leaves `phase` behind. Dispatching on phase alone would
+        // wedge every later call in "unexpected phase".
+        let stale = SessionState {
+            phase: "stack".into(),
+            session_active: true,
+            next_seq: 12,
+            thread_id: 3,
+            ..Default::default()
+        };
+        let call = Invocation {
+            name: "debug_continue".into(),
+            arguments: json!({}),
+            state: stale.to_value(),
+            events: Vec::new(),
+        };
+
+        let (response, requests) = resume_debug(&call).unwrap();
+        let next: SessionState = serde_json::from_value(response.state.unwrap()).unwrap();
+        assert_eq!(next.phase, "running");
+        assert!(requests[0].arguments["data"]
+            .as_str()
+            .unwrap()
+            .contains("\"command\":\"continue\""));
+    }
+
+    #[test]
+    fn resume_defaults_to_the_thread_the_session_stopped_on() {
+        let (_, requests) = resume_debug(&stopped_invocation("debug_continue", json!({}))).unwrap();
+        let sent: serde_json::Value = serde_json::from_str(
+            requests[0].arguments["data"]
+                .as_str()
+                .unwrap()
+                .split("\r\n\r\n")
+                .nth(1)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(sent["arguments"]["threadId"], 7);
+    }
+
+    #[test]
+    fn resume_and_eval_refuse_to_run_without_a_stopped_session() {
+        let resume = resume_debug(&invocation("debug_continue", json!({}))).unwrap_err();
+        assert!(resume
+            .error
+            .unwrap()
+            .contains("No debug session is stopped"));
+
+        let eval = eval_debug(&invocation("debug_eval", json!({ "expression": "x" }))).unwrap_err();
+        assert!(eval.error.unwrap().contains("No debug session is stopped"));
+    }
+
+    #[test]
+    fn a_finished_stack_trace_persists_a_resumable_session() {
+        let state = SessionState {
+            phase: "stack".into(),
+            stop_reason: "breakpoint".into(),
+            thread_id: 4,
+            ..Default::default()
+        };
+        let invocation = with_message(
+            "debug_run",
+            &state,
+            json!({
+                "type": "response",
+                "command": "stackTrace",
+                "success": true,
+                "body": { "stackFrames": [{ "name": "main", "line": 1 }] }
+            }),
+        );
+
+        let (response, _) = run_debug(&invocation).unwrap();
+        let next: SessionState = serde_json::from_value(response.state.unwrap()).unwrap();
+        assert_eq!(next.phase, "stopped");
+        assert!(next.session_active);
+        assert_eq!(next.thread_id, 4);
+        assert_eq!(next.pump_steps, 0, "the budget resets for the next call");
+    }
+
+    #[test]
+    fn an_exiting_program_clears_the_persisted_session() {
+        let state = SessionState {
+            phase: "running".into(),
+            session_active: true,
+            ..Default::default()
+        };
+        let invocation = with_message(
+            "debug_run",
+            &state,
+            json!({ "type": "event", "event": "terminated" }),
+        );
+
+        let (response, _) = run_debug(&invocation).unwrap();
+        let next: SessionState = serde_json::from_value(response.state.unwrap()).unwrap();
+        assert_eq!(next, SessionState::default());
+        assert!(!next.session_active);
+    }
+
+    #[test]
+    fn a_finished_evaluate_leaves_the_session_resumable() {
+        let state = SessionState {
+            phase: "evaluating".into(),
+            expression: "counter".into(),
+            session_active: true,
+            ..Default::default()
+        };
+        let invocation = with_message(
+            "debug_eval",
+            &state,
+            json!({
+                "type": "response",
+                "command": "evaluate",
+                "success": true,
+                "body": { "result": "1" }
+            }),
+        );
+
+        let (response, _) = eval_debug(&invocation).unwrap();
+        let next: SessionState = serde_json::from_value(response.state.unwrap()).unwrap();
+        assert_eq!(next.phase, "stopped");
+        assert!(next.session_active);
+    }
+
+    #[test]
+    fn stopping_clears_the_persisted_session() {
+        let (response, _) = stop_debug();
+        let next: SessionState = serde_json::from_value(response.state.unwrap()).unwrap();
+        assert_eq!(next, SessionState::default());
     }
 
     #[test]
