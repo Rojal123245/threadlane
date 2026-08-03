@@ -393,10 +393,7 @@ impl McpManager {
         &self,
         config: &McpServerConfig,
     ) -> (McpServerStatus, Vec<McpToolInfo>) {
-        if matches!(config.transport, McpTransport::Sse { .. }) {
-            let McpTransport::Sse { url, .. } = &config.transport else {
-                unreachable!("transport was just matched as SSE")
-            };
+        if let McpTransport::Sse { url, .. } = &config.transport {
             return (
                 McpServerStatus::Error(format!("SSE transport ({url}) not active")),
                 Vec::new(),
@@ -502,11 +499,23 @@ impl McpManager {
                             return Some(Err(format!("Failed to start MCP server: {error}")))
                         }
                     };
-                    let handle = Arc::new(TokioMutex::new(session));
-                    self.sessions
-                        .lock()
-                        .await
-                        .insert(config.id.clone(), Arc::clone(&handle));
+                    // Another call may have connected the same server while
+                    // this one was doing I/O. Adopt whichever handle reached
+                    // the map first and retire the redundant process, so two
+                    // callers never end up driving two different sessions.
+                    let mut handle = Arc::new(TokioMutex::new(session));
+                    {
+                        let mut sessions = self.sessions.lock().await;
+                        match sessions.get(&config.id) {
+                            Some(winner) => {
+                                let redundant = std::mem::replace(&mut handle, Arc::clone(winner));
+                                redundant.lock().await.kill().await;
+                            }
+                            None => {
+                                sessions.insert(config.id.clone(), Arc::clone(&handle));
+                            }
+                        }
+                    }
                     handle
                 }
             }
@@ -526,8 +535,19 @@ impl McpManager {
             Ok(response) => response,
             Err(error) => {
                 // The pipe is no longer trustworthy after a failed exchange;
-                // drop it so the next call starts a clean session.
-                let broken = self.sessions.lock().await.remove(&config.id);
+                // drop it so the next call starts a clean session. Only retire
+                // the session this call actually used: a concurrent restart may
+                // already have installed a healthy replacement that another
+                // caller is mid-request on.
+                let broken = {
+                    let mut sessions = self.sessions.lock().await;
+                    match sessions.get(&config.id) {
+                        Some(current) if Arc::ptr_eq(current, &handle) => {
+                            sessions.remove(&config.id)
+                        }
+                        _ => None,
+                    }
+                };
                 if let Some(broken) = broken {
                     broken.lock().await.kill().await;
                 }

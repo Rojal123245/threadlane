@@ -13,7 +13,7 @@
 //! THREADLANE_PERF=1 cargo run -p threadlane
 //! ```
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -49,7 +49,6 @@ fn samples() -> &'static Mutex<Samples> {
 
 static TOTAL: AtomicU64 = AtomicU64::new(0);
 static JANK: AtomicU64 = AtomicU64::new(0);
-static REPORTING: AtomicBool = AtomicBool::new(false);
 
 /// Times one event pass.
 ///
@@ -98,12 +97,10 @@ fn record(elapsed: Duration) {
         return;
     }
 
-    // Claim the reporting slot *before* draining. Draining first and then
-    // bailing out on a contended flag would discard the samples and advance
-    // `last_report`, silently losing an interval's worth of data.
-    if REPORTING.swap(true, Ordering::Acquire) {
-        return;
-    }
+    // Advancing the interval and draining happen together under the mutex,
+    // which is what makes them atomic against another reporter. A separate
+    // "am I reporting" flag would add no exclusion here and could strand
+    // reporting for the process if a panic landed between claim and release.
     samples.last_report = Some(now);
     let mut sorted = std::mem::take(&mut samples.micros);
     drop(samples);
@@ -111,7 +108,6 @@ fn record(elapsed: Duration) {
     // Formatting and printing stay off the lock.
     sorted.sort_unstable();
     eprintln!("{}", summarize(&sorted));
-    REPORTING.store(false, Ordering::Release);
 }
 
 /// Formats a sorted sample set. Split out so it is testable without a UI.
@@ -193,24 +189,23 @@ mod tests {
     }
 
     #[test]
-    fn a_contended_report_keeps_its_samples() {
-        // Simulates another thread mid-report: `record` must not drain the
-        // buffer or advance `last_report` when it cannot claim the slot.
+    fn a_not_yet_due_interval_keeps_its_samples() {
+        // The drain is gated on the interval alone, under the mutex. A record
+        // that arrives early must leave the buffer and the deadline untouched.
         let mut samples = Samples {
             micros: vec![1, 2, 3],
-            last_report: None,
+            last_report: Some(Instant::now()),
         };
-        REPORTING.store(true, Ordering::Release);
-        let claimed = !REPORTING.swap(true, Ordering::Acquire);
-        if claimed {
+        let due = samples
+            .last_report
+            .is_none_or(|last| Instant::now().duration_since(last) >= REPORT_EVERY);
+        if due {
             samples.last_report = Some(Instant::now());
             samples.micros.clear();
         }
-        REPORTING.store(false, Ordering::Release);
 
-        assert!(!claimed, "the slot was already held");
+        assert!(!due, "the interval has not elapsed");
         assert_eq!(samples.micros, vec![1, 2, 3], "samples must survive");
-        assert!(samples.last_report.is_none(), "interval must not advance");
     }
 
     #[test]

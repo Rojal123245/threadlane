@@ -104,6 +104,52 @@ async fn tool_calls_reuse_one_server_process() {
     manager.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_first_calls_converge_on_one_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let spawn_log = dir.path().join("spawns.log");
+    let script = stub_server(dir.path(), &spawn_log);
+
+    McpSettings::save_global(
+        dir.path(),
+        &[McpServerConfig {
+            id: "stub".to_string(),
+            name: "Stub".to_string(),
+            transport: McpTransport::Stdio {
+                command: script.to_string_lossy().to_string(),
+                args: Vec::new(),
+                env: HashMap::new(),
+            },
+            enabled: true,
+            scope: McpScope::Global,
+        }],
+    )
+    .unwrap();
+
+    let manager = Arc::new(McpManager::new(Some(dir.path().to_path_buf()), None));
+    manager.discover_and_connect().await;
+
+    // Racing callers may each connect before either reaches the map. Whoever
+    // loses must retire its redundant process and adopt the winner, so no
+    // caller is left driving a session the map no longer owns.
+    let mut calls = Vec::new();
+    for _ in 0..8 {
+        let executor = McpToolExecutor::new(Arc::clone(&manager));
+        calls.push(tokio::spawn(async move {
+            executor.execute_tool("mcp__stub__echo", "{}").await
+        }));
+    }
+    for call in calls {
+        let result = call.await.unwrap();
+        assert!(
+            matches!(result, Some(Ok(ref text)) if text == "ok"),
+            "every concurrent call should succeed, got {result:?}"
+        );
+    }
+
+    manager.shutdown().await;
+}
+
 #[tokio::test]
 async fn a_dead_server_is_restarted_on_the_next_call() {
     let dir = tempfile::tempdir().unwrap();
