@@ -315,6 +315,14 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 - Editor file loading refuses directories, non-UTF-8 content, and files over `MAX_EDITABLE_BYTES`. Keep that policy in `load_editable_text` rather than at the call site so it stays testable without a `Cx`.
 - Saving writes `Text`'s `Display` form. It round-trips byte-for-byte, so do not "normalize" line endings on save; a covering test guards this.
 
+## Performance
+
+- Measure before changing. `crates/threadlane-mcp/tests/perf_baseline.rs` and `crates/threadlane-agent/tests/perf_baseline.rs` are `#[ignore]`d measurement harnesses, not assertions; run them with `-- --ignored --nocapture` to get a baseline and again to prove a change helped. Do not optimize a path whose cost has not been measured.
+- Pin a performance fix with a *behavioral* test, not a timing one. `tests/session_reuse.rs` counts how many server processes actually start, so it fails for the right reason on a loaded CI machine.
+- MCP servers are long-lived: `McpManager` keeps one `McpSession` per server id and reuses it across tool calls. Do not reintroduce spawn-per-call — it cost ~5 ms per call against a trivial shell stub and far more against a real `npx`-based server. A failed exchange retires the session so the next call reconnects, and `Command::kill_on_drop` cleans up when the manager drops.
+- Each MCP session carries its own lock. Hold the session map only long enough to look up or install a handle, never across the request round trip, or tool calls to unrelated servers serialize behind each other.
+- Session files are parsed once through the untagged `SessionLine` enum. Do not go back to trying `SessionRecord` and then `SessionNode`, which parsed the JSON text of every node line twice.
+
 ## Updater Behavior
 
 - `THREADLANE_UPDATER_PUBLIC_KEY` and `THREADLANE_UPDATER_ENDPOINT` are compile-time environment values through `option_env!`.

@@ -65,6 +65,22 @@ pub struct SessionNode {
     pub message: AgentMessage,
 }
 
+/// One line of a session file.
+///
+/// Loading previously tried `SessionRecord` and then `SessionNode`, which
+/// parsed the JSON *text* of every node line twice — and node lines are the
+/// overwhelming majority. `untagged` buffers the parse once and matches the
+/// variants against that buffer instead.
+///
+/// Order matters: `SessionRecord` is internally tagged and cannot match a node
+/// line, which carries no `type`.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum SessionLine {
+    Record(SessionRecord),
+    Node(SessionNode),
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 enum SessionRecord {
@@ -642,8 +658,8 @@ impl SessionTree {
             if l.trim().is_empty() {
                 continue;
             }
-            if let Ok(record) = serde_json::from_str::<SessionRecord>(&l) {
-                match record {
+            match serde_json::from_str::<SessionLine>(&l) {
+                Ok(SessionLine::Record(record)) => match record {
                     SessionRecord::Metadata {
                         name,
                         title_attempted,
@@ -665,13 +681,15 @@ impl SessionTree {
                     SessionRecord::GlobalFact { key, value } => {
                         tree.global_facts.insert(key, value);
                     }
+                },
+                Ok(SessionLine::Node(node)) => {
+                    if !explicit_active {
+                        tree.active_node_id = Some(node.id.clone());
+                    }
+                    tree.node_order.push(node.id.clone());
+                    tree.nodes.insert(node.id.clone(), node);
                 }
-            } else if let Ok(node) = serde_json::from_str::<SessionNode>(&l) {
-                if !explicit_active {
-                    tree.active_node_id = Some(node.id.clone());
-                }
-                tree.node_order.push(node.id.clone());
-                tree.nodes.insert(node.id.clone(), node);
+                Err(_) => {}
             }
         }
 
