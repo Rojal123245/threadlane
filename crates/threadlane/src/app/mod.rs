@@ -1819,6 +1819,27 @@ script_mod! {
                                 draw_icon +: { svg: crate_resource("self:resources/icons/panel-down.svg") }
                             }
 
+                            right_sidebar_toggle_btn := mod.components.IconButton {
+                                width: 28
+                                height: 28
+                                visible: false
+                                icon_walk: Walk{width: 14 height: 14}
+                                draw_bg +: {
+                                    color: theme.color_secondary
+                                    color_hover: theme.color_card
+                                    color_focus: theme.color_card
+                                    color_down: theme.color_input
+                                    border_radius: 14.0
+                                }
+                                draw_icon +: {
+                                    svg: crate_resource("self:resources/icons/sidebar.svg")
+                                    color: theme.color_foreground
+                                    color_hover: theme.color_foreground
+                                    color_focus: theme.color_foreground
+                                    color_down: theme.color_primary_foreground
+                                }
+                            }
+
                             caps_btn := mod.components.HeaderChipButton {
                                 padding: Inset{left: 8 right: 9 top: 4 bottom: 4}
                                 text: "Tools"
@@ -3160,6 +3181,8 @@ pub struct App {
     #[rust]
     right_sidebar_tab: RightSidebarTab,
     #[rust]
+    right_sidebar_open: bool,
+    #[rust]
     right_sidebar_agents_available: bool,
     #[rust]
     right_sidebar_width: f64,
@@ -3181,6 +3204,7 @@ impl MatchEvent for App {
         self.git_status_timer = cx.start_interval(2.0);
         self.right_sidebar_width = 280.0;
         self.left_sidebar_open = true;
+        self.right_sidebar_open = true;
         let (tx, rx) = channel::<GuiAgentEvent>();
         self.tx = Some(tx);
         self.rx = Some(Arc::new(Mutex::new(rx)));
@@ -3529,6 +3553,15 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(settings_btn)).clicked(actions) {
             self.open_providers_modal(cx);
             self.refresh_provider_connection_ui(cx);
+        }
+
+        if self
+            .ui
+            .button(cx, ids!(right_sidebar_toggle_btn))
+            .clicked(actions)
+        {
+            self.right_sidebar_open = !self.right_sidebar_open;
+            self.sync_right_sidebar(cx);
         }
 
         if self.ui.button(cx, ids!(close_modal_btn)).clicked(actions) {
@@ -5851,14 +5884,27 @@ impl App {
         let show_git_changes = show_git && !self.git_diff_open;
         let show_git_diff = show_git && self.git_diff_open;
 
-        self.ui.view(cx, ids!(right_sidebar)).set_visible(cx, true);
+        let sidebar_available = self.right_sidebar_available();
+        let sidebar_visible = sidebar_available && self.right_sidebar_open;
+        self.ui
+            .view(cx, ids!(right_sidebar))
+            .set_visible(cx, sidebar_visible);
         self.ui
             .view(cx, ids!(right_sidebar_resize_handle))
-            .set_visible(cx, true);
+            .set_visible(cx, sidebar_visible);
+        self.ui
+            .button(cx, ids!(right_sidebar_toggle_btn))
+            .set_visible(cx, sidebar_available);
+        self.ui
+            .button(cx, ids!(right_sidebar_toggle_btn))
+            .redraw(cx);
+        self.ui.view(cx, ids!(header)).redraw(cx);
 
-        if let Some(mut sidebar) = self.ui.view(cx, ids!(right_sidebar)).borrow_mut() {
-            sidebar.walk.width = Size::Fixed(self.right_sidebar_width);
-            sidebar.redraw(cx);
+        if sidebar_visible {
+            if let Some(mut sidebar) = self.ui.view(cx, ids!(right_sidebar)).borrow_mut() {
+                sidebar.walk.width = Size::Fixed(self.right_sidebar_width);
+                sidebar.redraw(cx);
+            }
         }
 
         self.ui
@@ -5939,10 +5985,14 @@ impl App {
             .clamp(RIGHT_SIDEBAR_MIN_WIDTH, RIGHT_SIDEBAR_MAX_WIDTH)
     }
 
-    fn right_sidebar_is_visible(&self) -> bool {
+    fn right_sidebar_available(&self) -> bool {
         self.active_work_dir()
             .is_some_and(|work_dir| self.git_status.contains_key(work_dir))
             || (self.right_sidebar_agents_available && self.task_sidebar_open)
+    }
+
+    fn right_sidebar_is_visible(&self) -> bool {
+        self.right_sidebar_open && self.right_sidebar_available()
     }
 
     fn sync_git_commit_button(&self, cx: &mut Cx) {
