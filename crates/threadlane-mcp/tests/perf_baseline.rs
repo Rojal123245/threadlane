@@ -3,6 +3,9 @@
 //! Ignored by default: it spawns real subprocesses and reports timings rather
 //! than asserting behavior. Run with
 //! `cargo test -p threadlane-mcp --test perf_baseline -- --ignored --nocapture`.
+//!
+//! The stub server is a `/bin/sh` script, so this harness is Unix-only.
+#![cfg(unix)]
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -36,7 +39,6 @@ done
 "#,
     )
     .unwrap();
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();

@@ -97,14 +97,18 @@ fn record(elapsed: Duration) {
     if !due || samples.micros.is_empty() {
         return;
     }
+
+    // Claim the reporting slot *before* draining. Draining first and then
+    // bailing out on a contended flag would discard the samples and advance
+    // `last_report`, silently losing an interval's worth of data.
+    if REPORTING.swap(true, Ordering::Acquire) {
+        return;
+    }
     samples.last_report = Some(now);
     let mut sorted = std::mem::take(&mut samples.micros);
     drop(samples);
 
-    // Reporting formats and prints; keep it off the lock and out of reentrancy.
-    if REPORTING.swap(true, Ordering::Acquire) {
-        return;
-    }
+    // Formatting and printing stay off the lock.
     sorted.sort_unstable();
     eprintln!("{}", summarize(&sorted));
     REPORTING.store(false, Ordering::Release);
@@ -186,6 +190,27 @@ mod tests {
             let _timer = FrameTimer { start: None };
         }
         assert_eq!(TOTAL.load(Ordering::Relaxed), before);
+    }
+
+    #[test]
+    fn a_contended_report_keeps_its_samples() {
+        // Simulates another thread mid-report: `record` must not drain the
+        // buffer or advance `last_report` when it cannot claim the slot.
+        let mut samples = Samples {
+            micros: vec![1, 2, 3],
+            last_report: None,
+        };
+        REPORTING.store(true, Ordering::Release);
+        let claimed = !REPORTING.swap(true, Ordering::Acquire);
+        if claimed {
+            samples.last_report = Some(Instant::now());
+            samples.micros.clear();
+        }
+        REPORTING.store(false, Ordering::Release);
+
+        assert!(!claimed, "the slot was already held");
+        assert_eq!(samples.micros, vec![1, 2, 3], "samples must survive");
+        assert!(samples.last_report.is_none(), "interval must not advance");
     }
 
     #[test]
