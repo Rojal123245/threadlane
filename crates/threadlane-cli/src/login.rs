@@ -128,10 +128,6 @@ impl LoginState {
         self.status = Some(status.into());
     }
 
-    pub fn clear_status(&mut self) {
-        self.status = None;
-    }
-
     pub fn push_char(&mut self, character: char) {
         if !self.pending && matches!(self.mode, LoginMode::OpenAiKey) {
             self.openai_key.push(character);
@@ -175,7 +171,7 @@ impl LoginState {
                 self.pending = false;
                 self.attempt_id = 0;
                 self.status = Some("Saved OpenAI API key.".into());
-                Ok("Saved OpenAI API key.".into())
+                Ok(key)
             }
             Err(error) => {
                 self.clear_secret();
@@ -192,18 +188,6 @@ impl LoginState {
         self.openai_key.clear();
     }
 
-    pub fn cancel(&mut self) {
-        self.pending = false;
-        self.attempt_id = 0;
-        self.status = None;
-        self.mode = LoginMode::ProviderPicker;
-        self.clear_secret();
-    }
-
-    #[cfg(test)]
-    pub fn take_openai_key(&mut self) -> String {
-        std::mem::take(&mut self.openai_key)
-    }
 }
 
 #[derive(Debug)]
@@ -342,19 +326,7 @@ mod tests {
         state.push_paste("-test-123");
 
         assert_eq!(state.masked_key(), "***********");
-        assert!(state.take_openai_key().starts_with("sk-"));
+        assert!(state.openai_key.starts_with("sk-"));
     }
 
-    #[test]
-    fn cancelling_login_clears_secret_state() {
-        let mut state = LoginState::new();
-        state.select_provider(LoginProvider::OpenAi);
-        state.push_paste("sk-secret");
-
-        state.cancel();
-
-        assert_eq!(state.mode, LoginMode::ProviderPicker);
-        assert_eq!(state.masked_key(), "");
-        assert!(state.status().is_none());
-    }
 }

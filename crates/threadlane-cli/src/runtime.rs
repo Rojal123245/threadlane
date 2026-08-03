@@ -24,6 +24,7 @@ pub(crate) enum Action {
     Message(String),
     OpenLogin,
     StartLogin(LoginProvider),
+    SetOpenAiKey(String),
     CancelLogin,
     None,
 }
@@ -160,9 +161,9 @@ fn dispatch_login_input(state: &mut AppState, input: InputEvent) -> Action {
         },
         LoginMode::OpenAiKey => match input {
             InputEvent::Submit => match login.save_openai_key() {
-                Ok(message) => {
+                Ok(key) => {
                     state.close_login();
-                    Action::Message(message)
+                    Action::SetOpenAiKey(key)
                 }
                 Err(message) => Action::Message(message),
             },
@@ -296,20 +297,25 @@ fn cancel_login_task(state: &mut AppState, active_login: &mut Option<JoinHandle<
     state.close_login();
 }
 
-fn drain_login_events(state: &mut AppState, login_rx: &mut UnboundedReceiver<LoginEvent>) {
+async fn drain_login_events(
+    state: &mut AppState,
+    agent: &Arc<Mutex<CodingAgent>>,
+    login_rx: &mut UnboundedReceiver<LoginEvent>,
+) {
     while let Ok(event) = login_rx.try_recv() {
-        handle_login_event(state, event);
+        handle_login_event(state, Some(&mut *agent.lock().await), event);
     }
 }
 
 async fn shutdown_login_flow(
     state: &mut AppState,
+    agent: &Arc<Mutex<CodingAgent>>,
     active_login: &mut Option<JoinHandle<()>>,
     login_rx: &mut UnboundedReceiver<LoginEvent>,
 ) {
-    drain_login_events(state, login_rx);
+    drain_login_events(state, agent, login_rx).await;
 
-    if let Some(mut handle) = active_login.take() {
+    if let Some(handle) = active_login.take() {
         let had_pending_login = state.login.as_ref().is_some_and(|login| login.pending);
         if !handle.is_finished() {
             handle.abort();
@@ -320,10 +326,14 @@ async fn shutdown_login_flow(
         let _ = handle.await;
     }
 
-    drain_login_events(state, login_rx);
+    drain_login_events(state, agent, login_rx).await;
 }
 
-fn handle_login_event(state: &mut AppState, event: LoginEvent) {
+fn handle_login_event(
+    state: &mut AppState,
+    agent: Option<&mut CodingAgent>,
+    event: LoginEvent,
+) {
     let attempt_id = match &event {
         LoginEvent::DeviceCodePrompt { attempt_id, .. }
         | LoginEvent::BrowserPrompt { attempt_id, .. }
@@ -357,7 +367,12 @@ fn handle_login_event(state: &mut AppState, event: LoginEvent) {
         }
         LoginEvent::CodexTokens { tokens, .. } => {
             let message = match threadlane_auth::save_credentials(&tokens) {
-                Ok(()) => "Codex login complete.".to_string(),
+                Ok(()) => {
+                    if let Some(agent) = agent {
+                        agent.set_credentials(tokens.access_token.clone(), tokens.account_id.clone());
+                    }
+                    "Codex login complete.".to_string()
+                }
                 Err(error) => error,
             };
             state.close_login();
@@ -506,6 +521,10 @@ pub(crate) async fn run_tui(
                         active_login = Some(spawn_provider_login(provider, attempt_id, login_tx.clone()));
                     }
                     Action::CancelLogin => cancel_login_task(&mut state, &mut active_login),
+                    Action::SetOpenAiKey(api_key) => {
+                        agent.lock().await.set_credentials(api_key, None);
+                        push_assistant_message(&mut state, "OpenAI API key saved.".into());
+                    }
                     Action::Quit => break,
                     Action::Message(content) => push_assistant_message(&mut state, content),
                     Action::Submit(_) | Action::None => {}
@@ -513,7 +532,7 @@ pub(crate) async fn run_tui(
             }
         }
 
-        drain_login_events(&mut state, &mut login_rx);
+        drain_login_events(&mut state, &agent, &mut login_rx).await;
         while let Ok(event) = event_rx.try_recv() {
             reduce_agent_event(&mut state, event);
         }
@@ -524,7 +543,7 @@ pub(crate) async fn run_tui(
             reduce_agent_event(&mut state, AgentEvent::AgentError { error });
         }
     }
-    shutdown_login_flow(&mut state, &mut active_login, &mut login_rx).await;
+    shutdown_login_flow(&mut state, &agent, &mut active_login, &mut login_rx).await;
     while let Ok(event) = event_rx.try_recv() {
         reduce_agent_event(&mut state, event);
     }
@@ -756,6 +775,45 @@ mod tests {
 
     #[test]
     fn login_openai_key_rejects_empty_submit_and_accepts_paste() {
+        struct HomeGuard {
+            _lock: std::sync::MutexGuard<'static, ()>,
+            previous_home: Option<std::ffi::OsString>,
+            home: std::path::PathBuf,
+        }
+
+        impl HomeGuard {
+            fn new() -> Self {
+                let lock = crate::test_env_guard_lock();
+                let previous_home = std::env::var_os("HOME");
+                let home = std::env::temp_dir().join(format!(
+                    "threadlane-cli-openai-login-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
+                std::fs::create_dir_all(&home).unwrap();
+                std::env::set_var("HOME", &home);
+                Self {
+                    _lock: lock,
+                    previous_home,
+                    home,
+                }
+            }
+        }
+
+        impl Drop for HomeGuard {
+            fn drop(&mut self) {
+                match self.previous_home.take() {
+                    Some(home) => std::env::set_var("HOME", home),
+                    None => std::env::remove_var("HOME"),
+                }
+                let _ = std::fs::remove_dir_all(&self.home);
+            }
+        }
+
+        let _env = HomeGuard::new();
         let mut state = AppState::test_state();
         state.open_login();
         assert_eq!(dispatch_input(&mut state, InputEvent::Next), Action::None);
@@ -773,6 +831,10 @@ mod tests {
             state.login.as_ref().unwrap().masked_key(),
             "*********"
         );
+        assert!(matches!(
+            dispatch_input(&mut state, InputEvent::Submit),
+            Action::SetOpenAiKey(key) if key == "sk-secret"
+        ));
     }
 
     #[test]
@@ -856,6 +918,7 @@ mod tests {
 
         handle_login_event(
             &mut state,
+            None,
             LoginEvent::CodexTokens {
                 attempt_id: 41,
                 tokens: Box::new(threadlane_auth::OAuthTokens {
@@ -948,7 +1011,16 @@ mod tests {
             tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
         }));
 
-        shutdown_login_flow(&mut state, &mut active_login, &mut login_rx).await;
+        let agent = Arc::new(Mutex::new(CodingAgent::new(CodingAgentOptions {
+            api_key: "before-login".into(),
+            account_id: None,
+            model: "gpt-4o".into(),
+            work_dir: env.home.clone(),
+            session_file: None,
+            system_prompt: Default::default(),
+        })));
+
+        shutdown_login_flow(&mut state, &agent, &mut active_login, &mut login_rx).await;
 
         assert!(state.login.is_none());
         assert!(active_login.is_none());

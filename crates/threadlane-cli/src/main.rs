@@ -105,11 +105,11 @@ pub(crate) fn resolve_credentials() -> (String, Option<String>) {
             return (api_key, account_id);
         }
     }
+    if let Some(api_key) = load_openai_api_key() {
+        return (api_key, None);
+    }
     if let Some(credentials) = load_credentials() {
         return (credentials.access_token, credentials.account_id.or(account_id));
-    }
-    if let Some(api_key) = load_openai_api_key() {
-        return (api_key, account_id);
     }
     (String::new(), account_id)
 }
@@ -218,13 +218,61 @@ mod tests {
     }
 
     #[test]
-    fn resolve_credentials_falls_back_to_saved_openai_key() {
+    fn resolve_credentials_prefers_saved_openai_key_over_codex_credentials() {
         let _env = EnvGuard::new("saved-openai-key");
         threadlane_auth::save_openai_api_key("sk-saved").unwrap();
+        threadlane_auth::save_credentials(&threadlane_auth::OAuthTokens {
+            access_token: "codex-token".into(),
+            refresh_token: None,
+            expires_in: None,
+            id_token: None,
+            account_id: Some("codex-account".into()),
+        })
+        .unwrap();
+        env::set_var("CHATGPT_ACCOUNT_ID", "environment-account");
 
         let (api_key, account_id) = resolve_credentials();
 
         assert_eq!(api_key, "sk-saved");
         assert_eq!(account_id, None);
+    }
+
+    #[test]
+    fn resolve_credentials_prefers_explicit_environment_credentials() {
+        let _env = EnvGuard::new("explicit-openai-key");
+        threadlane_auth::save_openai_api_key("sk-saved").unwrap();
+        threadlane_auth::save_credentials(&threadlane_auth::OAuthTokens {
+            access_token: "codex-token".into(),
+            refresh_token: None,
+            expires_in: None,
+            id_token: None,
+            account_id: Some("codex-account".into()),
+        })
+        .unwrap();
+        env::set_var("OPENAI_API_KEY", "sk-explicit");
+        env::set_var("CHATGPT_ACCOUNT_ID", "environment-account");
+
+        assert_eq!(
+            resolve_credentials(),
+            ("sk-explicit".into(), Some("environment-account".into()))
+        );
+    }
+
+    #[test]
+    fn resolve_credentials_uses_codex_credentials_as_final_fallback() {
+        let _env = EnvGuard::new("codex-fallback");
+        threadlane_auth::save_credentials(&threadlane_auth::OAuthTokens {
+            access_token: "codex-token".into(),
+            refresh_token: None,
+            expires_in: None,
+            id_token: None,
+            account_id: Some("codex-account".into()),
+        })
+        .unwrap();
+
+        assert_eq!(
+            resolve_credentials(),
+            ("codex-token".into(), Some("codex-account".into()))
+        );
     }
 }

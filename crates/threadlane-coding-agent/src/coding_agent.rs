@@ -2155,6 +2155,10 @@ impl CodingAgent {
         self.agent.loop_engine.tool_intent_recorder = recorder;
     }
 
+    pub fn set_credentials(&mut self, api_key: String, account_id: Option<String>) {
+        self.agent.loop_engine.set_credentials(api_key, account_id);
+    }
+
     pub async fn replay_safe_tools(
         &self,
         records: &[threadlane_agent::OpRecord],
@@ -5656,6 +5660,20 @@ mod tests {
             session_file: None,
             system_prompt: SystemPromptConfig::default(),
         }
+    }
+
+    #[test]
+    fn set_credentials_updates_the_running_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut agent = CodingAgent::new(coding_agent_options(dir.path().to_path_buf()));
+
+        agent.set_credentials("new-token".into(), Some("new-account".into()));
+
+        assert_eq!(agent.agent.loop_engine.api_key, "new-token");
+        assert_eq!(
+            agent.agent.loop_engine.account_id.as_deref(),
+            Some("new-account")
+        );
     }
 
     #[test]

@@ -52,8 +52,9 @@ pub fn load_antigravity_credentials() -> Option<AntigravityCredentials> {
 
 pub fn save_antigravity_credentials(creds: &AntigravityCredentials) -> Result<(), String> {
     let path = get_antigravity_credentials_path();
-    let json = serde_json::to_string_pretty(creds).map_err(|e| e.to_string())?;
-    fs::write(path, json).map_err(|e| e.to_string())
+    let json = serde_json::to_string_pretty(creds)
+        .map_err(|_| "Failed to serialize credentials".to_string())?;
+    crate::openai_auth::write_secure_text_file(&path, &json)
 }
 
 pub fn clear_antigravity_credentials() -> Result<(), String> {
@@ -156,16 +157,15 @@ pub async fn exchange_code_for_tokens_without_saving(
         .map_err(|e| format!("Failed to read OAuth response body: {e}"))?;
 
     if !status.is_success() {
-        return Err(format!("OAuth token exchange failed ({status}): {body}"));
+        return Err(format!("OAuth token exchange failed ({status})"));
     }
 
-    let val: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| format!("Failed to parse OAuth response JSON ({e}): {body}"))?;
+    let val: serde_json::Value = crate::parse_oauth_response(&body)?;
 
     let access_token = val
         .get("access_token")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| format!("Missing access_token in response: {body}"))?
+        .ok_or_else(|| "Missing access_token in OAuth response".to_string())?
         .to_string();
 
     let refresh_token = val
@@ -248,16 +248,15 @@ async fn refresh_antigravity_token(
         .map_err(|e| format!("Failed to read refresh response: {e}"))?;
 
     if !status.is_success() {
-        return Err(format!("Token refresh failed ({status}): {body}"));
+        return Err(format!("Token refresh failed ({status})"));
     }
 
-    let val: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| format!("Failed to parse refresh JSON ({e}): {body}"))?;
+    let val: serde_json::Value = crate::parse_oauth_response(&body)?;
 
     let new_access_token = val
         .get("access_token")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| format!("Missing access_token in refresh response: {body}"))?
+        .ok_or_else(|| "Missing access_token in refresh response".to_string())?
         .to_string();
 
     let expires_in = val
@@ -391,6 +390,42 @@ impl crate::traits::AuthProvider for AntigravityAuthProvider {
 mod tests {
     use super::*;
     use crate::traits::AuthProvider;
+    use std::ffi::OsString;
+
+    struct TestHomeGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        previous_home: Option<OsString>,
+        home: PathBuf,
+    }
+
+    impl TestHomeGuard {
+        fn new() -> Self {
+            let lock = crate::test_env_guard_lock();
+            let previous_home = std::env::var_os("HOME");
+            let home = std::env::temp_dir().join(format!(
+                "threadlane-antigravity-auth-{}-{}",
+                std::process::id(),
+                current_timestamp()
+            ));
+            fs::create_dir_all(&home).unwrap();
+            std::env::set_var("HOME", &home);
+            Self {
+                _lock: lock,
+                previous_home,
+                home,
+            }
+        }
+    }
+
+    impl Drop for TestHomeGuard {
+        fn drop(&mut self) {
+            match self.previous_home.take() {
+                Some(home) => std::env::set_var("HOME", home),
+                None => std::env::remove_var("HOME"),
+            }
+            let _ = fs::remove_dir_all(&self.home);
+        }
+    }
 
     #[test]
     fn test_antigravity_provider_id() {
@@ -404,5 +439,28 @@ mod tests {
         assert!(!verifier.is_empty());
         assert!(!challenge.is_empty());
         assert_ne!(verifier, challenge);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_save_antigravity_credentials_sets_restrictive_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let env = TestHomeGuard::new();
+        save_antigravity_credentials(&AntigravityCredentials {
+            access_token: "access-secret".into(),
+            refresh_token: Some("refresh-secret".into()),
+            expires_at: current_timestamp() + 3600,
+            account_email: None,
+            project_id: None,
+        })
+        .unwrap();
+
+        let path = env
+            .home
+            .join(".threadlane")
+            .join("antigravity_credentials.json");
+        let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }

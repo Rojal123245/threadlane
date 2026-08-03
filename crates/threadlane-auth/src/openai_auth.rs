@@ -135,8 +135,9 @@ pub fn save_credentials(tokens: &OAuthTokens) -> Result<(), String> {
         account_id: tokens.account_id.clone(),
         source: "~/.threadlane/credentials.json".to_string(),
     };
-    let json = serde_json::to_string_pretty(&creds).map_err(|e| e.to_string())?;
-    fs::write(path, json).map_err(|e| e.to_string())
+    let json = serde_json::to_string_pretty(&creds)
+        .map_err(|_| "Failed to serialize credentials".to_string())?;
+    write_secure_text_file(&path, &json)
 }
 
 pub fn is_own_source(source: &str) -> bool {
@@ -185,7 +186,7 @@ fn replace_file(temp_path: &Path, destination: &Path) -> std::io::Result<()> {
     fs::rename(temp_path, destination)
 }
 
-fn write_secure_text_file(path: &Path, contents: &str) -> Result<(), String> {
+pub(crate) fn write_secure_text_file(path: &Path, contents: &str) -> Result<(), String> {
     write_secure_text_file_with_replacer(path, contents, replace_file)
 }
 
@@ -194,13 +195,15 @@ fn write_secure_text_file_with_replacer(
     contents: &str,
     replace: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
 ) -> Result<(), String> {
-    let parent = path.parent().ok_or_else(|| "Failed to store OpenAI API key".to_string())?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Failed to store credentials".to_string())?;
     let tmp_path = parent.join(format!(
-        ".openai_api_key.tmp-{}-{}",
+        ".credentials.tmp-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| "Failed to store OpenAI API key".to_string())?
+            .map_err(|_| "Failed to store credentials".to_string())?
             .as_nanos()
     ));
 
@@ -215,7 +218,7 @@ fn write_secure_text_file_with_replacer(
 
     let mut file = options
         .open(&tmp_path)
-        .map_err(|e| format!("Failed to store OpenAI API key: {e}"))?;
+        .map_err(|e| format!("Failed to store credentials: {e}"))?;
 
     let write_result = file
         .write_all(contents.as_bytes())
@@ -224,7 +227,7 @@ fn write_secure_text_file_with_replacer(
 
     if let Err(error) = write_result {
         let _ = fs::remove_file(&tmp_path);
-        return Err(format!("Failed to store OpenAI API key: {error}"));
+        return Err(format!("Failed to store credentials: {error}"));
     }
 
     #[cfg(unix)]
@@ -233,13 +236,13 @@ fn write_secure_text_file_with_replacer(
 
         if let Err(error) = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600)) {
             let _ = fs::remove_file(&tmp_path);
-            return Err(format!("Failed to store OpenAI API key: {error}"));
+            return Err(format!("Failed to store credentials: {error}"));
         }
     }
 
     if let Err(error) = replace(&tmp_path, path) {
         let _ = fs::remove_file(&tmp_path);
-        return Err(format!("Failed to store OpenAI API key: {error}"));
+        return Err(format!("Failed to store credentials: {error}"));
     }
 
     Ok(())
@@ -332,8 +335,7 @@ pub async fn start_device_login() -> Result<DeviceCodeResponse, String> {
 
     if !res.status().is_success() {
         let status = res.status();
-        let body = res.text().await.unwrap_or_default();
-        return Err(format!("Device login initiation failed ({status}): {body}"));
+        return Err(format!("Device login initiation failed ({status})"));
     }
 
     let text = res
@@ -341,8 +343,7 @@ pub async fn start_device_login() -> Result<DeviceCodeResponse, String> {
         .await
         .map_err(|e| format!("Failed to read device code body: {e}"))?;
 
-    serde_json::from_str::<DeviceCodeResponse>(&text)
-        .map_err(|e| format!("Failed to parse device code response ({e}): {text}"))
+    crate::parse_oauth_response(&text)
 }
 
 pub async fn poll_device_token(
@@ -376,8 +377,7 @@ pub async fn poll_device_token_without_saving(
         return Err("authorization_pending".to_string());
     }
 
-    let val: Value = serde_json::from_str(&body)
-        .map_err(|e| format!("Failed to parse OAuth response body ({e}): {body}"))?;
+    let val: Value = crate::parse_oauth_response(&body)?;
 
     if let Some(access_token) = val.get("access_token").and_then(|v| v.as_str()) {
         let tokens = OAuthTokens {
@@ -408,13 +408,7 @@ pub async fn poll_device_token_without_saving(
         return exchange_authorization_code_without_saving(code).await;
     }
 
-    Err(format!("Unexpected OAuth token response: {body}"))
-}
-
-async fn exchange_authorization_code(code: &str) -> Result<OAuthTokens, String> {
-    let tokens = exchange_authorization_code_without_saving(code).await?;
-    let _ = save_credentials(&tokens);
-    Ok(tokens)
+    Err("Unexpected OAuth token response".into())
 }
 
 async fn exchange_authorization_code_without_saving(code: &str) -> Result<OAuthTokens, String> {
@@ -432,8 +426,7 @@ async fn exchange_authorization_code_without_saving(code: &str) -> Result<OAuthT
         .map_err(|e| format!("Error exchanging code for OAuth token: {e}"))?;
 
     let body = res.text().await.unwrap_or_default();
-    let val: Value = serde_json::from_str(&body)
-        .map_err(|e| format!("Failed to parse token exchange response ({e}): {body}"))?;
+    let val: Value = crate::parse_oauth_response(&body)?;
 
     if let Some(access_token) = val.get("access_token").and_then(|v| v.as_str()) {
         let tokens = OAuthTokens {
@@ -455,7 +448,7 @@ async fn exchange_authorization_code_without_saving(code: &str) -> Result<OAuthT
         return Ok(tokens);
     }
 
-    Err(format!("Code exchange failed: {body}"))
+    Err("Code exchange failed".into())
 }
 
 pub struct OpenAiAuthProvider;
@@ -488,12 +481,6 @@ mod tests {
     use std::fs;
     use std::ffi::OsString;
     use std::path::PathBuf;
-    use std::sync::{Mutex, OnceLock};
-
-    fn test_guard() -> std::sync::MutexGuard<'static, ()> {
-        static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-        GUARD.get_or_init(|| Mutex::new(())).lock().unwrap()
-    }
 
     fn temp_home(name: &str) -> PathBuf {
         let mut home = std::env::temp_dir();
@@ -517,7 +504,7 @@ mod tests {
 
     impl TestHomeGuard {
         fn new(name: &str) -> Self {
-            let lock = test_guard();
+            let lock = crate::test_env_guard_lock();
             let previous_home = std::env::var_os("HOME");
             let home = temp_home(name);
             std::env::set_var("HOME", &home);
@@ -575,6 +562,26 @@ mod tests {
 
         assert_eq!(load_openai_api_key().as_deref(), Some("sk-test-123"));
         assert!(env.home().join(".threadlane").join("openai_api_key").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_save_codex_credentials_sets_restrictive_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let env = TestHomeGuard::new("codex-permissions");
+        save_credentials(&OAuthTokens {
+            access_token: "codex-secret".into(),
+            refresh_token: Some("refresh-secret".into()),
+            expires_in: None,
+            id_token: None,
+            account_id: Some("account".into()),
+        })
+        .unwrap();
+
+        let path = env.home().join(".threadlane").join("credentials.json");
+        let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]
