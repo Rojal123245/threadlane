@@ -299,6 +299,10 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 - That guard resolves a not-yet-existing target by joining the remaining components onto its canonicalized nearest existing ancestor, then comparing against the canonical root. Never compare a lexical path against the canonical root: a workspace reached through a symlink is spelled two ways (`/tmp/...` and `/private/tmp/...` on macOS), so the lexical check rejects valid new files anywhere under it.
 - The default `AcpPermissionPolicy` is `Reject`. An unattended client has no informed consent to give, so auto-approval must stay opt-in and any UI-backed handler should prompt rather than raise this default.
 - Build connections through `AcpConnection::from_streams` when testing. `tests/acp_tests.rs` pairs the client with an in-process stub agent over `tokio::io::duplex`, which covers framing, request correlation, and the sandbox without depending on an installed agent binary.
+- The settings modal has a dedicated `acp_page` whose scope buttons share the modal's single `install_scope_global` flag with the WASI and MCP pages; register new scope buttons in both `sync_install_scope` and the scope-click handlers rather than adding a second scope flag.
+- `ProviderSettingsModal::draw_walk` selects a `PortalList` branch by `self.page`, which is only correct because non-selected pages are invisible and therefore never draw. Any new capability page must add its branch there and its widget to `sync_page_visibility`, or its rows silently render into another page's list.
+- `refresh_acp_state` renders configured agents from disk immediately with `Connecting` status, then replaces them when the background probe reports through `AcpRefreshCompleted`. Probing spawns processes and each handshake can take seconds, so never probe on the UI thread and never leave the list blank while it runs.
+- Opening the settings modal must not probe ACP agents. Probing starts only when the ACP page is selected or refreshed, so merely opening settings never launches third-party binaries.
 
 ## Updater Behavior
 

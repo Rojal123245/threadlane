@@ -47,6 +47,7 @@ Threadlane combines a GPU-accelerated desktop interface with a capable coding-ag
 | Session trees | Fork, clone, navigate, persist, and compact branching conversation history. |
 | Provider integration | OpenAI-compatible streaming, Codex-oriented models, reasoning controls, device authorization, and credential persistence. |
 | WASI extensions | Sandboxed Wasm modules using the `threadlane_host` capability broker. |
+| ACP agents | Configure external Agent Client Protocol agents per project or globally, and check that each one launches and handshakes. |
 | Signed updater | Background update checks, verified downloads, progress UI, and packaged-app installation/relaunch. |
 
 ## How It Fits Together
@@ -148,6 +149,7 @@ Threadlane keeps application state local:
 - Project sessions: `<project>/.threadlane/sessions/`
 - Project extensions, agents, prompts, and skills: `<project>/.threadlane/`
 - Global extensions, agents, and skills: `~/.threadlane/` and `~/.agents/skills/`
+- ACP agent configuration: `~/.threadlane/acp.json` and `<project>/.threadlane/acp.json`
 
 Treat these directories as user data. Back them up before manually migrating or removing state.
 
@@ -211,6 +213,50 @@ Threadlane reads identity and version information from the module's exported
 `extension_info` manifest; it does not run Cargo or extension build scripts.
 An enabled project module overrides an enabled global module with the same
 manifest name. Each scope can be enabled, disabled, or removed independently.
+
+## External ACP Agents
+
+Threadlane can talk to third-party coding agents that implement the
+[Agent Client Protocol](https://agentclientprotocol.com). It acts as the ACP
+*client*: it launches the agent as a subprocess and speaks JSON-RPC over its
+stdio pipes.
+
+The **ACP Agents** settings page lists agents from `~/.threadlane/acp.json` and
+`<project>/.threadlane/acp.json`. Choose Global or Project scope, give the agent
+a name and the command that starts it, and press Add:
+
+| Agent | Command |
+| --- | --- |
+| Gemini CLI | `gemini --experimental-acp` |
+| Claude Code | `npx -y @zed-industries/claude-code-acp` |
+
+Refresh launches each enabled agent, completes the ACP handshake, and reports
+the agent name, negotiated protocol version, and whether it still needs to be
+signed in. An agent that cannot be spawned shows the launch error instead, so a
+missing binary or a wrong command is visible without leaving the settings page.
+Agents can be enabled, disabled, or removed per scope, and a project entry
+shadows a global entry with the same id.
+
+The configuration file can also be edited directly:
+
+```json
+{
+  "agents": [
+    {
+      "id": "gemini",
+      "name": "Gemini CLI",
+      "command": "gemini",
+      "args": ["--experimental-acp"],
+      "enabled": true
+    }
+  ]
+}
+```
+
+ACP has no HTTP transport, so an agent is always a local command. Threadlane
+grants a connected agent workspace-scoped file access only: reads and writes
+that resolve outside the project root are refused. Tool-permission requests are
+declined unless a handler is configured to answer them.
 
 ## Development
 

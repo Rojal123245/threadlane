@@ -9,6 +9,7 @@ pub enum SettingsTab {
     WasiExtensions,
     Skills,
     McpServers,
+    AcpAgents,
     About,
 }
 
@@ -21,6 +22,7 @@ impl SettingsTab {
             Self::WasiExtensions => "WASI Extensions",
             Self::Skills => "Skills",
             Self::McpServers => "MCP Servers",
+            Self::AcpAgents => "ACP Agents",
             Self::About => "About",
         }
     }
