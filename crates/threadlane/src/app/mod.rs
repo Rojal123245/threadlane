@@ -3316,14 +3316,26 @@ struct GenerationRun {
     handle: tokio::task::JoinHandle<()>,
 }
 
+/// A live ACP conversation attached to one chat session.
+///
+/// The update channel is created with the session and outlives a single turn:
+/// the handler owns the sender for as long as the session lives, so a follow-up
+/// turn must reuse this receiver rather than making a fresh one, which would
+/// have no sender and yield nothing.
+#[derive(Clone)]
+pub struct AcpChat {
+    session: Arc<threadlane_coding_agent::AcpSession>,
+    updates: Arc<
+        tokio::sync::Mutex<
+            tokio::sync::mpsc::UnboundedReceiver<threadlane_coding_agent::AcpSessionNotification>,
+        >,
+    >,
+}
+
 struct SessionRuntime {
     agent: Arc<tokio::sync::Mutex<CodingAgent>>,
-    /// Live external agent session, when this chat is driven over ACP.
-    ///
-    /// Held per chat session so a follow-up turn continues the same
-    /// conversation rather than starting a fresh one, and so cancellation has
-    /// something to send `session/cancel` to.
-    acp: Option<Arc<threadlane_coding_agent::AcpSession>>,
+    /// Live external agent conversation, when this chat is driven over ACP.
+    acp: Option<AcpChat>,
     work_handle: CodingAgentWorkHandle,
     session_file: Option<PathBuf>,
     generation: Option<GenerationRun>,
@@ -4757,9 +4769,9 @@ impl App {
                     generation.handle.abort();
                     // Aborting the task stops us listening, but the external
                     // agent keeps working until it is told to stop.
-                    if let Some(session) = runtime.acp.clone() {
+                    if let Some(chat) = runtime.acp.clone() {
                         get_runtime().spawn(async move {
-                            let _ = session.cancel().await;
+                            let _ = chat.session.cancel().await;
                         });
                     }
                     runtime.terminal_generation_id = None;
@@ -5710,7 +5722,10 @@ impl App {
             return;
         };
         if !attachments.is_empty() {
-            self.push_chat(
+            // Routed to this turn's session: another workspace may be active
+            // by the time a dispatch lands.
+            self.push_chat_to(
+                key.clone(),
                 MsgRole::System,
                 "Attachments are not sent to ACP agents yet; only the text was sent.".to_string(),
             );
@@ -5745,18 +5760,20 @@ impl App {
                 SignalToUI::set_ui_signal();
             };
 
-            // Session updates arrive on a channel so the prompt future and the
-            // stream can be polled together.
-            let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel();
-            let session = match existing {
-                Some(session) => session,
+            // The update channel belongs to the session, not the turn: the
+            // handler owns the sender for as long as the session lives, so a
+            // follow-up turn reuses this receiver instead of making a fresh one
+            // that would have no sender.
+            let chat = match existing {
+                Some(chat) => chat,
                 None => {
+                    let (update_tx, update_rx) = tokio::sync::mpsc::unbounded_channel();
                     let handler: Arc<dyn threadlane_coding_agent::AcpClientHandler> = Arc::new(
                         threadlane_coding_agent::AcpWorkspaceClient::new(work_dir.clone())
                             .with_permission_policy(
                                 threadlane_coding_agent::AcpPermissionPolicy::AllowOnce,
                             )
-                            .with_update_sender(update_tx.clone()),
+                            .with_update_sender(update_tx),
                     );
                     let manager = threadlane_coding_agent::AcpManager::new(
                         global_dir,
@@ -5764,14 +5781,17 @@ impl App {
                     );
                     match manager.start_session(&agent_id, &work_dir, handler).await {
                         Ok(session) => {
-                            let session = Arc::new(session);
+                            let chat = AcpChat {
+                                session: Arc::new(session),
+                                updates: Arc::new(tokio::sync::Mutex::new(update_rx)),
+                            };
                             let _ = session_tx.send(GuiAgentEvent::AcpSessionStarted {
                                 work_dir: event_work_dir.clone(),
                                 session_id: event_session_id.clone(),
-                                session: Arc::clone(&session),
+                                chat: chat.clone(),
                             });
                             SignalToUI::set_ui_signal();
-                            session
+                            chat
                         }
                         Err(error) => {
                             forward(threadlane_agent::AgentEvent::AgentError {
@@ -5783,7 +5803,8 @@ impl App {
                     }
                 }
             };
-            drop(update_tx);
+            let session = Arc::clone(&chat.session);
+            let mut update_rx = chat.updates.lock().await;
 
             forward(threadlane_agent::AgentEvent::AgentStart);
             forward(threadlane_agent::AgentEvent::MessageStart {
@@ -5792,10 +5813,11 @@ impl App {
 
             let prompt = session.prompt_text(&input);
             tokio::pin!(prompt);
+            let mut listening = true;
             let outcome = loop {
                 tokio::select! {
                     result = &mut prompt => break result,
-                    update = update_rx.recv() => match update {
+                    update = update_rx.recv(), if listening => match update {
                         Some(notification) => {
                             for event in
                                 threadlane_coding_agent::agent_events_for(notification.update)
@@ -5803,10 +5825,9 @@ impl App {
                                 forward(event);
                             }
                         }
-                        // The sender lives on the handler, which outlives the
-                        // turn, so a closed channel just means nothing more is
-                        // buffered right now.
-                        None => continue,
+                        // Only reachable once the session's handler is gone.
+                        // Disable the branch rather than spinning on it.
+                        None => listening = false,
                     }
                 }
             };
@@ -8730,11 +8751,11 @@ impl App {
                 GuiAgentEvent::AcpSessionStarted {
                     work_dir,
                     session_id,
-                    session,
+                    chat,
                 } => {
                     let key = SessionKey::new(work_dir, session_id);
                     if let Some(runtime) = self.session_runtimes.get_mut(&key) {
-                        runtime.acp = Some(session);
+                        runtime.acp = Some(chat);
                     }
                 }
                 GuiAgentEvent::AcpRefreshCompleted(records) => {

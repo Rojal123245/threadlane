@@ -149,11 +149,23 @@ pub fn agent_events_for(update: AcpSessionUpdate) -> Vec<AgentEvent> {
                 .as_ref()
                 .map(|input| input.to_string())
                 .unwrap_or_else(|| "{}".to_string());
-            vec![AgentEvent::ToolExecutionStart {
-                tool_call_id: call.tool_call_id.clone(),
-                name,
-                arguments,
-            }]
+            // The transcript flushes buffered assistant text into the tool
+            // activity group when it sees `tool_call_name`. Without this, an
+            // agent's preamble ("Let me read that file…") stays stranded in the
+            // assistant stream and ACP tool calls group differently from
+            // native ones.
+            vec![
+                AgentEvent::MessageUpdate {
+                    text_delta: None,
+                    reasoning_delta: None,
+                    tool_call_name: Some(name.clone()),
+                },
+                AgentEvent::ToolExecutionStart {
+                    tool_call_id: call.tool_call_id.clone(),
+                    name,
+                    arguments,
+                },
+            ]
         }
         AcpSessionUpdate::ToolCallUpdate(call) => tool_update_events(call),
         AcpSessionUpdate::Plan(entries) => vec![AgentEvent::PlanUpdated {
@@ -290,14 +302,19 @@ mod tests {
             "kind": "read",
             "rawInput": { "path": "src/main.rs" },
         }))));
-        let [AgentEvent::ToolExecutionStart {
+        let [AgentEvent::MessageUpdate {
+            tool_call_name: Some(boundary),
+            ..
+        }, AgentEvent::ToolExecutionStart {
             tool_call_id,
             name,
             arguments,
         }] = events.as_slice()
         else {
-            panic!("expected a tool start, got {events:?}");
+            panic!("expected a preamble flush then a tool start, got {events:?}");
         };
+        // The flush must precede the tool row or the preamble is stranded.
+        assert_eq!(boundary, "Read main.rs");
         assert_eq!(tool_call_id, "call_1");
         assert_eq!(name, "Read main.rs");
         assert!(arguments.contains("src/main.rs"));
@@ -309,11 +326,11 @@ mod tests {
             "toolCallId": "call_2",
             "kind": "execute",
         }))));
-        let [AgentEvent::ToolExecutionStart {
+        let [_flush, AgentEvent::ToolExecutionStart {
             name, arguments, ..
         }] = events.as_slice()
         else {
-            panic!("expected a tool start, got {events:?}");
+            panic!("expected a preamble flush then a tool start, got {events:?}");
         };
         assert_eq!(name, "execute");
         // No rawInput must still produce valid arguments rather than empty text.

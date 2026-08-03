@@ -270,7 +270,7 @@ pub enum GuiAgentEvent {
     AcpSessionStarted {
         work_dir: PathBuf,
         session_id: String,
-        session: std::sync::Arc<threadlane_coding_agent::AcpSession>,
+        chat: crate::app::AcpChat,
     },
 }
 
