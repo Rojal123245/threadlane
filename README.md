@@ -464,6 +464,30 @@ xattr -dr com.apple.quarantine /Applications/Threadlane.app
 
 Only bypass quarantine for an artifact you trust. The release workflow verifies the app and DMG structure before publishing, while the updater signature separately authenticates automatic updates.
 
+## Performance Measurement
+
+UI frame timing is opt-in:
+
+```bash
+THREADLANE_PERF=1 cargo run --release -p threadlane
+```
+
+Every five seconds the app prints a summary of how long its event passes take:
+
+```text
+[perf] frames=431 jank=12 (2.8%) p50=3.6ms p95=8.1ms p99=29.7ms max=31.2ms (over 200 samples)
+```
+
+`jank` counts passes over the 16.7ms budget for 60fps. Measure a release build;
+debug figures are much slower and not representative.
+
+Backend hot paths have measurement harnesses, kept out of normal test runs:
+
+```bash
+cargo test -p threadlane-mcp --test perf_baseline -- --ignored --nocapture
+cargo test -p threadlane-agent --test perf_baseline -- --ignored --nocapture
+```
+
 ## Security
 
 - Never commit updater private keys, signing passwords, provider tokens, or local credential files.

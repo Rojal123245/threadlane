@@ -4515,6 +4515,9 @@ impl AppMain for App {
         self::script_mod(vm)
     }
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        // Times the whole pass, including the early return below. No-op unless
+        // THREADLANE_PERF=1.
+        let _frame = crate::perf::frame();
         if self.handle_clipboard_image_paste(cx, event) {
             return;
         }

@@ -70,10 +70,30 @@ async fn mcp_tool_call_latency() {
 
     let manager = Arc::new(McpManager::new(Some(dir.path().to_path_buf()), None));
 
+    // First exec of a freshly written script costs ~185ms on macOS (the
+    // system's one-time check on a new executable). Without this warm-up that
+    // cost lands inside the first discovery and reads as "MCP discovery is
+    // slow", which it is not.
+    let warm = Instant::now();
+    let _ = tokio::process::Command::new(&script)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .status()
+        .await;
+    println!(
+        "first-exec warm-up   : {:?} (harness cost, not MCP)",
+        warm.elapsed()
+    );
+
     let discover_start = Instant::now();
     let records = manager.discover_and_connect().await;
     let discover = discover_start.elapsed();
     assert_eq!(records.len(), 1, "stub server should be discovered");
+
+    // A repeat refresh reconnects, so this shows the steady-state cost.
+    let repeat_start = Instant::now();
+    manager.discover_and_connect().await;
+    let repeat = repeat_start.elapsed();
 
     // Exercise the same path the agent uses.
     let executor = McpToolExecutor::new(Arc::clone(&manager));
@@ -86,6 +106,7 @@ async fn mcp_tool_call_latency() {
 
     println!("\n--- MCP latency ---");
     println!("discover_and_connect : {discover:?}");
+    println!("discover (repeat)    : {repeat:?}");
     println!("{CALLS} tool calls      : {calls:?}");
     println!("per tool call        : {:?}", calls / CALLS);
     println!("-------------------\n");
