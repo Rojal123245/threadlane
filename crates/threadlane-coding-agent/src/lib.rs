@@ -18,38 +18,22 @@ pub mod wasi_extension;
 pub use agents::{discover_agents, AgentConfig, AgentDiscoveryResult, AgentScope, AgentSource};
 pub use capabilities::CapabilityCatalog;
 pub use coding_agent::{
-    cancel_open_subagent_operations, CodingAgent, CodingAgentOptions, CodingAgentWorkHandle,
-    ExtensionBeforeToolHook,
+    cancel_open_subagent_operations, CodingAgent, CodingAgentCancellation, CodingAgentOptions,
+    CodingAgentWorkHandle, ExtensionBeforeToolHook,
 };
 pub use commands::{execute_slash_command, parse_slash_command, CommandAction};
 pub use context::{ProjectContext, ProjectInstruction};
-pub use extension_broker::{
-    BrokerDispatchResult, BrokerError, BrokerOperationResult, BrokerRequest, BrokerResponse,
-    CapabilityDispatcher, CapabilityHandler, CapabilityPolicy, HostBrokerRequest,
-    HostCapabilityGrantPolicy,
-};
-pub use mcp::{
-    McpManager, McpScope, McpServerConfig, McpServerRecord, McpServerStatus, McpSettings,
-    McpToolExecutor, McpTransport,
-};
-pub use packages::{
-    default_global_threadlane_dir, ExtensionManager, ExtensionRecord, ExtensionScope,
-};
+pub use threadlane_wasi::broker::*;
+pub use threadlane_mcp::*;
+pub use threadlane_wasi::packages::*;
 pub use policy::ToolPolicy;
 pub use prompt_templates::{
     expand_prompt_template, load_prompt_templates, parse_command_args, substitute_args,
     PromptTemplate,
 };
-pub use skills::{
-    load_skill_tool_definition, LoadSkillToolExecutor, SkillDiscoveryOptions, SkillDiscoveryReport,
-    SkillDiscoveryWarning, SkillDiscoveryWarningKind, SkillManager, SkillMetadata, SkillRegistry,
-    SkillScope, SkillSettings, LOAD_SKILL_TOOL_NAME,
-};
+pub use threadlane_skills::*;
 pub use supervisor::{
     HarnessSupervisor, ProjectRecord, TaskAgentEvent, TaskKind, TaskRecord, TaskStatus,
 };
 pub use system_prompt::SystemPromptConfig;
-pub use wasi_extension::{
-    WasiCommandDefinition, WasiExtension, WasiExtensionCommandResult, WasiExtensionEvent,
-    WasiExtensionManager, WasiExtensionManifest, WasiLegacyEffect, WasiToolDefinition,
-};
+pub use threadlane_wasi::*;

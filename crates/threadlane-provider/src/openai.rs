@@ -664,6 +664,10 @@ impl OpenAIClient {
         }
     }
 
+    pub(crate) fn is_codex(&self) -> bool {
+        self.account_id.is_some() || self.api_key.starts_with("ey")
+    }
+
     pub async fn generate_title(&self, model: &str, prompt: &str) -> Result<String, String> {
         let is_codex = self.is_codex();
         let (url, payload) = if is_codex {
@@ -714,10 +718,6 @@ impl OpenAIClient {
             title_response_text(&value)
         }
     }
-    pub(crate) fn is_codex(&self) -> bool {
-        self.account_id.is_some() || self.api_key.starts_with("ey")
-    }
-
     pub(crate) async fn stream_chat_completion(
         &self,
         payload: Value,
@@ -1150,6 +1150,36 @@ impl OpenAIClient {
             }
         }
         let _ = accumulator.finish(event_tx).await;
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::traits::ModelProvider for OpenAIClient {
+    fn provider_id(&self) -> &'static str {
+        if self.is_codex() {
+            "codex"
+        } else {
+            "openai"
+        }
+    }
+
+    fn supports_model(&self, model: &str) -> bool {
+        !crate::router::is_antigravity_model(model)
+    }
+
+    async fn stream_chat_completion(
+        &self,
+        payload_source: crate::router::PayloadSource,
+        prompt_cache_key: Option<String>,
+        event_tx: mpsc::Sender<StreamEvent>,
+    ) {
+        let format = if self.is_codex() {
+            crate::router::PayloadFormat::Codex
+        } else {
+            crate::router::PayloadFormat::ChatCompletions
+        };
+        let payload = payload_source.resolve(format).await;
+        self.stream_chat_completion(payload, prompt_cache_key, event_tx).await;
     }
 }
 

@@ -57,7 +57,7 @@ impl PayloadSource {
         }
     }
 
-    async fn resolve(self, format: PayloadFormat) -> Value {
+    pub(crate) async fn resolve(self, format: PayloadFormat) -> Value {
         match self {
             PayloadSource::Eager {
                 chat_payload,
@@ -95,7 +95,7 @@ impl ProviderClient {
         }
     }
 
-    fn determine_format(&self, model: &str) -> PayloadFormat {
+    pub fn determine_format(&self, model: &str) -> PayloadFormat {
         if is_antigravity_model(model) {
             PayloadFormat::ChatCompletions
         } else if self.openai.is_codex() {
@@ -112,24 +112,16 @@ impl ProviderClient {
         event_tx: mpsc::Sender<StreamEvent>,
     ) {
         let source = payload_source.into();
-        let format = self.determine_format(source.model());
-        let payload = source.resolve(format).await;
+        let model = source.model().to_string();
 
-        let model = payload
-            .get("model")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
+        let provider: Arc<dyn crate::traits::ModelProvider> = if is_antigravity_model(&model) {
+            Arc::new(self.antigravity.clone())
+        } else {
+            Arc::new(self.openai.clone())
+        };
 
-        if is_antigravity_model(model) {
-            self.antigravity
-                .clone()
-                .stream_chat_completion(payload, event_tx)
-                .await;
-            return;
-        }
-
-        self.openai
-            .stream_chat_completion(payload, prompt_cache_key, event_tx)
+        provider
+            .stream_chat_completion(source, prompt_cache_key, event_tx)
             .await;
     }
 

@@ -2,14 +2,22 @@
 //!
 //! Chat, sessions, and command palette panels are modularized under `crate::panels`.
 
+mod settings_handlers;
+mod terminal_handlers;
+mod workspace_sync;
+
+use terminal_handlers::{canonical_terminal_work_dir, truncate_terminal_output};
 use crate::components::file_tree::{FileTree, FileTreeAction};
 use crate::components::git_changes::{GitChanges, GitChangesAction};
 use crate::components::git_diff::GitDiffView;
 use crate::components::context_window::ContextWindowWidgetRefExt;
 use crate::components::model_dropdown::IconDropDownWidgetRefExt;
-use crate::components::session_row::ProjectHeaderAction;
+use crate::components::project_header::ProjectHeaderAction;
 use crate::components::task_sidebar::{
     task_header_state, TaskSidebar, TaskSidebarAction, TaskSidebarItem,
+};
+use crate::components::provider_settings_modal::{
+    ProviderSettingsModal, ProviderSettingsModalAction, SettingsPage,
 };
 use crate::components::terminal_panel::ProjectTerminalWidgetRefExt;
 use crate::git::GitStatus;
@@ -59,7 +67,6 @@ use threadlane_provider::openai::{fetch_available_models, OpenAIClient};
 use threadlane_provider::ProviderClient;
 
 use crate::panels::terminal::{ProjectTerminalGroup, ProjectTerminalSession};
-use makepad_terminal_core::{Pty, TermKeyCode as TerminalKeyCode, Terminal};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -77,8 +84,13 @@ const MAX_TERMINAL_OUTPUT: usize = 256 * 1024;
 const RIGHT_SIDEBAR_MIN_WIDTH: f64 = 220.0;
 const RIGHT_SIDEBAR_MAX_WIDTH: f64 = 520.0;
 const RIGHT_SIDEBAR_MIN_MAIN_WIDTH: f64 = 360.0;
+const LEFT_SIDEBAR_WIDTH: f64 = 250.0;
 const DEFAULT_CONTEXT_WINDOW: u32 = 258_000;
 const CONTEXT_USAGE_FACT: &str = "context_window_usage";
+
+fn left_sidebar_splitter_align(open: bool) -> SplitterAlign {
+    SplitterAlign::FromA(if open { LEFT_SIDEBAR_WIDTH } else { 0.0 })
+}
 
 fn normalize_generated_commit_message(raw: &str) -> String {
     let line = raw
@@ -236,25 +248,6 @@ fn project_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-fn canonical_terminal_work_dir(work_dir: &Path) -> PathBuf {
-    std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf())
-}
-
-fn truncate_terminal_output(output: &mut String) {
-    if output.len() <= MAX_TERMINAL_OUTPUT {
-        return;
-    }
-    let mut cutoff = output.len() - MAX_TERMINAL_OUTPUT;
-    while cutoff < output.len() && !output.is_char_boundary(cutoff) {
-        cutoff += 1;
-    }
-    let cutoff = output[cutoff..]
-        .char_indices()
-        .find_map(|(offset, ch)| (ch == '\n').then_some(cutoff + offset + 1))
-        .unwrap_or(cutoff);
-    output.drain(..cutoff);
-}
-
 use crate::path_utils::compact_workspace_path;
 
 script_mod! {
@@ -310,69 +303,19 @@ script_mod! {
                 align: Align{y: 0.5}
                 margin: Inset{bottom: 6}
 
-                headline_pre_lbl := Label {
-                    width: Fit
-                    height: Fit
+                headline_pre_lbl := mod.components.HeadlineLabel {
                     text: "What should we build in "
-                    draw_text +: {
-                        color: theme.color_card_foreground
-                        text_style: theme.font_bold { font_size: 20.0 }
-                    }
                 }
-                project_name_inline_lbl := Label {
-                    width: Fit
-                    height: Fit
+                project_name_inline_lbl := mod.components.HeadlineAccentLabel {
                     text: ""
-                    draw_text +: {
-                        color: theme.color_foreground
-                        text_style: theme.font_bold { font_size: 20.0 }
-                    }
                 }
-                headline_post_lbl := Label {
-                    width: Fit
-                    height: Fit
+                headline_post_lbl := mod.components.HeadlineLabel {
                     text: "?"
-                    draw_text +: {
-                        color: theme.color_card_foreground
-                        text_style: theme.font_bold { font_size: 20.0 }
-                    }
                 }
             }
 
             // Workspace path subtitle badge
-            workspace_path_wrap := RoundedView {
-                width: Fit
-                height: Fit
-                flow: Right
-                align: Align{y: 0.5}
-                spacing: 6
-                margin: Inset{bottom: 24}
-                padding: Inset{left: 10 top: 4 right: 10 bottom: 4}
-                draw_bg +: {
-                    color: theme.color_card
-                    border_color: theme.color_border
-                    border_size: 1.0
-                    border_radius: theme.radius_sm
-                }
-                workspace_folder_icon := Icon {
-                    width: 14
-                    height: 14
-                    icon_walk: Walk{width: 14 height: 14}
-                    draw_icon +: {
-                        svg: crate_resource("self:resources/icons/folder.svg")
-                        color: theme.color_primary
-                    }
-                }
-                workspace_path_lbl := Label {
-                    width: Fit
-                    height: Fit
-                    text: ""
-                    draw_text +: {
-                        color: theme.color_muted_foreground
-                        text_style +: { font_size: 10.0 }
-                    }
-                }
-            }
+            workspace_path_wrap := mod.components.WorkspaceBadge {}
 
             // Action suggestion cards
                 cards_row := View {
@@ -1011,15 +954,9 @@ script_mod! {
                     border_size: 1.0
                 }
 
-                providers_category_lbl := Label {
-                    width: Fill
-                    height: Fit
+                providers_category_lbl := mod.components.CategoryHeaderLabel {
                     margin: Inset{bottom: 4}
                     text: "PROVIDERS"
-                    draw_text +: {
-                        color: theme.color_muted_foreground
-                        text_style: theme.font_bold { font_size: 9.0 }
-                    }
                 }
 
                 settings_nav_google_btn := mod.components.NavButton {
@@ -1030,15 +967,9 @@ script_mod! {
                     text: "OpenAI / ChatGPT"
                 }
 
-                advanced_category_lbl := Label {
-                    width: Fill
-                    height: Fit
+                advanced_category_lbl := mod.components.CategoryHeaderLabel {
                     margin: Inset{top: 18 bottom: 4}
                     text: "ADVANCED"
-                    draw_text +: {
-                        color: theme.color_muted_foreground
-                        text_style: theme.font_bold { font_size: 9.0 }
-                    }
                 }
 
                 settings_nav_capabilities_btn := mod.components.NavButton {
@@ -1117,24 +1048,12 @@ script_mod! {
                     flow: Down
                     spacing: 14
 
-                    google_page_title := Label {
-                        width: Fill
-                        height: Fit
+                    google_page_title := mod.components.PageTitleLabel {
                         text: "Google Antigravity"
-                        draw_text +: {
-                            color: theme.color_foreground
-                            text_style: theme.font_bold { font_size: 18.0 }
-                        }
                     }
 
-                    google_page_desc := Label {
-                        width: Fill
-                        height: Fit
+                    google_page_desc := mod.components.PageDescriptionLabel {
                         text: "Connect your AI model providers to use them in Threadlane."
-                        draw_text +: {
-                            color: theme.color_muted_foreground
-                            text_style +: { font_size: 10.0 }
-                        }
                     }
 
                     antigravity_card := mod.components.ProviderCard {
@@ -1203,24 +1122,12 @@ script_mod! {
                     spacing: 14
                     visible: false
 
-                    openai_page_title := Label {
-                        width: Fill
-                        height: Fit
+                    openai_page_title := mod.components.PageTitleLabel {
                         text: "OpenAI / ChatGPT"
-                        draw_text +: {
-                            color: theme.color_foreground
-                            text_style: theme.font_bold { font_size: 18.0 }
-                        }
                     }
 
-                    openai_page_desc := Label {
-                        width: Fill
-                        height: Fit
+                    openai_page_desc := mod.components.PageDescriptionLabel {
                         text: "Connect your AI model providers to use them in Threadlane."
-                        draw_text +: {
-                            color: theme.color_muted_foreground
-                            text_style +: { font_size: 10.0 }
-                        }
                     }
 
                     openai_card := mod.components.ProviderCard {
@@ -1276,16 +1183,11 @@ script_mod! {
                         spacing: 6
                         align: Align{y: 0.5}
 
-                        capability_page_title := Label {
-                            width: Fill
+                        capability_page_title := mod.components.PageTitleLabel {
                             height: 28
                             padding: 0
                             align: Align{y: 0.5}
                             text: "WASI Extensions"
-                            draw_text +: {
-                                color: theme.color_foreground
-                                text_style: theme.font_bold { font_size: 18.0 }
-                            }
                         }
 
                         capability_install_scope_lbl := Label {
@@ -1324,15 +1226,9 @@ script_mod! {
                         }
                     }
 
-                    capability_page_desc := Label {
-                        width: Fill
-                        height: Fit
+                    capability_page_desc := mod.components.PageDescriptionLabel {
                         padding: 0
                         text: "Choose a compiled .wasm file. Threadlane never runs Cargo or build scripts."
-                        draw_text +: {
-                            color: theme.color_muted_foreground
-                            text_style +: { font_size: 10.0 }
-                        }
                     }
 
                     capability_build_command := mod.components.CodeLabel {
@@ -1379,16 +1275,11 @@ script_mod! {
                         spacing: 6
                         align: Align{y: 0.5}
 
-                        skill_page_title := Label {
-                            width: Fill
+                        skill_page_title := mod.components.PageTitleLabel {
                             height: 28
                             padding: 0
                             align: Align{y: 0.5}
                             text: "Skills"
-                            draw_text +: {
-                                color: theme.color_foreground
-                                text_style: theme.font_bold { font_size: 18.0 }
-                            }
                         }
 
                         skill_refresh_btn := mod.components.IconButton {
@@ -1398,15 +1289,9 @@ script_mod! {
                         }
                     }
 
-                    skill_page_desc := Label {
-                        width: Fill
-                        height: Fit
+                    skill_page_desc := mod.components.PageDescriptionLabel {
                         padding: 0
                         text: "Enable or disable discovered skills for this project. Disabled skills are hidden from the composer and the model."
-                        draw_text +: {
-                            color: theme.color_muted_foreground
-                            text_style +: { font_size: 10.0 }
-                        }
                     }
 
                     skill_list := PortalList {
@@ -1448,16 +1333,11 @@ script_mod! {
                         spacing: 6
                         align: Align{y: 0.5}
 
-                        mcp_page_title := Label {
-                            width: Fill
+                        mcp_page_title := mod.components.PageTitleLabel {
                             height: 28
                             padding: 0
                             align: Align{y: 0.5}
                             text: "MCP Servers"
-                            draw_text +: {
-                                color: theme.color_foreground
-                                text_style: theme.font_bold { font_size: 18.0 }
-                            }
                         }
 
                         mcp_scope_global_btn := SettingsActionButton {
@@ -1481,15 +1361,9 @@ script_mod! {
                         }
                     }
 
-                    mcp_page_desc := Label {
-                        width: Fill
-                        height: Fit
+                    mcp_page_desc := mod.components.PageDescriptionLabel {
                         padding: 0
                         text: "Model Context Protocol servers providing external tools over stdio."
-                        draw_text +: {
-                            color: theme.color_muted_foreground
-                            text_style +: { font_size: 10.0 }
-                        }
                     }
 
                     mcp_add_card := RoundedView {
@@ -1621,14 +1495,8 @@ script_mod! {
                             }
                         }
 
-                        about_title_lbl := Label {
-                            width: Fill
-                            height: Fit
+                        about_title_lbl := mod.components.PageTitleLabel {
                             text: "Threadlane"
-                            draw_text +: {
-                                color: theme.color_foreground
-                                text_style: theme.font_bold { font_size: 18.0 }
-                            }
                         }
                         }
 
@@ -1652,14 +1520,8 @@ script_mod! {
                         }
                     }
 
-                    about_detail_lbl := Label {
-                        width: Fill
-                        height: Fit
+                    about_detail_lbl := mod.components.PageDescriptionLabel {
                         text: "Keep projects, sessions, and provider connections together in one calm, native desktop app."
-                        draw_text +: {
-                            color: theme.color_muted_foreground
-                            text_style +: { font_size: 10.0 }
-                        }
                     }
                 }
             }
@@ -1789,6 +1651,14 @@ script_mod! {
                                     }
                                 }
                                 sidebar_brand_spacer := mod.components.FlexSpacer {}
+                                left_sidebar_toggle_btn := mod.components.IconButton {
+                                    width: 26
+                                    height: 26
+                                    icon_walk: Walk{width: 14 height: 14}
+                                    draw_icon +: {
+                                        svg: crate_resource("self:resources/icons/sidebar.svg")
+                                    }
+                                }
                                 settings_btn := mod.components.IconButton {
                                     width: 26
                                     height: 26
@@ -1877,6 +1747,27 @@ script_mod! {
                             spacing: 8
                             padding: Inset{left: 4 top: 1 right: 2 bottom: 2}
 
+                            left_sidebar_expand_btn := mod.components.IconButton {
+                                width: 28
+                                height: 28
+                                visible: false
+                                icon_walk: Walk{width: 14 height: 14}
+                                draw_bg +: {
+                                    color: theme.color_secondary
+                                    color_hover: theme.color_card
+                                    color_focus: theme.color_card
+                                    color_down: theme.color_input
+                                    border_radius: 14.0
+                                }
+                                draw_icon +: {
+                                    color: theme.color_foreground
+                                    color_hover: theme.color_foreground
+                                    color_focus: theme.color_foreground
+                                    color_down: theme.color_primary_foreground
+                                }
+                                draw_icon +: { svg: crate_resource("self:resources/icons/sidebar.svg") }
+                            }
+
                             project_identity := View {
                                 width: Fill
                                 height: Fit
@@ -1925,7 +1816,28 @@ script_mod! {
                                 width: 24
                                 height: 24
                                 icon_walk: Walk{width: 11 height: 11}
-                                draw_icon +: { svg: crate_resource("self:resources/icons/terminal.svg") }
+                                draw_icon +: { svg: crate_resource("self:resources/icons/panel-down.svg") }
+                            }
+
+                            right_sidebar_toggle_btn := mod.components.IconButton {
+                                width: 28
+                                height: 28
+                                visible: false
+                                icon_walk: Walk{width: 14 height: 14}
+                                draw_bg +: {
+                                    color: theme.color_secondary
+                                    color_hover: theme.color_card
+                                    color_focus: theme.color_card
+                                    color_down: theme.color_input
+                                    border_radius: 14.0
+                                }
+                                draw_icon +: {
+                                    svg: crate_resource("self:resources/icons/sidebar.svg")
+                                    color: theme.color_foreground
+                                    color_hover: theme.color_foreground
+                                    color_focus: theme.color_foreground
+                                    color_down: theme.color_primary_foreground
+                                }
                             }
 
                             caps_btn := mod.components.HeaderChipButton {
@@ -2020,6 +1932,51 @@ script_mod! {
                                             dot_radius: 1.15
                                             speed: 8.0
                                         }
+                                    }
+                                }
+                            }
+
+                            queued_message_preview := RoundedView {
+                                width: Fill
+                                height: Fit
+                                visible: false
+                                flow: Right
+                                spacing: 6
+                                padding: Inset{left: 12 right: 8 top: 8 bottom: 8}
+                                align: Align{y: 0.5}
+                                draw_bg +: {
+                                    color: theme.color_secondary
+                                    border_color: theme.color_border
+                                    border_size: 1.0
+                                    border_radius: 8.0
+                                }
+
+                                queued_message_text := mod.components.ClippedLabel {
+                                    width: Fill
+                                    height: Fit
+                                    draw_text +: {
+                                        color: theme.color_foreground
+                                        text_style +: { font_size: 10.0 }
+                                    }
+                                }
+
+                                queue_btn := mod.components.ComposerChip {
+                                    text: "Queue"
+                                }
+
+                                steer_btn := mod.components.ComposerChip {
+                                    text: "Steer"
+                                    draw_bg +: {
+                                        color: theme.color_primary
+                                        color_hover: theme.color_primary
+                                        color_down: theme.color_primary
+                                        border_color: theme.color_transparent
+                                        border_color_hover: theme.color_transparent
+                                    }
+                                    draw_text +: {
+                                        color: theme.color_primary_foreground
+                                        color_hover: theme.color_primary_foreground
+                                        color_down: theme.color_primary_foreground
                                     }
                                 }
                             }
@@ -2212,7 +2169,7 @@ script_mod! {
                                     }
 
                                     composer_action_slot := View {
-                                        width: 68
+                                        width: 34
                                         height: 30
                                         flow: Right
 
@@ -2829,572 +2786,7 @@ script_mod! {
 
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum SettingsPage {
-    #[default]
-    GoogleAntigravity,
-    OpenAi,
-    Capabilities,
-    Skills,
-    McpServers,
-    About,
-}
 
-#[derive(Clone, Debug, Default)]
-enum ProviderSettingsModalAction {
-    ShowExtensions,
-    ShowSkills,
-    ShowMcpServers,
-    Add(ExtensionScope),
-    Refresh,
-    SetEnabled {
-        row: usize,
-        enabled: bool,
-    },
-    Remove(usize),
-    SetSkillEnabled {
-        row: usize,
-        enabled: bool,
-    },
-    RefreshSkills,
-    SetMcpEnabled {
-        row: usize,
-        enabled: bool,
-    },
-    RemoveMcpServer(usize),
-    RefreshMcpServers,
-    AddMcpServer {
-        scope: threadlane_coding_agent::McpScope,
-        name: String,
-        command: String,
-    },
-    #[default]
-    None,
-}
-
-#[derive(Script, Widget)]
-struct ProviderSettingsModal {
-    #[source]
-    source: ScriptObjectRef,
-    #[deref]
-    view: View,
-    #[rust]
-    draw_list: Option<DrawList2d>,
-    #[rust]
-    opened: bool,
-    #[rust]
-    page: SettingsPage,
-    #[rust]
-    extension_rows: Vec<crate::state::CapabilityExtensionRow>,
-    #[rust]
-    skill_rows: Vec<crate::state::CapabilitySkillRow>,
-    #[rust]
-    mcp_rows: Vec<crate::state::CapabilityMcpRow>,
-    #[rust]
-    install_scope_global: bool,
-}
-
-impl ScriptHook for ProviderSettingsModal {
-    fn on_after_new(&mut self, vm: &mut ScriptVm) {
-        self.draw_list = Some(DrawList2d::script_new(vm));
-    }
-
-    fn on_after_apply(
-        &mut self,
-        vm: &mut ScriptVm,
-        _apply: &Apply,
-        _scope: &mut Scope,
-        _value: ScriptValue,
-    ) {
-        vm.with_cx_mut(|cx| {
-            if let Some(draw_list) = &self.draw_list {
-                draw_list.redraw(cx);
-            }
-            let version = format!("Version {}", env!("CARGO_PKG_VERSION"));
-            self.view
-                .label(cx, ids!(about_version_lbl))
-                .set_text(cx, &version);
-            self.sync_page_visibility(cx);
-        });
-    }
-}
-
-impl Widget for ProviderSettingsModal {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        if !self.opened {
-            return;
-        }
-
-        self.view.handle_event(cx, event, scope);
-        if let Event::Actions(actions) = event {
-            let uid = self.widget_uid();
-            if self
-                .view
-                .button(cx, ids!(settings_nav_google_btn))
-                .clicked(actions)
-            {
-                self.set_page(cx, SettingsPage::GoogleAntigravity);
-            }
-            if self
-                .view
-                .button(cx, ids!(settings_nav_openai_btn))
-                .clicked(actions)
-            {
-                self.set_page(cx, SettingsPage::OpenAi);
-            }
-            if self
-                .view
-                .button(cx, ids!(settings_nav_capabilities_btn))
-                .clicked(actions)
-            {
-                self.set_page(cx, SettingsPage::Capabilities);
-                cx.widget_action(uid, ProviderSettingsModalAction::ShowExtensions);
-            }
-            if self
-                .view
-                .button(cx, ids!(settings_nav_skills_btn))
-                .clicked(actions)
-            {
-                self.set_page(cx, SettingsPage::Skills);
-                cx.widget_action(uid, ProviderSettingsModalAction::ShowSkills);
-            }
-            if self
-                .view
-                .button(cx, ids!(settings_nav_mcp_btn))
-                .clicked(actions)
-            {
-                self.set_page(cx, SettingsPage::McpServers);
-                cx.widget_action(uid, ProviderSettingsModalAction::ShowMcpServers);
-            }
-            if self
-                .view
-                .button(cx, ids!(settings_nav_about_btn))
-                .clicked(actions)
-            {
-                self.set_page(cx, SettingsPage::About);
-            }
-            if self
-                .view
-                .button(cx, ids!(capability_scope_global_btn))
-                .clicked(actions)
-            {
-                self.install_scope_global = true;
-                self.sync_install_scope(cx);
-            }
-            if self
-                .view
-                .button(cx, ids!(capability_scope_project_btn))
-                .clicked(actions)
-                || self
-                    .view
-                    .button(cx, ids!(mcp_scope_project_btn))
-                    .clicked(actions)
-            {
-                self.install_scope_global = false;
-                self.sync_install_scope(cx);
-            }
-            if self
-                .view
-                .button(cx, ids!(capability_scope_global_btn))
-                .clicked(actions)
-                || self
-                    .view
-                    .button(cx, ids!(mcp_scope_global_btn))
-                    .clicked(actions)
-            {
-                self.install_scope_global = true;
-                self.sync_install_scope(cx);
-            }
-            if self
-                .view
-                .button(cx, ids!(mcp_submit_add_btn))
-                .clicked(actions)
-            {
-                let name = self.view.text_input(cx, ids!(mcp_name_input)).text();
-                let command = self.view.text_input(cx, ids!(mcp_command_input)).text();
-                let scope = if self.install_scope_global {
-                    threadlane_coding_agent::McpScope::Global
-                } else {
-                    threadlane_coding_agent::McpScope::Project
-                };
-                cx.widget_action(
-                    uid,
-                    ProviderSettingsModalAction::AddMcpServer {
-                        scope,
-                        name,
-                        command,
-                    },
-                );
-            }
-            if self
-                .view
-                .button(cx, ids!(capability_add_btn))
-                .clicked(actions)
-            {
-                cx.widget_action(uid, ProviderSettingsModalAction::Add(self.install_scope()));
-            }
-            if self
-                .view
-                .button(cx, ids!(capability_refresh_btn))
-                .clicked(actions)
-            {
-                cx.widget_action(uid, ProviderSettingsModalAction::Refresh);
-            }
-            if self
-                .view
-                .button(cx, ids!(skill_refresh_btn))
-                .clicked(actions)
-            {
-                cx.widget_action(uid, ProviderSettingsModalAction::RefreshSkills);
-            }
-            if self.view.button(cx, ids!(mcp_refresh_btn)).clicked(actions) {
-                cx.widget_action(uid, ProviderSettingsModalAction::RefreshMcpServers);
-            }
-            let list = self.view.portal_list(cx, ids!(capability_list));
-            for (row, item) in list.items_with_actions(actions) {
-                if let Some(enabled) = item.check_box(cx, ids!(enabled_toggle)).changed(actions) {
-                    cx.widget_action(
-                        uid,
-                        ProviderSettingsModalAction::SetEnabled { row, enabled },
-                    );
-                }
-                if item.button(cx, ids!(remove_btn)).clicked(actions) {
-                    cx.widget_action(uid, ProviderSettingsModalAction::Remove(row));
-                }
-            }
-            let skill_list = self.view.portal_list(cx, ids!(skill_list));
-            for (row, item) in skill_list.items_with_actions(actions) {
-                if let Some(enabled) = item.check_box(cx, ids!(enabled_toggle)).changed(actions) {
-                    cx.widget_action(
-                        uid,
-                        ProviderSettingsModalAction::SetSkillEnabled { row, enabled },
-                    );
-                }
-            }
-            let mcp_list = self.view.portal_list(cx, ids!(mcp_list));
-            for (row, item) in mcp_list.items_with_actions(actions) {
-                if let Some(enabled) = item.check_box(cx, ids!(enabled_toggle)).changed(actions) {
-                    cx.widget_action(
-                        uid,
-                        ProviderSettingsModalAction::SetMcpEnabled { row, enabled },
-                    );
-                }
-                if item.button(cx, ids!(remove_btn)).clicked(actions) {
-                    cx.widget_action(uid, ProviderSettingsModalAction::RemoveMcpServer(row));
-                }
-            }
-        }
-        let modal_rect = self.view.widget(cx, ids!(modal_card)).area().rect(cx);
-        let should_close = matches!(
-            event,
-            Event::MouseUp(event)
-                if event.button.is_primary() && !modal_rect.contains(event.abs)
-        ) || matches!(event, Event::KeyDown(event) if event.key_code == KeyCode::Escape)
-            || matches!(event, Event::BackPressed { .. });
-        if should_close {
-            self.close(cx);
-        }
-    }
-
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
-        let draw_list = self.draw_list.as_mut().unwrap();
-        draw_list.begin_overlay_reuse(cx);
-
-        let pass_size = cx.current_pass_size();
-        cx.begin_root_turtle(pass_size, Layout::flow_overlay());
-        if self.opened {
-            let walk = Walk {
-                width: Size::Fixed(pass_size.x),
-                height: Size::Fixed(pass_size.y),
-                ..Default::default()
-            };
-            while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
-                if let Some(mut list) = item.as_portal_list().borrow_mut() {
-                    if self.page == SettingsPage::Skills {
-                        list.set_item_range(cx, 0, self.skill_rows.len().max(1));
-                        while let Some(row_index) = list.next_visible_item(cx) {
-                            if self.skill_rows.is_empty() {
-                                if row_index == 0 {
-                                    list.item(cx, row_index, id!(SkillEmptyRow))
-                                        .draw_all_unscoped(cx);
-                                }
-                                continue;
-                            }
-                            let Some(row) = self.skill_rows.get(row_index) else {
-                                continue;
-                            };
-                            let item = list.item(cx, row_index, id!(SkillRow));
-                            item.label(cx, ids!(name_lbl)).set_text(cx, &row.id);
-                            item.label(cx, ids!(scope_lbl))
-                                .set_text(cx, &row.scope_status());
-                            item.label(cx, ids!(path_lbl))
-                                .set_text(cx, &row.file_path.display().to_string());
-                            item.check_box(cx, ids!(enabled_toggle)).set_active(
-                                cx,
-                                row.enabled && row.is_valid,
-                                Animate::No,
-                            );
-                            item.draw_all_unscoped(cx);
-                        }
-                    } else if self.page == SettingsPage::McpServers {
-                        list.set_item_range(cx, 0, self.mcp_rows.len().max(1));
-                        while let Some(row_index) = list.next_visible_item(cx) {
-                            if self.mcp_rows.is_empty() {
-                                if row_index == 0 {
-                                    list.item(cx, row_index, id!(McpEmptyRow))
-                                        .draw_all_unscoped(cx);
-                                }
-                                continue;
-                            }
-                            let Some(row) = self.mcp_rows.get(row_index) else {
-                                continue;
-                            };
-                            let item = list.item(cx, row_index, id!(McpRow));
-                            item.label(cx, ids!(name_lbl)).set_text(cx, &row.name);
-                            item.label(cx, ids!(scope_lbl))
-                                .set_text(cx, &row.scope_status());
-                            item.label(cx, ids!(path_lbl))
-                                .set_text(cx, &row.transport_detail);
-                            item.check_box(cx, ids!(enabled_toggle)).set_active(
-                                cx,
-                                row.enabled,
-                                Animate::No,
-                            );
-                            item.draw_all_unscoped(cx);
-                        }
-                    } else if self.page == SettingsPage::Capabilities {
-                        list.set_item_range(cx, 0, self.extension_rows.len().max(1));
-                        while let Some(row_index) = list.next_visible_item(cx) {
-                            if self.extension_rows.is_empty() {
-                                if row_index == 0 {
-                                    list.item(cx, row_index, id!(EmptyRow))
-                                        .draw_all_unscoped(cx);
-                                }
-                                continue;
-                            }
-                            let Some(row) = self.extension_rows.get(row_index) else {
-                                continue;
-                            };
-                            let item = list.item(cx, row_index, id!(ExtensionRow));
-                            item.label(cx, ids!(name_lbl))
-                                .set_text(cx, &format!("{} · v{}", row.name, row.version));
-                            item.label(cx, ids!(scope_lbl))
-                                .set_text(cx, &row.scope_status());
-                            item.label(cx, ids!(path_lbl))
-                                .set_text(cx, &row.module_path.display().to_string());
-                            item.check_box(cx, ids!(enabled_toggle)).set_active(
-                                cx,
-                                row.enabled,
-                                Animate::No,
-                            );
-                            item.draw_all_unscoped(cx);
-                        }
-                    }
-                }
-            }
-        }
-        cx.end_pass_sized_turtle();
-        draw_list.end(cx);
-        DrawStep::done()
-    }
-}
-impl ProviderSettingsModal {
-    fn install_scope(&self) -> ExtensionScope {
-        if self.install_scope_global {
-            ExtensionScope::Global
-        } else {
-            ExtensionScope::Project
-        }
-    }
-
-    fn redraw_capability_overlay(&mut self, cx: &mut Cx) {
-        if let Some(draw_list) = &self.draw_list {
-            draw_list.redraw(cx);
-        }
-        self.view.redraw(cx);
-    }
-
-    fn set_extension_rows(&mut self, cx: &mut Cx, rows: Vec<crate::state::CapabilityExtensionRow>) {
-        self.extension_rows = rows;
-        self.redraw_capability_overlay(cx);
-    }
-
-    fn set_skill_rows(&mut self, cx: &mut Cx, rows: Vec<crate::state::CapabilitySkillRow>) {
-        self.skill_rows = rows;
-        self.redraw_capability_overlay(cx);
-    }
-
-    fn set_mcp_rows(&mut self, cx: &mut Cx, rows: Vec<crate::state::CapabilityMcpRow>) {
-        self.mcp_rows = rows;
-        self.redraw_capability_overlay(cx);
-    }
-
-    fn set_mcp_status(&mut self, cx: &mut Cx, status: &str) {
-        self.view
-            .label(cx, ids!(mcp_status_lbl))
-            .set_text(cx, status);
-    }
-
-    fn set_skill_status(&mut self, cx: &mut Cx, status: &str) {
-        self.view
-            .label(cx, ids!(skill_status_lbl))
-            .set_text(cx, status);
-    }
-
-    fn set_extension_status(&mut self, cx: &mut Cx, status: &str) {
-        self.view
-            .label(cx, ids!(capability_status_lbl))
-            .set_text(cx, status);
-    }
-
-    fn sync_install_scope(&mut self, cx: &mut Cx) {
-        let normal_color = Vec4f {
-            x: 0x2b as f32 / 255.0,
-            y: 0x31 as f32 / 255.0,
-            z: 0x3d as f32 / 255.0,
-            w: 1.0,
-        };
-        let selected_color = Vec4f {
-            x: 0x2d as f32 / 255.0,
-            y: 0x40 as f32 / 255.0,
-            z: 0x5a as f32 / 255.0,
-            w: 1.0,
-        };
-        let normal_border = Vec4f {
-            x: 0x3a as f32 / 255.0,
-            y: 0x43 as f32 / 255.0,
-            z: 0x54 as f32 / 255.0,
-            w: 1.0,
-        };
-        let selected_border = Vec4f {
-            x: 0x4b as f32 / 255.0,
-            y: 0x71 as f32 / 255.0,
-            z: 0x9f as f32 / 255.0,
-            w: 1.0,
-        };
-        for (button_id, selected) in [
-            (ids!(capability_scope_global_btn), self.install_scope_global),
-            (
-                ids!(capability_scope_project_btn),
-                !self.install_scope_global,
-            ),
-            (ids!(mcp_scope_global_btn), self.install_scope_global),
-            (ids!(mcp_scope_project_btn), !self.install_scope_global),
-        ] {
-            let mut button = self.view.button(cx, button_id);
-            let color = if selected {
-                selected_color
-            } else {
-                normal_color
-            };
-            let border_color = if selected {
-                selected_border
-            } else {
-                normal_border
-            };
-            script_apply_eval!(cx, button, {
-                draw_bg +: {
-                    color: #(color)
-                    border_color: #(border_color)
-                }
-            });
-            button.redraw(cx);
-        }
-    }
-
-    fn set_page(&mut self, cx: &mut Cx, page: SettingsPage) {
-        self.page = page;
-        self.sync_page_visibility(cx);
-        self.view.redraw(cx);
-    }
-
-    fn sync_page_visibility(&mut self, cx: &mut Cx) {
-        let google_selected = self.page == SettingsPage::GoogleAntigravity;
-        let openai_selected = self.page == SettingsPage::OpenAi;
-        let capabilities_selected = self.page == SettingsPage::Capabilities;
-        let skills_selected = self.page == SettingsPage::Skills;
-        let mcp_selected = self.page == SettingsPage::McpServers;
-        let about_selected = self.page == SettingsPage::About;
-
-        for (button_id, selected) in [
-            (ids!(settings_nav_google_btn), google_selected),
-            (ids!(settings_nav_openai_btn), openai_selected),
-            (ids!(settings_nav_capabilities_btn), capabilities_selected),
-            (ids!(settings_nav_skills_btn), skills_selected),
-            (ids!(settings_nav_mcp_btn), mcp_selected),
-            (ids!(settings_nav_about_btn), about_selected),
-        ] {
-            let button = self.view.button(cx, button_id);
-            crate::components::nav_button::set_selected(cx, &button, selected);
-            button.redraw(cx);
-        }
-
-        // Keep every navigation entry available; the selected page controls
-        // the presentation while the button styles show the active state.
-        self.view
-            .button(cx, ids!(settings_nav_google_btn))
-            .set_visible(cx, true);
-        self.view
-            .button(cx, ids!(settings_nav_openai_btn))
-            .set_visible(cx, true);
-        self.view
-            .button(cx, ids!(settings_nav_capabilities_btn))
-            .set_visible(cx, true);
-        self.view
-            .button(cx, ids!(settings_nav_skills_btn))
-            .set_visible(cx, true);
-        self.view
-            .button(cx, ids!(settings_nav_mcp_btn))
-            .set_visible(cx, true);
-        self.view
-            .button(cx, ids!(settings_nav_about_btn))
-            .set_visible(cx, true);
-        self.view
-            .widget(cx, ids!(google_antigravity_page))
-            .set_visible(cx, google_selected);
-        self.view
-            .widget(cx, ids!(openai_page))
-            .set_visible(cx, openai_selected);
-        self.view
-            .widget(cx, ids!(capabilities_page))
-            .set_visible(cx, capabilities_selected);
-        self.view
-            .widget(cx, ids!(skills_page))
-            .set_visible(cx, skills_selected);
-        self.view
-            .widget(cx, ids!(mcp_page))
-            .set_visible(cx, mcp_selected);
-        self.view
-            .widget(cx, ids!(about_page))
-            .set_visible(cx, about_selected);
-        self.sync_install_scope(cx);
-    }
-
-    fn open(&mut self, cx: &mut Cx) {
-        self.open_page(cx, SettingsPage::GoogleAntigravity);
-    }
-
-    fn open_page(&mut self, cx: &mut Cx, page: SettingsPage) {
-        self.page = page;
-        self.opened = true;
-        self.sync_page_visibility(cx);
-        if let Some(draw_list) = &self.draw_list {
-            draw_list.redraw(cx);
-        }
-        self.view.redraw(cx);
-    }
-
-    fn close(&mut self, cx: &mut Cx) {
-        if !self.opened {
-            return;
-        }
-        self.opened = false;
-        if let Some(draw_list) = &self.draw_list {
-            draw_list.redraw(cx);
-        }
-        self.view.redraw(cx);
-    }
-}
 
 #[derive(Clone, Debug)]
 enum ImagePickerAction {
@@ -3708,6 +3100,10 @@ pub struct App {
     #[rust]
     composer_state: ComposerState,
     #[rust]
+    pending_queue_text: Option<String>,
+    #[rust]
+    pending_queue_attachments: Vec<ImageAttachment>,
+    #[rust]
     commands: Vec<CommandInfo>,
     #[rust]
     capabilities_summary: String,
@@ -3719,6 +3115,8 @@ pub struct App {
     session_context_entry: Option<SessionEntry>,
     #[rust]
     sidebar_pointer: Option<Vec2d>,
+    #[rust]
+    left_sidebar_open: bool,
     #[rust]
     auth_workspace: Option<SessionKey>,
     #[rust]
@@ -3787,6 +3185,8 @@ pub struct App {
     #[rust]
     right_sidebar_tab: RightSidebarTab,
     #[rust]
+    right_sidebar_open: bool,
+    #[rust]
     right_sidebar_agents_available: bool,
     #[rust]
     right_sidebar_width: f64,
@@ -3809,6 +3209,8 @@ impl MatchEvent for App {
         self.chat_redraw_pending = false;
         self.git_status_timer = cx.start_interval(2.0);
         self.right_sidebar_width = 280.0;
+        self.left_sidebar_open = true;
+        self.right_sidebar_open = true;
         let (tx, rx) = channel::<GuiAgentEvent>();
         self.tx = Some(tx);
         self.rx = Some(Arc::new(Mutex::new(rx)));
@@ -4142,9 +3544,30 @@ impl MatchEvent for App {
                 .toggle(cx);
         }
 
+        if self
+            .ui
+            .button(cx, ids!(left_sidebar_toggle_btn))
+            .clicked(actions)
+            || self
+                .ui
+                .button(cx, ids!(left_sidebar_expand_btn))
+                .clicked(actions)
+        {
+            self.toggle_left_sidebar(cx);
+        }
+
         if self.ui.button(cx, ids!(settings_btn)).clicked(actions) {
             self.open_providers_modal(cx);
             self.refresh_provider_connection_ui(cx);
+        }
+
+        if self
+            .ui
+            .button(cx, ids!(right_sidebar_toggle_btn))
+            .clicked(actions)
+        {
+            self.right_sidebar_open = !self.right_sidebar_open;
+            self.sync_right_sidebar(cx);
         }
 
         if self.ui.button(cx, ids!(close_modal_btn)).clicked(actions) {
@@ -4488,43 +3911,7 @@ impl MatchEvent for App {
             self.open_capabilities_modal(cx);
         }
 
-        let providers_modal_uid = self.ui.widget(cx, ids!(providers_modal)).widget_uid();
-        if let Some(action) = actions.find_widget_action(providers_modal_uid) {
-            match action.cast::<ProviderSettingsModalAction>() {
-                ProviderSettingsModalAction::ShowExtensions
-                | ProviderSettingsModalAction::Refresh => self.refresh_capability_state(cx),
-                ProviderSettingsModalAction::ShowSkills
-                | ProviderSettingsModalAction::RefreshSkills => self.refresh_skill_state(cx),
-                ProviderSettingsModalAction::ShowMcpServers
-                | ProviderSettingsModalAction::RefreshMcpServers => self.refresh_mcp_state(cx),
-                ProviderSettingsModalAction::Add(scope) => {
-                    self.open_extension_picker(scope);
-                }
-                ProviderSettingsModalAction::SetEnabled { row, enabled } => {
-                    self.set_extension_enabled(cx, row, enabled);
-                }
-                ProviderSettingsModalAction::Remove(row) => {
-                    self.remove_extension(cx, row);
-                }
-                ProviderSettingsModalAction::SetSkillEnabled { row, enabled } => {
-                    self.set_skill_enabled(cx, row, enabled);
-                }
-                ProviderSettingsModalAction::SetMcpEnabled { row, enabled } => {
-                    self.set_mcp_enabled(cx, row, enabled);
-                }
-                ProviderSettingsModalAction::RemoveMcpServer(row) => {
-                    self.remove_mcp_server(cx, row);
-                }
-                ProviderSettingsModalAction::AddMcpServer {
-                    scope,
-                    name,
-                    command,
-                } => {
-                    self.add_mcp_server(cx, scope, name, command);
-                }
-                ProviderSettingsModalAction::None => {}
-            }
-        }
+        self.handle_provider_settings_action(cx, actions);
 
         let task_sidebar_uid = self.ui.widget(cx, ids!(task_sidebar)).widget_uid();
         if let Some(action) = actions.find_widget_action(task_sidebar_uid) {
@@ -4588,68 +3975,17 @@ impl MatchEvent for App {
         }
 
         if self.ui.button(cx, ids!(stop_btn)).clicked(actions) {
-            let active_key = self.workspace_state.active_key().cloned();
-            if let Some(key) = active_key {
-                if let Some(session_file) = self
-                    .session_runtimes
-                    .get(&key)
-                    .and_then(|runtime| runtime.session_file.as_deref())
-                {
-                    if let Err(error) = cancel_open_subagent_operations(session_file) {
-                        self.push_chat(
-                            MsgRole::System,
-                            format!("Could not persist subagent cancellation: {error}"),
-                        );
-                    }
-                }
-                let current_draft = self.prompt_text(cx);
-                let (restored_draft, restored_attachments) = self
-                    .session_runtimes
-                    .get_mut(&key)
-                    .and_then(|runtime| {
-                        let generation = runtime.generation.take()?;
-                        let generation_id = generation.id;
-                        generation.handle.abort();
-                        runtime.terminal_generation_id = None;
-                        let draft = draft_for_cancellation(
-                            Some(generation_id),
-                            runtime.submitted_draft.as_ref(),
-                            generation_id,
-                        );
-                        let attachments = runtime
-                            .submitted_attachments
-                            .as_ref()
-                            .filter(|(id, _)| *id == generation_id)
-                            .map(|(_, att)| att.clone());
-                        runtime.submitted_draft = None;
-                        runtime.submitted_attachments = None;
-                        Some((draft, attachments))
-                    })
-                    .unwrap_or((None, None));
-                let draft = if current_draft.trim().is_empty() {
-                    restored_draft.unwrap_or_default()
-                } else {
-                    current_draft
-                };
-                if let Some(workspace) = self.workspace_state.active_workspace_mut() {
-                    workspace.ui.draft = draft.clone();
-                    if let Some(attachments) = restored_attachments {
-                        workspace.ui.attachments = attachments;
-                    }
-                }
-                self.set_prompt_text(cx, &draft);
-                self.refresh_attachment_ui(cx);
-                self.workspace_state
-                    .workspace_mut(key.clone())
-                    .chat
-                    .mark_generation_stopped();
-                if self.finish_session_tasks(&key.work_dir, &key.session_id) {
-                    self.sync_task_sidebar(cx);
-                }
-                self.set_session_status(cx, &key, UiStatus::Ready, "Stopped");
-                self.push_chat(MsgRole::System, "Generation stopped.");
-                self.ui.widget(cx, ids!(chat_list)).redraw(cx);
+            // Dismiss any pending queue popup.
+            if self.pending_queue_text.is_some() {
+                let text = self.pending_queue_text.take().unwrap_or_default();
+                self.pending_queue_attachments.clear();
+                self.ui
+                    .widget(cx, ids!(queued_message_preview))
+                    .set_visible(cx, false);
+                // Restore the pending text to the composer.
+                self.set_prompt_text(cx, &text);
             }
+            self.stop_active_generation(cx);
         }
 
         let session_menu_uid = self.ui.widget(cx, ids!(session_context_menu)).widget_uid();
@@ -4830,17 +4166,52 @@ impl MatchEvent for App {
                 .is_some_and(|workspace| !workspace.ui.attachments.is_empty());
             if !input_text.trim().is_empty() || has_attachments {
                 if self.busy {
+                    // Show the queue/steer popup instead of immediately steering.
                     let attachments = self
                         .workspace_state
                         .active_workspace()
                         .map(|workspace| workspace.ui.attachments.clone())
                         .unwrap_or_default();
-                    self.enqueue_steer_interrupt(cx, &input_text, attachments);
+                    self.pending_queue_text = Some(input_text.clone());
+                    self.pending_queue_attachments = attachments;
+                    self.ui
+                        .label(cx, ids!(queued_message_text))
+                        .set_text(cx, input_text.trim());
+                    self.ui
+                        .widget(cx, ids!(queued_message_preview))
+                        .set_visible(cx, true);
                     cti.text_input_ref(cx).set_text(cx, "");
                     self.refresh_attachment_ui(cx);
+                    cx.redraw_all();
                 } else {
                     self.dispatch_input(cx, input_text, InputOrigin::Composer);
                 }
+            }
+        }
+
+        // Queue button: enqueue the pending message as a follow-up.
+        if self.ui.button(cx, ids!(queue_btn)).clicked(actions) {
+            if let Some(text) = self.pending_queue_text.take() {
+                let attachments = std::mem::take(&mut self.pending_queue_attachments);
+                self.enqueue_steer_interrupt(cx, &text, attachments);
+                self.ui
+                    .widget(cx, ids!(queued_message_preview))
+                    .set_visible(cx, false);
+                cx.redraw_all();
+            }
+        }
+
+        // Steer button: stop current generation, then dispatch the pending message.
+        if self.ui.button(cx, ids!(steer_btn)).clicked(actions) {
+            if let Some(text) = self.pending_queue_text.take() {
+                let _attachments = std::mem::take(&mut self.pending_queue_attachments);
+                self.ui
+                    .widget(cx, ids!(queued_message_preview))
+                    .set_visible(cx, false);
+                // Stop the current generation (same as stop_btn logic).
+                self.stop_active_generation(cx);
+                // Dispatch the pending message as a fresh prompt.
+                self.dispatch_input(cx, text, InputOrigin::Composer);
             }
         }
     }
@@ -5027,6 +4398,88 @@ fn format_capabilities_summary(skills: &[SkillMetadata], agents: &[AgentConfig])
 }
 
 impl App {
+    fn toggle_left_sidebar(&mut self, cx: &mut Cx) {
+        self.left_sidebar_open = !self.left_sidebar_open;
+        self.ui.dock(cx, ids!(dock)).set_splitter_align(
+            cx,
+            id!(root),
+            left_sidebar_splitter_align(self.left_sidebar_open),
+            false,
+        );
+        self.ui
+            .button(cx, ids!(left_sidebar_toggle_btn))
+            .set_visible(cx, self.left_sidebar_open);
+        self.ui
+            .button(cx, ids!(left_sidebar_expand_btn))
+            .set_visible(cx, !self.left_sidebar_open);
+        self.ui.view(cx, ids!(header)).redraw(cx);
+    }
+
+    fn stop_active_generation(&mut self, cx: &mut Cx) {
+        let active_key = self.workspace_state.active_key().cloned();
+        if let Some(key) = active_key {
+            if let Some(session_file) = self
+                .session_runtimes
+                .get(&key)
+                .and_then(|runtime| runtime.session_file.as_deref())
+            {
+                if let Err(error) = cancel_open_subagent_operations(session_file) {
+                    self.push_chat(
+                        MsgRole::System,
+                        format!("Could not persist subagent cancellation: {error}"),
+                    );
+                }
+            }
+            let current_draft = self.prompt_text(cx);
+            let (restored_draft, restored_attachments) = self
+                .session_runtimes
+                .get_mut(&key)
+                .and_then(|runtime| {
+                    let generation = runtime.generation.take()?;
+                    let generation_id = generation.id;
+                    generation.handle.abort();
+                    runtime.terminal_generation_id = None;
+                    let draft = draft_for_cancellation(
+                        Some(generation_id),
+                        runtime.submitted_draft.as_ref(),
+                        generation_id,
+                    );
+                    let attachments = runtime
+                        .submitted_attachments
+                        .as_ref()
+                        .filter(|(id, _)| *id == generation_id)
+                        .map(|(_, att)| att.clone());
+                    runtime.submitted_draft = None;
+                    runtime.submitted_attachments = None;
+                    Some((draft, attachments))
+                })
+                .unwrap_or((None, None));
+            let draft = if current_draft.trim().is_empty() {
+                restored_draft.unwrap_or_default()
+            } else {
+                current_draft
+            };
+            if let Some(workspace) = self.workspace_state.active_workspace_mut() {
+                workspace.ui.draft = draft.clone();
+                if let Some(attachments) = restored_attachments {
+                    workspace.ui.attachments = attachments;
+                }
+            }
+            self.set_prompt_text(cx, &draft);
+            self.refresh_attachment_ui(cx);
+            self.workspace_state
+                .workspace_mut(key.clone())
+                .chat
+                .mark_generation_stopped();
+            if self.finish_session_tasks(&key.work_dir, &key.session_id) {
+                self.sync_task_sidebar(cx);
+            }
+            self.set_session_status(cx, &key, UiStatus::Ready, "Stopped");
+            self.push_chat(MsgRole::System, "Generation stopped.");
+            self.ui.widget(cx, ids!(chat_list)).redraw(cx);
+        }
+    }
+
     fn schedule_chat_redraw(&mut self, cx: &mut Cx) {
         if !self.chat_redraw_pending {
             self.chat_redraw_pending = true;
@@ -5725,29 +5178,6 @@ impl App {
         cx.redraw_all();
     }
 
-    fn sync_sidebar_action_visibility(&mut self, cx: &mut Cx, event: &Event) {
-        match event {
-            Event::MouseMove(event) => self.sidebar_pointer = Some(event.abs),
-            Event::MouseLeave(_) => self.sidebar_pointer = None,
-            _ => {}
-        }
-        let pointer = self.sidebar_pointer;
-
-        let context_menu_open = crate::panels::sessions::state::SESSIONS_DATA
-            .read()
-            .unwrap()
-            .context_session_id
-            .is_some();
-
-        let projects_header = self.ui.view(cx, ids!(projects_header));
-        let add_project_visible = !context_menu_open
-            && pointer.is_some_and(|position| projects_header.area().rect(cx).contains(position));
-        let add_project_btn = self.ui.button(cx, ids!(add_project_btn));
-        if add_project_btn.visible() != add_project_visible {
-            add_project_btn.set_visible(cx, add_project_visible);
-            projects_header.redraw(cx);
-        }
-    }
 
     fn set_model_dropup_options(&mut self, cx: &mut Cx, models: Vec<String>, selected_model: &str) {
         let Some((canonical, display)) = ordered_model_options(models, selected_model) else {
@@ -6463,14 +5893,27 @@ impl App {
         let show_git_changes = show_git && !self.git_diff_open;
         let show_git_diff = show_git && self.git_diff_open;
 
-        self.ui.view(cx, ids!(right_sidebar)).set_visible(cx, true);
+        let sidebar_available = self.right_sidebar_available();
+        let sidebar_visible = sidebar_available && self.right_sidebar_open;
+        self.ui
+            .view(cx, ids!(right_sidebar))
+            .set_visible(cx, sidebar_visible);
         self.ui
             .view(cx, ids!(right_sidebar_resize_handle))
-            .set_visible(cx, true);
+            .set_visible(cx, sidebar_visible);
+        self.ui
+            .button(cx, ids!(right_sidebar_toggle_btn))
+            .set_visible(cx, sidebar_available);
+        self.ui
+            .button(cx, ids!(right_sidebar_toggle_btn))
+            .redraw(cx);
+        self.ui.view(cx, ids!(header)).redraw(cx);
 
-        if let Some(mut sidebar) = self.ui.view(cx, ids!(right_sidebar)).borrow_mut() {
-            sidebar.walk.width = Size::Fixed(self.right_sidebar_width);
-            sidebar.redraw(cx);
+        if sidebar_visible {
+            if let Some(mut sidebar) = self.ui.view(cx, ids!(right_sidebar)).borrow_mut() {
+                sidebar.walk.width = Size::Fixed(self.right_sidebar_width);
+                sidebar.redraw(cx);
+            }
         }
 
         self.ui
@@ -6551,10 +5994,14 @@ impl App {
             .clamp(RIGHT_SIDEBAR_MIN_WIDTH, RIGHT_SIDEBAR_MAX_WIDTH)
     }
 
-    fn right_sidebar_is_visible(&self) -> bool {
+    fn right_sidebar_available(&self) -> bool {
         self.active_work_dir()
             .is_some_and(|work_dir| self.git_status.contains_key(work_dir))
             || (self.right_sidebar_agents_available && self.task_sidebar_open)
+    }
+
+    fn right_sidebar_is_visible(&self) -> bool {
+        self.right_sidebar_open && self.right_sidebar_available()
     }
 
     fn sync_git_commit_button(&self, cx: &mut Cx) {
@@ -7069,344 +6516,7 @@ impl App {
         (api_key, account_id)
     }
 
-    fn active_terminal_project(&self) -> Option<PathBuf> {
-        self.workspace_state
-            .active_key()
-            .map(|key| canonical_terminal_work_dir(&key.work_dir))
-    }
 
-    fn sync_terminal_project(&mut self, cx: &mut Cx) {
-        let Some(work_dir) = self.active_terminal_project() else {
-            return;
-        };
-        let project = project_name(&work_dir);
-        let terminal = self.ui.project_terminal(cx, ids!(project_terminal));
-        if let Some(group) = self.project_terminals.get(&work_dir) {
-            let names = group
-                .sessions
-                .iter()
-                .enumerate()
-                .map(|(index, _)| {
-                    if index == 0 {
-                        project.clone()
-                    } else {
-                        format!("{project} {}", index + 1)
-                    }
-                })
-                .collect::<Vec<_>>();
-            let output = group.sessions.get(group.active).map(Self::terminal_text);
-            let output = output
-                .as_deref()
-                .or(group.error.as_deref())
-                .unwrap_or_default();
-            terminal.set_terminals(cx, &names, Some(group.active), output);
-        } else {
-            terminal.set_terminals(cx, &[], None, "");
-        }
-    }
-
-    fn spawn_project_terminal(
-        &mut self,
-        work_dir: &Path,
-        cols: u16,
-        rows: u16,
-    ) -> Result<ProjectTerminalSession, String> {
-        let pty = Pty::spawn(
-            cols,
-            rows,
-            None,
-            &[("TERM", "xterm-256color")],
-            Some(work_dir),
-        )
-        .map_err(|error| format!("Could not start terminal: {error}"))?;
-        Ok(ProjectTerminalSession {
-            pty,
-            emulator: Terminal::new(cols as usize, rows as usize),
-        })
-    }
-
-    fn create_project_terminal(&mut self, cx: &mut Cx) {
-        let Some(work_dir) = self.active_terminal_project() else {
-            return;
-        };
-        if self.project_terminals.get(&work_dir).is_some_and(|group| {
-            group.sessions.len() >= crate::components::terminal_panel::MAX_VISIBLE_TERMINALS
-        }) {
-            return;
-        }
-        let (cols, rows) = self
-            .ui
-            .project_terminal(cx, ids!(project_terminal))
-            .dimensions(cx)
-            .unwrap_or((80, 24));
-        match self.spawn_project_terminal(&work_dir, cols as u16, rows as u16) {
-            Ok(session) => {
-                let group = self.project_terminals.entry(work_dir).or_default();
-                group.sessions.push(session);
-                group.active = group.sessions.len() - 1;
-                group.error = None;
-                self.terminal_poll_next_frame = cx.new_next_frame();
-            }
-            Err(error) => {
-                self.project_terminals.entry(work_dir).or_default().error = Some(error);
-                self.sync_terminal_project(cx);
-                return;
-            }
-        }
-        self.sync_terminal_project(cx);
-    }
-
-    fn select_project_terminal(&mut self, cx: &mut Cx, index: usize) {
-        let Some(work_dir) = self.active_terminal_project() else {
-            return;
-        };
-        if let Some(group) = self.project_terminals.get_mut(&work_dir) {
-            if index < group.sessions.len() {
-                group.active = index;
-            }
-        }
-        self.sync_terminal_project(cx);
-    }
-
-    fn resize_project_terminals(&mut self, cx: &mut Cx, cols: usize, rows: usize) {
-        let Some(work_dir) = self.active_terminal_project() else {
-            return;
-        };
-        let cols = cols.clamp(1, u16::MAX as usize);
-        let rows = rows.clamp(1, u16::MAX as usize);
-        if let Some(group) = self.project_terminals.get_mut(&work_dir) {
-            for session in &mut group.sessions {
-                if session.emulator.screen().cols() == cols
-                    && session.emulator.screen().rows() == rows
-                {
-                    continue;
-                }
-                if let Err(error) = session.pty.resize(cols as u16, rows as u16) {
-                    eprintln!("Terminal resize failed: {error}");
-                    continue;
-                }
-                session.emulator.resize(cols, rows);
-            }
-        }
-        self.sync_terminal_project(cx);
-    }
-
-    fn close_project_terminal(&mut self, cx: &mut Cx, index: usize) {
-        let Some(work_dir) = self.active_terminal_project() else {
-            return;
-        };
-        let remove_group = if let Some(group) = self.project_terminals.get_mut(&work_dir) {
-            if index >= group.sessions.len() {
-                return;
-            }
-            group.sessions.remove(index).terminate();
-            if group.sessions.is_empty() {
-                true
-            } else {
-                if group.active >= group.sessions.len() {
-                    group.active = group.sessions.len() - 1;
-                } else if index < group.active {
-                    group.active -= 1;
-                }
-                false
-            }
-        } else {
-            return;
-        };
-        if remove_group {
-            if let Some(group) = self.project_terminals.remove(&work_dir) {
-                group.terminate();
-            }
-        }
-        self.sync_terminal_project(cx);
-    }
-
-    fn write_terminal_bytes(&mut self, cx: &mut Cx, bytes: Vec<u8>) {
-        let Some(work_dir) = self.active_terminal_project() else {
-            return;
-        };
-        if self
-            .project_terminals
-            .get(&work_dir)
-            .is_none_or(|group| group.sessions.is_empty())
-        {
-            self.create_project_terminal(cx);
-        }
-        let Some(group) = self.project_terminals.get_mut(&work_dir) else {
-            return;
-        };
-        let Some(terminal) = group.sessions.get_mut(group.active) else {
-            return;
-        };
-        if let Err(error) = terminal.pty.write(&bytes) {
-            eprintln!("Terminal write failed: {error}");
-        }
-        self.sync_terminal_project(cx);
-    }
-
-    fn write_terminal_key(
-        &mut self,
-        cx: &mut Cx,
-        key: TerminalKeyCode,
-        shift: bool,
-        control: bool,
-        alt: bool,
-    ) {
-        let Some(work_dir) = self.active_terminal_project() else {
-            return;
-        };
-        if self
-            .project_terminals
-            .get(&work_dir)
-            .is_none_or(|group| group.sessions.is_empty())
-        {
-            self.create_project_terminal(cx);
-        }
-        let Some(terminal) = self
-            .project_terminals
-            .get_mut(&work_dir)
-            .and_then(|group| group.sessions.get_mut(group.active))
-        else {
-            return;
-        };
-        if let Some(bytes) = terminal.emulator.encode_key(key, "", shift, control, alt) {
-            if let Err(error) = terminal.pty.write(&bytes) {
-                eprintln!("Terminal write failed: {error}");
-            }
-        }
-        self.sync_terminal_project(cx);
-    }
-
-    fn poll_terminal_output(&mut self, cx: &mut Cx) {
-        const MAX_PTY_READS_PER_FRAME: usize = 8;
-        let mut processed_output = false;
-        for group in self.project_terminals.values_mut() {
-            for session in &mut group.sessions {
-                for _ in 0..MAX_PTY_READS_PER_FRAME {
-                    let Some(bytes) = session.pty.try_read() else {
-                        break;
-                    };
-                    processed_output = true;
-                    session.emulator.process_bytes(&bytes);
-                    let outbound = session.emulator.take_outbound();
-                    if !outbound.is_empty() {
-                        let _ = session.pty.write(&outbound);
-                    }
-                }
-            }
-        }
-        if processed_output {
-            self.sync_terminal_project(cx);
-        }
-    }
-
-    fn has_live_terminal_sessions(&self) -> bool {
-        self.project_terminals
-            .values()
-            .any(|group| !group.sessions.is_empty())
-    }
-
-    fn terminal_text(session: &ProjectTerminalSession) -> String {
-        let screen = session.emulator.screen();
-        const CURSOR_MARKER: char = '\u{e000}';
-        let cursor_row = screen.scrollback().len() + screen.cursor.y;
-        let cursor_col = screen.cursor.x;
-        let mut output = String::new();
-        let mut push_row = |row_index: usize, cells: &[makepad_terminal_core::Cell]| {
-            let mut line: String = cells.iter().map(|cell| cell.codepoint).collect();
-            if row_index == cursor_row {
-                let width = line.chars().count();
-                if width < cursor_col {
-                    line.extend(std::iter::repeat_n(' ', cursor_col - width));
-                }
-                let byte_index = line
-                    .char_indices()
-                    .nth(cursor_col)
-                    .map(|(index, _)| index)
-                    .unwrap_or(line.len());
-                line.insert(byte_index, CURSOR_MARKER);
-            } else {
-                line = line.trim_end().to_owned();
-            }
-            output.push_str(&line);
-            output.push('\n');
-        };
-        for (row, cells) in screen.scrollback().iter().enumerate() {
-            push_row(row, cells);
-        }
-        for row in 0..screen.rows() {
-            push_row(screen.scrollback().len() + row, screen.grid.row_slice(row));
-        }
-        truncate_terminal_output(&mut output);
-        output.pop();
-        output
-    }
-
-    fn select_workspace(&mut self, work_dir: PathBuf, session_id: impl Into<String>) {
-        self.workspace_state
-            .select(SessionKey::new(work_dir, session_id));
-    }
-
-    fn select_project_draft(&mut self, cx: &mut Cx, work_dir: PathBuf) {
-        if !work_dir.is_dir() {
-            self.push_chat(
-                MsgRole::System,
-                format!("Project folder `{}` is missing.", work_dir.display()),
-            );
-            return;
-        }
-        set_active_project(&work_dir);
-        if let Some(registry) = self.project_registry.as_mut() {
-            if let Err(error) = registry.remember_selection(&work_dir, None) {
-                self.push_chat(
-                    MsgRole::System,
-                    format!("Could not update recent-project state: {error}"),
-                );
-            }
-        }
-        self.select_workspace_ui(cx, work_dir.clone(), "draft".to_string());
-        let key = SessionKey::project_draft(work_dir.clone());
-        if !self.session_runtimes.contains_key(&key) {
-            let (api_key, account_id) = self.current_credentials(cx);
-            let model = self
-                .ui
-                .icon_drop_down(cx, ids!(model_drop))
-                .selected_label();
-            let model = if model.is_empty() {
-                default_model_name().to_string()
-            } else {
-                model
-            };
-            let effort = ReasoningEffort::from_label(
-                &self
-                    .ui
-                    .icon_drop_down(cx, ids!(effort_drop))
-                    .selected_label(),
-            )
-            .unwrap_or_default();
-            let agent = CodingAgent::new(CodingAgentOptions {
-                api_key,
-                account_id,
-                model: model.clone(),
-                work_dir: work_dir.clone(),
-                session_file: None,
-                system_prompt: Default::default(),
-            });
-            self.session_runtimes
-                .insert(key.clone(), SessionRuntime::new(agent, model, effort));
-        }
-        if let Some((model, effort)) = self
-            .session_runtimes
-            .get(&key)
-            .map(|runtime| (runtime.model.clone(), runtime.reasoning_effort))
-        {
-            self.set_model_dropup_options(cx, self.available_models.clone(), &model);
-            self.set_reasoning_effort_picker(cx, effort);
-        }
-        self.refresh_project_capabilities(cx, &work_dir);
-        self.restore_active_status(cx);
-        cx.redraw_all();
-    }
 
     fn start_background_task(
         &mut self,
@@ -7543,59 +6653,6 @@ impl App {
         }
     }
 
-    fn select_workspace_ui(&mut self, cx: &mut Cx, work_dir: PathBuf, session_id: String) {
-        self.save_active_draft(cx);
-        self.git_operation_pending = false;
-        self.git_pr_pending = false;
-        self.git_pr_created = false;
-        self.git_status_pending = false;
-        self.git_new_branch_open = false;
-        if let Some(abort) = self.git_commit_message_abort.take() {
-            abort.abort();
-        }
-        self.git_commit_message_pending = false;
-        self.git_commit_message_request_id = self.git_commit_message_request_id.wrapping_add(1);
-        self.git_diff_open = false;
-        self.git_diff_request_id = self.git_diff_request_id.wrapping_add(1);
-        self.git_diff_pending = false;
-        self.git_feedback = None;
-        self.ui
-            .text_input(cx, ids!(git_commit_message))
-            .set_text(cx, "");
-        if let Some(mut changes) = self
-            .ui
-            .widget(cx, ids!(git_changes))
-            .borrow_mut::<GitChanges>()
-        {
-            changes.clear_selection(cx);
-        }
-        self.select_workspace(work_dir, session_id);
-        if let Some(key) = self.workspace_state.active_key() {
-            let home_dir = std::env::var_os("HOME").map(PathBuf::from);
-            self.ui
-                .label(cx, ids!(project_name_label))
-                .set_text(cx, &project_name(&key.work_dir));
-            self.ui.label(cx, ids!(workspace_label)).set_text(
-                cx,
-                &compact_workspace_path(&key.work_dir, home_dir.as_deref()),
-            );
-        }
-        let draft = self
-            .workspace_state
-            .active_workspace()
-            .map(|workspace| workspace.ui.draft.clone())
-            .unwrap_or_default();
-        self.ui
-            .threadlane_command_text_input(cx, ids!(prompt_input))
-            .text_input_ref(cx)
-            .set_text(cx, &draft);
-        self.refresh_attachment_ui(cx);
-        self.sync_terminal_project(cx);
-        self.sync_git_branch_picker(cx);
-        self.sync_right_sidebar(cx);
-        self.request_git_status();
-        self.sync_task_sidebar(cx);
-    }
 
     fn push_chat(&mut self, role: MsgRole, text: impl Into<String>) {
         if let Some(workspace) = self.workspace_state.active_workspace_mut() {
@@ -7677,7 +6734,9 @@ impl App {
             .and_then(|key| self.session_runtimes.get(key))
             .is_some_and(|runtime| runtime.generation.is_some());
         let show_stop = presentation.show_stop(has_generation);
-        self.ui.button(cx, ids!(send_btn)).set_visible(cx, true);
+        self.ui
+            .button(cx, ids!(send_btn))
+            .set_visible(cx, !show_stop);
         self.ui
             .button(cx, ids!(stop_btn))
             .set_visible(cx, show_stop);
@@ -8561,6 +7620,15 @@ impl App {
                         .flush_streaming();
                     self.set_session_status(cx, &key, UiStatus::Ready, "Ready");
 
+                    // If a message was pending in the queue popup, dispatch it now.
+                    if let Some(text) = self.pending_queue_text.take() {
+                        self.pending_queue_attachments.clear();
+                        self.ui
+                            .widget(cx, ids!(queued_message_preview))
+                            .set_visible(cx, false);
+                        self.dispatch_input(cx, text, InputOrigin::Composer);
+                    }
+
                     if self.finish_session_tasks(&work_dir, &session_id) {
                         self.sync_task_sidebar(cx);
                     }
@@ -8911,13 +7979,15 @@ mod workspace_header_tests {
     use super::{
         aggregate_extension_reload_results, append_antigravity_models, clear_composer_for_dispatch,
         compact_workspace_path, extension_reload_matches, extension_reload_status,
-        model_credential_error, normalize_generated_commit_message, ordered_model_options,
+        left_sidebar_splitter_align, model_credential_error, normalize_generated_commit_message,
+        ordered_model_options,
         project_name, reduce_harness_event, session_reload_count, task_sidebar_items,
         restore_harness_activities, truncate_terminal_output, InputOrigin, ANTIGRAVITY_MODELS,
-        MAX_TERMINAL_OUTPUT,
+        MAX_TERMINAL_OUTPUT, LEFT_SIDEBAR_WIDTH,
     };
     use crate::panels::chat::state::HarnessActivityStatus;
     use crate::workspace::WorkspaceUiState;
+    use makepad_widgets::SplitterAlign;
     use std::path::{Path, PathBuf};
     use threadlane_agent::{AgentEvent, ImageAttachment, OpOutcome, OpRecord, SubagentRecoveryStatus};
     use threadlane_coding_agent::{ExtensionScope, TaskKind, TaskRecord, TaskStatus};
@@ -9241,6 +8311,18 @@ mod workspace_header_tests {
             project_name(Path::new("/Users/alex/code/threadlane")),
             "threadlane"
         );
+    }
+
+    #[test]
+    fn left_sidebar_splitter_alignment_tracks_visibility() {
+        assert!(matches!(
+            left_sidebar_splitter_align(true),
+            SplitterAlign::FromA(width) if width == LEFT_SIDEBAR_WIDTH
+        ));
+        assert!(matches!(
+            left_sidebar_splitter_align(false),
+            SplitterAlign::FromA(width) if width == 0.0
+        ));
     }
 
     #[test]
