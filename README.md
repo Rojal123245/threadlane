@@ -47,6 +47,7 @@ Threadlane combines a GPU-accelerated desktop interface with a capable coding-ag
 | Session trees | Fork, clone, navigate, persist, and compact branching conversation history. |
 | Provider integration | OpenAI-compatible streaming, Codex-oriented models, reasoning controls, device authorization, and credential persistence. |
 | WASI extensions | Sandboxed Wasm modules using the `threadlane_host` capability broker. |
+| Code editor | Open workspace files from the file tree in an embedded Makepad code editor with syntax highlighting and save. |
 | Signed updater | Background update checks, verified downloads, progress UI, and packaged-app installation/relaunch. |
 
 ## How It Fits Together
@@ -107,6 +108,18 @@ threadlane -p "Summarize git diff"
 ```
 
 On first launch, use the in-app authorization flow or provide credentials through the supported provider configuration. Threadlane persists device-flow credentials under `~/.threadlane/auth.json`.
+
+### Code editor
+
+Selecting a file in the workspace file tree opens it in an embedded code editor
+in the right panel, backed by the same `makepad-code-editor` widget Makepad
+Studio uses. The header shows the workspace-relative path, marks unsaved changes
+with a dot, and offers save and close; the editor tab appears in the right
+sidebar's tab strip once a file is open.
+
+Directories, non-UTF-8 files, and files over 2 MB are refused with a message
+rather than opened, so a stray click on a build artifact cannot stall the UI.
+Saving writes the buffer back to the file and refreshes the Git panel.
 
 ### Git and GitHub actions
 

@@ -300,6 +300,15 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 - The default `AcpPermissionPolicy` is `Reject`. An unattended client has no informed consent to give, so auto-approval must stay opt-in and any UI-backed handler should prompt rather than raise this default.
 - Build connections through `AcpConnection::from_streams` when testing. `tests/acp_tests.rs` pairs the client with an in-process stub agent over `tokio::io::duplex`, which covers framing, request correlation, and the sandbox without depending on an installed agent binary.
 
+## Code Editor
+
+- The embedded editor uses `makepad-code-editor` from the same pinned Makepad git revision as `makepad-widgets`. Do not vendor a copy of it: its only dependency is the sibling `makepad-widgets` crate, so a vendored copy would drift from the pinned revision on the `dev` branch and break at a Makepad bump.
+- `CodeEditorView` follows Makepad Studio's `DesktopCodeEditor`: the upstream `CodeEditor` is not an ordinary auto-drawn child, because both drawing and event handling need a `CodeSession` threaded through. Studio keeps sessions in shared app data keyed by dock tab; Threadlane shows one file at a time, so the widget owns its session and needs no scope plumbing.
+- That wrapper has no `#[walk]` of its own and delegates `walk()` to the inner editor, so setting `width`/`height` on `mod.components.CodeEditorView` fails at runtime with "property width not defined on type". Size the inner `editor` instead; its DSL default is already Fill/Fill.
+- The wrapper's `script_mod!` must `use mod.widgets.*`, because `CodeEditor` is registered into `mod.widgets` by `makepad_code_editor::script_mod`, which has to run before the component that inherits from it. Both of these are runtime-only failures that `cargo check` cannot catch — run the app after touching editor DSL.
+- Editor file loading refuses directories, non-UTF-8 content, and files over `MAX_EDITABLE_BYTES`. Keep that policy in `load_editable_text` rather than at the call site so it stays testable without a `Cx`.
+- Saving writes `Text`'s `Display` form. It round-trips byte-for-byte, so do not "normalize" line endings on save; a covering test guards this.
+
 ## Updater Behavior
 
 - `THREADLANE_UPDATER_PUBLIC_KEY` and `THREADLANE_UPDATER_ENDPOINT` are compile-time environment values through `option_env!`.
