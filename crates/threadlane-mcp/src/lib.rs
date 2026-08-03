@@ -10,12 +10,13 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use threadlane_agent::{AgentToolDefinition, ToolExecutor};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex as TokioMutex;
 
 const MCP_SETTINGS_FILE: &str = "mcp.json";
 const MCP_PROJECT_SETTINGS_RELATIVE_PATH: &str = ".threadlane/mcp.json";
 const MAX_MCP_SETTINGS_BYTES: usize = 512 * 1024;
+const MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -170,11 +171,148 @@ pub struct McpServerRecord {
     pub tools: Vec<McpToolInfo>,
 }
 
+/// A live stdio session with one MCP server.
+///
+/// The handshake is performed once when the process starts and the pipes stay
+/// open, so a tool call costs one request/response round trip instead of a
+/// process spawn plus a full `initialize` exchange.
+struct McpSession {
+    child: Child,
+    stdin: ChildStdin,
+    reader: BufReader<ChildStdout>,
+    next_id: u64,
+}
+
+impl McpSession {
+    /// Spawns the server and completes the MCP handshake.
+    async fn connect(config: &McpServerConfig) -> Result<Self, String> {
+        let McpTransport::Stdio { command, args, env } = &config.transport else {
+            return Err("Only stdio MCP servers can be connected".to_string());
+        };
+
+        let mut cmd = Command::new(command);
+        cmd.args(args);
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            // Without this a crashed or replaced session leaks its process.
+            .kill_on_drop(true);
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|error| format!("Failed to spawn process: {error}"))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "Failed to open stdin".to_string())?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "Failed to open stdout".to_string())?;
+
+        let mut session = Self {
+            child,
+            stdin,
+            reader: BufReader::new(stdout),
+            next_id: 1,
+        };
+
+        session
+            .request(
+                "initialize",
+                json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": { "name": "threadlane", "version": env!("CARGO_PKG_VERSION") }
+                }),
+            )
+            .await
+            .map_err(|error| format!("Initialize failed: {error}"))?;
+        session
+            .notify("notifications/initialized", Value::Null)
+            .await?;
+        Ok(session)
+    }
+
+    async fn write_line(&mut self, message: &Value) -> Result<(), String> {
+        let mut line = message.to_string();
+        line.push('\n');
+        self.stdin
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|error| format!("Failed to write to MCP server: {error}"))?;
+        self.stdin
+            .flush()
+            .await
+            .map_err(|error| format!("Failed to flush MCP server stdin: {error}"))
+    }
+
+    async fn notify(&mut self, method: &str, params: Value) -> Result<(), String> {
+        self.write_line(&json!({ "jsonrpc": "2.0", "method": method, "params": params }))
+            .await
+    }
+
+    /// Sends a request and reads until the matching response arrives.
+    ///
+    /// Notifications and unrelated responses are skipped rather than mistaken
+    /// for the answer, which a single blind `read_line` would do.
+    async fn request(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.write_line(&json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        }))
+        .await?;
+
+        let deadline = tokio::time::Instant::now() + MCP_REQUEST_TIMEOUT;
+        loop {
+            let mut line = String::new();
+            let read = tokio::time::timeout_at(deadline, self.reader.read_line(&mut line))
+                .await
+                .map_err(|_| format!("MCP request '{method}' timed out"))?
+                .map_err(|error| format!("Failed to read from MCP server: {error}"))?;
+            if read == 0 {
+                return Err("MCP server closed its output stream".to_string());
+            }
+            let Ok(message) = serde_json::from_str::<Value>(line.trim()) else {
+                continue;
+            };
+            if message.get("id").and_then(Value::as_u64) != Some(id) {
+                continue;
+            }
+            if let Some(error) = message.get("error") {
+                let text = error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("MCP error");
+                return Err(text.to_string());
+            }
+            return Ok(message.get("result").cloned().unwrap_or(Value::Null));
+        }
+    }
+
+    async fn shutdown(mut self) {
+        let _ = self.child.kill().await;
+    }
+}
+
 pub struct McpManager {
     global_dir: Option<PathBuf>,
     project_root: Option<PathBuf>,
     servers: TokioMutex<Vec<McpServerRecord>>,
     cached_tool_defs: RwLock<Vec<AgentToolDefinition>>,
+    /// Live sessions keyed by server id, reused across tool calls.
+    ///
+    /// Each session carries its own lock so a call to one server never blocks a
+    /// call to another; the outer map is held only long enough to look up or
+    /// install the handle, never across the request round trip.
+    sessions: TokioMutex<HashMap<String, Arc<TokioMutex<McpSession>>>>,
 }
 
 impl McpManager {
@@ -184,6 +322,20 @@ impl McpManager {
             project_root,
             servers: TokioMutex::new(Vec::new()),
             cached_tool_defs: RwLock::new(Vec::new()),
+            sessions: TokioMutex::new(HashMap::new()),
+        }
+    }
+
+    /// Terminates every live server session.
+    ///
+    /// Call when the manager's project changes or the app shuts down; sessions
+    /// otherwise live as long as the manager does.
+    pub async fn shutdown(&self) {
+        let sessions = std::mem::take(&mut *self.sessions.lock().await);
+        for (_, session) in sessions {
+            if let Ok(session) = Arc::try_unwrap(session) {
+                session.into_inner().shutdown().await;
+            }
         }
     }
 
@@ -213,7 +365,7 @@ impl McpManager {
                 continue;
             }
 
-            let (status, tools) = Self::connect_server(&config).await;
+            let (status, tools) = self.connect_server(&config).await;
             for t in &tools {
                 tool_defs.push(t.definition.clone());
             }
@@ -232,165 +384,74 @@ impl McpManager {
         records
     }
 
-    async fn connect_server(config: &McpServerConfig) -> (McpServerStatus, Vec<McpToolInfo>) {
-        match &config.transport {
-            McpTransport::Stdio { command, args, env } => {
-                let mut cmd = Command::new(command);
-                cmd.args(args);
-                for (k, v) in env {
-                    cmd.env(k, v);
-                }
-                cmd.stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::null());
-
-                let mut child = match cmd.spawn() {
-                    Ok(c) => c,
-                    Err(e) => {
-                        return (
-                            McpServerStatus::Error(format!("Failed to spawn process: {e}")),
-                            Vec::new(),
-                        )
-                    }
-                };
-
-                let mut stdin = match child.stdin.take() {
-                    Some(s) => s,
-                    None => {
-                        return (
-                            McpServerStatus::Error("Failed to open stdin".into()),
-                            Vec::new(),
-                        )
-                    }
-                };
-                let stdout = match child.stdout.take() {
-                    Some(s) => s,
-                    None => {
-                        return (
-                            McpServerStatus::Error("Failed to open stdout".into()),
-                            Vec::new(),
-                        )
-                    }
-                };
-
-                let mut reader = BufReader::new(stdout);
-
-                // Send initialize JSON-RPC request
-                let init_req = json!({
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "initialize",
-                    "params": {
-                        "protocolVersion": "2024-11-05",
-                        "capabilities": {},
-                        "clientInfo": {
-                            "name": "threadlane",
-                            "version": env!("CARGO_PKG_VERSION")
-                        }
-                    }
-                });
-
-                let mut line = String::new();
-                let write_res = stdin.write_all(format!("{}\n", init_req).as_bytes()).await;
-                if let Err(e) = write_res {
-                    let _ = child.kill().await;
-                    return (
-                        McpServerStatus::Error(format!("Failed to send initialize: {e}")),
-                        Vec::new(),
-                    );
-                }
-
-                let read_res =
-                    tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line)).await;
-                if read_res.is_err() || line.trim().is_empty() {
-                    let _ = child.kill().await;
-                    return (
-                        McpServerStatus::Error("Initialize response timed out".into()),
-                        Vec::new(),
-                    );
-                }
-
-                // Send initialized notification
-                let init_notif = json!({
-                    "jsonrpc": "2.0",
-                    "method": "notifications/initialized"
-                });
-                let _ = stdin
-                    .write_all(format!("{}\n", init_notif).as_bytes())
-                    .await;
-
-                // Send tools/list request
-                let list_req = json!({
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "method": "tools/list",
-                    "params": {}
-                });
-                let _ = stdin.write_all(format!("{}\n", list_req).as_bytes()).await;
-
-                line.clear();
-                let list_res =
-                    tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line)).await;
-                let _ = child.kill().await;
-
-                if list_res.is_err() || line.trim().is_empty() {
-                    return (
-                        McpServerStatus::Error("tools/list response timed out".into()),
-                        Vec::new(),
-                    );
-                }
-
-                let response_json: Value = match serde_json::from_str(line.trim()) {
-                    Ok(val) => val,
-                    Err(e) => {
-                        return (
-                            McpServerStatus::Error(format!("Failed to parse response: {e}")),
-                            Vec::new(),
-                        )
-                    }
-                };
-
-                let mut mcp_tools = Vec::new();
-                if let Some(tools_arr) = response_json
-                    .get("result")
-                    .and_then(|r| r.get("tools"))
-                    .and_then(|t| t.as_array())
-                {
-                    for tool_val in tools_arr {
-                        if let Some(name) = tool_val.get("name").and_then(|n| n.as_str()) {
-                            let description = tool_val
-                                .get("description")
-                                .and_then(|d| d.as_str())
-                                .unwrap_or("MCP tool");
-                            let input_schema = tool_val
-                                .get("inputSchema")
-                                .cloned()
-                                .unwrap_or_else(|| json!({"type": "object", "properties": {}}));
-
-                            let full_name = format!("mcp__{}__{}", config.id, name);
-                            let definition = AgentToolDefinition::new(
-                                full_name.clone(),
-                                format!("[MCP: {}] {}", config.name, description),
-                                input_schema,
-                            );
-
-                            mcp_tools.push(McpToolInfo {
-                                tool_name: name.to_string(),
-                                full_name,
-                                definition,
-                            });
-                        }
-                    }
-                }
-
-                let count = mcp_tools.len();
-                (McpServerStatus::Connected { tool_count: count }, mcp_tools)
-            }
-            McpTransport::Sse { url, .. } => (
+    /// Opens (or reuses) a session and lists the server's tools.
+    async fn connect_server(&self, config: &McpServerConfig) -> (McpServerStatus, Vec<McpToolInfo>) {
+        if matches!(config.transport, McpTransport::Sse { .. }) {
+            let McpTransport::Sse { url, .. } = &config.transport else {
+                unreachable!("transport was just matched as SSE")
+            };
+            return (
                 McpServerStatus::Error(format!("SSE transport ({url}) not active")),
                 Vec::new(),
-            ),
+            );
         }
+
+        // A previous session may be stale after a config change, so discovery
+        // always starts a fresh one and retires the old process.
+        let previous = self.sessions.lock().await.remove(&config.id);
+        if let Some(previous) = previous {
+            if let Ok(previous) = Arc::try_unwrap(previous) {
+                previous.into_inner().shutdown().await;
+            }
+        }
+        let mut session = match McpSession::connect(config).await {
+            Ok(session) => session,
+            Err(error) => return (McpServerStatus::Error(error), Vec::new()),
+        };
+
+        let listed = session.request("tools/list", json!({})).await;
+        let response = match listed {
+            Ok(response) => response,
+            Err(error) => {
+                session.shutdown().await;
+                return (McpServerStatus::Error(error), Vec::new());
+            }
+        };
+
+        let mut mcp_tools = Vec::new();
+        if let Some(tools) = response.get("tools").and_then(Value::as_array) {
+            for tool in tools {
+                let Some(name) = tool.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                let description = tool
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or("MCP tool");
+                let input_schema = tool
+                    .get("inputSchema")
+                    .cloned()
+                    .unwrap_or_else(|| json!({"type": "object", "properties": {}}));
+                let full_name = format!("mcp__{}__{}", config.id, name);
+                mcp_tools.push(McpToolInfo {
+                    tool_name: name.to_string(),
+                    full_name: full_name.clone(),
+                    definition: AgentToolDefinition::new(
+                        full_name,
+                        format!("[MCP: {}] {}", config.name, description),
+                        input_schema,
+                    ),
+                });
+            }
+        }
+
+        // Keep the session for tool calls instead of killing it here.
+        self.sessions
+            .lock()
+            .await
+            .insert(config.id.clone(), Arc::new(TokioMutex::new(session)));
+        let count = mcp_tools.len();
+        (McpServerStatus::Connected { tool_count: count }, mcp_tools)
     }
 
     fn get_tools_sync(&self) -> Vec<AgentToolDefinition> {
@@ -401,135 +462,91 @@ impl McpManager {
     }
 
     async fn execute_tool(&self, full_name: &str, args: &str) -> Option<Result<String, String>> {
-        let guard = self.servers.lock().await;
-        let mut target = None;
-        for server in guard.iter() {
-            if !server.config.enabled {
-                continue;
-            }
-            for tool in &server.tools {
-                if tool.full_name == full_name || tool.tool_name == full_name {
-                    target = Some((server.config.clone(), tool.tool_name.clone()));
-                    break;
+        let target = {
+            let servers = self.servers.lock().await;
+            servers.iter().find_map(|server| {
+                if !server.config.enabled {
+                    return None;
                 }
-            }
-            if target.is_some() {
-                break;
-            }
-        }
-        drop(guard);
-
+                server
+                    .tools
+                    .iter()
+                    .find(|tool| tool.full_name == full_name || tool.tool_name == full_name)
+                    .map(|tool| (server.config.clone(), tool.tool_name.clone()))
+            })
+        };
         let (config, tool_name) = target?;
+
         let parsed_args: Value = match serde_json::from_str(args) {
-            Ok(v) => v,
-            Err(e) => return Some(Err(format!("Invalid JSON tool arguments: {e}"))),
+            Ok(value) => value,
+            Err(error) => return Some(Err(format!("Invalid JSON tool arguments: {error}"))),
         };
 
-        match config.transport {
-            McpTransport::Stdio { command, args, env } => {
-                let mut cmd = Command::new(&command);
-                cmd.args(&args);
-                for (k, v) in &env {
-                    cmd.env(k, v);
-                }
-                cmd.stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::null());
-
-                let mut child = match cmd.spawn() {
-                    Ok(c) => c,
-                    Err(e) => return Some(Err(format!("Failed to spawn MCP server: {e}"))),
-                };
-
-                let mut stdin = child.stdin.take().unwrap();
-                let stdout = child.stdout.take().unwrap();
-                let mut reader = BufReader::new(stdout);
-
-                // Handshake
-                let init_req = json!({
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "initialize",
-                    "params": {
-                        "protocolVersion": "2024-11-05",
-                        "capabilities": {},
-                        "clientInfo": { "name": "threadlane", "version": env!("CARGO_PKG_VERSION") }
-                    }
-                });
-                let _ = stdin.write_all(format!("{}\n", init_req).as_bytes()).await;
-
-                let mut line = String::new();
-                let _ =
-                    tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line)).await;
-
-                let init_notif = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
-                let _ = stdin
-                    .write_all(format!("{}\n", init_notif).as_bytes())
-                    .await;
-
-                // Execute call
-                let call_req = json!({
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "method": "tools/call",
-                    "params": {
-                        "name": tool_name,
-                        "arguments": parsed_args
-                    }
-                });
-                let _ = stdin.write_all(format!("{}\n", call_req).as_bytes()).await;
-
-                line.clear();
-                let read_res =
-                    tokio::time::timeout(Duration::from_secs(15), reader.read_line(&mut line))
-                        .await;
-                let _ = child.kill().await;
-
-                if read_res.is_err() || line.trim().is_empty() {
-                    return Some(Err("MCP tool execution timed out".into()));
-                }
-
-                let response_json: Value = match serde_json::from_str(line.trim()) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return Some(Err(format!("Failed to parse tool execution response: {e}")))
-                    }
-                };
-
-                if let Some(err) = response_json.get("error") {
-                    let msg = err
-                        .get("message")
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("MCP error");
-                    return Some(Err(msg.to_string()));
-                }
-
-                let mut output = String::new();
-                if let Some(content) = response_json
-                    .get("result")
-                    .and_then(|r| r.get("content"))
-                    .and_then(|c| c.as_array())
-                {
-                    for item in content {
-                        if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
-                            if !output.is_empty() {
-                                output.push('\n');
-                            }
-                            output.push_str(text);
+        // Resolve the handle under the map lock, then release it before doing
+        // any I/O so concurrent calls to other servers are not serialized.
+        let handle = {
+            let existing = self.sessions.lock().await.get(&config.id).cloned();
+            match existing {
+                Some(handle) => handle,
+                None => {
+                    // A server that died between calls is restarted once rather
+                    // than failing the tool call outright.
+                    let session = match McpSession::connect(&config).await {
+                        Ok(session) => session,
+                        Err(error) => {
+                            return Some(Err(format!("Failed to start MCP server: {error}")))
                         }
+                    };
+                    let handle = Arc::new(TokioMutex::new(session));
+                    self.sessions
+                        .lock()
+                        .await
+                        .insert(config.id.clone(), Arc::clone(&handle));
+                    handle
+                }
+            }
+        };
+
+        let response = {
+            let mut session = handle.lock().await;
+            session
+                .request(
+                    "tools/call",
+                    json!({ "name": tool_name, "arguments": parsed_args }),
+                )
+                .await
+        };
+
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                // The pipe is no longer trustworthy after a failed exchange;
+                // drop it so the next call starts a clean session.
+                let broken = self.sessions.lock().await.remove(&config.id);
+                if let Some(broken) = broken {
+                    if let Ok(broken) = Arc::try_unwrap(broken) {
+                        broken.into_inner().shutdown().await;
                     }
                 }
-
-                if output.is_empty() {
-                    output = serde_json::to_string_pretty(&response_json).unwrap_or_default();
-                }
-
-                Some(Ok(output))
+                return Some(Err(error));
             }
-            McpTransport::Sse { url, .. } => Some(Err(format!(
-                "SSE transport for {url} not currently supported"
-            ))),
+        };
+
+        let mut output = String::new();
+        if let Some(content) = response.get("content").and_then(Value::as_array) {
+            for item in content {
+                if let Some(text) = item.get("text").and_then(Value::as_str) {
+                    if !output.is_empty() {
+                        output.push('\n');
+                    }
+                    output.push_str(text);
+                }
+            }
         }
+        if output.is_empty() {
+            output = serde_json::to_string_pretty(&response).unwrap_or_default();
+        }
+        Some(Ok(output))
     }
 }
 
