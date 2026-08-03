@@ -986,6 +986,10 @@ script_mod! {
                     text: "MCP Servers"
                 }
 
+                settings_nav_acp_btn := mod.components.NavButton {
+                    text: "ACP Agents"
+                }
+
                 settings_nav_about_btn := mod.components.NavButton {
                     text: "About"
                 }
@@ -1462,6 +1466,169 @@ script_mod! {
                     }
 
                     mcp_status_lbl := Label {
+                        width: Fill
+                        height: Fit
+                        padding: 0
+                        text: ""
+                        draw_text +: {
+                            color: theme.color_primary
+                            text_style +: { font_size: 9.5 }
+                        }
+                    }
+                }
+
+                acp_page := View {
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    spacing: 12
+                    visible: false
+
+                    acp_header := View {
+                        width: Fill
+                        height: 28
+                        flow: Right
+                        spacing: 6
+                        align: Align{y: 0.5}
+
+                        acp_page_title := Label {
+                            width: Fill
+                            height: 28
+                            padding: 0
+                            align: Align{y: 0.5}
+                            text: "ACP Agents"
+                            draw_text +: {
+                                color: theme.color_foreground
+                                text_style: theme.font_bold { font_size: 18.0 }
+                            }
+                        }
+
+                        acp_scope_global_btn := SettingsActionButton {
+                            height: 24
+                            padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
+                            text: "Global"
+                        }
+                        acp_scope_project_btn := SettingsActionButton {
+                            height: 24
+                            padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
+                            text: "Project"
+                            draw_bg +: {
+                                color: theme.color_primary
+                                border_color: theme.color_primary
+                            }
+                        }
+                        acp_refresh_btn := mod.components.IconButton {
+                            draw_icon +: {
+                                svg: crate_resource("self:resources/icons/refresh.svg")
+                            }
+                        }
+                    }
+
+                    acp_page_desc := Label {
+                        width: Fill
+                        height: Fit
+                        padding: 0
+                        text: "External coding agents that speak the Agent Client Protocol over stdio."
+                        draw_text +: {
+                            color: theme.color_muted_foreground
+                            text_style +: { font_size: 10.0 }
+                        }
+                    }
+
+                    acp_add_card := RoundedView {
+                        width: Fill
+                        height: Fit
+                        flow: Down
+                        padding: Inset{left: 12 top: 10 right: 12 bottom: 10}
+                        spacing: 8
+                        draw_bg +: {
+                            color: theme.color_card
+                            border_radius: 8.0
+                            border_size: 1.0
+                            border_color: theme.color_input
+                        }
+
+                        acp_add_title := Label {
+                            width: Fill
+                            height: Fit
+                            text: "Add ACP Agent"
+                            draw_text +: {
+                                color: theme.color_foreground
+                                text_style: theme.font_bold { font_size: 11.0 }
+                            }
+                        }
+
+                        acp_add_inputs := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 8
+                            align: Align{y: 0.5}
+
+                            acp_name_input := TextInput {
+                                width: 140
+                                height: 28
+                                padding: Inset{left: 8 right: 8}
+                                empty_text: "Name (e.g. Gemini)"
+                                draw_bg +: {
+                                    color: theme.color_input
+                                    color_focus: theme.color_input
+                                    border_color: theme.color_secondary
+                                    border_color_focus: theme.color_primary
+                                    border_radius: 5.0
+                                    border_size: 1.0
+                                }
+                                draw_text +: {
+                                    color: theme.color_foreground
+                                    color_empty: theme.color_muted_foreground
+                                }
+                            }
+
+                            acp_command_input := TextInput {
+                                width: Fill
+                                height: 28
+                                padding: Inset{left: 8 right: 8}
+                                empty_text: "Command (e.g. gemini --experimental-acp)"
+                                draw_bg +: {
+                                    color: theme.color_input
+                                    color_focus: theme.color_input
+                                    border_color: theme.color_secondary
+                                    border_color_focus: theme.color_primary
+                                    border_radius: 5.0
+                                    border_size: 1.0
+                                }
+                                draw_text +: {
+                                    color: theme.color_foreground
+                                    color_empty: theme.color_muted_foreground
+                                }
+                            }
+
+                            acp_submit_add_btn := SettingsActionButton {
+                                height: 28
+                                padding: Inset{left: 12 right: 12 top: 4 bottom: 4}
+                                text: "Add"
+                                draw_bg +: {
+                                    color: theme.color_primary
+                                    border_color: theme.color_primary
+                                }
+                            }
+                        }
+                    }
+
+                    acp_list := PortalList {
+                        width: Fill
+                        height: Fill
+                        flow: Down
+                        spacing: 8
+
+                        AcpRow := mod.components.CapabilityRowWithRemove {}
+
+                        AcpEmptyRow := mod.components.CapabilityEmptyRow {
+                            empty_lbl: { text: "No ACP agents configured." }
+                        }
+                    }
+
+                    acp_status_lbl := Label {
                         width: Fill
                         height: Fit
                         padding: 0
@@ -4936,6 +5103,191 @@ impl App {
         }
     }
 
+    fn set_acp_status(&mut self, cx: &mut Cx, status: &str) {
+        if let Some(mut modal) = self
+            .ui
+            .widget(cx, ids!(providers_modal))
+            .borrow_mut::<ProviderSettingsModal>()
+        {
+            modal.set_acp_status(cx, status);
+        }
+    }
+
+    fn load_acp_configs(
+        scope: threadlane_coding_agent::AcpScope,
+        global_dir: Option<&Path>,
+        work_dir: Option<&Path>,
+    ) -> Vec<threadlane_coding_agent::AcpAgentConfig> {
+        match scope {
+            threadlane_coding_agent::AcpScope::Global => {
+                threadlane_coding_agent::AcpSettings::load_global(global_dir)
+            }
+            threadlane_coding_agent::AcpScope::Project => {
+                threadlane_coding_agent::AcpSettings::load_project(work_dir)
+            }
+        }
+    }
+
+    fn save_acp_configs(
+        scope: threadlane_coding_agent::AcpScope,
+        global_dir: Option<&Path>,
+        work_dir: Option<&Path>,
+        configs: &[threadlane_coding_agent::AcpAgentConfig],
+    ) -> Result<(), String> {
+        match scope {
+            threadlane_coding_agent::AcpScope::Global => {
+                let dir = global_dir
+                    .ok_or_else(|| "No global Threadlane directory is available.".to_string())?;
+                threadlane_coding_agent::AcpSettings::save_global(dir, configs)
+            }
+            threadlane_coding_agent::AcpScope::Project => {
+                let root = work_dir.ok_or_else(|| {
+                    "Attach a project to manage project-scoped ACP agents.".to_string()
+                })?;
+                threadlane_coding_agent::AcpSettings::save_project(root, configs)
+            }
+        }
+    }
+
+    /// Probing an agent spawns its process, so refreshes run off the UI thread
+    /// and report back through `AcpRefreshCompleted`.
+    ///
+    /// Configured agents are rendered immediately from disk so the list is not
+    /// blank while a slow or missing agent binary is being probed.
+    fn refresh_acp_state(&mut self, cx: &mut Cx) {
+        let global_dir = threadlane_coding_agent::default_global_threadlane_dir();
+        let work_dir = self.active_work_dir().map(Path::to_path_buf);
+
+        let pending = threadlane_coding_agent::AcpManager::new(global_dir.clone(), work_dir.clone())
+            .configs()
+            .into_iter()
+            .map(|config| {
+                let status = if config.enabled {
+                    threadlane_coding_agent::AcpAgentStatus::Connecting
+                } else {
+                    threadlane_coding_agent::AcpAgentStatus::Disconnected
+                };
+                threadlane_coding_agent::AcpAgentRecord { config, status }
+            })
+            .collect();
+        self.capability_state.refresh_acp_records(pending);
+        if let Some(mut modal) = self
+            .ui
+            .widget(cx, ids!(providers_modal))
+            .borrow_mut::<ProviderSettingsModal>()
+        {
+            modal.set_acp_rows(cx, self.capability_state.acp_agents.clone());
+        }
+
+        if let Some(tx) = self.tx.clone() {
+            get_runtime().spawn(async move {
+                let records = threadlane_coding_agent::AcpManager::new(global_dir, work_dir)
+                    .discover_and_connect()
+                    .await;
+                let _ = tx.send(GuiAgentEvent::AcpRefreshCompleted(records));
+                SignalToUI::set_ui_signal();
+            });
+        }
+    }
+
+    fn set_acp_enabled(&mut self, cx: &mut Cx, row: usize, enabled: bool) {
+        let Some(selected) = self.capability_state.acp_agents.get(row).cloned() else {
+            self.refresh_acp_state(cx);
+            self.set_acp_status(cx, "ACP agent list changed. Please try again.");
+            return;
+        };
+        let global_dir = threadlane_coding_agent::default_global_threadlane_dir();
+        let work_dir = self.active_work_dir().map(Path::to_path_buf);
+        let mut configs =
+            Self::load_acp_configs(selected.scope, global_dir.as_deref(), work_dir.as_deref());
+        let Some(config) = configs.iter_mut().find(|c| c.id == selected.id) else {
+            self.refresh_acp_state(cx);
+            self.set_acp_status(cx, "ACP agent list changed. Please try again.");
+            return;
+        };
+        config.enabled = enabled;
+        if let Err(error) = Self::save_acp_configs(
+            selected.scope,
+            global_dir.as_deref(),
+            work_dir.as_deref(),
+            &configs,
+        ) {
+            self.set_acp_status(cx, &format!("Failed to save ACP agent: {error}"));
+            return;
+        }
+        self.set_acp_status(cx, "");
+        self.refresh_acp_state(cx);
+    }
+
+    fn remove_acp_agent(&mut self, cx: &mut Cx, row: usize) {
+        let Some(selected) = self.capability_state.acp_agents.get(row).cloned() else {
+            self.refresh_acp_state(cx);
+            self.set_acp_status(cx, "ACP agent list changed. Please try again.");
+            return;
+        };
+        let global_dir = threadlane_coding_agent::default_global_threadlane_dir();
+        let work_dir = self.active_work_dir().map(Path::to_path_buf);
+        let mut configs =
+            Self::load_acp_configs(selected.scope, global_dir.as_deref(), work_dir.as_deref());
+        configs.retain(|c| c.id != selected.id);
+        if let Err(error) = Self::save_acp_configs(
+            selected.scope,
+            global_dir.as_deref(),
+            work_dir.as_deref(),
+            &configs,
+        ) {
+            self.set_acp_status(cx, &format!("Failed to remove ACP agent: {error}"));
+            return;
+        }
+        self.set_acp_status(cx, &format!("Removed ACP agent '{}'.", selected.name));
+        self.refresh_acp_state(cx);
+    }
+
+    fn add_acp_agent(
+        &mut self,
+        cx: &mut Cx,
+        scope: threadlane_coding_agent::AcpScope,
+        name: String,
+        command: String,
+    ) {
+        let Some(new_config) =
+            threadlane_coding_agent::AcpAgentConfig::from_command_line(&name, &command, scope)
+        else {
+            self.set_acp_status(cx, "Please provide both an agent name and a command.");
+            return;
+        };
+        // ACP has no HTTP transport; an agent is always a local command.
+        if command.trim().starts_with("http://") || command.trim().starts_with("https://") {
+            self.set_acp_status(
+                cx,
+                "ACP agents are launched over stdio; provide a command, not a URL.",
+            );
+            return;
+        }
+
+        let global_dir = threadlane_coding_agent::default_global_threadlane_dir();
+        let work_dir = self.active_work_dir().map(Path::to_path_buf);
+        if scope == threadlane_coding_agent::AcpScope::Project && work_dir.is_none() {
+            self.set_acp_status(cx, "Attach a project to add project-scoped ACP agents.");
+            return;
+        }
+
+        let mut configs = Self::load_acp_configs(scope, global_dir.as_deref(), work_dir.as_deref());
+        configs.retain(|c| c.id != new_config.id);
+        let display_name = new_config.name.clone();
+        configs.push(new_config);
+
+        match Self::save_acp_configs(scope, global_dir.as_deref(), work_dir.as_deref(), &configs) {
+            Ok(()) => {
+                self.set_acp_status(cx, &format!("Added ACP agent '{display_name}'."));
+                self.refresh_acp_state(cx);
+            }
+            Err(error) => {
+                self.set_acp_status(cx, &format!("Failed to save ACP agent: {error}"));
+            }
+        }
+    }
+
     fn set_skill_status(&mut self, cx: &mut Cx, status: &str) {
         if let Some(mut modal) = self
             .ui
@@ -8141,6 +8493,16 @@ impl App {
                     {
                         modal.set_mcp_rows(cx, self.capability_state.mcp_servers.clone());
                         modal.set_mcp_status(cx, "");
+                    }
+                }
+                GuiAgentEvent::AcpRefreshCompleted(records) => {
+                    self.capability_state.refresh_acp_records(records);
+                    if let Some(mut modal) = self
+                        .ui
+                        .widget(cx, ids!(providers_modal))
+                        .borrow_mut::<ProviderSettingsModal>()
+                    {
+                        modal.set_acp_rows(cx, self.capability_state.acp_agents.clone());
                     }
                 }
                 GuiAgentEvent::BackgroundTask(event) => {

@@ -299,6 +299,10 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 - That guard resolves a not-yet-existing target by joining the remaining components onto its canonicalized nearest existing ancestor, then comparing against the canonical root. Never compare a lexical path against the canonical root: a workspace reached through a symlink is spelled two ways (`/tmp/...` and `/private/tmp/...` on macOS), so the lexical check rejects valid new files anywhere under it.
 - The default `AcpPermissionPolicy` is `Reject`. An unattended client has no informed consent to give, so auto-approval must stay opt-in and any UI-backed handler should prompt rather than raise this default.
 - Build connections through `AcpConnection::from_streams` when testing. `tests/acp_tests.rs` pairs the client with an in-process stub agent over `tokio::io::duplex`, which covers framing, request correlation, and the sandbox without depending on an installed agent binary.
+- The settings modal has a dedicated `acp_page` whose scope buttons share the modal's single `install_scope_global` flag with the WASI and MCP pages; register new scope buttons in both `sync_install_scope` and the scope-click handlers rather than adding a second scope flag.
+- `ProviderSettingsModal::draw_walk` selects a `PortalList` branch by `self.page`, which is only correct because non-selected pages are invisible and therefore never draw. Any new capability page must add its branch there and its widget to `sync_page_visibility`, or its rows silently render into another page's list.
+- `refresh_acp_state` renders configured agents from disk immediately with `Connecting` status, then replaces them when the background probe reports through `AcpRefreshCompleted`. Probing spawns processes and each handshake can take seconds, so never probe on the UI thread and never leave the list blank while it runs.
+- Opening the settings modal must not probe ACP agents. Probing starts only when the ACP page is selected or refreshed, so merely opening settings never launches third-party binaries.
 
 ## Code Editor
 
@@ -335,6 +339,12 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
   both rows remain visible in settings. Disabling a project override reveals an
   enabled global module.
 - Use `./scripts/build_extensions.sh` to compile and deploy them.
+- An extension that drives a long-lived subprocess uses the broker's named managed process (`process.spawn`/`send`/`recv`/`kill`), not `process.run`. The process outlives a single tool call, which is what lets `debug_ext` stop at a breakpoint in one call and resume in the next. `process.recv` supports `content-length` framing, so both LSP and DAP need no framing code of their own.
+- Extension state is **one slot per extension**, persisted to disk and threaded into every invocation regardless of which tool ran. It is not per-tool-call scratch space. A tool that returns a terminal response without setting `state` leaves the previous phase persisted, and the next tool call then starts in a transient phase it cannot handle. Every terminal path must persist a stable state.
+- Do not use the phase string to tell a new tool call from a continuation — a fresh call arrives carrying the previous call's phase. The reliable discriminator is whether the invocation carries `broker_response` events, as `debug_ext::is_continuation` does.
+- Broker responses arrive on the *next* invocation as `broker_response` events, so any multi-step protocol exchange is a phase machine over `Invocation::state` with `continue_after_broker` set. Follow the `lsp_ext`/`debug_ext` shape: a `phase` string names what the extension is waiting for, and an unrecognized message re-issues the read without changing phase.
+- A protocol that interleaves responses and events (DAP especially) needs a bounded pump. Count continuation steps in the extension's state and fail with a clear message at the cap; an adapter streaming `output` events would otherwise keep a tool call alive indefinitely.
+- Declare the narrowest capability set that a tool actually needs. `debug_ext` requests only `process` even though it deals in file paths, because the adapter reads sources itself.
 - The script treats missing binaries and copy failures as fatal and must not
   clear user-installed modules or disabled markers from the extension root.
 - Bundled agent definitions and prompts are part of a valid extension deployment; do not update only the `.wasm` artifact when associated metadata also changes.

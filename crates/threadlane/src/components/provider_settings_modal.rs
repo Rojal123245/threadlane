@@ -11,6 +11,7 @@ pub enum SettingsPage {
     Capabilities,
     Skills,
     McpServers,
+    AcpAgents,
     About,
 }
 
@@ -42,6 +43,18 @@ pub enum ProviderSettingsModalAction {
         name: String,
         command: String,
     },
+    ShowAcpAgents,
+    SetAcpEnabled {
+        row: usize,
+        enabled: bool,
+    },
+    RemoveAcpAgent(usize),
+    RefreshAcpAgents,
+    AddAcpAgent {
+        scope: threadlane_coding_agent::AcpScope,
+        name: String,
+        command: String,
+    },
     #[default]
     None,
 }
@@ -66,6 +79,8 @@ pub struct ProviderSettingsModal {
     skill_rows: Vec<crate::state::CapabilitySkillRow>,
     #[rust]
     mcp_rows: Vec<crate::state::CapabilityMcpRow>,
+    #[rust]
+    acp_rows: Vec<crate::state::CapabilityAcpRow>,
     #[rust]
     install_scope_global: bool,
 }
@@ -144,6 +159,14 @@ impl Widget for ProviderSettingsModal {
             }
             if self
                 .view
+                .button(cx, ids!(settings_nav_acp_btn))
+                .clicked(actions)
+            {
+                self.set_page(cx, SettingsPage::AcpAgents);
+                cx.widget_action(uid, ProviderSettingsModalAction::ShowAcpAgents);
+            }
+            if self
+                .view
                 .button(cx, ids!(settings_nav_about_btn))
                 .clicked(actions)
             {
@@ -165,6 +188,10 @@ impl Widget for ProviderSettingsModal {
                     .view
                     .button(cx, ids!(mcp_scope_project_btn))
                     .clicked(actions)
+                || self
+                    .view
+                    .button(cx, ids!(acp_scope_project_btn))
+                    .clicked(actions)
             {
                 self.install_scope_global = false;
                 self.sync_install_scope(cx);
@@ -173,6 +200,10 @@ impl Widget for ProviderSettingsModal {
                 .view
                 .button(cx, ids!(mcp_scope_global_btn))
                 .clicked(actions)
+                || self
+                    .view
+                    .button(cx, ids!(acp_scope_global_btn))
+                    .clicked(actions)
             {
                 self.install_scope_global = true;
                 self.sync_install_scope(cx);
@@ -192,6 +223,27 @@ impl Widget for ProviderSettingsModal {
                 cx.widget_action(
                     uid,
                     ProviderSettingsModalAction::AddMcpServer {
+                        scope,
+                        name,
+                        command,
+                    },
+                );
+            }
+            if self
+                .view
+                .button(cx, ids!(acp_submit_add_btn))
+                .clicked(actions)
+            {
+                let name = self.view.text_input(cx, ids!(acp_name_input)).text();
+                let command = self.view.text_input(cx, ids!(acp_command_input)).text();
+                let scope = if self.install_scope_global {
+                    threadlane_coding_agent::AcpScope::Global
+                } else {
+                    threadlane_coding_agent::AcpScope::Project
+                };
+                cx.widget_action(
+                    uid,
+                    ProviderSettingsModalAction::AddAcpAgent {
                         scope,
                         name,
                         command,
@@ -221,6 +273,9 @@ impl Widget for ProviderSettingsModal {
             }
             if self.view.button(cx, ids!(mcp_refresh_btn)).clicked(actions) {
                 cx.widget_action(uid, ProviderSettingsModalAction::RefreshMcpServers);
+            }
+            if self.view.button(cx, ids!(acp_refresh_btn)).clicked(actions) {
+                cx.widget_action(uid, ProviderSettingsModalAction::RefreshAcpAgents);
             }
             let list = self.view.portal_list(cx, ids!(capability_list));
             for (row, item) in list.items_with_actions(actions) {
@@ -253,6 +308,18 @@ impl Widget for ProviderSettingsModal {
                 }
                 if item.button(cx, ids!(remove_btn)).clicked(actions) {
                     cx.widget_action(uid, ProviderSettingsModalAction::RemoveMcpServer(row));
+                }
+            }
+            let acp_list = self.view.portal_list(cx, ids!(acp_list));
+            for (row, item) in acp_list.items_with_actions(actions) {
+                if let Some(enabled) = item.check_box(cx, ids!(enabled_toggle)).changed(actions) {
+                    cx.widget_action(
+                        uid,
+                        ProviderSettingsModalAction::SetAcpEnabled { row, enabled },
+                    );
+                }
+                if item.button(cx, ids!(remove_btn)).clicked(actions) {
+                    cx.widget_action(uid, ProviderSettingsModalAction::RemoveAcpAgent(row));
                 }
             }
         }
@@ -334,6 +401,32 @@ impl Widget for ProviderSettingsModal {
                             );
                             item.draw_all_unscoped(cx);
                         }
+                    } else if self.page == SettingsPage::AcpAgents {
+                        list.set_item_range(cx, 0, self.acp_rows.len().max(1));
+                        while let Some(row_index) = list.next_visible_item(cx) {
+                            if self.acp_rows.is_empty() {
+                                if row_index == 0 {
+                                    list.item(cx, row_index, id!(AcpEmptyRow))
+                                        .draw_all_unscoped(cx);
+                                }
+                                continue;
+                            }
+                            let Some(row) = self.acp_rows.get(row_index) else {
+                                continue;
+                            };
+                            let item = list.item(cx, row_index, id!(AcpRow));
+                            item.label(cx, ids!(name_lbl)).set_text(cx, &row.name);
+                            item.label(cx, ids!(scope_lbl))
+                                .set_text(cx, &row.scope_status());
+                            item.label(cx, ids!(path_lbl))
+                                .set_text(cx, &row.command_detail);
+                            item.check_box(cx, ids!(enabled_toggle)).set_active(
+                                cx,
+                                row.enabled,
+                                Animate::No,
+                            );
+                            item.draw_all_unscoped(cx);
+                        }
                     } else if self.page == SettingsPage::Capabilities {
                         list.set_item_range(cx, 0, self.extension_rows.len().max(1));
                         while let Some(row_index) = list.next_visible_item(cx) {
@@ -402,6 +495,17 @@ impl ProviderSettingsModal {
         self.redraw_capability_overlay(cx);
     }
 
+    pub fn set_acp_rows(&mut self, cx: &mut Cx, rows: Vec<crate::state::CapabilityAcpRow>) {
+        self.acp_rows = rows;
+        self.redraw_capability_overlay(cx);
+    }
+
+    pub fn set_acp_status(&mut self, cx: &mut Cx, status: &str) {
+        self.view
+            .label(cx, ids!(acp_status_lbl))
+            .set_text(cx, status);
+    }
+
     pub fn set_mcp_status(&mut self, cx: &mut Cx, status: &str) {
         self.view
             .label(cx, ids!(mcp_status_lbl))
@@ -453,6 +557,8 @@ impl ProviderSettingsModal {
             ),
             (ids!(mcp_scope_global_btn), self.install_scope_global),
             (ids!(mcp_scope_project_btn), !self.install_scope_global),
+            (ids!(acp_scope_global_btn), self.install_scope_global),
+            (ids!(acp_scope_project_btn), !self.install_scope_global),
         ] {
             let mut button = self.view.button(cx, button_id);
             let color = if selected {
@@ -487,6 +593,7 @@ impl ProviderSettingsModal {
         let capabilities_selected = self.page == SettingsPage::Capabilities;
         let skills_selected = self.page == SettingsPage::Skills;
         let mcp_selected = self.page == SettingsPage::McpServers;
+        let acp_selected = self.page == SettingsPage::AcpAgents;
         let about_selected = self.page == SettingsPage::About;
 
         for (button_id, selected) in [
@@ -495,6 +602,7 @@ impl ProviderSettingsModal {
             (ids!(settings_nav_capabilities_btn), capabilities_selected),
             (ids!(settings_nav_skills_btn), skills_selected),
             (ids!(settings_nav_mcp_btn), mcp_selected),
+            (ids!(settings_nav_acp_btn), acp_selected),
             (ids!(settings_nav_about_btn), about_selected),
         ] {
             let button = self.view.button(cx, button_id);
@@ -518,6 +626,9 @@ impl ProviderSettingsModal {
             .button(cx, ids!(settings_nav_mcp_btn))
             .set_visible(cx, true);
         self.view
+            .button(cx, ids!(settings_nav_acp_btn))
+            .set_visible(cx, true);
+        self.view
             .button(cx, ids!(settings_nav_about_btn))
             .set_visible(cx, true);
         self.view
@@ -535,6 +646,9 @@ impl ProviderSettingsModal {
         self.view
             .widget(cx, ids!(mcp_page))
             .set_visible(cx, mcp_selected);
+        self.view
+            .widget(cx, ids!(acp_page))
+            .set_visible(cx, acp_selected);
         self.view
             .widget(cx, ids!(about_page))
             .set_visible(cx, about_selected);
