@@ -620,6 +620,11 @@ pub struct AcpWriteTextFileRequest {
 /// Client-side half of ACP: everything the agent may ask Threadlane to do.
 #[async_trait]
 pub trait AcpClientHandler: Send + Sync {
+    /// Called for each `session/update`, in the order the agent emitted them.
+    ///
+    /// This runs on the connection's read loop to preserve that order, so an
+    /// implementation must hand the update off (a channel send, a queue push)
+    /// rather than block on rendering or user interaction.
     async fn on_session_update(&self, notification: AcpSessionNotification);
 
     async fn request_permission(&self, request: AcpPermissionRequest) -> AcpPermissionOutcome;
@@ -1059,13 +1064,25 @@ async fn read_loop<R>(
             continue;
         };
 
-        let has_method = message.get("method").and_then(Value::as_str).is_some();
-        if has_method {
-            tokio::spawn(dispatch_incoming(
-                message,
-                Arc::clone(&writer),
-                Arc::clone(&handler),
-            ));
+        if let Some(method) = message.get("method").and_then(Value::as_str) {
+            if method == "session/update" {
+                // Session updates are order-sensitive: message chunks and
+                // tool-call updates only reconstruct correctly in the order the
+                // agent emitted them. Dispatching them inline preserves that
+                // order; spawning a task per notification does not.
+                let params = message.get("params").cloned().unwrap_or(Value::Null);
+                if let Some(notification) = parse_session_notification(params) {
+                    handler.on_session_update(notification).await;
+                }
+            } else {
+                // Requests can block on a user decision, so they must not stall
+                // the read loop the way an inline notification does.
+                tokio::spawn(dispatch_request(
+                    message,
+                    Arc::clone(&writer),
+                    Arc::clone(&handler),
+                ));
+            }
             continue;
         }
 
@@ -1099,8 +1116,8 @@ fn format_rpc_error(error: &Value) -> String {
     }
 }
 
-/// Handles one agent-initiated request or notification.
-async fn dispatch_incoming(
+/// Handles one agent-initiated request and writes its response.
+async fn dispatch_request(
     message: Value,
     writer: Arc<TokioMutex<BoxedWriter>>,
     handler: Arc<dyn AcpClientHandler>,
@@ -1111,17 +1128,10 @@ async fn dispatch_incoming(
         .unwrap_or_default()
         .to_string();
     let params = message.get("params").cloned().unwrap_or(Value::Null);
-    let id = message.get("id").cloned();
 
-    if method == "session/update" {
-        if let Some(notification) = parse_session_notification(params) {
-            handler.on_session_update(notification).await;
-        }
-        return;
-    }
-
-    // Every remaining method is a request that owes a response.
-    let Some(id) = id else {
+    // A method without an id is a notification we do not implement; there is
+    // nothing to answer.
+    let Some(id) = message.get("id").cloned() else {
         return;
     };
 

@@ -6,12 +6,13 @@
 
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::tempdir;
 use threadlane_coding_agent::{
-    AcpClientHandler, AcpConnection, AcpContentBlock, AcpPermissionPolicy, AcpProbeClient,
-    AcpSessionNotification, AcpSessionUpdate, AcpStopReason, AcpWorkspaceClient,
+    AcpClientHandler, AcpConnection, AcpContentBlock, AcpPermissionOutcome, AcpPermissionPolicy,
+    AcpPermissionRequest, AcpProbeClient, AcpReadTextFileRequest, AcpSessionNotification,
+    AcpSessionUpdate, AcpStopReason, AcpWorkspaceClient, AcpWriteTextFileRequest,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, DuplexStream, ReadHalf};
 use tokio::sync::mpsc;
@@ -519,6 +520,81 @@ async fn probing_refuses_filesystem_and_permission_requests() {
         permission["result"]["outcome"],
         json!({ "outcome": "cancelled" })
     );
+}
+
+/// Records update text in arrival order, yielding first so the recording spans
+/// an await point. Any realistic handler has one (a channel send, a UI hop);
+/// without it a task-per-notification scheduler can look ordered by accident.
+struct OrderRecordingClient {
+    seen: Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl AcpClientHandler for OrderRecordingClient {
+    async fn on_session_update(&self, notification: AcpSessionNotification) {
+        tokio::task::yield_now().await;
+        if let AcpSessionUpdate::AgentMessageChunk(block) = notification.update {
+            if let Some(text) = block.as_text() {
+                self.seen.lock().unwrap().push(text.to_string());
+            }
+        }
+    }
+
+    async fn request_permission(&self, _request: AcpPermissionRequest) -> AcpPermissionOutcome {
+        AcpPermissionOutcome::Cancelled
+    }
+
+    async fn read_text_file(&self, _request: AcpReadTextFileRequest) -> Result<String, String> {
+        Err("unused".to_string())
+    }
+
+    async fn write_text_file(&self, _request: AcpWriteTextFileRequest) -> Result<(), String> {
+        Err("unused".to_string())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn streamed_updates_arrive_in_the_order_the_agent_sent_them() {
+    const CHUNKS: usize = 200;
+
+    let handler = Arc::new(OrderRecordingClient {
+        seen: Mutex::new(Vec::new()),
+    });
+    let (connection, mut stub) = connect_with_handler(handler.clone());
+
+    let agent = tokio::spawn(async move {
+        let init = stub.next_message().await;
+        stub.respond(&init["id"], json!({ "protocolVersion": 1 }))
+            .await;
+        for index in 0..CHUNKS {
+            stub.notify_update(
+                "sess_1",
+                json!({
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": { "type": "text", "text": index.to_string() },
+                }),
+            )
+            .await;
+        }
+        stub
+    });
+
+    connection.initialize().await.unwrap();
+    let _stub = agent.await.unwrap();
+
+    // A streamed reply only reconstructs in order. Dispatching notifications on
+    // separate tasks lets them interleave once the runtime has more than one
+    // worker thread.
+    let expected: Vec<String> = (0..CHUNKS).map(|index| index.to_string()).collect();
+    for _ in 0..50 {
+        if handler.seen.lock().unwrap().len() == CHUNKS {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let seen = handler.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), CHUNKS, "not every chunk was delivered");
+    assert_eq!(seen, expected, "chunks were delivered out of order");
 }
 
 #[tokio::test]

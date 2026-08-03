@@ -229,14 +229,28 @@ pub fn validate_path_in_workspace(
                 canonical_root.display()
             ));
         }
-        if !normalized.starts_with(&canonical_root) {
+        // Rebuild the target on top of the canonical ancestor. Comparing
+        // `normalized` against the canonical root directly would reject valid
+        // destinations whenever the workspace path traverses a symlink, because
+        // the two sides are then spelled differently (`/tmp/...` against
+        // `/private/tmp/...` on macOS). The trailing components do not exist, so
+        // they cannot themselves be symlinks that escape.
+        let tail = normalized.strip_prefix(ancestor).map_err(|_| {
+            format!(
+                "Failed to resolve path '{}' inside workspace root '{}'",
+                path_input,
+                canonical_root.display()
+            )
+        })?;
+        let resolved = canonical_ancestor.join(tail);
+        if !resolved.starts_with(&canonical_root) {
             return Err(format!(
                 "Access denied: Path '{}' escapes workspace root '{}'",
                 path_input,
                 canonical_root.display()
             ));
         }
-        Ok(normalized)
+        Ok(resolved)
     }
 }
 
@@ -831,6 +845,49 @@ fn run_post_edit_diagnostics(workspace_root: &Path, raw_path: &str) -> String {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn validate_path_allows_a_new_absolute_destination_under_a_symlinked_root() {
+        // `tempdir()` lives under a symlinked prefix on macOS (`/var` ->
+        // `/private/var`), which is exactly the shape a caller sends back after
+        // being handed a non-canonical workspace path.
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let target = root.join("nested").join("new.txt");
+
+        let resolved = validate_path_in_workspace(&target.to_string_lossy(), root)
+            .expect("a new file inside the workspace must be allowed");
+
+        let canonical_root = root.canonicalize().unwrap();
+        assert!(resolved.starts_with(&canonical_root));
+        assert!(resolved.ends_with("nested/new.txt"));
+    }
+
+    #[test]
+    fn validate_path_resolves_existing_and_new_paths_to_the_same_root() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("exists.txt"), "x").unwrap();
+
+        let existing =
+            validate_path_in_workspace(&root.join("exists.txt").to_string_lossy(), root).unwrap();
+        let new = validate_path_in_workspace(&root.join("new.txt").to_string_lossy(), root).unwrap();
+
+        assert_eq!(existing.parent(), new.parent());
+    }
+
+    #[test]
+    fn validate_path_still_denies_escapes_for_paths_that_do_not_exist() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+
+        let relative = validate_path_in_workspace("../escaped.txt", dir.path());
+        assert!(relative.is_err(), "got: {relative:?}");
+
+        let absolute =
+            validate_path_in_workspace(&outside.path().join("new.txt").to_string_lossy(), dir.path());
+        assert!(absolute.is_err(), "got: {absolute:?}");
+    }
 
     #[test]
     fn test_run_post_edit_diagnostics_non_rust_file() {
