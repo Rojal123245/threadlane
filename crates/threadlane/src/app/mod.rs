@@ -7,7 +7,7 @@ mod terminal_handlers;
 mod workspace_sync;
 
 use terminal_handlers::{canonical_terminal_work_dir, truncate_terminal_output};
-use crate::components::code_editor_view::CodeEditorViewWidgetRefExt;
+use crate::components::code_editor_view::{CodeEditorViewAction, CodeEditorViewWidgetRefExt};
 use crate::components::file_tree::{FileTree, FileTreeAction};
 use crate::components::git_changes::{GitChanges, GitChangesAction};
 use crate::components::git_diff::GitDiffView;
@@ -3921,6 +3921,17 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(file_tree_tab_btn)).clicked(actions) {
             self.right_sidebar_tab = RightSidebarTab::FileTree;
             self.sync_right_sidebar(cx);
+        }
+
+        // The editor reports its own edits; the unsaved marker in the header
+        // only updates if the app refreshes it when that fires.
+        let code_editor_uid = self.ui.widget(cx, ids!(code_editor_view)).widget_uid();
+        if let Some(action) = actions.find_widget_action(code_editor_uid) {
+            if matches!(action.cast::<CodeEditorViewAction>(), CodeEditorViewAction::Modified)
+                && self.right_sidebar_tab == RightSidebarTab::Editor
+            {
+                self.sync_code_editor_header(cx);
+            }
         }
 
         if self.ui.button(cx, ids!(code_editor_tab_btn)).clicked(actions) {

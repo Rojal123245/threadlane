@@ -9,6 +9,7 @@
 //! Chrome (file name, close button) lives in the app DSL around this widget,
 //! matching how `file_tree_wrap` wraps the file tree.
 
+use makepad_code_editor::code_editor::CodeEditorAction;
 use makepad_code_editor::decoration::DecorationSet;
 use makepad_code_editor::{CodeDocument, CodeEditor, CodeSession};
 use makepad_widgets::*;
@@ -173,13 +174,14 @@ impl Widget for CodeEditorView {
         let actions = self
             .editor
             .handle_event(cx, event, &mut Scope::empty(), session);
-        if actions.is_empty() {
-            return;
-        }
-        // Any editor action means the buffer moved away from what is on disk.
-        // Tracking it here keeps the "unsaved" marker owned by the widget that
-        // knows about the edit rather than by the app shell.
-        if !self.modified {
+        // Only a content change makes the buffer differ from disk. Cursor
+        // movement, selection, scrolling, and focus all produce actions too, so
+        // treating any action as an edit would show "unsaved" on a file that is
+        // still byte-identical.
+        let changed = actions
+            .iter()
+            .any(|action| matches!(action, CodeEditorAction::TextDidChange));
+        if changed && !self.modified {
             self.modified = true;
             cx.widget_action(self.uid, CodeEditorViewAction::Modified);
         }
@@ -279,6 +281,24 @@ mod tests {
         );
         assert!(error.contains("MB"), "got: {error}");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn only_a_text_change_marks_the_buffer_modified() {
+        // The dirty check runs over the actions the upstream editor returns.
+        // Cursor movement and unhandled keys are actions too, so the predicate
+        // has to select `TextDidChange` specifically.
+        let edit = [CodeEditorAction::TextDidChange];
+        let navigation = [CodeEditorAction::None];
+        let dirty = |actions: &[CodeEditorAction]| {
+            actions
+                .iter()
+                .any(|action| matches!(action, CodeEditorAction::TextDidChange))
+        };
+
+        assert!(dirty(&edit));
+        assert!(!dirty(&navigation));
+        assert!(!dirty(&[]));
     }
 
     #[test]
