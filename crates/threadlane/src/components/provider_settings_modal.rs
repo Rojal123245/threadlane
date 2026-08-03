@@ -117,6 +117,22 @@ impl Widget for ProviderSettingsModal {
         }
 
         self.view.handle_event(cx, event, scope);
+        if let Event::MouseUp(mouse) = event {
+            if mouse.button.is_primary() {
+                for input_id in [
+                    ids!(mcp_name_input),
+                    ids!(mcp_command_input),
+                    ids!(acp_name_input),
+                    ids!(acp_command_input),
+                ] {
+                    let input = self.view.text_input(cx, input_id);
+                    if input.area().rect(cx).contains(mouse.abs) {
+                        input.set_key_focus(cx);
+                        break;
+                    }
+                }
+            }
+        }
         if let Event::Actions(actions) = event {
             let uid = self.widget_uid();
             if self

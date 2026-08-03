@@ -1469,6 +1469,12 @@ script_mod! {
                                     color: theme.color_primary
                                     border_color: theme.color_primary
                                 }
+                                draw_text +: {
+                                    color: theme.color_primary_foreground
+                                    color_hover: theme.color_primary_foreground
+                                    color_focus: theme.color_primary_foreground
+                                    color_down: theme.color_primary_foreground
+                                }
                             }
                         }
                     }
@@ -1631,6 +1637,12 @@ script_mod! {
                                 draw_bg +: {
                                     color: theme.color_primary
                                     border_color: theme.color_primary
+                                }
+                                draw_text +: {
+                                    color: theme.color_primary_foreground
+                                    color_hover: theme.color_primary_foreground
+                                    color_focus: theme.color_primary_foreground
+                                    color_down: theme.color_primary_foreground
                                 }
                             }
                         }
