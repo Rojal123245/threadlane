@@ -1,4 +1,5 @@
 pub mod acp;
+pub mod acp_bridge;
 pub mod agents;
 pub mod capabilities;
 pub mod coding_agent;
@@ -24,6 +25,9 @@ pub use acp::{
     AcpReadTextFileRequest, AcpScope, AcpSession, AcpSessionNotification, AcpSessionUpdate,
     AcpSettings, AcpStopReason, AcpToolCall, AcpToolCallStatus, AcpToolKind, AcpWorkspaceClient,
     AcpWriteTextFileRequest, ACP_PROTOCOL_VERSION,
+};
+pub use acp_bridge::{
+    acp_agent_id, acp_model_id, agent_events_for, is_acp_model, ACP_MODEL_PREFIX,
 };
 pub use agents::{discover_agents, AgentConfig, AgentDiscoveryResult, AgentScope, AgentSource};
 pub use capabilities::CapabilityCatalog;

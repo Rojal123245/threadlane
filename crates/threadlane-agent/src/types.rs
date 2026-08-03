@@ -323,6 +323,28 @@ pub struct AgentToolResult {
     pub(crate) terminate: bool,
 }
 
+impl AgentToolResult {
+    /// Builds a tool result produced outside the built-in tool loop.
+    ///
+    /// External agents (ACP) report tool outcomes that need to reach the same
+    /// transcript rendering as native tool calls, but they never terminate the
+    /// loop, so `terminate` stays private and false.
+    pub fn external(
+        tool_call_id: impl Into<String>,
+        name: impl Into<String>,
+        content: impl Into<String>,
+        is_error: bool,
+    ) -> Self {
+        Self {
+            tool_call_id: tool_call_id.into(),
+            name: name.into(),
+            content: content.into(),
+            is_error,
+            terminate: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct BeforeToolCallResult {
     pub block: bool,
