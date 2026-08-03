@@ -1,3 +1,4 @@
+pub mod acp;
 pub mod agents;
 pub mod capabilities;
 pub mod coding_agent;
@@ -15,6 +16,15 @@ pub mod supervisor;
 pub mod system_prompt;
 pub mod wasi_extension;
 
+pub use acp::{
+    AcpAgentCapabilities, AcpAgentConfig, AcpAgentRecord, AcpAgentStatus, AcpAuthMethod,
+    AcpClientHandler, AcpConnection, AcpContentBlock, AcpInitializeResult, AcpManager,
+    AcpNewSessionResult, AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionOutcome,
+    AcpPermissionPolicy, AcpPermissionRequest, AcpPlanEntry, AcpReadTextFileRequest, AcpScope,
+    AcpSession, AcpSessionNotification, AcpSessionUpdate, AcpSettings, AcpStopReason, AcpToolCall,
+    AcpToolCallStatus, AcpToolKind, AcpWorkspaceClient, AcpWriteTextFileRequest,
+    ACP_PROTOCOL_VERSION,
+};
 pub use agents::{discover_agents, AgentConfig, AgentDiscoveryResult, AgentScope, AgentSource};
 pub use capabilities::CapabilityCatalog;
 pub use coding_agent::{

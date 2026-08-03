@@ -285,6 +285,18 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 - The settings modal has a dedicated `skills_page` (separate `PortalList` and row template from `capability_list`). In `ProviderSettingsModal::draw_walk`, the two `PortalList`s share one `as_portal_list()` loop, so each branch must be matched by comparing `list.widget_uid()` against the resolved list widget before drawing rows.
 - A toggle must clear `capability_cache`, refresh the capabilities chip / slash commands via `refresh_project_capabilities`, and call `refresh_live_session_skills` so running sessions re-discover skills. `CodingAgent::refresh_skills` swaps the shared `SkillRegistry` `Arc`; note the already-registered `LoadSkillToolExecutor` holds the previous `Arc`, so an in-flight session keeps the catalog from its creation and a fresh session fully reflects the toggle.
 
+## External ACP Agents
+
+- Threadlane is an Agent Client Protocol *client*: it launches a third-party agent as a subprocess and speaks newline-delimited JSON-RPC 2.0 over its stdio pipes. It is not an ACP agent server, and ACP has no non-stdio transport, so an `AcpAgentConfig` is always a spawnable command.
+- `crates/threadlane-coding-agent/src/acp.rs` owns the protocol. Follow the `mcp.rs` precedent rather than adding a protocol SDK dependency: the wire format is hand-rolled with `serde_json` over `tokio::process`, which keeps the runtime model consistent with the rest of the workspace.
+- Configuration mirrors MCP: `acp.json` in the global Threadlane directory and in `<project>/.threadlane/`. Project entries shadow global entries with the same `id`, unparsable or oversized files load as empty, and the scope on a loaded config always comes from the file it was read from, never from the file's contents.
+- ACP grows by adding enum variants. Decode defensively: unknown `session/update` kinds become `AcpSessionUpdate::Other`, unknown content blocks become `AcpContentBlock::Unknown`, and unknown tool kinds, tool statuses, permission kinds, and stop reasons degrade to `None`/`Unknown` instead of failing the surrounding message. A newer agent must never break an in-flight turn.
+- `AcpConnection` is bidirectional. The reader task resolves pending client requests by id and dispatches agent-initiated requests (`fs/read_text_file`, `fs/write_text_file`, `session/request_permission`) to the `AcpClientHandler`; every unimplemented method must answer `-32601` rather than going silent, or the agent blocks forever.
+- `session/prompt` has no client-side timeout: a turn runs until the agent reports a stop reason, and `session/cancel` is the interrupt. Reserve timeouts for the handshake and other bounded calls.
+- Agent-driven filesystem access is workspace-scoped through `threadlane_tools::validate_path_in_workspace`. Do not add a second path-guard implementation, and do not widen the guard to satisfy an agent that asks for absolute paths outside the project.
+- The default `AcpPermissionPolicy` is `Reject`. An unattended client has no informed consent to give, so auto-approval must stay opt-in and any UI-backed handler should prompt rather than raise this default.
+- Build connections through `AcpConnection::from_streams` when testing. `tests/acp_tests.rs` pairs the client with an in-process stub agent over `tokio::io::duplex`, which covers framing, request correlation, and the sandbox without depending on an installed agent binary.
+
 ## Updater Behavior
 
 - `THREADLANE_UPDATER_PUBLIC_KEY` and `THREADLANE_UPDATER_ENDPOINT` are compile-time environment values through `option_env!`.

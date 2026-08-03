@@ -161,7 +161,15 @@ pub fn get_codex_tools() -> Vec<Value> {
         .collect()
 }
 
-fn validate_path_in_workspace(path_input: &str, workspace_root: &Path) -> Result<PathBuf, String> {
+/// Resolves `path_input` against `workspace_root` and rejects anything that
+/// escapes the workspace, including via symlinks or `..` components.
+///
+/// Accepts absolute and relative inputs, and tolerates paths that do not exist
+/// yet so callers can validate a write destination before creating it.
+pub fn validate_path_in_workspace(
+    path_input: &str,
+    workspace_root: &Path,
+) -> Result<PathBuf, String> {
     let canonical_root = workspace_root
         .canonicalize()
         .map_err(|e| format!("Invalid workspace root '{}': {e}", workspace_root.display()))?;
