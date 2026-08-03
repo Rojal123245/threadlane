@@ -8,6 +8,7 @@ pub mod auth_row;
 pub mod capability_row;
 pub mod chat_bubble;
 pub mod clipped_label;
+pub mod code_editor_view;
 pub mod code_label;
 pub mod command_input;
 pub mod composer_action;
@@ -52,6 +53,10 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     sidebar_compose_button::script_mod(vm);
     clipped_label::script_mod(vm);
     code_label::script_mod(vm);
+    // The upstream code editor registers `CodeEditor` into `mod.widgets`, which
+    // `CodeEditorView` inherits from, so it must be registered first.
+    makepad_code_editor::script_mod(vm);
+    code_editor_view::script_mod(vm);
     status_dot::script_mod(vm);
     notice_banner::script_mod(vm);
     section_header::script_mod(vm);

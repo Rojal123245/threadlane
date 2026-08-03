@@ -7,6 +7,7 @@ mod terminal_handlers;
 mod workspace_sync;
 
 use terminal_handlers::{canonical_terminal_work_dir, truncate_terminal_output};
+use crate::components::code_editor_view::{CodeEditorViewAction, CodeEditorViewWidgetRefExt};
 use crate::components::file_tree::{FileTree, FileTreeAction};
 use crate::components::git_changes::{GitChanges, GitChangesAction};
 use crate::components::git_diff::GitDiffView;
@@ -125,6 +126,7 @@ enum RightSidebarTab {
     Git,
     Tasks,
     FileTree,
+    Editor,
 }
 
 fn append_antigravity_models(models: &mut Vec<String>) {
@@ -2879,6 +2881,82 @@ script_mod! {
                                         height: Fill
                                     }
                                 }
+                                code_editor_wrap := View {
+                                    width: Fill
+                                    height: Fill
+                                    visible: false
+                                    flow: Down
+                                    spacing: 6
+                                    padding: Inset{left: 10 top: 10 right: 10 bottom: 10}
+                                    draw_bg +: {
+                                        color: theme.color_input
+                                        border_color: theme.color_border
+                                        border_size: 1.0
+                                        border_radius: 8.0
+                                    }
+
+                                    code_editor_header := View {
+                                        width: Fill
+                                        height: 24
+                                        flow: Right
+                                        spacing: 6
+                                        align: Align{y: 0.5}
+
+                                        code_editor_path_lbl := mod.components.ClippedLabel {
+                                            width: Fill
+                                            height: 16
+                                            text: ""
+                                            align: Align{y: 0.5}
+                                            draw_text +: {
+                                                color: theme.color_muted_foreground
+                                                text_style: theme.font_code { font_size: 8.0 }
+                                            }
+                                        }
+                                        code_editor_save_btn := mod.components.IconButton {
+                                            width: 26
+                                            height: 22
+                                            text: ""
+                                            icon_walk: Walk{width: 13 height: 13}
+                                            align: Align{x: 0.5 y: 0.5}
+                                            padding: 0
+                                            spacing: 0
+                                            draw_icon +: {
+                                                svg: crate_resource("self:resources/icons/write-file.svg")
+                                                color: theme.color_muted_foreground
+                                                color_hover: theme.color_success
+                                                color_down: theme.color_primary
+                                            }
+                                        }
+                                        code_editor_close_btn := mod.components.IconButton {
+                                            width: 26
+                                            height: 22
+                                            text: ""
+                                            icon_walk: Walk{width: 13 height: 13}
+                                            align: Align{x: 0.5 y: 0.5}
+                                            padding: 0
+                                            spacing: 0
+                                            draw_icon +: {
+                                                svg: crate_resource("self:resources/icons/close.svg")
+                                                color: theme.color_muted_foreground
+                                                color_hover: theme.color_destructive
+                                                color_down: theme.color_primary
+                                            }
+                                        }
+                                    }
+
+                                    code_editor_status_lbl := Label {
+                                        width: Fill
+                                        height: Fit
+                                        padding: 0
+                                        text: ""
+                                        draw_text +: {
+                                            color: theme.color_destructive
+                                            text_style +: { font_size: 9.0 }
+                                        }
+                                    }
+
+                                    code_editor_view := mod.components.CodeEditorView {}
+                                }
                                 right_sidebar_tabs := View {
                                     width: Fill
                                     height: 36
@@ -2917,6 +2995,21 @@ script_mod! {
                                         spacing: 0
                                         draw_icon +: {
                                             svg: crate_resource("self:resources/icons/git.svg")
+                                            color: theme.color_muted_foreground
+                                            color_hover: theme.color_foreground
+                                            color_down: theme.color_primary
+                                        }
+                                    }
+                                    code_editor_tab_btn := mod.components.IconButton {
+                                        width: 36
+                                        height: 28
+                                        text: ""
+                                        icon_walk: Walk{width: 15 height: 15}
+                                        align: Align{x: 0.5 y: 0.5}
+                                        padding: 0
+                                        spacing: 0
+                                        draw_icon +: {
+                                            svg: crate_resource("self:resources/icons/edit-file.svg")
                                             color: theme.color_muted_foreground
                                             color_hover: theme.color_foreground
                                             color_down: theme.color_primary
@@ -3351,6 +3444,8 @@ pub struct App {
     git_commit_message_abort: Option<tokio::task::AbortHandle>,
     #[rust]
     right_sidebar_tab: RightSidebarTab,
+    #[rust]
+    code_editor_status: Option<String>,
     #[rust]
     right_sidebar_open: bool,
     #[rust]
@@ -3969,7 +4064,7 @@ impl MatchEvent for App {
         if let Some(action) = actions.find_widget_action(file_tree_uid) {
             match action.cast::<FileTreeAction>() {
                 FileTreeAction::FileClicked(path) => {
-                    self.start_git_diff(cx, path);
+                    self.open_file_in_editor(cx, &path);
                 }
                 FileTreeAction::FolderToggled(_) | FileTreeAction::None => {}
             }
@@ -3991,6 +4086,33 @@ impl MatchEvent for App {
         }
 
         if self.ui.button(cx, ids!(file_tree_tab_btn)).clicked(actions) {
+            self.right_sidebar_tab = RightSidebarTab::FileTree;
+            self.sync_right_sidebar(cx);
+        }
+
+        // The editor reports its own edits; the unsaved marker in the header
+        // only updates if the app refreshes it when that fires.
+        let code_editor_uid = self.ui.widget(cx, ids!(code_editor_view)).widget_uid();
+        if let Some(action) = actions.find_widget_action(code_editor_uid) {
+            if matches!(action.cast::<CodeEditorViewAction>(), CodeEditorViewAction::Modified)
+                && self.right_sidebar_tab == RightSidebarTab::Editor
+            {
+                self.sync_code_editor_header(cx);
+            }
+        }
+
+        if self.ui.button(cx, ids!(code_editor_tab_btn)).clicked(actions) {
+            self.right_sidebar_tab = RightSidebarTab::Editor;
+            self.sync_right_sidebar(cx);
+        }
+
+        if self.ui.button(cx, ids!(code_editor_save_btn)).clicked(actions) {
+            self.save_open_editor_file(cx);
+        }
+
+        if self.ui.button(cx, ids!(code_editor_close_btn)).clicked(actions) {
+            self.ui.code_editor_view(cx, ids!(code_editor_view)).close(cx);
+            self.code_editor_status = None;
             self.right_sidebar_tab = RightSidebarTab::FileTree;
             self.sync_right_sidebar(cx);
         }
@@ -6127,6 +6249,75 @@ impl App {
         });
     }
 
+    /// Opens a workspace-relative path from the file tree in the code editor.
+    fn open_file_in_editor(&mut self, cx: &mut Cx, rel_path: &str) {
+        let Some(work_dir) = self.active_work_dir().map(Path::to_path_buf) else {
+            return;
+        };
+        // The tree only ever yields paths under the workspace, but resolving
+        // through the shared guard keeps that true if the tree ever changes.
+        let absolute = match threadlane_tools::validate_path_in_workspace(rel_path, &work_dir) {
+            Ok(path) => path,
+            Err(error) => {
+                self.code_editor_status = Some(error);
+                self.right_sidebar_tab = RightSidebarTab::Editor;
+                self.sync_right_sidebar(cx);
+                return;
+            }
+        };
+
+        let editor = self.ui.code_editor_view(cx, ids!(code_editor_view));
+        self.code_editor_status = match editor.open_file(cx, &absolute) {
+            Ok(()) => None,
+            Err(error) => Some(error),
+        };
+        self.right_sidebar_tab = RightSidebarTab::Editor;
+        self.sync_right_sidebar(cx);
+    }
+
+    fn save_open_editor_file(&mut self, cx: &mut Cx) {
+        let editor = self.ui.code_editor_view(cx, ids!(code_editor_view));
+        self.code_editor_status = match editor.save() {
+            Ok(()) => None,
+            Err(error) => Some(error),
+        };
+        // A save changes the working tree, so the Git panel is now stale.
+        self.request_git_status();
+        self.sync_right_sidebar(cx);
+    }
+
+    fn sync_code_editor_header(&mut self, cx: &mut Cx) {
+        let editor = self.ui.code_editor_view(cx, ids!(code_editor_view));
+        let work_dir = self.active_work_dir().map(Path::to_path_buf);
+        let label = match editor.path() {
+            Some(path) => {
+                let shown = work_dir
+                    .as_deref()
+                    .and_then(|root| path.strip_prefix(root).ok())
+                    .unwrap_or(path.as_path())
+                    .display()
+                    .to_string();
+                if editor.is_modified() {
+                    format!("{shown} •")
+                } else {
+                    shown
+                }
+            }
+            None => "No file open".to_string(),
+        };
+        self.ui
+            .label(cx, ids!(code_editor_path_lbl))
+            .set_text(cx, &label);
+
+        let status = self.code_editor_status.clone().unwrap_or_default();
+        self.ui
+            .label(cx, ids!(code_editor_status_lbl))
+            .set_text(cx, &status);
+        self.ui
+            .button(cx, ids!(code_editor_save_btn))
+            .set_enabled(cx, editor.is_open());
+    }
+
     fn sync_right_sidebar(&mut self, cx: &mut Cx) {
         if let Some(content_width) = self.content_row_width(cx) {
             self.right_sidebar_width = self.right_sidebar_width.clamp(
@@ -6241,6 +6432,7 @@ impl App {
         let show_git = tab == RightSidebarTab::Git;
         let show_tasks = tab == RightSidebarTab::Tasks;
         let show_file_tree = tab == RightSidebarTab::FileTree;
+        let show_editor = tab == RightSidebarTab::Editor;
 
         let show_git_changes = show_git && !self.git_diff_open;
         let show_git_diff = show_git && self.git_diff_open;
@@ -6294,6 +6486,13 @@ impl App {
         self.ui
             .view(cx, ids!(file_tree_wrap))
             .set_visible(cx, show_file_tree);
+        self.ui
+            .view(cx, ids!(code_editor_wrap))
+            .set_visible(cx, show_editor);
+
+        if show_editor {
+            self.sync_code_editor_header(cx);
+        }
 
         if show_file_tree {
             if let Some(mut tree) = self.ui.widget(cx, ids!(file_tree)).borrow_mut::<FileTree>() {
@@ -6305,6 +6504,17 @@ impl App {
             cx,
             &self.ui.button(cx, ids!(tasks_tab_btn)),
             tab == RightSidebarTab::Tasks || self.right_sidebar_agents_available,
+        );
+        // The editor tab only appears once a file has been opened, so the strip
+        // does not show a control that would land on an empty panel.
+        let editor_open = self.ui.code_editor_view(cx, ids!(code_editor_view)).is_open();
+        self.ui
+            .button(cx, ids!(code_editor_tab_btn))
+            .set_visible(cx, editor_open);
+        crate::components::nav_button::set_selected(
+            cx,
+            &self.ui.button(cx, ids!(code_editor_tab_btn)),
+            show_editor,
         );
         crate::components::nav_button::set_selected(
             cx,
