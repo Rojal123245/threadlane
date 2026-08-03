@@ -84,8 +84,13 @@ const MAX_TERMINAL_OUTPUT: usize = 256 * 1024;
 const RIGHT_SIDEBAR_MIN_WIDTH: f64 = 220.0;
 const RIGHT_SIDEBAR_MAX_WIDTH: f64 = 520.0;
 const RIGHT_SIDEBAR_MIN_MAIN_WIDTH: f64 = 360.0;
+const LEFT_SIDEBAR_WIDTH: f64 = 250.0;
 const DEFAULT_CONTEXT_WINDOW: u32 = 258_000;
 const CONTEXT_USAGE_FACT: &str = "context_window_usage";
+
+fn left_sidebar_splitter_align(open: bool) -> SplitterAlign {
+    SplitterAlign::FromA(if open { LEFT_SIDEBAR_WIDTH } else { 0.0 })
+}
 
 fn normalize_generated_commit_message(raw: &str) -> String {
     let line = raw
@@ -1646,6 +1651,14 @@ script_mod! {
                                     }
                                 }
                                 sidebar_brand_spacer := mod.components.FlexSpacer {}
+                                left_sidebar_toggle_btn := mod.components.IconButton {
+                                    width: 26
+                                    height: 26
+                                    icon_walk: Walk{width: 14 height: 14}
+                                    draw_icon +: {
+                                        svg: crate_resource("self:resources/icons/sidebar.svg")
+                                    }
+                                }
                                 settings_btn := mod.components.IconButton {
                                     width: 26
                                     height: 26
@@ -1734,6 +1747,27 @@ script_mod! {
                             spacing: 8
                             padding: Inset{left: 4 top: 1 right: 2 bottom: 2}
 
+                            left_sidebar_expand_btn := mod.components.IconButton {
+                                width: 28
+                                height: 28
+                                visible: false
+                                icon_walk: Walk{width: 14 height: 14}
+                                draw_bg +: {
+                                    color: theme.color_secondary
+                                    color_hover: theme.color_card
+                                    color_focus: theme.color_card
+                                    color_down: theme.color_input
+                                    border_radius: 14.0
+                                }
+                                draw_icon +: {
+                                    color: theme.color_foreground
+                                    color_hover: theme.color_foreground
+                                    color_focus: theme.color_foreground
+                                    color_down: theme.color_primary_foreground
+                                }
+                                draw_icon +: { svg: crate_resource("self:resources/icons/sidebar.svg") }
+                            }
+
                             project_identity := View {
                                 width: Fill
                                 height: Fit
@@ -1782,7 +1816,7 @@ script_mod! {
                                 width: 24
                                 height: 24
                                 icon_walk: Walk{width: 11 height: 11}
-                                draw_icon +: { svg: crate_resource("self:resources/icons/terminal.svg") }
+                                draw_icon +: { svg: crate_resource("self:resources/icons/panel-down.svg") }
                             }
 
                             caps_btn := mod.components.HeaderChipButton {
@@ -3061,6 +3095,8 @@ pub struct App {
     #[rust]
     sidebar_pointer: Option<Vec2d>,
     #[rust]
+    left_sidebar_open: bool,
+    #[rust]
     auth_workspace: Option<SessionKey>,
     #[rust]
     project_registry: Option<ProjectRegistry>,
@@ -3144,6 +3180,7 @@ impl MatchEvent for App {
         self.terminal_poll_next_frame = NextFrame::default();
         self.git_status_timer = cx.start_interval(2.0);
         self.right_sidebar_width = 280.0;
+        self.left_sidebar_open = true;
         let (tx, rx) = channel::<GuiAgentEvent>();
         self.tx = Some(tx);
         self.rx = Some(Arc::new(Mutex::new(rx)));
@@ -3475,6 +3512,18 @@ impl MatchEvent for App {
             self.ui
                 .project_terminal(cx, ids!(project_terminal))
                 .toggle(cx);
+        }
+
+        if self
+            .ui
+            .button(cx, ids!(left_sidebar_toggle_btn))
+            .clicked(actions)
+            || self
+                .ui
+                .button(cx, ids!(left_sidebar_expand_btn))
+                .clicked(actions)
+        {
+            self.toggle_left_sidebar(cx);
         }
 
         if self.ui.button(cx, ids!(settings_btn)).clicked(actions) {
@@ -4316,6 +4365,23 @@ fn format_capabilities_summary(skills: &[SkillMetadata], agents: &[AgentConfig])
 }
 
 impl App {
+    fn toggle_left_sidebar(&mut self, cx: &mut Cx) {
+        self.left_sidebar_open = !self.left_sidebar_open;
+        self.ui.dock(cx, ids!(dock)).set_splitter_align(
+            cx,
+            id!(root),
+            left_sidebar_splitter_align(self.left_sidebar_open),
+            false,
+        );
+        self.ui
+            .button(cx, ids!(left_sidebar_toggle_btn))
+            .set_visible(cx, self.left_sidebar_open);
+        self.ui
+            .button(cx, ids!(left_sidebar_expand_btn))
+            .set_visible(cx, !self.left_sidebar_open);
+        self.ui.view(cx, ids!(header)).redraw(cx);
+    }
+
     fn stop_active_generation(&mut self, cx: &mut Cx) {
         let active_key = self.workspace_state.active_key().cloned();
         if let Some(key) = active_key {
@@ -7854,13 +7920,15 @@ mod workspace_header_tests {
     use super::{
         aggregate_extension_reload_results, append_antigravity_models, clear_composer_for_dispatch,
         compact_workspace_path, extension_reload_matches, extension_reload_status,
-        model_credential_error, normalize_generated_commit_message, ordered_model_options,
+        left_sidebar_splitter_align, model_credential_error, normalize_generated_commit_message,
+        ordered_model_options,
         project_name, reduce_harness_event, session_reload_count, task_sidebar_items,
         restore_harness_activities, truncate_terminal_output, InputOrigin, ANTIGRAVITY_MODELS,
-        MAX_TERMINAL_OUTPUT,
+        MAX_TERMINAL_OUTPUT, LEFT_SIDEBAR_WIDTH,
     };
     use crate::panels::chat::state::HarnessActivityStatus;
     use crate::workspace::WorkspaceUiState;
+    use makepad_widgets::SplitterAlign;
     use std::path::{Path, PathBuf};
     use threadlane_agent::{AgentEvent, ImageAttachment, OpOutcome, OpRecord, SubagentRecoveryStatus};
     use threadlane_coding_agent::{ExtensionScope, TaskKind, TaskRecord, TaskStatus};
@@ -8184,6 +8252,18 @@ mod workspace_header_tests {
             project_name(Path::new("/Users/alex/code/threadlane")),
             "threadlane"
         );
+    }
+
+    #[test]
+    fn left_sidebar_splitter_alignment_tracks_visibility() {
+        assert!(matches!(
+            left_sidebar_splitter_align(true),
+            SplitterAlign::FromA(width) if width == LEFT_SIDEBAR_WIDTH
+        ));
+        assert!(matches!(
+            left_sidebar_splitter_align(false),
+            SplitterAlign::FromA(width) if width == 0.0
+        ));
     }
 
     #[test]
