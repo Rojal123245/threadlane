@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
 use threadlane_coding_agent::{
-    AcpConnection, AcpContentBlock, AcpPermissionPolicy, AcpSessionNotification, AcpSessionUpdate,
-    AcpStopReason, AcpWorkspaceClient,
+    AcpClientHandler, AcpConnection, AcpContentBlock, AcpPermissionPolicy, AcpProbeClient,
+    AcpSessionNotification, AcpSessionUpdate, AcpStopReason, AcpWorkspaceClient,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, DuplexStream, ReadHalf};
 use tokio::sync::mpsc;
@@ -73,23 +73,28 @@ fn connect(
     StubAgent,
     mpsc::UnboundedReceiver<AcpSessionNotification>,
 ) {
-    let (client_io, agent_io) = tokio::io::duplex(64 * 1024);
-    let (client_read, client_write) = tokio::io::split(client_io);
-    let (agent_read, agent_write) = tokio::io::split(agent_io);
-
     let (tx, rx) = mpsc::unbounded_channel();
     let handler = Arc::new(
         AcpWorkspaceClient::new(workspace)
             .with_permission_policy(policy)
             .with_update_sender(tx),
     );
+    let (connection, stub) = connect_with_handler(handler);
+    (connection, stub, rx)
+}
+
+/// Builds a connection with an arbitrary handler.
+fn connect_with_handler(handler: Arc<dyn AcpClientHandler>) -> (AcpConnection, StubAgent) {
+    let (client_io, agent_io) = tokio::io::duplex(64 * 1024);
+    let (client_read, client_write) = tokio::io::split(client_io);
+    let (agent_read, agent_write) = tokio::io::split(agent_io);
 
     let connection = AcpConnection::from_streams(client_write, client_read, handler, None);
     let stub = StubAgent {
         reader: BufReader::new(agent_read),
         writer: Box::new(agent_write),
     };
-    (connection, stub, rx)
+    (connection, stub)
 }
 
 #[tokio::test]
@@ -459,6 +464,95 @@ async fn cancel_is_sent_as_a_notification() {
     assert!(
         message["id"].is_null(),
         "session/cancel must not carry a request id"
+    );
+}
+
+#[tokio::test]
+async fn probing_refuses_filesystem_and_permission_requests() {
+    let workspace = tempdir().unwrap();
+    let readable = workspace.path().join("in-workspace.txt");
+    std::fs::write(&readable, "even this is off limits while probing").unwrap();
+
+    let (connection, mut stub) = connect_with_handler(Arc::new(AcpProbeClient));
+
+    let agent = tokio::spawn(async move {
+        let init = stub.next_message().await;
+        stub.respond(&init["id"], json!({ "protocolVersion": 1 }))
+            .await;
+
+        // A probe has no session, so an agent asking for files during the
+        // handshake must be refused even for a path the app could otherwise read.
+        stub.send(json!({
+            "jsonrpc": "2.0",
+            "id": 500,
+            "method": "fs/read_text_file",
+            "params": { "sessionId": "probe", "path": readable.to_string_lossy() },
+        }))
+        .await;
+        let read = stub.next_message().await;
+
+        stub.send(json!({
+            "jsonrpc": "2.0",
+            "id": 501,
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": "probe",
+                "toolCall": { "toolCallId": "call_1" },
+                "options": [{ "optionId": "yes", "name": "Allow", "kind": "allow_once" }],
+            },
+        }))
+        .await;
+        let permission = stub.next_message().await;
+
+        (read, permission)
+    });
+
+    connection.initialize().await.unwrap();
+    let (read, permission) = agent.await.unwrap();
+
+    assert!(read["result"].is_null());
+    assert!(read["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("not available while probing"));
+    assert_eq!(
+        permission["result"]["outcome"],
+        json!({ "outcome": "cancelled" })
+    );
+}
+
+#[tokio::test]
+async fn shutdown_fails_an_in_flight_prompt() {
+    let workspace = tempdir().unwrap();
+    let (connection, mut stub, _updates) = connect(
+        workspace.path().to_path_buf(),
+        AcpPermissionPolicy::default(),
+    );
+    let connection = Arc::new(connection);
+
+    // `session/prompt` has no timeout, so shutting the connection down is the
+    // only thing that can release a caller waiting on an unanswered turn.
+    let pending = tokio::spawn({
+        let connection = Arc::clone(&connection);
+        async move {
+            connection
+                .prompt("sess_1", vec![AcpContentBlock::text("hello")])
+                .await
+        }
+    });
+    let sent = stub.next_message().await;
+    assert_eq!(sent["method"], "session/prompt");
+
+    connection.shutdown().await;
+
+    let error = tokio::time::timeout(Duration::from_secs(5), pending)
+        .await
+        .expect("shutdown must not leave a prompt hanging")
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        error.contains("shut down") || error.contains("closed the connection"),
+        "unexpected error: {error}"
     );
 }
 

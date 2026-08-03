@@ -20,10 +20,10 @@ pub use acp::{
     AcpAgentCapabilities, AcpAgentConfig, AcpAgentRecord, AcpAgentStatus, AcpAuthMethod,
     AcpClientHandler, AcpConnection, AcpContentBlock, AcpInitializeResult, AcpManager,
     AcpNewSessionResult, AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionOutcome,
-    AcpPermissionPolicy, AcpPermissionRequest, AcpPlanEntry, AcpReadTextFileRequest, AcpScope,
-    AcpSession, AcpSessionNotification, AcpSessionUpdate, AcpSettings, AcpStopReason, AcpToolCall,
-    AcpToolCallStatus, AcpToolKind, AcpWorkspaceClient, AcpWriteTextFileRequest,
-    ACP_PROTOCOL_VERSION,
+    AcpPermissionPolicy, AcpPermissionRequest, AcpPlanEntry, AcpProbeClient,
+    AcpReadTextFileRequest, AcpScope, AcpSession, AcpSessionNotification, AcpSessionUpdate,
+    AcpSettings, AcpStopReason, AcpToolCall, AcpToolCallStatus, AcpToolKind, AcpWorkspaceClient,
+    AcpWriteTextFileRequest, ACP_PROTOCOL_VERSION,
 };
 pub use agents::{discover_agents, AgentConfig, AgentDiscoveryResult, AgentScope, AgentSource};
 pub use capabilities::CapabilityCatalog;

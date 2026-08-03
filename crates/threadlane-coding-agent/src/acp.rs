@@ -746,6 +746,31 @@ impl AcpClientHandler for AcpWorkspaceClient {
     }
 }
 
+/// Handler for connections that exist only to complete a handshake.
+///
+/// A probe has no session and no user watching, so it grants nothing: every
+/// filesystem method is refused and every permission request is cancelled. This
+/// is what keeps `AcpManager::discover_and_connect` from handing an unproven
+/// third-party binary access to whatever directory the app happens to be in.
+pub struct AcpProbeClient;
+
+#[async_trait]
+impl AcpClientHandler for AcpProbeClient {
+    async fn on_session_update(&self, _notification: AcpSessionNotification) {}
+
+    async fn request_permission(&self, _request: AcpPermissionRequest) -> AcpPermissionOutcome {
+        AcpPermissionOutcome::Cancelled
+    }
+
+    async fn read_text_file(&self, _request: AcpReadTextFileRequest) -> Result<String, String> {
+        Err("Filesystem access is not available while probing an ACP agent".to_string())
+    }
+
+    async fn write_text_file(&self, _request: AcpWriteTextFileRequest) -> Result<(), String> {
+        Err("Filesystem access is not available while probing an ACP agent".to_string())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Connection
 // ---------------------------------------------------------------------------
@@ -1002,6 +1027,12 @@ impl AcpConnection {
 impl Drop for AcpConnection {
     fn drop(&mut self) {
         self.reader_task.abort();
+        // `abort` only schedules cancellation, so the reader's own clone of the
+        // pending map may outlive this call. Fail the waiters here instead of
+        // relying on the channel senders being dropped at some later point.
+        for (_, sender) in lock_pending(&self.pending).drain() {
+            let _ = sender.send(Err("ACP connection was dropped".to_string()));
+        }
     }
 }
 
@@ -1318,11 +1349,13 @@ impl AcpManager {
         self.agents.lock().await.clone()
     }
 
+    /// Completes a handshake and terminates the process.
+    ///
+    /// The probe runs with [`AcpProbeClient`], so an agent that issues
+    /// filesystem or permission requests during `initialize` is refused rather
+    /// than handed access to the current directory.
     async fn probe(config: &AcpAgentConfig, cwd: Option<&Path>) -> AcpAgentStatus {
-        let handler: Arc<dyn AcpClientHandler> = Arc::new(AcpWorkspaceClient::new(
-            cwd.map(Path::to_path_buf)
-                .unwrap_or_else(|| PathBuf::from(".")),
-        ));
+        let handler: Arc<dyn AcpClientHandler> = Arc::new(AcpProbeClient);
         let connection = match AcpConnection::spawn(config, cwd, handler).await {
             Ok(connection) => connection,
             Err(error) => return AcpAgentStatus::Error(error),
