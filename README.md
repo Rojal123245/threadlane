@@ -214,6 +214,34 @@ Threadlane reads identity and version information from the module's exported
 An enabled project module overrides an enabled global module with the same
 manifest name. Each scope can be enabled, disabled, or removed independently.
 
+### Debugging
+
+`debug_ext` lets the agent run a program under a real debugger instead of
+adding print statements. It speaks the
+[Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/)
+to a debug adapter launched through the capability broker.
+
+| Tool | Purpose |
+| --- | --- |
+| `debug_run` | Launch a program with breakpoints and report where it stops, with a stack trace. |
+| `debug_continue` | Resume the stopped program: `continue`, `next`, `step_in`, or `step_out`. |
+| `debug_eval` | Evaluate an expression in the stopped program. |
+| `debug_stop` | Terminate the session and its adapter. |
+
+The adapter is chosen from the program under test, and must be installed
+separately and on `PATH`:
+
+| Program | Adapter | Install |
+| --- | --- | --- |
+| Native executables (Rust, C, C++) | `lldb-dap` | Ships with LLVM |
+| `*.py` | `debugpy` | `pip install debugpy` |
+| `*.go` | `dlv dap` | `go install github.com/go-delve/delve/cmd/dlv@latest` |
+| `*.js` | `js-debug-adapter` | Ships with the VS Code JavaScript debugger |
+
+Pass `adapter` to override the command and `adapter_type` to override the DAP
+launch type when a project needs a different debugger. Only adapters that speak
+DAP over stdio work; the broker exposes no TCP capability, so port-based
+adapters are out of reach.
 ## External ACP Agents
 
 Threadlane can talk to third-party coding agents that implement the

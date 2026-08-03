@@ -66,6 +66,33 @@ fn broker_smoke_manifest_matches_v2_documentation() {
 }
 
 #[test]
+fn debug_extension_manifest_declares_dap_tools_and_process_capability() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let path = root.join(".threadlane/extensions/debug_ext.wasm");
+    let extension = WasiExtension::load_from_file(&path).unwrap_or_else(|error| {
+        panic!(
+            "load deployed debug extension at {} (run scripts/build_extensions.sh): {error}",
+            path.display()
+        )
+    });
+
+    assert_eq!(extension.manifest.api_version, 2);
+    assert_eq!(extension.manifest.name, "debug_ext");
+    // Debugging drives an adapter subprocess and nothing else; a wider grant
+    // would hand a third-party adapter capabilities it never needs.
+    assert_eq!(extension.manifest.capabilities, vec!["process"]);
+    assert_eq!(
+        extension
+            .manifest
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["debug_run", "debug_continue", "debug_eval", "debug_stop"]
+    );
+}
+
+#[test]
 fn broker_import_queues_accepted_requests_and_returns_denials_to_the_extension() {
     let extension = WasiExtension::load_from_file(&build_broker_smoke_extension(false)).unwrap();
     let manager = WasiExtensionManager::new();
