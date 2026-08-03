@@ -40,6 +40,21 @@ impl App {
                 } => {
                     self.add_mcp_server(cx, scope, name, command);
                 }
+                ProviderSettingsModalAction::ShowAcpAgents
+                | ProviderSettingsModalAction::RefreshAcpAgents => self.refresh_acp_state(cx),
+                ProviderSettingsModalAction::SetAcpEnabled { row, enabled } => {
+                    self.set_acp_enabled(cx, row, enabled);
+                }
+                ProviderSettingsModalAction::RemoveAcpAgent(row) => {
+                    self.remove_acp_agent(cx, row);
+                }
+                ProviderSettingsModalAction::AddAcpAgent {
+                    scope,
+                    name,
+                    command,
+                } => {
+                    self.add_acp_agent(cx, scope, name, command);
+                }
                 ProviderSettingsModalAction::None => {}
             }
         }
