@@ -47,6 +47,7 @@ Threadlane combines a GPU-accelerated desktop interface with a capable coding-ag
 | Session trees | Fork, clone, navigate, persist, and compact branching conversation history. |
 | Provider integration | OpenAI-compatible streaming, Codex-oriented models, reasoning controls, device authorization, and credential persistence. |
 | WASI extensions | Sandboxed Wasm modules using the `threadlane_host` capability broker. |
+| ACP agents | Configure external Agent Client Protocol agents per project or globally, and check that each one launches and handshakes. |
 | Signed updater | Background update checks, verified downloads, progress UI, and packaged-app installation/relaunch. |
 
 ## How It Fits Together
@@ -92,6 +93,18 @@ cd threadlane
 
 # Start the native desktop app.
 cargo run -p threadlane
+
+# Start the interactive Ratatui TUI in your terminal
+cargo run -p threadlane-cli
+
+# Install the standalone `threadlane` CLI binary locally:
+cargo install --path crates/threadlane-cli
+
+# Launch the TUI using the binary name:
+threadlane
+
+# Or execute a one-shot headless query directly in your shell:
+threadlane -p "Summarize git diff"
 ```
 
 On first launch, use the in-app authorization flow or provide credentials through the supported provider configuration. Threadlane persists device-flow credentials under `~/.threadlane/auth.json`.
@@ -136,6 +149,7 @@ Threadlane keeps application state local:
 - Project sessions: `<project>/.threadlane/sessions/`
 - Project extensions, agents, prompts, and skills: `<project>/.threadlane/`
 - Global extensions, agents, and skills: `~/.threadlane/` and `~/.agents/skills/`
+- ACP agent configuration: `~/.threadlane/acp.json` and `<project>/.threadlane/acp.json`
 
 Treat these directories as user data. Back them up before manually migrating or removing state.
 
@@ -144,10 +158,17 @@ Treat these directories as user data. Back them up before manually migrating or 
 | Crate | Responsibility |
 | --- | --- |
 | [`threadlane`](crates/threadlane) | Makepad desktop application, chat UI, composer, projects, sessions, updater, and application event loop. |
+| [`threadlane-cli`](crates/threadlane-cli) | Headless CLI & Ratatui TUI binary (`threadlane`). |
+| [`threadlane-auth`](crates/threadlane-auth) | Trait-based authentication (`AuthProvider`), device flow, and token storage. |
 | [`threadlane-coding-agent`](crates/threadlane-coding-agent) | Coding-agent orchestration, project context, skills, prompts, subagents, and WASI extension hosting. |
 | [`threadlane-agent`](crates/threadlane-agent) | Agent execution loop, message/session trees, context compaction, hooks, and tool-call dispatch. |
-| [`threadlane-provider`](crates/threadlane-provider) | OpenAI-compatible and Codex-oriented streaming clients, model access, and authentication. |
+| [`threadlane-provider`](crates/threadlane-provider) | `ModelProvider` trait, OpenAI-compatible and Codex-oriented streaming clients. |
+| [`threadlane-git`](crates/threadlane-git) | Low-level Git status inspection, branch creation, worktrees, and diff generation. |
 | [`threadlane-tools`](crates/threadlane-tools) | Workspace file operations, search, directory access, and sandboxed process execution. |
+| [`threadlane-mcp`](crates/threadlane-mcp) | Model Context Protocol JSON-RPC client engine (`McpManager`, `McpToolExecutor`). |
+| [`threadlane-skills`](crates/threadlane-skills) | SKILL.md directory scanner, YAML frontmatter parser, and skill registry. |
+| [`threadlane-wasi`](crates/threadlane-wasi) | WASI WebAssembly extension sandbox host and capability broker. |
+| [`threadlane-hashline`](crates/threadlane-hashline) | Precision line:hash anchor calculation and string replacement engine. |
 
 The desktop application is further organized by responsibility:
 
@@ -221,6 +242,49 @@ Pass `adapter` to override the command and `adapter_type` to override the DAP
 launch type when a project needs a different debugger. Only adapters that speak
 DAP over stdio work; the broker exposes no TCP capability, so port-based
 adapters are out of reach.
+## External ACP Agents
+
+Threadlane can talk to third-party coding agents that implement the
+[Agent Client Protocol](https://agentclientprotocol.com). It acts as the ACP
+*client*: it launches the agent as a subprocess and speaks JSON-RPC over its
+stdio pipes.
+
+The **ACP Agents** settings page lists agents from `~/.threadlane/acp.json` and
+`<project>/.threadlane/acp.json`. Choose Global or Project scope, give the agent
+a name and the command that starts it, and press Add:
+
+| Agent | Command |
+| --- | --- |
+| Gemini CLI | `gemini --experimental-acp` |
+| Claude Code | `npx -y @zed-industries/claude-code-acp` |
+
+Refresh launches each enabled agent, completes the ACP handshake, and reports
+the agent name, negotiated protocol version, and whether it still needs to be
+signed in. An agent that cannot be spawned shows the launch error instead, so a
+missing binary or a wrong command is visible without leaving the settings page.
+Agents can be enabled, disabled, or removed per scope, and a project entry
+shadows a global entry with the same id.
+
+The configuration file can also be edited directly:
+
+```json
+{
+  "agents": [
+    {
+      "id": "gemini",
+      "name": "Gemini CLI",
+      "command": "gemini",
+      "args": ["--experimental-acp"],
+      "enabled": true
+    }
+  ]
+}
+```
+
+ACP has no HTTP transport, so an agent is always a local command. Threadlane
+grants a connected agent workspace-scoped file access only: reads and writes
+that resolve outside the project root are refused. Tool-permission requests are
+declined unless a handler is configured to answer them.
 
 ## Development
 

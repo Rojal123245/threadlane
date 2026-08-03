@@ -3,7 +3,7 @@
 use super::state::{
     relative_time_label, ProjectGroup, SessionHealth, SessionListRow, SessionsData, SESSIONS_DATA,
 };
-use crate::components::session_row::ProjectHeaderAction;
+use crate::components::project_header::ProjectHeaderAction;
 use crate::path_utils::truncate_chars;
 use makepad_widgets::*;
 use std::path::PathBuf;

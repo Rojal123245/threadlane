@@ -94,11 +94,32 @@ impl CapabilityMcpRow {
     }
 }
 
+#[derive(Clone)]
+pub struct CapabilityAcpRow {
+    pub id: String,
+    pub name: String,
+    pub command_detail: String,
+    pub scope: threadlane_coding_agent::AcpScope,
+    pub enabled: bool,
+    pub status_text: String,
+}
+
+impl CapabilityAcpRow {
+    pub fn scope_status(&self) -> String {
+        let scope = match self.scope {
+            threadlane_coding_agent::AcpScope::Global => "Global",
+            threadlane_coding_agent::AcpScope::Project => "Project",
+        };
+        format!("{scope} · {}", self.status_text)
+    }
+}
+
 #[derive(Default)]
 pub struct CapabilityState {
     pub extensions: Vec<CapabilityExtensionRow>,
     pub skills: Vec<CapabilitySkillRow>,
     pub mcp_servers: Vec<CapabilityMcpRow>,
+    pub acp_agents: Vec<CapabilityAcpRow>,
 }
 
 impl CapabilityState {
@@ -143,6 +164,20 @@ impl CapabilityState {
                     enabled: rec.config.enabled,
                     status_text: rec.status.display_status(),
                 }
+            })
+            .collect();
+    }
+
+    pub fn refresh_acp_records(&mut self, records: Vec<threadlane_coding_agent::AcpAgentRecord>) {
+        self.acp_agents = records
+            .into_iter()
+            .map(|rec| CapabilityAcpRow {
+                command_detail: rec.config.command_line(),
+                id: rec.config.id,
+                name: rec.config.name,
+                scope: rec.config.scope,
+                enabled: rec.config.enabled,
+                status_text: rec.status.display_status(),
             })
             .collect();
     }
@@ -229,6 +264,7 @@ pub enum GuiAgentEvent {
         result: Result<String, String>,
     },
     McpRefreshCompleted(Vec<threadlane_coding_agent::McpServerRecord>),
+    AcpRefreshCompleted(Vec<threadlane_coding_agent::AcpAgentRecord>),
 }
 
 #[cfg(test)]

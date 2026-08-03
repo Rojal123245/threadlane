@@ -25,6 +25,30 @@ use threadlane_tools::{
 };
 use tokio::sync::{broadcast, mpsc, Mutex};
 
+struct AbortOnDrop<T> {
+    handle: Option<tokio::task::JoinHandle<T>>,
+}
+
+impl<T> AbortOnDrop<T> {
+    fn new(handle: tokio::task::JoinHandle<T>) -> Self {
+        Self { handle: Some(handle) }
+    }
+
+    async fn join(mut self) -> Result<T, tokio::task::JoinError> {
+        let result = self.handle.as_mut().expect("task handle missing").await;
+        self.handle = None;
+        result
+    }
+}
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.handle {
+            handle.abort();
+        }
+    }
+}
+
 fn normalized_tool_call_id(id: &str, empty_index: usize) -> String {
     if id.is_empty() {
         format!("call_{empty_index}")
@@ -412,6 +436,13 @@ impl AgentLoop {
             .filter(|key| !key.is_empty());
     }
 
+    pub fn set_credentials(&mut self, api_key: impl Into<String>, account_id: Option<String>) {
+        let api_key = api_key.into();
+        self.provider_client = ProviderClient::new(api_key.clone(), account_id.clone());
+        self.api_key = api_key;
+        self.account_id = account_id;
+    }
+
     /// Restricts both advertised and executable tools. `None` restores the
     /// default behavior where all registered, state, and core tools are available.
     pub fn set_allowed_tool_names(&mut self, allowed_tool_names: Option<HashSet<String>>) {
@@ -776,11 +807,11 @@ impl AgentLoop {
             let client = self.provider_client.clone();
             let prompt_cache_key = self.prompt_cache_key.clone();
 
-            tokio::spawn(async move {
+            let _stream_task = AbortOnDrop::new(tokio::spawn(async move {
                 client
                     .stream_chat_completion(payload_source, prompt_cache_key, stream_tx)
                     .await;
-            });
+            }));
 
             let _ = self.event_tx.send(AgentEvent::MessageStart {
                 role: "assistant".into(),
@@ -1010,13 +1041,14 @@ impl AgentLoop {
                 };
 
                 let handle_tool_call = tc.clone();
-                let handle =
-                    tokio::spawn(async move { Self::run_tool_with_hooks(tc_clone, context).await });
+                let handle = AbortOnDrop::new(
+                    tokio::spawn(async move { Self::run_tool_with_hooks(tc_clone, context).await }),
+                );
                 handles.push((handle_tool_call, handle));
             }
 
             for (tool_call, handle) in handles {
-                match handle.await {
+                match handle.join().await {
                     Ok(result) => results.push(result),
                     Err(error) => {
                         let result = AgentToolResult {
@@ -1460,5 +1492,23 @@ mod normalize_tool_arguments_tests {
             Ok(AgentEvent::ToolExecutionEnd { .. })
         ));
         assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn set_credentials_updates_provider_routing() {
+        let mut agent = AgentLoop::new("sk-openai", None, "test");
+        assert_eq!(
+            agent.provider_client.determine_format("gpt-5"),
+            threadlane_provider::router::PayloadFormat::ChatCompletions
+        );
+
+        agent.set_credentials("codex-token", Some("account-id".into()));
+
+        assert_eq!(agent.api_key, "codex-token");
+        assert_eq!(agent.account_id.as_deref(), Some("account-id"));
+        assert_eq!(
+            agent.provider_client.determine_format("gpt-5"),
+            threadlane_provider::router::PayloadFormat::Codex
+        );
     }
 }
