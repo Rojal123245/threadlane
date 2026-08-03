@@ -12,11 +12,11 @@ use crossterm::event;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use threadlane_agent::AgentEvent;
 use threadlane_coding_agent::{CodingAgent, CodingAgentCancellation, CodingAgentOptions};
-use tokio::sync::Mutex;
 use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub(crate) enum Action {
     Submit(String),
     Cancel,
@@ -27,6 +27,24 @@ pub(crate) enum Action {
     SetOpenAiKey(String),
     CancelLogin,
     None,
+}
+
+impl std::fmt::Debug for Action {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Submit(prompt) => formatter.debug_tuple("Submit").field(prompt).finish(),
+            Self::Cancel => formatter.write_str("Cancel"),
+            Self::Quit => formatter.write_str("Quit"),
+            Self::Message(message) => formatter.debug_tuple("Message").field(message).finish(),
+            Self::OpenLogin => formatter.write_str("OpenLogin"),
+            Self::StartLogin(provider) => {
+                formatter.debug_tuple("StartLogin").field(provider).finish()
+            }
+            Self::SetOpenAiKey(_) => formatter.write_str("SetOpenAiKey(<redacted>)"),
+            Self::CancelLogin => formatter.write_str("CancelLogin"),
+            Self::None => formatter.write_str("None"),
+        }
+    }
 }
 
 pub(crate) fn dispatch_input(state: &mut AppState, input: InputEvent) -> Action {
@@ -183,10 +201,9 @@ fn dispatch_login_input(state: &mut AppState, input: InputEvent) -> Action {
                 login.push_paste(&text);
                 Action::None
             }
-            InputEvent::Previous
-            | InputEvent::Next
-            | InputEvent::Resize
-            | InputEvent::Tab => Action::None,
+            InputEvent::Previous | InputEvent::Next | InputEvent::Resize | InputEvent::Tab => {
+                Action::None
+            }
         },
     }
 }
@@ -329,11 +346,7 @@ async fn shutdown_login_flow(
     drain_login_events(state, agent, login_rx).await;
 }
 
-fn handle_login_event(
-    state: &mut AppState,
-    agent: Option<&mut CodingAgent>,
-    event: LoginEvent,
-) {
+fn handle_login_event(state: &mut AppState, agent: Option<&mut CodingAgent>, event: LoginEvent) {
     let attempt_id = match &event {
         LoginEvent::DeviceCodePrompt { attempt_id, .. }
         | LoginEvent::BrowserPrompt { attempt_id, .. }
@@ -369,7 +382,10 @@ fn handle_login_event(
             let message = match threadlane_auth::save_credentials(&tokens) {
                 Ok(()) => {
                     if let Some(agent) = agent {
-                        agent.set_credentials(tokens.access_token.clone(), tokens.account_id.clone());
+                        agent.set_credentials(
+                            tokens.access_token.clone(),
+                            tokens.account_id.clone(),
+                        );
                     }
                     "Codex login complete.".to_string()
                 }
@@ -475,7 +491,9 @@ pub(crate) async fn run_tui(
                                 Err(error) => CommandResult::Message(error.to_string()),
                             };
                             match result {
-                                CommandResult::Message(content) => push_assistant_message(&mut state, content),
+                                CommandResult::Message(content) => {
+                                    push_assistant_message(&mut state, content)
+                                }
                                 CommandResult::OpenLogin => state.open_login(),
                                 CommandResult::Quit => break,
                             }
@@ -518,7 +536,8 @@ pub(crate) async fn run_tui(
                                 );
                             }
                         }
-                        active_login = Some(spawn_provider_login(provider, attempt_id, login_tx.clone()));
+                        active_login =
+                            Some(spawn_provider_login(provider, attempt_id, login_tx.clone()));
                     }
                     Action::CancelLogin => cancel_login_task(&mut state, &mut active_login),
                     Action::SetOpenAiKey(api_key) => {
@@ -737,8 +756,14 @@ mod tests {
         let mut state = AppState::test_state();
         state.composer = "/login".into();
 
-        assert_eq!(dispatch_input(&mut state, InputEvent::Submit), Action::OpenLogin);
-        assert_eq!(state.login.as_ref().unwrap().mode, LoginMode::ProviderPicker);
+        assert_eq!(
+            dispatch_input(&mut state, InputEvent::Submit),
+            Action::OpenLogin
+        );
+        assert_eq!(
+            state.login.as_ref().unwrap().mode,
+            LoginMode::ProviderPicker
+        );
 
         state.composer = "should stay blocked".into();
         assert_eq!(
@@ -760,10 +785,7 @@ mod tests {
 
         state.open_login();
         assert_eq!(dispatch_input(&mut state, InputEvent::Next), Action::None);
-        assert_eq!(
-            dispatch_input(&mut state, InputEvent::Submit),
-            Action::None
-        );
+        assert_eq!(dispatch_input(&mut state, InputEvent::Submit), Action::None);
         assert_eq!(state.login.as_ref().unwrap().mode, LoginMode::OpenAiKey);
 
         assert_eq!(
@@ -827,10 +849,7 @@ mod tests {
             dispatch_input(&mut state, InputEvent::Paste("sk-secret".into())),
             Action::None
         );
-        assert_eq!(
-            state.login.as_ref().unwrap().masked_key(),
-            "*********"
-        );
+        assert_eq!(state.login.as_ref().unwrap().masked_key(), "*********");
         assert!(matches!(
             dispatch_input(&mut state, InputEvent::Submit),
             Action::SetOpenAiKey(key) if key == "sk-secret"
@@ -896,11 +915,11 @@ mod tests {
         let env = HomeGuard::new();
         let mut state = AppState::test_state();
         state.open_login();
-        state
-            .login
-            .as_mut()
-            .unwrap()
-            .begin_provider_flow(LoginProvider::Codex, 41, "Starting Codex login...");
+        state.login.as_mut().unwrap().begin_provider_flow(
+            LoginProvider::Codex,
+            41,
+            "Starting Codex login...",
+        );
 
         let mut active_login = Some(tokio::spawn(async {
             tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
@@ -933,7 +952,10 @@ mod tests {
 
         assert_eq!(state.messages.len(), baseline_messages);
         assert!(
-            !env.home.join(".threadlane").join("credentials.json").exists(),
+            !env.home
+                .join(".threadlane")
+                .join("credentials.json")
+                .exists(),
             "stale login completion must not persist credentials after cancellation"
         );
     }
@@ -986,11 +1008,11 @@ mod tests {
         let env = HomeGuard::new();
         let mut state = AppState::test_state();
         state.open_login();
-        state
-            .login
-            .as_mut()
-            .unwrap()
-            .begin_provider_flow(LoginProvider::Codex, 77, "Starting Codex login...");
+        state.login.as_mut().unwrap().begin_provider_flow(
+            LoginProvider::Codex,
+            77,
+            "Starting Codex login...",
+        );
 
         let (login_tx, mut login_rx) = tokio::sync::mpsc::unbounded_channel();
         let success_tokens = threadlane_auth::OAuthTokens {
@@ -1025,12 +1047,14 @@ mod tests {
         assert!(state.login.is_none());
         assert!(active_login.is_none());
         assert!(
-            state.messages
+            state
+                .messages
                 .iter()
                 .any(|message| message.content == "Codex login complete."),
             "queued success should still be applied during shutdown"
         );
-        let saved = fs::read_to_string(env.home.join(".threadlane").join("credentials.json")).unwrap();
+        let saved =
+            fs::read_to_string(env.home.join(".threadlane").join("credentials.json")).unwrap();
         assert!(saved.contains("queued-success-token"));
         assert!(saved.contains("acct-queued"));
     }
