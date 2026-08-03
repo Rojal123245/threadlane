@@ -1881,6 +1881,51 @@ script_mod! {
                                 }
                             }
 
+                            queued_message_preview := RoundedView {
+                                width: Fill
+                                height: Fit
+                                visible: false
+                                flow: Right
+                                spacing: 6
+                                padding: Inset{left: 12 right: 8 top: 8 bottom: 8}
+                                align: Align{y: 0.5}
+                                draw_bg +: {
+                                    color: theme.color_secondary
+                                    border_color: theme.color_border
+                                    border_size: 1.0
+                                    border_radius: 8.0
+                                }
+
+                                queued_message_text := mod.components.ClippedLabel {
+                                    width: Fill
+                                    height: Fit
+                                    draw_text +: {
+                                        color: theme.color_foreground
+                                        text_style +: { font_size: 10.0 }
+                                    }
+                                }
+
+                                queue_btn := mod.components.ComposerChip {
+                                    text: "Queue"
+                                }
+
+                                steer_btn := mod.components.ComposerChip {
+                                    text: "Steer"
+                                    draw_bg +: {
+                                        color: theme.color_primary
+                                        color_hover: theme.color_primary
+                                        color_down: theme.color_primary
+                                        border_color: theme.color_transparent
+                                        border_color_hover: theme.color_transparent
+                                    }
+                                    draw_text +: {
+                                        color: theme.color_primary_foreground
+                                        color_hover: theme.color_primary_foreground
+                                        color_down: theme.color_primary_foreground
+                                    }
+                                }
+                            }
+
                             input_bar := mod.components.ComposerSurface {
                                 width: Fill
                                 height: Fit
@@ -2069,7 +2114,7 @@ script_mod! {
                                     }
 
                                     composer_action_slot := View {
-                                        width: 68
+                                        width: 34
                                         height: 30
                                         flow: Right
 
@@ -3000,6 +3045,10 @@ pub struct App {
     #[rust]
     composer_state: ComposerState,
     #[rust]
+    pending_queue_text: Option<String>,
+    #[rust]
+    pending_queue_attachments: Vec<ImageAttachment>,
+    #[rust]
     commands: Vec<CommandInfo>,
     #[rust]
     capabilities_summary: String,
@@ -3847,68 +3896,17 @@ impl MatchEvent for App {
         }
 
         if self.ui.button(cx, ids!(stop_btn)).clicked(actions) {
-            let active_key = self.workspace_state.active_key().cloned();
-            if let Some(key) = active_key {
-                if let Some(session_file) = self
-                    .session_runtimes
-                    .get(&key)
-                    .and_then(|runtime| runtime.session_file.as_deref())
-                {
-                    if let Err(error) = cancel_open_subagent_operations(session_file) {
-                        self.push_chat(
-                            MsgRole::System,
-                            format!("Could not persist subagent cancellation: {error}"),
-                        );
-                    }
-                }
-                let current_draft = self.prompt_text(cx);
-                let (restored_draft, restored_attachments) = self
-                    .session_runtimes
-                    .get_mut(&key)
-                    .and_then(|runtime| {
-                        let generation = runtime.generation.take()?;
-                        let generation_id = generation.id;
-                        generation.handle.abort();
-                        runtime.terminal_generation_id = None;
-                        let draft = draft_for_cancellation(
-                            Some(generation_id),
-                            runtime.submitted_draft.as_ref(),
-                            generation_id,
-                        );
-                        let attachments = runtime
-                            .submitted_attachments
-                            .as_ref()
-                            .filter(|(id, _)| *id == generation_id)
-                            .map(|(_, att)| att.clone());
-                        runtime.submitted_draft = None;
-                        runtime.submitted_attachments = None;
-                        Some((draft, attachments))
-                    })
-                    .unwrap_or((None, None));
-                let draft = if current_draft.trim().is_empty() {
-                    restored_draft.unwrap_or_default()
-                } else {
-                    current_draft
-                };
-                if let Some(workspace) = self.workspace_state.active_workspace_mut() {
-                    workspace.ui.draft = draft.clone();
-                    if let Some(attachments) = restored_attachments {
-                        workspace.ui.attachments = attachments;
-                    }
-                }
-                self.set_prompt_text(cx, &draft);
-                self.refresh_attachment_ui(cx);
-                self.workspace_state
-                    .workspace_mut(key.clone())
-                    .chat
-                    .mark_generation_stopped();
-                if self.finish_session_tasks(&key.work_dir, &key.session_id) {
-                    self.sync_task_sidebar(cx);
-                }
-                self.set_session_status(cx, &key, UiStatus::Ready, "Stopped");
-                self.push_chat(MsgRole::System, "Generation stopped.");
-                self.ui.widget(cx, ids!(chat_list)).redraw(cx);
+            // Dismiss any pending queue popup.
+            if self.pending_queue_text.is_some() {
+                let text = self.pending_queue_text.take().unwrap_or_default();
+                self.pending_queue_attachments.clear();
+                self.ui
+                    .widget(cx, ids!(queued_message_preview))
+                    .set_visible(cx, false);
+                // Restore the pending text to the composer.
+                self.set_prompt_text(cx, &text);
             }
+            self.stop_active_generation(cx);
         }
 
         let session_menu_uid = self.ui.widget(cx, ids!(session_context_menu)).widget_uid();
@@ -4089,17 +4087,52 @@ impl MatchEvent for App {
                 .is_some_and(|workspace| !workspace.ui.attachments.is_empty());
             if !input_text.trim().is_empty() || has_attachments {
                 if self.busy {
+                    // Show the queue/steer popup instead of immediately steering.
                     let attachments = self
                         .workspace_state
                         .active_workspace()
                         .map(|workspace| workspace.ui.attachments.clone())
                         .unwrap_or_default();
-                    self.enqueue_steer_interrupt(cx, &input_text, attachments);
+                    self.pending_queue_text = Some(input_text.clone());
+                    self.pending_queue_attachments = attachments;
+                    self.ui
+                        .label(cx, ids!(queued_message_text))
+                        .set_text(cx, input_text.trim());
+                    self.ui
+                        .widget(cx, ids!(queued_message_preview))
+                        .set_visible(cx, true);
                     cti.text_input_ref(cx).set_text(cx, "");
                     self.refresh_attachment_ui(cx);
+                    cx.redraw_all();
                 } else {
                     self.dispatch_input(cx, input_text, InputOrigin::Composer);
                 }
+            }
+        }
+
+        // Queue button: enqueue the pending message as a follow-up.
+        if self.ui.button(cx, ids!(queue_btn)).clicked(actions) {
+            if let Some(text) = self.pending_queue_text.take() {
+                let attachments = std::mem::take(&mut self.pending_queue_attachments);
+                self.enqueue_steer_interrupt(cx, &text, attachments);
+                self.ui
+                    .widget(cx, ids!(queued_message_preview))
+                    .set_visible(cx, false);
+                cx.redraw_all();
+            }
+        }
+
+        // Steer button: stop current generation, then dispatch the pending message.
+        if self.ui.button(cx, ids!(steer_btn)).clicked(actions) {
+            if let Some(text) = self.pending_queue_text.take() {
+                let _attachments = std::mem::take(&mut self.pending_queue_attachments);
+                self.ui
+                    .widget(cx, ids!(queued_message_preview))
+                    .set_visible(cx, false);
+                // Stop the current generation (same as stop_btn logic).
+                self.stop_active_generation(cx);
+                // Dispatch the pending message as a fresh prompt.
+                self.dispatch_input(cx, text, InputOrigin::Composer);
             }
         }
     }
@@ -4283,6 +4316,71 @@ fn format_capabilities_summary(skills: &[SkillMetadata], agents: &[AgentConfig])
 }
 
 impl App {
+    fn stop_active_generation(&mut self, cx: &mut Cx) {
+        let active_key = self.workspace_state.active_key().cloned();
+        if let Some(key) = active_key {
+            if let Some(session_file) = self
+                .session_runtimes
+                .get(&key)
+                .and_then(|runtime| runtime.session_file.as_deref())
+            {
+                if let Err(error) = cancel_open_subagent_operations(session_file) {
+                    self.push_chat(
+                        MsgRole::System,
+                        format!("Could not persist subagent cancellation: {error}"),
+                    );
+                }
+            }
+            let current_draft = self.prompt_text(cx);
+            let (restored_draft, restored_attachments) = self
+                .session_runtimes
+                .get_mut(&key)
+                .and_then(|runtime| {
+                    let generation = runtime.generation.take()?;
+                    let generation_id = generation.id;
+                    generation.handle.abort();
+                    runtime.terminal_generation_id = None;
+                    let draft = draft_for_cancellation(
+                        Some(generation_id),
+                        runtime.submitted_draft.as_ref(),
+                        generation_id,
+                    );
+                    let attachments = runtime
+                        .submitted_attachments
+                        .as_ref()
+                        .filter(|(id, _)| *id == generation_id)
+                        .map(|(_, att)| att.clone());
+                    runtime.submitted_draft = None;
+                    runtime.submitted_attachments = None;
+                    Some((draft, attachments))
+                })
+                .unwrap_or((None, None));
+            let draft = if current_draft.trim().is_empty() {
+                restored_draft.unwrap_or_default()
+            } else {
+                current_draft
+            };
+            if let Some(workspace) = self.workspace_state.active_workspace_mut() {
+                workspace.ui.draft = draft.clone();
+                if let Some(attachments) = restored_attachments {
+                    workspace.ui.attachments = attachments;
+                }
+            }
+            self.set_prompt_text(cx, &draft);
+            self.refresh_attachment_ui(cx);
+            self.workspace_state
+                .workspace_mut(key.clone())
+                .chat
+                .mark_generation_stopped();
+            if self.finish_session_tasks(&key.work_dir, &key.session_id) {
+                self.sync_task_sidebar(cx);
+            }
+            self.set_session_status(cx, &key, UiStatus::Ready, "Stopped");
+            self.push_chat(MsgRole::System, "Generation stopped.");
+            self.ui.widget(cx, ids!(chat_list)).redraw(cx);
+        }
+    }
+
     fn enqueue_steer_interrupt(
         &mut self,
         _cx: &mut Cx,
@@ -6511,7 +6609,9 @@ impl App {
             .and_then(|key| self.session_runtimes.get(key))
             .is_some_and(|runtime| runtime.generation.is_some());
         let show_stop = presentation.show_stop(has_generation);
-        self.ui.button(cx, ids!(send_btn)).set_visible(cx, true);
+        self.ui
+            .button(cx, ids!(send_btn))
+            .set_visible(cx, !show_stop);
         self.ui
             .button(cx, ids!(stop_btn))
             .set_visible(cx, show_stop);
@@ -7394,6 +7494,15 @@ impl App {
                         .chat
                         .flush_streaming();
                     self.set_session_status(cx, &key, UiStatus::Ready, "Ready");
+
+                    // If a message was pending in the queue popup, dispatch it now.
+                    if let Some(text) = self.pending_queue_text.take() {
+                        self.pending_queue_attachments.clear();
+                        self.ui
+                            .widget(cx, ids!(queued_message_preview))
+                            .set_visible(cx, false);
+                        self.dispatch_input(cx, text, InputOrigin::Composer);
+                    }
 
                     if self.finish_session_tasks(&work_dir, &session_id) {
                         self.sync_task_sidebar(cx);
