@@ -297,7 +297,11 @@ impl McpSession {
         }
     }
 
-    async fn shutdown(mut self) {
+    /// Terminates the server process.
+    ///
+    /// Takes `&mut self` rather than `self` so a session can be killed through
+    /// its shared handle without needing exclusive ownership of the `Arc`.
+    async fn kill(&mut self) {
         let _ = self.child.kill().await;
     }
 }
@@ -328,14 +332,14 @@ impl McpManager {
 
     /// Terminates every live server session.
     ///
-    /// Call when the manager's project changes or the app shuts down; sessions
-    /// otherwise live as long as the manager does.
+    /// Waits for any in-flight call on a session before killing it, so a
+    /// concurrent tool call delays shutdown but never escapes it. Call when the
+    /// manager's project changes or the app shuts down; sessions otherwise live
+    /// as long as the manager does.
     pub async fn shutdown(&self) {
         let sessions = std::mem::take(&mut *self.sessions.lock().await);
         for (_, session) in sessions {
-            if let Ok(session) = Arc::try_unwrap(session) {
-                session.into_inner().shutdown().await;
-            }
+            session.lock().await.kill().await;
         }
     }
 
@@ -385,7 +389,10 @@ impl McpManager {
     }
 
     /// Opens (or reuses) a session and lists the server's tools.
-    async fn connect_server(&self, config: &McpServerConfig) -> (McpServerStatus, Vec<McpToolInfo>) {
+    async fn connect_server(
+        &self,
+        config: &McpServerConfig,
+    ) -> (McpServerStatus, Vec<McpToolInfo>) {
         if matches!(config.transport, McpTransport::Sse { .. }) {
             let McpTransport::Sse { url, .. } = &config.transport else {
                 unreachable!("transport was just matched as SSE")
@@ -400,9 +407,7 @@ impl McpManager {
         // always starts a fresh one and retires the old process.
         let previous = self.sessions.lock().await.remove(&config.id);
         if let Some(previous) = previous {
-            if let Ok(previous) = Arc::try_unwrap(previous) {
-                previous.into_inner().shutdown().await;
-            }
+            previous.lock().await.kill().await;
         }
         let mut session = match McpSession::connect(config).await {
             Ok(session) => session,
@@ -413,7 +418,7 @@ impl McpManager {
         let response = match listed {
             Ok(response) => response,
             Err(error) => {
-                session.shutdown().await;
+                session.kill().await;
                 return (McpServerStatus::Error(error), Vec::new());
             }
         };
@@ -524,9 +529,7 @@ impl McpManager {
                 // drop it so the next call starts a clean session.
                 let broken = self.sessions.lock().await.remove(&config.id);
                 if let Some(broken) = broken {
-                    if let Ok(broken) = Arc::try_unwrap(broken) {
-                        broken.into_inner().shutdown().await;
-                    }
+                    broken.lock().await.kill().await;
                 }
                 return Some(Err(error));
             }

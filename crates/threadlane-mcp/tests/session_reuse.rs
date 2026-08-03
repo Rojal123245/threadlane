@@ -2,6 +2,11 @@
 //!
 //! Asserts on the number of processes actually started rather than on timing,
 //! so it fails for the right reason on a loaded CI machine.
+//!
+//! The stubs are `/bin/sh` scripts, so the file is Unix-only. The behaviour
+//! under test is platform-independent; only the way the fake server is written
+//! is not.
+#![cfg(unix)]
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -36,7 +41,6 @@ done
         ),
     )
     .unwrap();
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -131,7 +135,6 @@ done
         ),
     )
     .unwrap();
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
