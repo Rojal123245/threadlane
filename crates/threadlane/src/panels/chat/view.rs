@@ -886,6 +886,11 @@ impl Widget for ChatList {
 
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
+                // Markdown remeasurement changes item heights after the list has chosen its
+                // viewport. Preserve the user's bottom-lock explicitly so PortalList does not
+                // animate the full stale overflow back into view.
+                let was_at_end = list.is_at_end();
+                list.set_tail_range(was_at_end);
                 list.set_item_range(cx, 0, rows.len());
 
                 while let Some(item_id) = list.next_visible_item(cx) {
@@ -1103,6 +1108,7 @@ impl Widget for ChatList {
                         }
                     }
                 }
+
             }
         }
         DrawStep::done()

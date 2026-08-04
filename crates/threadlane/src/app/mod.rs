@@ -421,7 +421,7 @@ script_mod! {
             flow: Down
             drag_scrolling: false
             auto_tail: true
-            smooth_tail: true
+            smooth_tail: false
             selectable: true
             reuse_items: false
 
