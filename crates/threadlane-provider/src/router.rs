@@ -1,14 +1,20 @@
 use crate::antigravity::AntigravityClient;
 use crate::openai::{OpenAIClient, StreamEvent};
+use crate::opencode::OpenCodeGoClient;
 use futures_util::future::BoxFuture;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
 const ANTIGRAVITY_MODEL_PREFIX: &str = "antigravity/";
+const OPENCODE_MODEL_PREFIX: &str = "opencode-go/";
 
 pub fn is_antigravity_model(model: &str) -> bool {
     model.starts_with(ANTIGRAVITY_MODEL_PREFIX)
+}
+
+pub fn is_opencode_model(model: &str) -> bool {
+    model.starts_with(OPENCODE_MODEL_PREFIX)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +91,7 @@ impl From<(Value, Value)> for PayloadSource {
 pub struct ProviderClient {
     openai: OpenAIClient,
     antigravity: AntigravityClient,
+    opencode: OpenCodeGoClient,
 }
 
 impl ProviderClient {
@@ -92,11 +99,12 @@ impl ProviderClient {
         Self {
             openai: OpenAIClient::new(api_key.into(), account_id),
             antigravity: AntigravityClient::new(),
+            opencode: OpenCodeGoClient::new(),
         }
     }
 
     pub fn determine_format(&self, model: &str) -> PayloadFormat {
-        if is_antigravity_model(model) {
+        if is_antigravity_model(model) || is_opencode_model(model) {
             PayloadFormat::ChatCompletions
         } else if self.openai.is_codex() {
             PayloadFormat::Codex
@@ -116,6 +124,8 @@ impl ProviderClient {
 
         let provider: Arc<dyn crate::traits::ModelProvider> = if is_antigravity_model(&model) {
             Arc::new(self.antigravity.clone())
+        } else if is_opencode_model(&model) {
+            Arc::new(self.opencode.clone())
         } else {
             Arc::new(self.openai.clone())
         };
@@ -223,6 +233,13 @@ mod tests {
     }
 
     #[test]
+    fn routes_only_prefixed_models_to_opencode() {
+        assert!(is_opencode_model("opencode-go/deepseek-v4-flash"));
+        assert!(!is_opencode_model("deepseek-v4-flash"));
+        assert!(!is_opencode_model("antigravity/gemini-3.6-flash"));
+    }
+
+    #[test]
     fn determines_payload_format_correctly() {
         let client_std = ProviderClient::new("sk-test", None);
         assert_eq!(
@@ -231,6 +248,10 @@ mod tests {
         );
         assert_eq!(
             client_std.determine_format("antigravity/gemini-3.6-flash"),
+            PayloadFormat::ChatCompletions
+        );
+        assert_eq!(
+            client_std.determine_format("opencode-go/deepseek-v4-flash"),
             PayloadFormat::ChatCompletions
         );
 

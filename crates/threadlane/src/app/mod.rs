@@ -6,32 +6,32 @@ mod settings_handlers;
 mod terminal_handlers;
 mod workspace_sync;
 
-use terminal_handlers::{canonical_terminal_work_dir, truncate_terminal_output};
 use crate::components::code_editor_view::{CodeEditorViewAction, CodeEditorViewWidgetRefExt};
+use crate::components::context_window::ContextWindowWidgetRefExt;
 use crate::components::file_tree::{FileTree, FileTreeAction};
 use crate::components::git_changes::{GitChanges, GitChangesAction};
 use crate::components::git_diff::GitDiffView;
-use crate::components::context_window::ContextWindowWidgetRefExt;
 use crate::components::model_dropdown::IconDropDownWidgetRefExt;
 use crate::components::project_header::ProjectHeaderAction;
+use crate::components::provider_settings_modal::{
+    ProviderSettingsModal, ProviderSettingsModalAction, SettingsPage,
+};
 use crate::components::session_row::SessionRowAction;
 use crate::components::task_sidebar::{
     task_header_state, TaskSidebar, TaskSidebarAction, TaskSidebarItem,
 };
-use crate::components::provider_settings_modal::{
-    ProviderSettingsModal, ProviderSettingsModalAction, SettingsPage,
-};
 use crate::components::terminal_panel::ProjectTerminalWidgetRefExt;
 use crate::git::GitStatus;
+use crate::panels::chat::state::{
+    harness_activities_from_oplog, reduce_harness_event, HarnessActivity,
+};
 use crate::panels::chat::{
     accepts_generation_event, concise_status, draft_for_cancellation, submitted_draft, ChatList,
     ChatListWidgetRefExt, ComposerState, ComposerStatus, GenerationEvent, StarterPromptAction,
     SubagentRail, ToolFoldHeader,
 };
-use crate::panels::chat::state::{
-    harness_activities_from_oplog, reduce_harness_event, HarnessActivity,
-};
 use crate::panels::command_palette::*;
+use terminal_handlers::{canonical_terminal_work_dir, truncate_terminal_output};
 
 use crate::panels::sessions::{
     set_search_query, ProjectRegistry, SessionContextMenu, SessionContextMenuAction, SessionList,
@@ -41,12 +41,11 @@ use crate::state::{
     active_session_entry, archive_session, begin_title_generation, builtin_commands,
     create_new_session, delete_session, end_title_generation, is_project_working,
     is_session_working, normalize_session_title, project_work_dir_at_row, refresh_sessions,
-    session_health,
-    session_entry_at_row, session_entry_for_file, session_overflow_at_row, session_title_eligible,
-    set_active_project, set_active_session, set_session_context_target, set_session_health,
-    set_session_working,
-    title_prompt_for_submission, toggle_project_collapsed, toggle_project_show_all, truncate_chars,
-    CapabilityState, CommandInfo, GuiAgentEvent, MsgRole, SessionEntry, ToolStatus,
+    session_entry_at_row, session_entry_for_file, session_health, session_overflow_at_row,
+    session_title_eligible, set_active_project, set_active_session, set_session_context_target,
+    set_session_health, set_session_working, title_prompt_for_submission, toggle_project_collapsed,
+    toggle_project_show_all, truncate_chars, CapabilityState, CommandInfo, GuiAgentEvent, MsgRole,
+    SessionEntry, ToolStatus,
 };
 use crate::updater::UpdateStatus;
 use crate::workspace::{AppState, SessionKey, WorkspaceUiState};
@@ -81,6 +80,16 @@ const ANTIGRAVITY_MODELS: &[&str] = &[
     "antigravity/claude-sonnet-4-6",
     "antigravity/claude-opus-4-6",
     "antigravity/gpt-oss-120b",
+];
+const OPENCODE_GO_MODELS: &[&str] = &[
+    "opencode-go/mimo-v2.5-pro",
+    "opencode-go/mimo-v2.5",
+    "opencode-go/qwen3.8-max",
+    "opencode-go/minimax-m3",
+    "opencode-go/minimax-m2.7",
+    "opencode-go/deepseek-v4-pro",
+    "opencode-go/deepseek-v4-flash",
+    "opencode-go/hy3",
 ];
 const MAX_TERMINAL_OUTPUT: usize = 256 * 1024;
 const RIGHT_SIDEBAR_MIN_WIDTH: f64 = 220.0;
@@ -138,10 +147,22 @@ fn append_antigravity_models(models: &mut Vec<String>) {
     }
 }
 
+fn append_opencode_models(models: &mut Vec<String>) {
+    if threadlane_provider::opencode_auth::load_opencode_api_key().is_none() {
+        return;
+    }
+    for model in OPENCODE_GO_MODELS {
+        if !models.iter().any(|existing| existing == model) {
+            models.push((*model).to_string());
+        }
+    }
+}
+
 fn include_connected_provider_models(mut models: Vec<String>) -> Vec<String> {
     if threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some() {
         append_antigravity_models(&mut models);
     }
+    append_opencode_models(&mut models);
     models
 }
 
@@ -171,6 +192,7 @@ fn append_acp_models(models: &mut Vec<String>, global_dir: Option<&Path>, work_d
 fn has_connected_provider() -> bool {
     auth::load_credentials().is_some()
         || threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some()
+        || threadlane_provider::opencode_auth::load_opencode_api_key().is_some()
 }
 
 fn ordered_model_options(
@@ -186,7 +208,12 @@ fn ordered_model_options(
     if !selected_model.is_empty() && !canonical.iter().any(|model| model == selected_model) {
         canonical.push(selected_model.to_string());
     }
-    canonical.sort_by_key(|model| threadlane_provider::router::is_antigravity_model(model));
+    canonical.sort_by_key(|model| {
+        (
+            threadlane_provider::router::is_antigravity_model(model),
+            threadlane_provider::router::is_opencode_model(model),
+        )
+    });
     if canonical.is_empty() {
         return None;
     }
@@ -209,8 +236,11 @@ fn default_model_name() -> &'static str {
             .unwrap_or(false);
     let has_antigravity =
         threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some();
-    if !has_openai && has_antigravity {
+    let has_opencode = threadlane_provider::opencode_auth::load_opencode_api_key().is_some();
+    if !has_openai && !has_opencode && has_antigravity {
         "antigravity/gemini-3.6-flash"
+    } else if !has_openai && !has_antigravity && has_opencode {
+        OPENCODE_GO_MODELS[0]
     } else {
         "gpt-5.6-luna"
     }
@@ -220,10 +250,14 @@ fn model_credential_error(
     model: &str,
     has_openai_credentials: bool,
     has_antigravity_credentials: bool,
+    has_opencode_credentials: bool,
 ) -> Option<&'static str> {
     if threadlane_provider::router::is_antigravity_model(model) {
         (!has_antigravity_credentials)
             .then_some("Sign in with Google Antigravity before using this model.")
+    } else if threadlane_provider::router::is_opencode_model(model) {
+        (!has_opencode_credentials)
+            .then_some("Set an OpenCode API key in Settings or OPENCODE_API_KEY.")
     } else {
         (!has_openai_credentials)
             .then_some("Please provide an OpenAI API key or click 'Login ChatGPT' to authenticate.")
@@ -934,6 +968,10 @@ script_mod! {
                     text: "OpenAI / ChatGPT"
                 }
 
+                settings_nav_opencode_btn := mod.components.NavButton {
+                    text: "OpenCode Go"
+                }
+
                 advanced_category_lbl := mod.components.CategoryHeaderLabel {
                     margin: Inset{top: 18 bottom: 4}
                     text: "ADVANCED"
@@ -1054,11 +1092,19 @@ script_mod! {
                                 draw_bg +: {
                                     color: theme.color_primary
                                     color_hover: theme.color_primary
+                                    color_focus: theme.color_primary
                                     color_down: theme.color_primary
+                                    border_color: theme.color_primary
+                                    border_color_hover: theme.color_primary
+                                    border_color_focus: theme.color_primary
+                                    border_color_down: theme.color_primary
                                     border_radius: 6.0
                                 }
                                 draw_text +: {
                                     color: theme.color_primary_foreground
+                                    color_hover: theme.color_primary_foreground
+                                    color_focus: theme.color_primary_foreground
+                                    color_down: theme.color_primary_foreground
                                     text_style: theme.font_bold { font_size: 9.5 }
                                 }
                             }
@@ -1071,14 +1117,20 @@ script_mod! {
                                 draw_bg +: {
                                     color: theme.color_card
                                     color_hover: theme.color_secondary
+                                    color_focus: theme.color_secondary
                                     color_down: theme.color_input
                                     border_color: theme.color_secondary
+                                    border_color_hover: theme.color_primary
+                                    border_color_focus: theme.color_primary
+                                    border_color_down: theme.color_primary
                                     border_size: 1.0
                                     border_radius: 6.0
                                 }
                                 draw_text +: {
                                     color: theme.color_card_foreground
                                     color_hover: theme.color_foreground
+                                    color_focus: theme.color_foreground
+                                    color_down: theme.color_primary_foreground
                                     text_style +: { font_size: 9.0 }
                                 }
                             }
@@ -1134,6 +1186,81 @@ script_mod! {
                                 draw_text +: {
                                     color: theme.color_primary_foreground
                                     text_style: theme.font_bold { font_size: 9.5 }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                opencode_page := View {
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    spacing: 14
+                    visible: false
+
+                    opencode_page_title := mod.components.PageTitleLabel {
+                        text: "OpenCode Go"
+                    }
+
+                    opencode_page_desc := mod.components.PageDescriptionLabel {
+                        text: "Use OpenCode Go models through the OpenCode Zen API."
+                    }
+
+                    opencode_go_card := mod.components.ProviderCard {
+                        oc_header := mod.components.ProviderCardHeader {
+                            oc_title := mod.components.ProviderCardTitle {
+                                text: "OpenCode Go"
+                            }
+                            opencode_status_lbl := mod.components.ProviderCardStatus {
+                                text: "Not Connected"
+                            }
+                        }
+
+                        oc_desc := mod.components.ProviderCardDescription {
+                            text: "Curated open-source and proprietary models via OpenCode Zen"
+                        }
+
+                        opencode_api_key_input := TextInput {
+                            width: Fill
+                            height: 32
+                            empty_text: "OpenCode API key (or OPENCODE_API_KEY)"
+                        }
+
+                        oc_actions := mod.components.ProviderCardActions {
+                            opencode_save_btn := Button {
+                                width: Fit
+                                height: 28
+                                padding: Inset{left: 12 right: 12 top: 4 bottom: 4}
+                                text: "Save API key"
+                                draw_bg +: {
+                                    color: theme.color_primary
+                                    color_hover: theme.color_primary
+                                    color_down: theme.color_primary
+                                    border_radius: 6.0
+                                }
+                                draw_text +: {
+                                    color: theme.color_primary_foreground
+                                    text_style: theme.font_bold { font_size: 9.5 }
+                                }
+                            }
+                            opencode_clear_btn := Button {
+                                width: Fit
+                                height: 28
+                                padding: Inset{left: 10 right: 10 top: 4 bottom: 4}
+                                text: "Clear"
+                                draw_bg +: {
+                                    color: theme.color_card
+                                    color_hover: theme.color_secondary
+                                    color_down: theme.color_input
+                                    border_color: theme.color_secondary
+                                    border_size: 1.0
+                                    border_radius: 6.0
+                                }
+                                draw_text +: {
+                                    color: theme.color_card_foreground
+                                    color_hover: theme.color_foreground
+                                    text_style +: { font_size: 9.0 }
                                 }
                             }
                         }
@@ -3001,8 +3128,6 @@ script_mod! {
 
 }
 
-
-
 #[derive(Clone, Debug)]
 enum ImagePickerAction {
     Loaded {
@@ -3694,11 +3819,8 @@ impl MatchEvent for App {
                 session_health(&workspace.chat.harness_activities),
             );
         }
-        let mut runtime = SessionRuntime::new(
-            coding_agent,
-            initial_model.clone(),
-            ReasoningEffort::Medium,
-        );
+        let mut runtime =
+            SessionRuntime::new(coding_agent, initial_model.clone(), ReasoningEffort::Medium);
         runtime.latest_usage = latest_usage;
         self.session_runtimes.insert(initial_key, runtime);
         self.set_model_dropup_options(cx, self.available_models.clone(), &initial_model);
@@ -3860,6 +3982,48 @@ impl MatchEvent for App {
                 ),
             }
             self.refresh_provider_connection_ui(cx);
+        }
+
+        let opencode_save_clicked = self.ui.button(cx, ids!(opencode_save_btn)).clicked(actions);
+        let opencode_clear_clicked = self
+            .ui
+            .button(cx, ids!(opencode_clear_btn))
+            .clicked(actions);
+        if opencode_save_clicked {
+            let key = self.ui.text_input(cx, ids!(opencode_api_key_input)).text();
+            match threadlane_provider::opencode_auth::save_opencode_api_key(&key) {
+                Ok(()) => {
+                    self.push_chat(MsgRole::System, "Saved OpenCode API key.");
+                    let selected_model = self
+                        .ui
+                        .icon_drop_down(cx, ids!(model_drop))
+                        .selected_label();
+                    self.set_model_dropup_options(
+                        cx,
+                        self.available_models.clone(),
+                        &selected_model,
+                    );
+                    self.refresh_provider_connection_ui(cx);
+                }
+                Err(error) => self
+                    .ui
+                    .label(cx, ids!(opencode_status_lbl))
+                    .set_text(cx, &error),
+            }
+        } else if opencode_clear_clicked {
+            match threadlane_provider::opencode_auth::clear_opencode_api_key() {
+                Ok(()) => {
+                    self.ui
+                        .text_input(cx, ids!(opencode_api_key_input))
+                        .set_text(cx, "");
+                    self.push_chat(MsgRole::System, "Cleared OpenCode API key.");
+                    self.refresh_provider_connection_ui(cx);
+                }
+                Err(error) => self
+                    .ui
+                    .label(cx, ids!(opencode_status_lbl))
+                    .set_text(cx, &error),
+            }
         }
 
         let start_openai_login = (openai_login_clicked && openai_creds.is_none())
@@ -4068,24 +4232,40 @@ impl MatchEvent for App {
         // only updates if the app refreshes it when that fires.
         let code_editor_uid = self.ui.widget(cx, ids!(code_editor_view)).widget_uid();
         if let Some(action) = actions.find_widget_action(code_editor_uid) {
-            if matches!(action.cast::<CodeEditorViewAction>(), CodeEditorViewAction::Modified)
-                && self.right_sidebar_tab == RightSidebarTab::Editor
+            if matches!(
+                action.cast::<CodeEditorViewAction>(),
+                CodeEditorViewAction::Modified
+            ) && self.right_sidebar_tab == RightSidebarTab::Editor
             {
                 self.sync_code_editor_header(cx);
             }
         }
 
-        if self.ui.button(cx, ids!(code_editor_tab_btn)).clicked(actions) {
+        if self
+            .ui
+            .button(cx, ids!(code_editor_tab_btn))
+            .clicked(actions)
+        {
             self.right_sidebar_tab = RightSidebarTab::Editor;
             self.sync_right_sidebar(cx);
         }
 
-        if self.ui.button(cx, ids!(code_editor_save_btn)).clicked(actions) {
+        if self
+            .ui
+            .button(cx, ids!(code_editor_save_btn))
+            .clicked(actions)
+        {
             self.save_open_editor_file(cx);
         }
 
-        if self.ui.button(cx, ids!(code_editor_close_btn)).clicked(actions) {
-            self.ui.code_editor_view(cx, ids!(code_editor_view)).close(cx);
+        if self
+            .ui
+            .button(cx, ids!(code_editor_close_btn))
+            .clicked(actions)
+        {
+            self.ui
+                .code_editor_view(cx, ids!(code_editor_view))
+                .close(cx);
             self.code_editor_status = None;
             self.right_sidebar_tab = RightSidebarTab::FileTree;
             self.sync_right_sidebar(cx);
@@ -4115,13 +4295,20 @@ impl MatchEvent for App {
             }
         }
 
-        if self.ui.button(cx, ids!(worktree_cancel_btn)).clicked(actions) {
+        if self
+            .ui
+            .button(cx, ids!(worktree_cancel_btn))
+            .clicked(actions)
+        {
             self.pending_worktree_path = None;
             self.set_worktree_prompt_visible(cx, false);
             self.sync_git_branch_picker(cx);
         }
 
-        if self.ui.button(cx, ids!(worktree_create_btn)).clicked(actions)
+        if self
+            .ui
+            .button(cx, ids!(worktree_create_btn))
+            .clicked(actions)
             || self
                 .ui
                 .text_input(cx, ids!(worktree_path))
@@ -4818,7 +5005,7 @@ impl App {
             workspace.chat.push_chat(MsgRole::User, visible);
             workspace.ui.attachments.clear();
         }
-        }
+    }
 
     fn open_providers_modal(&mut self, cx: &mut Cx) {
         let mut show_extensions = false;
@@ -5166,18 +5353,19 @@ impl App {
         let global_dir = threadlane_coding_agent::default_global_threadlane_dir();
         let work_dir = self.active_work_dir().map(Path::to_path_buf);
 
-        let pending = threadlane_coding_agent::AcpManager::new(global_dir.clone(), work_dir.clone())
-            .configs()
-            .into_iter()
-            .map(|config| {
-                let status = if config.enabled {
-                    threadlane_coding_agent::AcpAgentStatus::Connecting
-                } else {
-                    threadlane_coding_agent::AcpAgentStatus::Disconnected
-                };
-                threadlane_coding_agent::AcpAgentRecord { config, status }
-            })
-            .collect();
+        let pending =
+            threadlane_coding_agent::AcpManager::new(global_dir.clone(), work_dir.clone())
+                .configs()
+                .into_iter()
+                .map(|config| {
+                    let status = if config.enabled {
+                        threadlane_coding_agent::AcpAgentStatus::Connecting
+                    } else {
+                        threadlane_coding_agent::AcpAgentStatus::Disconnected
+                    };
+                    threadlane_coding_agent::AcpAgentRecord { config, status }
+                })
+                .collect();
         self.capability_state.refresh_acp_records(pending);
         if let Some(mut modal) = self
             .ui
@@ -5585,6 +5773,24 @@ impl App {
                     .set_enabled(cx, true);
             }
         }
+        if let Some(key) = threadlane_provider::opencode_auth::load_opencode_api_key() {
+            self.ui
+                .label(cx, ids!(opencode_status_lbl))
+                .set_text(cx, "✓ Connected");
+            self.ui
+                .text_input(cx, ids!(opencode_api_key_input))
+                .set_text(cx, &key);
+            self.ui
+                .button(cx, ids!(opencode_save_btn))
+                .set_text(cx, "Update API key");
+        } else {
+            self.ui
+                .label(cx, ids!(opencode_status_lbl))
+                .set_text(cx, "Not Connected");
+            self.ui
+                .button(cx, ids!(opencode_save_btn))
+                .set_text(cx, "Save API key");
+        }
         if has_connected_provider() {
             self.ui.widget(cx, ids!(auth_row)).set_visible(cx, false);
         } else {
@@ -5659,7 +5865,6 @@ impl App {
         });
         cx.redraw_all();
     }
-
 
     /// Runs one chat turn against an external ACP agent.
     ///
@@ -5842,6 +6047,7 @@ impl App {
         mut models: Vec<String>,
         selected_model: &str,
     ) {
+        models = include_connected_provider_models(models);
         // Injected here rather than at each call site so every path that
         // repopulates the picker shows configured ACP agents.
         append_acp_models(
@@ -6325,10 +6531,8 @@ impl App {
         let Some(key) = self.workspace_state.active_key().cloned() else {
             return;
         };
-        let Some((model, reasoning_effort, session_file)) = self
-            .session_runtimes
-            .get(&key)
-            .map(|runtime| {
+        let Some((model, reasoning_effort, session_file)) =
+            self.session_runtimes.get(&key).map(|runtime| {
                 (
                     runtime.model.clone(),
                     runtime.reasoning_effort,
@@ -6350,10 +6554,8 @@ impl App {
             session_file,
             system_prompt: Default::default(),
         });
-        self.session_runtimes.insert(
-            key,
-            SessionRuntime::new(agent, model, reasoning_effort),
-        );
+        self.session_runtimes
+            .insert(key, SessionRuntime::new(agent, model, reasoning_effort));
     }
 
     fn request_git_status(&mut self) {
@@ -6407,12 +6609,8 @@ impl App {
             .view(cx, ids!(worktree_prompt_row))
             .set_visible(cx, visible);
         if visible {
-            self.ui
-                .text_input(cx, ids!(worktree_name))
-                .set_text(cx, "");
-            self.ui
-                .text_input(cx, ids!(worktree_path))
-                .set_text(cx, "");
+            self.ui.text_input(cx, ids!(worktree_name)).set_text(cx, "");
+            self.ui.text_input(cx, ids!(worktree_path)).set_text(cx, "");
             self.ui
                 .text_input(cx, ids!(worktree_name))
                 .set_key_focus(cx);
@@ -6648,7 +6846,10 @@ impl App {
             &self.ui.button(cx, ids!(right_sidebar_toggle_btn)),
             sidebar_visible,
         );
-        let terminal_open = self.ui.project_terminal(cx, ids!(project_terminal)).is_open();
+        let terminal_open = self
+            .ui
+            .project_terminal(cx, ids!(project_terminal))
+            .is_open();
         crate::components::nav_button::set_selected(
             cx,
             &self.ui.button(cx, ids!(terminal_header_btn)),
@@ -6716,7 +6917,10 @@ impl App {
         );
         // The editor tab only appears once a file has been opened, so the strip
         // does not show a control that would land on an empty panel.
-        let editor_open = self.ui.code_editor_view(cx, ids!(code_editor_view)).is_open();
+        let editor_open = self
+            .ui
+            .code_editor_view(cx, ids!(code_editor_view))
+            .is_open();
         self.ui
             .button(cx, ids!(code_editor_tab_btn))
             .set_visible(cx, editor_open);
@@ -6953,9 +7157,14 @@ impl App {
         eprintln!("[commit_message_gen] Selected model: `{model}`");
         let has_antigravity_credentials =
             threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some();
-        if let Some(error) =
-            model_credential_error(&model, !api_key.is_empty(), has_antigravity_credentials)
-        {
+        let has_opencode_credentials =
+            threadlane_provider::opencode_auth::load_opencode_api_key().is_some();
+        if let Some(error) = model_credential_error(
+            &model,
+            !api_key.is_empty(),
+            has_antigravity_credentials,
+            has_opencode_credentials,
+        ) {
             self.git_feedback = Some((false, error.to_owned()));
             self.sync_right_sidebar(cx);
             return;
@@ -7287,8 +7496,6 @@ impl App {
         (api_key, account_id)
     }
 
-
-
     fn start_background_task(
         &mut self,
         cx: &mut Cx,
@@ -7423,7 +7630,6 @@ impl App {
             workspace.ui.draft = draft;
         }
     }
-
 
     fn push_chat(&mut self, role: MsgRole, text: impl Into<String>) {
         if let Some(workspace) = self.workspace_state.active_workspace_mut() {
@@ -7665,11 +7871,7 @@ impl App {
                 .workspace_mut(key.clone())
                 .chat
                 .harness_activities = activities;
-            set_session_health(
-                &entry.work_dir,
-                &entry.id,
-                health,
-            );
+            set_session_health(&entry.work_dir, &entry.id, health);
         }
 
         if let Some((model, reasoning_effort)) = self
@@ -7741,10 +7943,13 @@ impl App {
         };
         let has_antigravity_credentials =
             threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some();
+        let has_opencode_credentials =
+            threadlane_provider::opencode_auth::load_opencode_api_key().is_some();
         if let Some(error) = model_credential_error(
             &model_name,
             !api_key.is_empty(),
             has_antigravity_credentials,
+            has_opencode_credentials,
         ) {
             self.push_chat(MsgRole::System, error);
             cx.redraw_all();
@@ -8340,8 +8545,7 @@ impl App {
                 set_session_health(&key.work_dir, &key.session_id, health);
                 self.ui.widget(cx, ids!(session_list)).redraw(cx);
             }
-            AgentEvent::TurnStart { .. }
-            | AgentEvent::MessageStart { .. } => {}
+            AgentEvent::TurnStart { .. } | AgentEvent::MessageStart { .. } => {}
         }
     }
 
@@ -8790,16 +8994,17 @@ mod workspace_header_tests {
         aggregate_extension_reload_results, append_antigravity_models, clear_composer_for_dispatch,
         compact_workspace_path, extension_reload_matches, extension_reload_status,
         left_sidebar_splitter_align, model_credential_error, normalize_generated_commit_message,
-        ordered_model_options,
-        project_name, reduce_harness_event, session_reload_count, task_sidebar_items,
-        restore_harness_activities, truncate_terminal_output, InputOrigin, ANTIGRAVITY_MODELS,
-        MAX_TERMINAL_OUTPUT, LEFT_SIDEBAR_WIDTH,
+        ordered_model_options, project_name, reduce_harness_event, restore_harness_activities,
+        session_reload_count, task_sidebar_items, truncate_terminal_output, InputOrigin,
+        ANTIGRAVITY_MODELS, LEFT_SIDEBAR_WIDTH, MAX_TERMINAL_OUTPUT,
     };
     use crate::panels::chat::state::HarnessActivityStatus;
     use crate::workspace::WorkspaceUiState;
     use makepad_widgets::SplitterAlign;
     use std::path::{Path, PathBuf};
-    use threadlane_agent::{AgentEvent, ImageAttachment, OpOutcome, OpRecord, SubagentRecoveryStatus};
+    use threadlane_agent::{
+        AgentEvent, ImageAttachment, OpOutcome, OpRecord, SubagentRecoveryStatus,
+    };
     use threadlane_coding_agent::{ExtensionScope, TaskKind, TaskRecord, TaskStatus};
 
     #[test]
@@ -9018,15 +9223,15 @@ mod workspace_header_tests {
     #[test]
     fn provider_credentials_follow_the_selected_model() {
         assert_eq!(
-            model_credential_error("antigravity/gemini-3.6-flash", false, true),
+            model_credential_error("antigravity/gemini-3.6-flash", false, true, false),
             None
         );
         assert_eq!(
-            model_credential_error("antigravity/gemini-3.6-flash", true, false),
+            model_credential_error("antigravity/gemini-3.6-flash", true, false, false),
             Some("Sign in with Google Antigravity before using this model.")
         );
         assert_eq!(
-            model_credential_error("gpt-5.6-luna", false, true),
+            model_credential_error("gpt-5.6-luna", false, true, false),
             Some("Please provide an OpenAI API key or click 'Login ChatGPT' to authenticate.")
         );
     }

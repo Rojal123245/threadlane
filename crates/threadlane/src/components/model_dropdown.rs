@@ -8,6 +8,23 @@ fn is_antigravity_model(model: &str) -> bool {
     model.starts_with("antigravity/")
 }
 
+fn is_opencode_model(model: &str) -> bool {
+    model.starts_with("opencode-go/")
+}
+
+/// Display text for a provider model row: the prefix is redundant with the
+/// provider icon, so trim it for drawing only. Stored labels, selection, and
+/// `/model` dispatch keep the canonical prefixed id.
+fn display_model_label(label: &str) -> &str {
+    if is_antigravity_model(label) {
+        &label["antigravity/".len()..]
+    } else if is_opencode_model(label) {
+        &label["opencode-go/".len()..]
+    } else {
+        label
+    }
+}
+
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
@@ -29,6 +46,9 @@ script_mod! {
         }
         draw_antigravity_icon +: {
             svg: crate_resource("self:resources/icons/google.svg")
+        }
+        draw_opencode_icon +: {
+            svg: crate_resource("self:resources/icons/opencode.svg")
         }
         draw_icon +: {
             svg: crate_resource("self:resources/icons/reasoning.svg")
@@ -150,6 +170,9 @@ script_mod! {
         }
         draw_antigravity_icon +: {
             svg: crate_resource("self:resources/icons/google.svg")
+        }
+        draw_opencode_icon +: {
+            svg: crate_resource("self:resources/icons/opencode.svg")
         }
         draw_icon +: {
             svg: crate_resource("self:resources/icons/reasoning.svg")
@@ -348,6 +371,8 @@ struct IconPopupMenuItem {
     #[live]
     draw_antigravity_icon: DrawSvg,
     #[live]
+    draw_opencode_icon: DrawSvg,
+    #[live]
     draw_icon: DrawSvg,
     #[live]
     draw_action_icon: DrawSvg,
@@ -380,6 +405,8 @@ impl IconPopupMenuItem {
             if self.use_provider_icons {
                 if is_antigravity_model(label) {
                     self.draw_antigravity_icon.draw_walk(cx, self.icon_walk);
+                } else if is_opencode_model(label) {
+                    self.draw_opencode_icon.draw_walk(cx, self.icon_walk);
                 } else {
                     self.draw_openai_icon.draw_walk(cx, self.icon_walk);
                 }
@@ -390,8 +417,13 @@ impl IconPopupMenuItem {
                     self.draw_icon.draw_walk(cx, self.icon_walk);
                 }
             }
+            let text = if self.use_provider_icons {
+                display_model_label(label)
+            } else {
+                label
+            };
             self.draw_text
-                .draw_walk(cx, Walk::fit(), Align::default(), label);
+                .draw_walk(cx, Walk::fit(), Align::default(), text);
         }
         self.draw_bg.end(cx);
     }
@@ -579,6 +611,8 @@ pub struct IconDropDown {
     #[live]
     draw_antigravity_icon: DrawSvg,
     #[live]
+    draw_opencode_icon: DrawSvg,
+    #[live]
     draw_icon: DrawSvg,
     #[live]
     use_provider_icons: bool,
@@ -659,14 +693,21 @@ impl IconDropDown {
         if self.use_provider_icons {
             if is_antigravity_model(label) {
                 self.draw_antigravity_icon.draw_walk(cx, self.icon_walk);
+            } else if is_opencode_model(label) {
+                self.draw_opencode_icon.draw_walk(cx, self.icon_walk);
             } else {
                 self.draw_openai_icon.draw_walk(cx, self.icon_walk);
             }
         } else {
             self.draw_icon.draw_walk(cx, self.icon_walk);
         }
+        let text = if self.use_provider_icons {
+            display_model_label(label)
+        } else {
+            label
+        };
         self.draw_text
-            .draw_walk(cx, Walk::fit(), Align::default(), label);
+            .draw_walk(cx, Walk::fit(), Align::default(), text);
         self.draw_bg.end(cx);
         cx.add_nav_stop(self.draw_bg.area(), NavRole::DropDown, Inset::default());
 

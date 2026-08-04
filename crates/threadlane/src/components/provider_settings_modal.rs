@@ -8,6 +8,7 @@ pub enum SettingsPage {
     #[default]
     GoogleAntigravity,
     OpenAi,
+    OpenCodeGo,
     Capabilities,
     Skills,
     McpServers,
@@ -148,6 +149,13 @@ impl Widget for ProviderSettingsModal {
                 .clicked(actions)
             {
                 self.set_page(cx, SettingsPage::OpenAi);
+            }
+            if self
+                .view
+                .button(cx, ids!(settings_nav_opencode_btn))
+                .clicked(actions)
+            {
+                self.set_page(cx, SettingsPage::OpenCodeGo);
             }
             if self
                 .view
@@ -496,7 +504,11 @@ impl ProviderSettingsModal {
         self.view.redraw(cx);
     }
 
-    pub fn set_extension_rows(&mut self, cx: &mut Cx, rows: Vec<crate::state::CapabilityExtensionRow>) {
+    pub fn set_extension_rows(
+        &mut self,
+        cx: &mut Cx,
+        rows: Vec<crate::state::CapabilityExtensionRow>,
+    ) {
         self.extension_rows = rows;
         self.redraw_capability_overlay(cx);
     }
@@ -606,6 +618,7 @@ impl ProviderSettingsModal {
     pub fn sync_page_visibility(&mut self, cx: &mut Cx) {
         let google_selected = self.page == SettingsPage::GoogleAntigravity;
         let openai_selected = self.page == SettingsPage::OpenAi;
+        let opencode_selected = self.page == SettingsPage::OpenCodeGo;
         let capabilities_selected = self.page == SettingsPage::Capabilities;
         let skills_selected = self.page == SettingsPage::Skills;
         let mcp_selected = self.page == SettingsPage::McpServers;
@@ -615,6 +628,7 @@ impl ProviderSettingsModal {
         for (button_id, selected) in [
             (ids!(settings_nav_google_btn), google_selected),
             (ids!(settings_nav_openai_btn), openai_selected),
+            (ids!(settings_nav_opencode_btn), opencode_selected),
             (ids!(settings_nav_capabilities_btn), capabilities_selected),
             (ids!(settings_nav_skills_btn), skills_selected),
             (ids!(settings_nav_mcp_btn), mcp_selected),
@@ -631,6 +645,9 @@ impl ProviderSettingsModal {
             .set_visible(cx, true);
         self.view
             .button(cx, ids!(settings_nav_openai_btn))
+            .set_visible(cx, true);
+        self.view
+            .button(cx, ids!(settings_nav_opencode_btn))
             .set_visible(cx, true);
         self.view
             .button(cx, ids!(settings_nav_capabilities_btn))
@@ -653,6 +670,9 @@ impl ProviderSettingsModal {
         self.view
             .widget(cx, ids!(openai_page))
             .set_visible(cx, openai_selected);
+        self.view
+            .widget(cx, ids!(opencode_page))
+            .set_visible(cx, opencode_selected);
         self.view
             .widget(cx, ids!(capabilities_page))
             .set_visible(cx, capabilities_selected);

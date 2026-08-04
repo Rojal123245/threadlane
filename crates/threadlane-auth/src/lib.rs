@@ -2,11 +2,13 @@ pub mod antigravity_auth;
 pub mod auth;
 pub mod codex_auth;
 pub mod openai_auth;
+pub mod opencode_auth;
 pub mod traits;
 
 pub use antigravity_auth::*;
 pub use codex_auth::*;
 pub use openai_auth::*;
+pub use opencode_auth::*;
 pub use traits::AuthProvider;
 
 use serde::de::DeserializeOwned;
@@ -33,6 +35,7 @@ pub fn resolve_auth_provider(provider_id: &str) -> Option<Arc<dyn AuthProvider>>
         "openai" => Some(Arc::new(OpenAiAuthProvider)),
         "codex" => Some(Arc::new(CodexAuthProvider)),
         "antigravity" | "google" => Some(Arc::new(AntigravityAuthProvider)),
+        "opencode-go" | "opencode" => Some(Arc::new(OpencodeAuthProvider)),
         _ => None,
     }
 }
@@ -44,13 +47,35 @@ mod tests {
     #[test]
     fn test_resolve_auth_provider() {
         assert!(resolve_auth_provider("openai").is_some());
-        assert_eq!(resolve_auth_provider("openai").unwrap().provider_id(), "openai");
+        assert_eq!(
+            resolve_auth_provider("openai").unwrap().provider_id(),
+            "openai"
+        );
         assert!(resolve_auth_provider("codex").is_some());
-        assert_eq!(resolve_auth_provider("codex").unwrap().provider_id(), "codex");
+        assert_eq!(
+            resolve_auth_provider("codex").unwrap().provider_id(),
+            "codex"
+        );
         assert!(resolve_auth_provider("antigravity").is_some());
-        assert_eq!(resolve_auth_provider("antigravity").unwrap().provider_id(), "antigravity");
+        assert_eq!(
+            resolve_auth_provider("antigravity").unwrap().provider_id(),
+            "antigravity"
+        );
         assert!(resolve_auth_provider("google").is_some());
-        assert_eq!(resolve_auth_provider("google").unwrap().provider_id(), "antigravity");
+        assert_eq!(
+            resolve_auth_provider("google").unwrap().provider_id(),
+            "antigravity"
+        );
+        assert_eq!(
+            resolve_auth_provider("opencode-go")
+                .unwrap()
+                .provider_id(),
+            "opencode-go"
+        );
+        assert_eq!(
+            resolve_auth_provider("opencode").unwrap().provider_id(),
+            "opencode-go"
+        );
         assert!(resolve_auth_provider("unknown").is_none());
     }
 
