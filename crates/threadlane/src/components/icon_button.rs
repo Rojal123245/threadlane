@@ -9,17 +9,18 @@ script_mod! {
     use mod.prelude.widgets.*
 
     mod.components.IconButton = Button {
-        width: 24
-        height: 24
+        width: 26
+        height: 26
         margin: 0
         padding: 0
         spacing: 0
         text: ""
         align: Align{x: 0.5 y: 0.5}
-        icon_walk: Walk{width: 12 height: 12 margin: 0}
+        icon_walk: Walk{width: 14 height: 14 margin: 0}
         draw_icon +: {
-            color: theme.color_primary
-            color_hover: theme.color_primary
+            color: theme.color_muted_foreground
+            color_hover: theme.color_foreground
+            color_focus: theme.color_foreground
             color_down: theme.color_primary_foreground
         }
         draw_bg +: {
@@ -33,6 +34,45 @@ script_mod! {
             border_color_down: theme.color_transparent
             border_size: 0.0
             border_radius: 6.0
+        }
+        animator: Animator{
+            selected: {
+                default: @off
+                off: AnimatorState{
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_bg: {
+                            color: theme.color_transparent
+                            color_hover: theme.color_secondary
+                            color_focus: theme.color_secondary
+                            color_down: theme.color_input
+                        }
+                        draw_icon: {
+                            color: theme.color_muted_foreground
+                            color_hover: theme.color_foreground
+                            color_focus: theme.color_foreground
+                            color_down: theme.color_primary_foreground
+                        }
+                    }
+                }
+                on: AnimatorState{
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_bg: {
+                            color: theme.color_secondary
+                            color_hover: theme.color_card
+                            color_focus: theme.color_card
+                            color_down: theme.color_input
+                        }
+                        draw_icon: {
+                            color: theme.color_foreground
+                            color_hover: theme.color_foreground
+                            color_focus: theme.color_foreground
+                            color_down: theme.color_primary_foreground
+                        }
+                    }
+                }
+            }
         }
     }
 }

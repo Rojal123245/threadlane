@@ -1858,7 +1858,7 @@ script_mod! {
                                     height: 26
                                     icon_walk: Walk{width: 14 height: 14}
                                     draw_icon +: {
-                                        svg: crate_resource("self:resources/icons/sidebar.svg")
+                                        svg: crate_resource("self:resources/icons/sidebar_left.svg")
                                     }
                                 }
                                 settings_btn := mod.components.IconButton {
@@ -1950,24 +1950,13 @@ script_mod! {
                             padding: Inset{left: 4 top: 1 right: 2 bottom: 2}
 
                             left_sidebar_expand_btn := mod.components.IconButton {
-                                width: 28
-                                height: 28
+                                width: 26
+                                height: 26
                                 visible: false
                                 icon_walk: Walk{width: 14 height: 14}
-                                draw_bg +: {
-                                    color: theme.color_secondary
-                                    color_hover: theme.color_card
-                                    color_focus: theme.color_card
-                                    color_down: theme.color_input
-                                    border_radius: 14.0
-                                }
                                 draw_icon +: {
-                                    color: theme.color_foreground
-                                    color_hover: theme.color_foreground
-                                    color_focus: theme.color_foreground
-                                    color_down: theme.color_primary_foreground
+                                    svg: crate_resource("self:resources/icons/sidebar_left.svg")
                                 }
-                                draw_icon +: { svg: crate_resource("self:resources/icons/sidebar.svg") }
                             }
 
                             project_identity := View {
@@ -2014,31 +2003,20 @@ script_mod! {
                                 }
                             }
 
-                            terminal_header_btn := mod.components.TerminalIconButton {
-                                width: 24
-                                height: 24
-                                icon_walk: Walk{width: 11 height: 11}
+                            terminal_header_btn := mod.components.IconButton {
+                                width: 26
+                                height: 26
+                                icon_walk: Walk{width: 14 height: 14}
                                 draw_icon +: { svg: crate_resource("self:resources/icons/panel-down.svg") }
                             }
 
                             right_sidebar_toggle_btn := mod.components.IconButton {
-                                width: 28
-                                height: 28
+                                width: 26
+                                height: 26
                                 visible: false
                                 icon_walk: Walk{width: 14 height: 14}
-                                draw_bg +: {
-                                    color: theme.color_secondary
-                                    color_hover: theme.color_card
-                                    color_focus: theme.color_card
-                                    color_down: theme.color_input
-                                    border_radius: 14.0
-                                }
                                 draw_icon +: {
-                                    svg: crate_resource("self:resources/icons/sidebar.svg")
-                                    color: theme.color_foreground
-                                    color_hover: theme.color_foreground
-                                    color_focus: theme.color_foreground
-                                    color_down: theme.color_primary_foreground
+                                    svg: crate_resource("self:resources/icons/sidebar_right.svg")
                                 }
                             }
 
@@ -2448,8 +2426,8 @@ script_mod! {
                                         height: 28
                                         labels: ["New worktree…", "Current checkout"]
                                         use_provider_icons: false
-                                        padding: Inset{left: 10 right: 22}
-                                        icon_walk: Walk{width: 14 height: 14 margin: Inset{right: 6}}
+                                        padding: Inset{left: 8 right: 22}
+                                        icon_walk: Walk{width: 11 height: 11 margin: Inset{right: 5}}
                                         draw_icon +: {
                                             svg: crate_resource("self:resources/icons/folder.svg")
                                             color: theme.color_primary
@@ -2551,9 +2529,9 @@ script_mod! {
                                     spacing: 6
                                     align: Align{y: 0.5}
                                     git_state_icon := Icon {
-                                        width: 14
-                                        height: 14
-                                        icon_walk: Walk{width: 12 height: 12}
+                                        width: 12
+                                        height: 12
+                                        icon_walk: Walk{width: 10 height: 10}
                                         align: Align{x: 0.5 y: 0.5}
                                         draw_icon +: {
                                             svg: crate_resource("self:resources/icons/git.svg")
@@ -3007,7 +2985,7 @@ script_mod! {
                                         width: 36
                                         height: 28
                                         text: ""
-                                        icon_walk: Walk{width: 15 height: 15}
+                                        icon_walk: Walk{width: 12 height: 12}
                                         align: Align{x: 0.5 y: 0.5}
                                         padding: 0
                                         spacing: 0
@@ -3022,7 +3000,7 @@ script_mod! {
                                         width: 36
                                         height: 28
                                         text: ""
-                                        icon_walk: Walk{width: 15 height: 15}
+                                        icon_walk: Walk{width: 12 height: 12}
                                         align: Align{x: 0.5 y: 0.5}
                                         padding: 0
                                         spacing: 0
@@ -3037,7 +3015,7 @@ script_mod! {
                                         width: 36
                                         height: 28
                                         text: ""
-                                        icon_walk: Walk{width: 15 height: 15}
+                                        icon_walk: Walk{width: 12 height: 12}
                                         align: Align{x: 0.5 y: 0.5}
                                         padding: 0
                                         spacing: 0
@@ -3052,7 +3030,7 @@ script_mod! {
                                         width: 36
                                         height: 28
                                         text: ""
-                                        icon_walk: Walk{width: 15 height: 15}
+                                        icon_walk: Walk{width: 12 height: 12}
                                         align: Align{x: 0.5 y: 0.5}
                                         padding: 0
                                         spacing: 0
@@ -4742,8 +4720,7 @@ fn format_capabilities_summary(skills: &[SkillMetadata], agents: &[AgentConfig])
 }
 
 impl App {
-    fn toggle_left_sidebar(&mut self, cx: &mut Cx) {
-        self.left_sidebar_open = !self.left_sidebar_open;
+    fn sync_left_sidebar(&mut self, cx: &mut Cx) {
         self.ui.dock(cx, ids!(dock)).set_splitter_align(
             cx,
             id!(root),
@@ -4756,7 +4733,22 @@ impl App {
         self.ui
             .button(cx, ids!(left_sidebar_expand_btn))
             .set_visible(cx, !self.left_sidebar_open);
+        crate::components::nav_button::set_selected(
+            cx,
+            &self.ui.button(cx, ids!(left_sidebar_toggle_btn)),
+            self.left_sidebar_open,
+        );
+        crate::components::nav_button::set_selected(
+            cx,
+            &self.ui.button(cx, ids!(left_sidebar_expand_btn)),
+            self.left_sidebar_open,
+        );
         self.ui.view(cx, ids!(header)).redraw(cx);
+    }
+
+    fn toggle_left_sidebar(&mut self, cx: &mut Cx) {
+        self.left_sidebar_open = !self.left_sidebar_open;
+        self.sync_left_sidebar(cx);
     }
 
     fn stop_active_generation(&mut self, cx: &mut Cx) {
@@ -6697,6 +6689,17 @@ impl App {
         self.ui
             .button(cx, ids!(right_sidebar_toggle_btn))
             .set_visible(cx, sidebar_available);
+        crate::components::nav_button::set_selected(
+            cx,
+            &self.ui.button(cx, ids!(right_sidebar_toggle_btn)),
+            sidebar_visible,
+        );
+        let terminal_open = self.ui.project_terminal(cx, ids!(project_terminal)).is_open();
+        crate::components::nav_button::set_selected(
+            cx,
+            &self.ui.button(cx, ids!(terminal_header_btn)),
+            terminal_open,
+        );
         self.ui
             .button(cx, ids!(right_sidebar_toggle_btn))
             .redraw(cx);
@@ -6749,10 +6752,13 @@ impl App {
             }
         }
 
+        self.ui
+            .button(cx, ids!(tasks_tab_btn))
+            .set_visible(cx, self.right_sidebar_agents_available);
         crate::components::nav_button::set_selected(
             cx,
             &self.ui.button(cx, ids!(tasks_tab_btn)),
-            tab == RightSidebarTab::Tasks || self.right_sidebar_agents_available,
+            show_tasks,
         );
         // The editor tab only appears once a file has been opened, so the strip
         // does not show a control that would land on an empty panel.

@@ -31,6 +31,8 @@ pub struct GitFile {
     pub worktree_status: char,
     pub staged: bool,
     pub unstaged: bool,
+    pub additions: u32,
+    pub deletions: u32,
 }
 
 impl GitFile {
@@ -184,6 +186,8 @@ fn parse_status(_work_dir: &Path, porcelain: &str) -> GitStatus {
                 worktree_status: worktree,
                 staged: index != ' ' && index != '?',
                 unstaged: index == '?' || worktree != ' ',
+                additions: 0,
+                deletions: 0,
             });
         }
     }
@@ -193,6 +197,31 @@ fn parse_status(_work_dir: &Path, porcelain: &str) -> GitStatus {
 pub fn inspect(work_dir: &Path) -> Result<GitStatus, GitError> {
     let porcelain = command(work_dir, &["status", "--porcelain=v1", "-b", "-z"])?;
     let mut status = parse_status(work_dir, &porcelain);
+    let numstat_output = command(work_dir, &["diff", "HEAD", "--numstat"])
+        .or_else(|_| command(work_dir, &["diff", "--numstat"]));
+    let mut numstats = std::collections::HashMap::new();
+    if let Ok(output) = &numstat_output {
+        for line in output.lines() {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() >= 3 {
+                let add = parts[0].parse::<u32>().unwrap_or(0);
+                let del = parts[1].parse::<u32>().unwrap_or(0);
+                let path = parts[2].trim().to_string();
+                numstats.insert(path, (add, del));
+            }
+        }
+    }
+    for file in &mut status.files {
+        if let Some(&(add, del)) = numstats.get(&file.path) {
+            file.additions = add;
+            file.deletions = del;
+        } else if file.index_status == '?' || file.worktree_status == '?' {
+            if let Ok(content) = std::fs::read_to_string(work_dir.join(&file.path)) {
+                let count = content.lines().count() as u32;
+                file.additions = if count == 0 { 1 } else { count };
+            }
+        }
+    }
     status.branches = command(
         work_dir,
         &["for-each-ref", "--format=%(refname:short)", "refs/heads"],

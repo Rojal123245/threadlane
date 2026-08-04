@@ -21,7 +21,7 @@ script_mod! {
         height: 24
         align: Align{y: 0.5}
         padding: Inset{left: 10 right: 10}
-        icon_walk: Walk{width: 13 height: 13 margin: Inset{right: 7}}
+        icon_walk: Walk{width: 11 height: 11 margin: Inset{right: 5}}
         use_provider_icons: true
         draw_openai_icon +: {
             svg: crate_resource("self:resources/icons/openai.svg")
@@ -142,7 +142,7 @@ script_mod! {
         margin: 0
         align: Align{x: 0.0 y: 0.5}
         padding: Inset{left: 10 right: 24}
-        icon_walk: Walk{width: 13 height: 13 margin: Inset{right: 7}}
+        icon_walk: Walk{width: 11 height: 11 margin: Inset{right: 5}}
         use_provider_icons: true
         draw_openai_icon +: {
             svg: crate_resource("self:resources/icons/openai.svg")
@@ -305,7 +305,7 @@ script_mod! {
     mod.components.GitBranchDropDown = mod.components.IconDropDown {
         use_provider_icons: false
         padding: Inset{left: 8 right: 22}
-        icon_walk: Walk{width: 14 height: 14 margin: Inset{right: 6}}
+        icon_walk: Walk{width: 11 height: 11 margin: Inset{right: 5}}
         draw_icon +: {
             svg: crate_resource("self:resources/icons/git.svg")
             color: theme.color_primary

@@ -57,6 +57,7 @@ impl App {
         self.sync_terminal_project(cx);
         self.sync_git_branch_picker(cx);
         self.sync_right_sidebar(cx);
+        self.sync_left_sidebar(cx);
         self.request_git_status();
         self.sync_task_sidebar(cx);
     }

@@ -11,15 +11,15 @@ script_mod! {
         draw_bg +: { color: theme.color_muted_foreground border_radius: 1.5 }
     }
 
-    mod.components.ActivityLoader = View {
+    mod.components.ActivityLoader = #(ActivityLoader::register_widget(vm)) {
         width: 20
         height: 10
         show_bg: true
         draw_bg +: {
             color: uniform(theme.color_primary)
-            color_mid: uniform(theme.color_primary)
-            color_tail: uniform(theme.color_primary)
-            color_idle: uniform(theme.color_primary)
+            color_mid: uniform(theme.color_foreground)
+            color_tail: uniform(theme.color_muted_foreground)
+            color_idle: uniform(theme.color_muted)
             speed: uniform(7.0)
             dot_radius: uniform(1.15)
 
@@ -68,9 +68,11 @@ script_mod! {
         width: Fit
         height: Fit
         flow: Right
-        align: Align{y: 0.5}
+        align: Align{x: 0.0 y: 0.5}
+        spacing: 4
+
         status_running_indicator := mod.components.ActivityLoader {
-            width: 18
+            width: 14
             height: 10
             visible: false
             draw_bg +: {
@@ -104,6 +106,32 @@ script_mod! {
                 color: theme.color_destructive
                 text_style: theme.font_bold { font_size: 8.0 }
             }
+        }
+    }
+}
+
+#[derive(Script, ScriptHook, Widget)]
+pub struct ActivityLoader {
+    #[deref]
+    view: View,
+    #[rust]
+    next_frame: NextFrame,
+}
+
+impl Widget for ActivityLoader {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        if self.view.visible() {
+            self.next_frame = cx.new_next_frame();
+        }
+        self.view.draw_walk(cx, scope, walk)
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+
+        if self.next_frame.is_event(event).is_some() && self.view.visible() {
+            self.view.redraw(cx);
+            self.next_frame = cx.new_next_frame();
         }
     }
 }

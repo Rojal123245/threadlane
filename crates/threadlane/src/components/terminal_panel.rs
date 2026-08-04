@@ -465,6 +465,11 @@ impl ProjectTerminalRef {
             inner.toggle(cx);
         }
     }
+    pub fn is_open(&self) -> bool {
+        self.borrow()
+            .map(|inner| inner.expanded)
+            .unwrap_or(false)
+    }
 
     pub fn dimensions(&self, cx: &Cx) -> Option<(usize, usize)> {
         self.borrow()
