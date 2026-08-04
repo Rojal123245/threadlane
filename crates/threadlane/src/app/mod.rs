@@ -2065,11 +2065,16 @@ script_mod! {
                         WorkspaceDock := View {
                             width: Fill
                             height: Fill
-                            flow: Down
-                            spacing: 5
-                            padding: Inset{left: 10 top: 8 right: 12 bottom: 10}
+                            flow: Overlay
 
-                        header := PanelHeader {
+                            workspace_content := View {
+                                width: Fill
+                                height: Fill
+                                flow: Down
+                                spacing: 5
+                                padding: Inset{left: 10 top: 8 right: 12 bottom: 10}
+
+                                header := PanelHeader {
                             spacing: 8
                             padding: Inset{left: 4 top: 1 right: 2 bottom: 2}
 
@@ -3126,7 +3131,6 @@ script_mod! {
                                             color_hover: theme.color_foreground
                                             color_down: theme.color_primary
                                         }
-                                    }
                                     file_tree_tab_btn := mod.components.IconButton {
                                         width: 36
                                         height: 28
@@ -3144,73 +3148,75 @@ script_mod! {
                                     }
                                 }
                             }
-                            git_branch_dialog := View {
-                                width: Fill
-                                height: Fill
-                                visible: false
-                                flow: Overlay
-                                align: Align{x: 0.5 y: 0.5}
+                        }
 
-                                git_branch_dialog_backdrop := mod.components.ModalDialogBackdrop {}
-                                git_branch_dialog_card := RoundedView {
-                                    width: 380
+                        git_branch_dialog := View {
+                            width: Fill
+                            height: Fill
+                            visible: false
+                            flow: Overlay
+                            align: Align{x: 0.5 y: 0.5}
+
+                            git_branch_dialog_backdrop := mod.components.ModalDialogBackdrop {}
+                            git_branch_dialog_card := RoundedView {
+                                width: 380
+                                height: Fit
+                                flow: Down
+                                spacing: 16
+                                padding: Inset{left: 20 top: 18 right: 20 bottom: 20}
+                                draw_bg +: {
+                                    color: theme.color_popover
+                                    border_color: theme.color_border
+                                    border_size: 1.0
+                                    border_radius: theme.radius_lg
+                                }
+
+                                git_branch_dialog_title := Label {
+                                    width: Fill
                                     height: Fit
-                                    flow: Down
-                                    spacing: 16
-                                    margin: Inset{left: -570}
-                                    padding: Inset{left: 20 top: 18 right: 20 bottom: 20}
+                                    text: "Create new branch"
+                                    draw_text +: {
+                                        color: theme.color_foreground
+                                        text_style: theme.font_bold { font_size: 14.0 }
+                                    }
+                                }
+                                git_branch_dialog_name := TextInput {
+                                    width: Fill
+                                    height: 36
+                                    empty_text: "Branch name"
+                                    padding: Inset{left: 10 right: 10}
                                     draw_bg +: {
-                                        color: theme.color_popover
+                                        color: theme.color_input
+                                        color_focus: theme.color_input
                                         border_color: theme.color_border
+                                        border_color_focus: theme.color_primary
                                         border_size: 1.0
-                                        border_radius: theme.radius_lg
+                                        border_radius: 7.0
                                     }
+                                }
+                                git_branch_dialog_actions := View {
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 1.0 y: 0.5}
 
-                                    git_branch_dialog_title := Label {
-                                        width: Fill
-                                        height: Fit
-                                        text: "Create new branch"
-                                        draw_text +: {
-                                            color: theme.color_foreground
-                                            text_style: theme.font_bold { font_size: 14.0 }
-                                        }
+                                    git_branch_dialog_cancel_btn := mod.components.HeaderChipButton {
+                                        width: Fit
+                                        height: 30
+                                        text: "Cancel"
+                                        padding: Inset{left: 10 right: 10 top: 5 bottom: 5}
                                     }
-                                    git_branch_dialog_name := TextInput {
-                                        width: Fill
-                                        height: 36
-                                        empty_text: "Branch name"
-                                        padding: Inset{left: 10 right: 10}
-                                        draw_bg +: {
-                                            color: theme.color_input
-                                            color_focus: theme.color_input
-                                            border_color: theme.color_border
-                                            border_color_focus: theme.color_primary
-                                            border_size: 1.0
-                                            border_radius: 7.0
-                                        }
-                                    }
-                                    git_branch_dialog_actions := View {
-                                        width: Fill
-                                        height: Fit
-                                        flow: Right
-                                        spacing: 8
-                                        align: Align{x: 1.0 y: 0.5}
-
-                                        git_branch_dialog_cancel_btn := mod.components.HeaderChipButton {
-                                            width: Fit
-                                            height: 30
-                                            text: "Cancel"
-                                            padding: Inset{left: 10 right: 10 top: 5 bottom: 5}
-                                        }
-                                        git_branch_dialog_create_btn := mod.components.HeaderChipButton {
-                                            width: Fit
-                                            height: 30
-                                            text: "Create"
-                                            padding: Inset{left: 10 right: 10 top: 5 bottom: 5}
-                                        }
+                                    git_branch_dialog_create_btn := mod.components.HeaderChipButton {
+                                        width: Fit
+                                        height: 30
+                                        text: "Create"
+                                        padding: Inset{left: 10 right: 10 top: 5 bottom: 5}
                                     }
                                 }
                             }
+                        }
+                    }
 
                         }
                     }
