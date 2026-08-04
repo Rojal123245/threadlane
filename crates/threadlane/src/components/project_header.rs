@@ -15,6 +15,7 @@ script_mod! {
         padding: Inset{left: 8 top: 4 right: 4 bottom: 4}
         draw_bg +: {
             hover: instance(0.0)
+            tree_top: instance(0.0)
             tree_color: uniform(theme.color_card)
             color: theme.color_transparent
             color_hover: theme.color_card
@@ -36,6 +37,10 @@ script_mod! {
 
                 let tree_x = 16.0
                 let tree_start = self.rect_size.y * 0.5 + 8.0
+                if self.tree_top > 0.5 {
+                    sdf.rect(tree_x, 0.0, 1.0, max(0.0, tree_start))
+                    sdf.fill(self.tree_color)
+                }
                 sdf.rect(tree_x, tree_start, 1.0, max(0.0, self.rect_size.y - tree_start))
                 sdf.fill(self.tree_color)
                 return sdf.result

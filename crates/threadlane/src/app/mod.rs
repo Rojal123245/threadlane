@@ -14,6 +14,7 @@ use crate::components::git_diff::GitDiffView;
 use crate::components::context_window::ContextWindowWidgetRefExt;
 use crate::components::model_dropdown::IconDropDownWidgetRefExt;
 use crate::components::project_header::ProjectHeaderAction;
+use crate::components::session_row::SessionRowAction;
 use crate::components::task_sidebar::{
     task_header_state, TaskSidebar, TaskSidebarAction, TaskSidebarItem,
 };
@@ -828,63 +829,6 @@ script_mod! {
 
             SessionRowLast := SessionRowBase {
                 draw_bg +: { tree_last: 1.0 }
-            }
-
-            mod.components.SessionRowActiveBase = SessionRowBase {
-                draw_bg +: {
-                    is_active: 1.0
-                    color: theme.color_secondary
-                    color_hover: theme.color_accent
-                    border_color: theme.color_border
-                    border_size: 1.0
-                    border_radius: theme.radius_sm
-                }
-                title_surface +: {
-                    title_lbl +: {
-                        draw_text +: { color: theme.color_foreground }
-                    }
-                }
-                time_lbl +: {
-                    draw_text +: {
-                        color: theme.color_muted_foreground
-                    }
-                }
-            }
-
-            SessionRowActive := mod.components.SessionRowActiveBase {}
-
-            SessionRowActiveLast := mod.components.SessionRowActiveBase {
-                draw_bg +: {
-                    tree_last: 1.0
-                }
-            }
-
-            mod.components.SessionRowContextBase = SessionRowBase {
-                draw_bg +: {
-                    color: theme.color_card
-                    color_hover: theme.color_accent
-                    border_color: theme.color_border
-                    border_size: 1.0
-                    border_radius: theme.radius_sm
-                }
-                title_surface +: {
-                    title_lbl +: {
-                        draw_text +: { color: theme.color_foreground }
-                    }
-                }
-                time_lbl +: {
-                    draw_text +: {
-                        color: theme.color_muted_foreground
-                    }
-                }
-            }
-
-            SessionRowContext := mod.components.SessionRowContextBase {}
-
-            SessionRowContextLast := mod.components.SessionRowContextBase {
-                draw_bg +: {
-                    tree_last: 1.0
-                }
             }
 
             SessionOverflow := View {
@@ -4310,8 +4254,8 @@ impl MatchEvent for App {
         let session_menu_uid = self.ui.widget(cx, ids!(session_context_menu)).widget_uid();
         if let Some(action) = actions.find_widget_action(session_menu_uid) {
             match action.cast::<SessionContextMenuAction>() {
-                SessionContextMenuAction::Archive => {
-                    self.apply_session_context_action(cx, archive_session, "Archived");
+                SessionContextMenuAction::Settle => {
+                    self.apply_session_context_action(cx, archive_session, "Settled");
                 }
                 SessionContextMenuAction::Delete => {
                     self.apply_session_context_action(cx, delete_session, "Deleted");
@@ -4359,6 +4303,16 @@ impl MatchEvent for App {
                     self.ui.widget(cx, ids!(session_list)).redraw(cx);
                 }
                 continue;
+            }
+            if let Some(action) = actions.find_widget_action(item.widget_uid()) {
+                if matches!(action.cast::<SessionRowAction>(), SessionRowAction::Settle) {
+                    let Some(entry) = session_entry_at_row(item_id) else {
+                        continue;
+                    };
+                    self.session_context_entry = Some(entry);
+                    self.apply_session_context_action(cx, archive_session, "Settled");
+                    continue;
+                }
             }
             if let Some(fe) = item.as_view().finger_up(actions) {
                 if let Some(work_dir) = project_work_dir_at_row(item_id) {

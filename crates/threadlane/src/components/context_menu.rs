@@ -5,7 +5,8 @@ use makepad_widgets::*;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum SessionContextMenuAction {
-    Archive,
+    /// Completes a session and moves its persisted history out of the active sidebar.
+    Settle,
     Delete,
     #[default]
     None,
@@ -61,7 +62,7 @@ impl Widget for SessionContextMenu {
                 .button(cx, ids!(archive_session_btn))
                 .clicked(actions)
             {
-                cx.widget_action(self.widget_uid(), SessionContextMenuAction::Archive);
+                cx.widget_action(self.widget_uid(), SessionContextMenuAction::Settle);
                 self.close(cx);
                 return;
             }
@@ -196,7 +197,7 @@ script_mod! {
             }
 
             archive_session_btn := mod.components.ContextMenuItem {
-                text: "Archive Session"
+                text: "Settle Session"
             }
 
             delete_session_btn := mod.components.ContextMenuItem {

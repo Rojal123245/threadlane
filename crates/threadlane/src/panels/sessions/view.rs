@@ -4,6 +4,7 @@ use super::state::{
     relative_time_label, ProjectGroup, SessionHealth, SessionListRow, SessionsData, SESSIONS_DATA,
 };
 use crate::components::project_header::ProjectHeaderAction;
+use crate::components::session_row::SessionRow;
 use crate::path_utils::truncate_chars;
 use makepad_widgets::*;
 use std::path::PathBuf;
@@ -74,14 +75,11 @@ fn draw_empty_session_row(cx: &mut Cx2d, list: &mut PortalList, item_id: usize) 
     item_widget.draw_all_unscoped(cx);
 }
 
-fn session_row_template(context_target: bool, active: bool, last: bool) -> LiveId {
-    match (context_target, active, last) {
-        (true, _, true) => id!(SessionRowContextLast),
-        (true, _, false) => id!(SessionRowContext),
-        (false, true, true) => id!(SessionRowActiveLast),
-        (false, true, false) => id!(SessionRowActive),
-        (false, false, true) => id!(SessionRowLast),
-        (false, false, false) => id!(SessionRow),
+fn session_row_template(_context_target: bool, _active: bool, last: bool) -> LiveId {
+    if last {
+        id!(SessionRowLast)
+    } else {
+        id!(SessionRow)
     }
 }
 
@@ -111,6 +109,8 @@ pub struct SessionList {
     scrollbar_hide_timer: Timer,
     #[rust]
     search_query: String,
+    #[rust]
+    fixed_tree_top: bool,
 }
 
 impl SessionList {
@@ -226,6 +226,27 @@ impl SessionList {
 
         self.fixed_active = project_is_active(data, Some(project));
         self.fixed_work_dir = Some(project.work_dir.clone());
+        let needs_upward_stem = fixed.project_idx > 0;
+        if self.fixed_tree_top != needs_upward_stem {
+            self.fixed_tree_top = needs_upward_stem;
+            let mut normal = self.view.widget(cx, ids!(fixed_project_header));
+            let mut active = self.view.widget(cx, ids!(fixed_project_header_active));
+            if needs_upward_stem {
+                script_apply_eval!(cx, normal, {
+                    draw_bg +: { tree_top: #(1.0f64) }
+                });
+                script_apply_eval!(cx, active, {
+                    draw_bg +: { tree_top: #(1.0f64) }
+                });
+            } else {
+                script_apply_eval!(cx, normal, {
+                    draw_bg +: { tree_top: #(0.0f64) }
+                });
+                script_apply_eval!(cx, active, {
+                    draw_bg +: { tree_top: #(0.0f64) }
+                });
+            }
+        }
         let normal = self.view.widget(cx, ids!(fixed_project_header));
         let active = self.view.widget(cx, ids!(fixed_project_header_active));
         normal.set_visible(cx, !self.fixed_active);
@@ -324,6 +345,9 @@ impl Widget for SessionList {
                             });
                             let template = session_row_template(context_target, active, last);
                             let item_widget = list.item(cx, item_id, template);
+                            if let Some(mut row) = item_widget.borrow_mut::<SessionRow>() {
+                                row.set_state(cx, active, context_target);
+                            }
                             item_widget
                                 .label(cx, ids!(title_lbl))
                                 .set_text(cx, &session.title);
@@ -487,27 +511,14 @@ mod tests {
     }
 
     #[test]
-    fn session_template_prioritizes_context_then_active_then_last() {
-        assert_eq!(
-            session_row_template(true, true, true),
-            id!(SessionRowContextLast)
-        );
-        assert_eq!(
-            session_row_template(true, false, false),
-            id!(SessionRowContext)
-        );
-        assert_eq!(
-            session_row_template(false, true, true),
-            id!(SessionRowActiveLast)
-        );
-        assert_eq!(
-            session_row_template(false, true, false),
-            id!(SessionRowActive)
-        );
-        assert_eq!(
-            session_row_template(false, false, true),
-            id!(SessionRowLast)
-        );
+    fn session_template_only_distinguishes_last_connector() {
+        assert_eq!(session_row_template(true, true, true), id!(SessionRowLast));
+        assert_eq!(session_row_template(true, false, true), id!(SessionRowLast));
+        assert_eq!(session_row_template(false, true, true), id!(SessionRowLast));
+        assert_eq!(session_row_template(true, true, false), id!(SessionRow));
+        assert_eq!(session_row_template(true, false, false), id!(SessionRow));
+        assert_eq!(session_row_template(false, true, false), id!(SessionRow));
+        assert_eq!(session_row_template(false, false, true), id!(SessionRowLast));
         assert_eq!(session_row_template(false, false, false), id!(SessionRow));
     }
 

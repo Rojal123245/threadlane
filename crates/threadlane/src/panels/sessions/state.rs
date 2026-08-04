@@ -914,6 +914,22 @@ mod tests {
     }
 
     #[test]
+    fn settling_a_session_moves_it_out_of_the_active_session_directory() {
+        let work_dir = unique_test_dir("settle-session");
+        std::fs::create_dir_all(&work_dir).unwrap();
+        let session = create_new_session(&work_dir).unwrap();
+        let archived_file = work_dir
+            .join(".threadlane/sessions/archive")
+            .join(session.session_file.file_name().unwrap());
+
+        assert!(archive_session(&session));
+        assert!(!session.session_file.exists());
+        assert!(archived_file.exists());
+
+        let _ = std::fs::remove_dir_all(work_dir);
+    }
+
+    #[test]
     fn session_title_normalization() {
         assert_eq!(
             normalize_session_title(" Title: \"Fix the login flow\" "),
