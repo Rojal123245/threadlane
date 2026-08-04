@@ -24,7 +24,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot, Mutex as TokioMutex};
 use tokio::task::JoinHandle;
@@ -33,6 +33,7 @@ use tokio::task::JoinHandle;
 pub const ACP_PROTOCOL_VERSION: u16 = 1;
 
 const ACP_SETTINGS_FILE: &str = "acp.json";
+const MAX_CAPTURED_STDERR_BYTES: usize = 16 * 1024;
 const ACP_PROJECT_SETTINGS_RELATIVE_PATH: &str = ".threadlane/acp.json";
 const MAX_ACP_SETTINGS_BYTES: usize = 512 * 1024;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -799,6 +800,7 @@ pub struct AcpConnection {
     next_id: AtomicU64,
     reader_task: JoinHandle<()>,
     child: Option<TokioMutex<Child>>,
+    stderr_task: Option<JoinHandle<Vec<u8>>>,
 }
 
 impl AcpConnection {
@@ -819,7 +821,7 @@ impl AcpConnection {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
 
         let mut child = command
@@ -833,8 +835,21 @@ impl AcpConnection {
             .stdout
             .take()
             .ok_or_else(|| "Failed to open ACP agent stdout".to_string())?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "Failed to open ACP agent stderr".to_string())?;
 
-        Ok(Self::from_streams(stdin, stdout, handler, Some(child)))
+        let mut connection = Self::from_streams(stdin, stdout, handler, Some(child));
+        connection.stderr_task = Some(tokio::spawn(async move {
+            let mut output = Vec::new();
+            let _ = stderr
+                .take(MAX_CAPTURED_STDERR_BYTES as u64)
+                .read_to_end(&mut output)
+                .await;
+            output
+        }));
+        Ok(connection)
     }
 
     /// Builds a connection over arbitrary byte streams. Used by [`Self::spawn`]
@@ -864,6 +879,7 @@ impl AcpConnection {
             next_id: AtomicU64::new(1),
             reader_task,
             child: child.map(TokioMutex::new),
+            stderr_task: None,
         }
     }
 
@@ -1366,7 +1382,7 @@ impl AcpManager {
     /// than handed access to the current directory.
     async fn probe(config: &AcpAgentConfig, cwd: Option<&Path>) -> AcpAgentStatus {
         let handler: Arc<dyn AcpClientHandler> = Arc::new(AcpProbeClient);
-        let connection = match AcpConnection::spawn(config, cwd, handler).await {
+        let mut connection = match AcpConnection::spawn(config, cwd, handler).await {
             Ok(connection) => connection,
             Err(error) => return AcpAgentStatus::Error(error),
         };
@@ -1376,10 +1392,39 @@ impl AcpManager {
                 protocol_version: result.protocol_version,
                 auth_required: result.requires_authentication(),
             },
-            Err(error) => AcpAgentStatus::Error(error),
+            Err(error) => {
+                connection.shutdown().await;
+                let stderr = match connection.stderr_task.take() {
+                    Some(task) => Some(task.await.unwrap_or_default()),
+                    None => None,
+                };
+                AcpAgentStatus::Error(Self::format_probe_error(error, stderr))
+            }
         };
         connection.shutdown().await;
         status
+    }
+
+    fn format_probe_error(error: String, stderr: Option<Vec<u8>>) -> String {
+        let stderr = stderr.and_then(|bytes| {
+            let text = String::from_utf8_lossy(&bytes);
+            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            (!text.is_empty()).then_some(text)
+        });
+        let detail = stderr
+            .map(|text| format!("; stderr: {}", Self::truncate_status_text(&text, 180)))
+            .unwrap_or_default();
+        format!("{error}{detail}")
+    }
+
+    fn truncate_status_text(text: &str, max_chars: usize) -> String {
+        let mut chars = text.chars();
+        let truncated: String = chars.by_ref().take(max_chars).collect();
+        if chars.next().is_some() {
+            format!("{truncated}...")
+        } else {
+            truncated
+        }
     }
 
     /// Opens a working session against the configured agent `id`.
@@ -1453,6 +1498,22 @@ mod tests {
     fn from_command_line_rejects_blank_input() {
         assert!(AcpAgentConfig::from_command_line("", "gemini", AcpScope::Global).is_none());
         assert!(AcpAgentConfig::from_command_line("Gemini", "   ", AcpScope::Global).is_none());
+    }
+
+    #[test]
+    fn probe_error_includes_normalized_truncated_stderr() {
+        let error = AcpManager::format_probe_error(
+            "ACP agent closed the connection".to_string(),
+            Some(b" npm ERR!\n  package not found\n".to_vec()),
+        );
+        assert_eq!(
+            error,
+            "ACP agent closed the connection; stderr: npm ERR! package not found"
+        );
+
+        let error = AcpManager::format_probe_error("failed".to_string(), Some(vec![b'x'; 300]));
+        assert!(error.ends_with("..."));
+        assert!(error.len() < 220);
     }
 
     #[test]
