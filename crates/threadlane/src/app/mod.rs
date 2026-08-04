@@ -64,7 +64,7 @@ use threadlane_coding_agent::{
     SkillSettings, TaskRecord,
 };
 use threadlane_provider::auth;
-use threadlane_provider::openai::{fetch_available_models, OpenAIClient};
+use threadlane_provider::openai::fetch_available_models;
 use threadlane_provider::ProviderClient;
 
 use crate::panels::terminal::{ProjectTerminalGroup, ProjectTerminalSession};
@@ -419,8 +419,9 @@ script_mod! {
             width: Fill
             height: Fill
             flow: Down
-            drag_scrolling: false
-            auto_tail: true
+            // Tail only while already at the bottom. PortalList's auto_tail resets the
+            // scroll position during every apply, which can swallow the first wheel events.
+            auto_tail: false
             smooth_tail: false
             selectable: true
             reuse_items: false
@@ -2672,29 +2673,6 @@ script_mod! {
                                         }
                                     }
                                 }
-                                git_new_branch_row := View {
-                                    width: Fill
-                                    height: 28
-                                    visible: false
-                                    flow: Right
-                                    spacing: 4
-                                    git_new_branch_name := mod.components.SearchInput {
-                                        empty_text: "New branch name"
-                                        margin: 0
-                                    }
-                                    git_create_branch_btn := mod.components.HeaderChipButton {
-                                        width: Fit
-                                        height: 28
-                                        text: "Create"
-                                        padding: Inset{left: 7 right: 7 top: 4 bottom: 4}
-                                    }
-                                    git_cancel_branch_btn := mod.components.HeaderChipButton {
-                                        width: Fit
-                                        height: 28
-                                        text: "Cancel"
-                                        padding: Inset{left: 7 right: 7 top: 4 bottom: 4}
-                                    }
-                                }
                                     git_feedback_error_row := View {
                                         width: Fill
                                         height: 18
@@ -3162,6 +3140,73 @@ script_mod! {
                                             color: theme.color_muted_foreground
                                             color_hover: theme.color_foreground
                                             color_down: theme.color_primary
+                                        }
+                                    }
+                                }
+                            }
+                            git_branch_dialog := View {
+                                width: Fill
+                                height: Fill
+                                visible: false
+                                flow: Overlay
+                                align: Align{x: 0.5 y: 0.5}
+
+                                git_branch_dialog_backdrop := mod.components.ModalDialogBackdrop {}
+                                git_branch_dialog_card := RoundedView {
+                                    width: 380
+                                    height: Fit
+                                    flow: Down
+                                    spacing: 16
+                                    margin: Inset{left: -570}
+                                    padding: Inset{left: 20 top: 18 right: 20 bottom: 20}
+                                    draw_bg +: {
+                                        color: theme.color_popover
+                                        border_color: theme.color_border
+                                        border_size: 1.0
+                                        border_radius: theme.radius_lg
+                                    }
+
+                                    git_branch_dialog_title := Label {
+                                        width: Fill
+                                        height: Fit
+                                        text: "Create new branch"
+                                        draw_text +: {
+                                            color: theme.color_foreground
+                                            text_style: theme.font_bold { font_size: 14.0 }
+                                        }
+                                    }
+                                    git_branch_dialog_name := TextInput {
+                                        width: Fill
+                                        height: 36
+                                        empty_text: "Branch name"
+                                        padding: Inset{left: 10 right: 10}
+                                        draw_bg +: {
+                                            color: theme.color_input
+                                            color_focus: theme.color_input
+                                            border_color: theme.color_border
+                                            border_color_focus: theme.color_primary
+                                            border_size: 1.0
+                                            border_radius: 7.0
+                                        }
+                                    }
+                                    git_branch_dialog_actions := View {
+                                        width: Fill
+                                        height: Fit
+                                        flow: Right
+                                        spacing: 8
+                                        align: Align{x: 1.0 y: 0.5}
+
+                                        git_branch_dialog_cancel_btn := mod.components.HeaderChipButton {
+                                            width: Fit
+                                            height: 30
+                                            text: "Cancel"
+                                            padding: Inset{left: 10 right: 10 top: 5 bottom: 5}
+                                        }
+                                        git_branch_dialog_create_btn := mod.components.HeaderChipButton {
+                                            width: Fit
+                                            height: 30
+                                            text: "Create"
+                                            padding: Inset{left: 10 right: 10 top: 5 bottom: 5}
                                         }
                                     }
                                 }
@@ -4185,30 +4230,27 @@ impl MatchEvent for App {
 
         let cancel_branch_requested = self
             .ui
-            .button(cx, ids!(git_cancel_branch_btn))
+            .button(cx, ids!(git_branch_dialog_cancel_btn))
             .clicked(actions);
         if cancel_branch_requested {
             self.git_new_branch_open = false;
             self.ui
-                .view(cx, ids!(git_new_branch_row))
-                .set_visible(cx, false);
-            self.ui
-                .text_input(cx, ids!(git_new_branch_name))
+                .text_input(cx, ids!(git_branch_dialog_name))
                 .set_text(cx, "");
             self.sync_right_sidebar(cx);
         }
 
         let create_branch_requested = self
             .ui
-            .button(cx, ids!(git_create_branch_btn))
+            .button(cx, ids!(git_branch_dialog_create_btn))
             .clicked(actions)
             || self
                 .ui
-                .text_input(cx, ids!(git_new_branch_name))
+                .text_input(cx, ids!(git_branch_dialog_name))
                 .returned(actions)
                 .is_some();
         if create_branch_requested {
-            let name = self.ui.text_input(cx, ids!(git_new_branch_name)).text();
+            let name = self.ui.text_input(cx, ids!(git_branch_dialog_name)).text();
             if name.trim().is_empty() {
                 self.git_feedback = Some((false, "Enter a branch name first.".to_owned()));
                 self.sync_right_sidebar(cx);
@@ -4216,6 +4258,7 @@ impl MatchEvent for App {
                 self.start_git_create_branch(cx, name);
             }
         }
+
 
         if self
             .ui
@@ -4383,28 +4426,22 @@ impl MatchEvent for App {
             if self.git_operation_pending || self.git_pr_pending {
                 self.sync_git_branch_picker(cx);
             } else if branch == "New branch…" || branch == "＋ New branch…" {
-                self.right_sidebar_tab = RightSidebarTab::Git;
                 self.git_new_branch_open = true;
                 self.sync_right_sidebar(cx);
                 self.ui
-                    .view(cx, ids!(git_new_branch_row))
+                    .view(cx, ids!(git_branch_dialog))
                     .set_visible(cx, true);
                 self.ui
-                    .text_input(cx, ids!(git_new_branch_name))
+                    .text_input(cx, ids!(git_branch_dialog_name))
                     .set_text(cx, "");
                 self.ui
-                    .text_input(cx, ids!(git_new_branch_name))
+                    .text_input(cx, ids!(git_branch_dialog_name))
                     .set_key_focus(cx);
             } else if branch == "Git" || branch == "detached HEAD" {
                 self.git_new_branch_open = false;
-                self.ui
-                    .view(cx, ids!(git_new_branch_row))
-                    .set_visible(cx, false);
+                self.sync_right_sidebar(cx);
             } else {
                 self.git_new_branch_open = false;
-                self.ui
-                    .view(cx, ids!(git_new_branch_row))
-                    .set_visible(cx, false);
                 self.checkout_git_branch(cx, branch);
             }
         }
@@ -6805,7 +6842,7 @@ impl App {
                 .view(cx, ids!(git_feedback_success_row))
                 .set_visible(cx, feedback_success);
             self.ui
-                .view(cx, ids!(git_new_branch_row))
+                .view(cx, ids!(git_branch_dialog))
                 .set_visible(cx, self.git_new_branch_open);
             if let Some(mut changes) = self
                 .ui
@@ -7291,10 +7328,7 @@ impl App {
     fn start_git_create_branch(&mut self, cx: &mut Cx, name: String) {
         self.git_new_branch_open = false;
         self.ui
-            .view(cx, ids!(git_new_branch_row))
-            .set_visible(cx, false);
-        self.ui
-            .text_input(cx, ids!(git_new_branch_name))
+            .text_input(cx, ids!(git_branch_dialog_name))
             .set_text(cx, "");
         self.start_git_operation(cx, format!("create branch `{name}`"), move |work_dir| {
             crate::git::create_branch(work_dir, &name)
@@ -8315,7 +8349,7 @@ impl App {
         };
         get_runtime().spawn(async move {
             let result = async {
-                let client = OpenAIClient::new(api_key, account_id);
+                let client = ProviderClient::new(api_key, account_id);
                 let raw = client.generate_title(&model, &title_prompt).await?;
                 let title = normalize_session_title(&raw);
                 if title.is_empty() {

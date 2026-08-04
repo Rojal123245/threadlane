@@ -982,9 +982,10 @@ async fn test_state_mutex_is_not_held_across_after_hook_await() {
 }
 
 #[tokio::test]
-async fn test_parallel_join_error_preserves_result_count_and_order() {
+async fn test_sequential_panic_preserves_result_count_and_order() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let mut agent_loop = AgentLoop::new("fake_key", None, "gpt-4o");
+    agent_loop.tool_execution_mode = ToolExecutionMode::Sequential;
     agent_loop
         .register_tool_executor(Arc::new(RecordingExecutor {
             id: "panic-executor",

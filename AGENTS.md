@@ -255,7 +255,7 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 
 ## Model Provider Routing
 
-- Provider selection is encoded in the persisted model ID. Models prefixed with `antigravity/` route through `threadlane-provider::router::ProviderClient`; unprefixed models retain the OpenAI path. Preserve the prefix across model switching, sessions, subagents, and payload construction.
+- Provider selection is encoded in the persisted model ID. Models prefixed with `antigravity/` or `opencode-go/` route through `threadlane-provider::router::ProviderClient`; unprefixed models retain the OpenAI path. Preserve the prefix across model switching, sessions, subagents, and payload construction.
 - Persist each session's selected model in `SessionTree` metadata. Restore it before constructing the agent runtime and synchronize the model picker from that restored value; legacy metadata without a model continues to use the caller-provided default.
 - A restored session has two synchronized representations: the persisted `SessionTree` active branch and `AgentState.messages`, which supplies provider context. Every constructor or session-switch path must load the active branch into `AgentState.messages` after the current system prompt; populating only the chat UI makes old messages visible without sending them to the model and also breaks subsequent prefix-based persistence.
 - Keep the central agent loop provider-neutral. Provider clients must translate requests and stream results into the shared `StreamEvent`, `ToolCall`, and `ProviderUsage` contract so tool execution, hooks, compaction, persistence, and chat rendering are not duplicated.
@@ -263,7 +263,7 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 - Antigravity uses Google Cloud Code Assist's `v1internal` endpoints and outer request envelope, not the public Gemini `streamGenerateContent` endpoint. Preserve project discovery, production/daily endpoint fallback, runtime-model mapping, wrapped SSE parsing, and provider-specific tool schemas when changing that client.
 - Gemini tool calls can include a required `thoughtSignature`. Preserve it on the shared persisted `ToolCall` and replay it on the assistant `functionCall` part; dropping it causes the next tool-result request to fail with HTTP 400.
 - Credential checks follow the selected model. Antigravity models require stored Antigravity OAuth credentials but must not require an OpenAI key; OpenAI models retain the existing OpenAI credential requirement.
-- Automatic session titles currently use the OpenAI title endpoint. Skip that side path for Antigravity sessions rather than consuming an OpenAI credential or permanently marking a failed Antigravity title attempt.
+- Automatic session titles must route through `ProviderClient` so provider-prefixed models use their own credentials and request format. OpenCode titles use streamed Chat Completions even when an OpenAI ChatGPT/Codex account is also configured; skip the title side path for Antigravity sessions rather than consuming an OpenAI credential or permanently marking a failed Antigravity title attempt.
 
 ## Background Tasks and Capabilities
 

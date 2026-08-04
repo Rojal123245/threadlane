@@ -376,12 +376,34 @@ impl ProjectTerminal {
             self.view
                 .button(cx, ids!(terminal_toggle))
                 .set_key_focus(cx);
+        } else {
+            // Hiding the body invalidates the focus state. Otherwise the first
+            // redraw after reopening can use the stale focused cursor state.
+            self.terminal_focused = false;
+            self.cursor_blink_on = false;
         }
         self.view.redraw(cx);
     }
 
     fn terminal_dimensions(&self, cx: &Cx) -> (usize, usize) {
-        let rect = self.view.view(cx, ids!(terminal_scroll)).area().rect(cx);
+        let scroll_rect = self.view.view(cx, ids!(terminal_scroll)).area().rect(cx);
+        let rect = if scroll_rect.size.x > 1.0 && scroll_rect.size.y > 1.0 {
+            scroll_rect
+        } else {
+            // ScrollYView can still report its pre-layout 1x1 area on the
+            // frame where the panel is reopened. The content/body already
+            // have the real panel bounds, so use them for the first PTY size.
+            let content_rect = self
+                .view
+                .view(cx, ids!(terminal_content))
+                .area()
+                .rect(cx);
+            if content_rect.size.x > 1.0 && content_rect.size.y > 1.0 {
+                content_rect
+            } else {
+                self.view.view(cx, ids!(terminal_body)).area().rect(cx)
+            }
+        };
         terminal_grid_size(rect.size.x, rect.size.y)
     }
 

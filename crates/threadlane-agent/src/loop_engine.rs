@@ -12,9 +12,11 @@ use crate::types::{
     AgentMessage, AgentState, AgentToolCall, AgentToolDefinition, AgentToolResult, QueueMode,
     TokenUsage, ToolExecutionMode,
 };
+use futures::FutureExt;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -1079,7 +1081,7 @@ impl AgentLoop {
         allowed_tool_names: Option<HashSet<String>>,
         intent_recorder: Option<ToolIntentRecorder>,
     ) -> AgentToolResult {
-        Self::run_tool_with_hooks(
+        let result = AssertUnwindSafe(Self::run_tool_with_hooks(
             tc.clone(),
             ToolRunContext {
                 before_hook: self.before_tool_call_hook.clone(),
@@ -1091,8 +1093,31 @@ impl AgentLoop {
                 allowed_tool_names,
                 work_dir: self.work_dir.clone(),
             },
-        )
-        .await
+        ))
+        .catch_unwind()
+        .await;
+
+        match result {
+            Ok(result) => result,
+            Err(_) => {
+                // A tool is untrusted session work. A panic must become a tool
+                // result so the model can see the failure and retry or choose
+                // another approach; it must not abort the entire agent loop.
+                let result = AgentToolResult {
+                    tool_call_id: tc.id.clone(),
+                    name: tc.function.name.clone(),
+                    content: format!("Tool '{}' failed: the tool panicked during execution. Please retry the tool or use another approach.", tc.function.name),
+                    is_error: true,
+                    terminate: false,
+                };
+                let _ = self.event_tx.send(AgentEvent::ToolExecutionEnd {
+                    tool_call_id: tc.id.clone(),
+                    name: tc.function.name.clone(),
+                    result: result.clone(),
+                });
+                result
+            }
+        }
     }
 
     async fn run_tool_with_hooks(tc: ToolCall, context: ToolRunContext) -> AgentToolResult {

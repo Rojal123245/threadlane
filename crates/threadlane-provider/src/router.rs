@@ -1,6 +1,7 @@
 use crate::antigravity::AntigravityClient;
 use crate::openai::{OpenAIClient, StreamEvent};
 use crate::opencode::OpenCodeGoClient;
+use crate::title_generator::{title_payload, TITLE_REQUEST_TIMEOUT};
 use futures_util::future::BoxFuture;
 use serde_json::Value;
 use std::sync::Arc;
@@ -135,6 +136,64 @@ impl ProviderClient {
             .await;
     }
 
+    /// Generate a short session title using the provider selected by the model id.
+    pub async fn generate_title(&self, model: &str, prompt: &str) -> Result<String, String> {
+        if !is_opencode_model(model) {
+            return self.openai.generate_title(model, prompt).await;
+        }
+
+        let mut payload = title_payload(model, prompt, false);
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("stream".to_owned(), Value::Bool(true));
+        }
+
+        let (event_tx, mut event_rx) = mpsc::channel(128);
+        let client = self.clone();
+        let stream_task = tokio::spawn(async move {
+            client
+                .stream_chat_completion(PayloadSource::ChatCompletions(payload), None, event_tx)
+                .await;
+        });
+
+        let received = tokio::time::timeout(TITLE_REQUEST_TIMEOUT, async {
+            let mut text = String::new();
+            let mut error = None;
+            while let Some(event) = event_rx.recv().await {
+                match event {
+                    StreamEvent::ContentToken(token) => text.push_str(&token),
+                    StreamEvent::Error(message) => error = Some(message),
+                    StreamEvent::Finished { .. }
+                    | StreamEvent::ReasoningToken(_)
+                    | StreamEvent::ToolCallStart { .. }
+                    | StreamEvent::ToolCallArgsDelta { .. } => {}
+                }
+            }
+            (text, error)
+        })
+        .await;
+
+        let (text, error) = match received {
+            Ok(result) => result,
+            Err(_) => {
+                stream_task.abort();
+                return Err("OpenCode title request timed out".to_owned());
+            }
+        };
+
+        if stream_task.await.is_err() && error.is_none() {
+            return Err("OpenCode title stream terminated unexpectedly".to_owned());
+        }
+        if let Some(error) = error {
+            return Err(error);
+        }
+
+        if text.trim().is_empty() {
+            Err("OpenCode title response did not contain text".to_owned())
+        } else {
+            Ok(text)
+        }
+    }
+
     /// Generate a short commit subject from a Git diff without adding a message to the chat.
     pub async fn generate_commit_message(&self, model: &str, diff: &str) -> Result<String, String> {
         let model = model.to_owned();
@@ -264,5 +323,18 @@ mod tests {
             client_codex.determine_format("antigravity/gemini-3.6-flash"),
             PayloadFormat::ChatCompletions
         );
+    }
+
+    #[test]
+    fn opencode_title_route_stays_on_chat_completions_with_codex_credentials() {
+        let client = ProviderClient::new("ey-test", Some("acc-123".into()));
+        assert_eq!(
+            client.determine_format("opencode-go/deepseek-v4-flash"),
+            PayloadFormat::ChatCompletions
+        );
+
+        let payload = title_payload("opencode-go/deepseek-v4-flash", "Fix the login flow", false);
+        assert!(payload.get("messages").is_some());
+        assert!(payload.get("input").is_none());
     }
 }
