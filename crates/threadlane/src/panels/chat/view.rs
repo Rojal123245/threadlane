@@ -718,6 +718,8 @@ pub struct ChatList {
     hovered_starter: Option<StarterPromptAction>,
     #[rust]
     pressed_starter: Option<StarterPromptAction>,
+    #[rust]
+    hovered_jump_to_latest: bool,
 }
 
 #[derive(Script, ScriptHook, Widget)]
@@ -1109,6 +1111,14 @@ impl Widget for ChatList {
                     }
                 }
 
+                let can_jump_to_latest = !list.is_at_end() && !rows.is_empty();
+                self.view
+                    .button(cx, ids!(jump_to_latest_btn))
+                    .set_visible(cx, can_jump_to_latest);
+                self.view
+                    .widget(cx, ids!(jump_to_latest_hint))
+                    .set_visible(cx, can_jump_to_latest && self.hovered_jump_to_latest);
+
             }
         }
         DrawStep::done()
@@ -1134,6 +1144,41 @@ impl Widget for ChatList {
         self.view.handle_event(cx, event, scope);
 
         if let Event::Actions(actions) = event {
+            let list = self.view.portal_list(cx, ids!(list));
+            if list.scrolled(actions) {
+                let can_jump_to_latest = !list.is_at_end() && !self.cached_rows.is_empty();
+                self.view
+                    .button(cx, ids!(jump_to_latest_btn))
+                    .set_visible(cx, can_jump_to_latest);
+                if !can_jump_to_latest {
+                    self.hovered_jump_to_latest = false;
+                    self.view
+                        .widget(cx, ids!(jump_to_latest_hint))
+                        .set_visible(cx, false);
+                }
+            }
+
+            let jump_button_ref = self.view.widget(cx, ids!(jump_to_latest_btn));
+            let jump_button = self.view.button(cx, ids!(jump_to_latest_btn));
+            let jump_button_view = jump_button_ref.as_view();
+            if jump_button_view.finger_hover_in(actions).is_some() {
+                self.hovered_jump_to_latest = true;
+                self.view.widget(cx, ids!(jump_to_latest_hint)).redraw(cx);
+            } else if jump_button_view.finger_hover_out(actions).is_some() {
+                self.hovered_jump_to_latest = false;
+                self.view.widget(cx, ids!(jump_to_latest_hint)).set_visible(cx, false);
+            }
+            if jump_button.clicked(actions) {
+                list.set_tail_range(true);
+                list.scroll_to_end(cx);
+                self.view
+                    .button(cx, ids!(jump_to_latest_btn))
+                    .set_visible(cx, false);
+                self.hovered_jump_to_latest = false;
+                self.view.widget(cx, ids!(jump_to_latest_hint)).set_visible(cx, false);
+                self.view.redraw(cx);
+            }
+
             let list = self.view.portal_list(cx, ids!(list));
             let layout_changed = actions.iter().any(|action| {
                 action.downcast_ref::<WidgetAction>().is_some_and(|action| {

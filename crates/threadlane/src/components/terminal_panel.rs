@@ -209,10 +209,17 @@ impl Widget for ProjectTerminal {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if self.layout_next_frame.is_event(event).is_some() && self.expanded {
             let (cols, rows) = self.terminal_dimensions(cx);
-            cx.widget_action(
-                self.widget_uid(),
-                ProjectTerminalAction::LayoutChanged { cols, rows },
-            );
+            if cols > 1 && rows > 1 {
+                cx.widget_action(
+                    self.widget_uid(),
+                    ProjectTerminalAction::LayoutChanged { cols, rows },
+                );
+            } else {
+                // The panel has just become visible and may not have a laid-out
+                // terminal area yet. Do not start a PTY with a 1x1 grid; wait
+                // for the next frame so the first terminal gets real dimensions.
+                self.layout_next_frame = cx.new_next_frame();
+            }
         }
         if self.focus_next_frame.is_event(event).is_some() && self.expanded {
             self.view
