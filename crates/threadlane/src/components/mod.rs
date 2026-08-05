@@ -7,6 +7,7 @@ pub mod activity_loader;
 pub mod auth_row;
 pub mod capability_row;
 pub mod chat_bubble;
+pub mod chat_fold_row_base;
 pub mod clipped_label;
 pub mod code_editor_view;
 pub mod code_label;
@@ -99,5 +100,6 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     starter_prompt_card::script_mod(vm);
     task_sidebar::script_mod(vm);
     terminal_panel::script_mod(vm);
+    chat_fold_row_base::script_mod(vm);
     tool_section::script_mod(vm)
 }

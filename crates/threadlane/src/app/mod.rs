@@ -461,18 +461,8 @@ script_mod! {
                 }
             }
 
-            ActivityGroupMsg := #(ToolFoldHeader::register_widget(vm)) {
-                width: Fill
-                height: Fit
-                flow: Down
-                body_walk: Walk{width: Fill, height: Fit}
-                margin: Inset{top: 4 bottom: 2 left: 20 right: 24}
-                opened: 0.0
-                animator +: {
-                    active: { default: @off }
-                }
-                header: ActivityHeader {
-                    width: Fill
+            ActivityGroupMsg := mod.components.ChatFoldRowBase {
+                header +: {
                     height: 28
                     title_lbl +: {
                         width: 62
@@ -491,29 +481,13 @@ script_mod! {
                         status_indicator := ActivityStatusIndicator {}
                     }
                 }
-                body: RoundedView {
-                    width: Fill
-                    height: Fit
-                    padding: Inset{left: 30 top: 3 right: 18 bottom: 7}
-                    draw_bg +: {
-                        color: theme.color_transparent
-                        border_size: 0.0
-                    }
+                body +: {
                     md := mod.components.ChatMarkdown {}
                 }
             }
 
-            ThinkingMsg := #(ToolFoldHeader::register_widget(vm)) {
-                width: Fill
-                height: Fit
-                flow: Down
-                body_walk: Walk{width: Fill, height: Fit}
-                margin: Inset{top: 4 bottom: 2 left: 20 right: 24}
-                opened: 0.0
-                animator +: {
-                    active: { default: @off }
-                }
-                header: ActivityHeader {
+            ThinkingMsg := mod.components.ChatFoldRowBase {
+                header +: {
                     icon_tile +: {
                         icon_stack +: {
                             icon_generic +: { visible: false }
@@ -538,30 +512,14 @@ script_mod! {
                         }
                     }
                 }
-                body: RoundedView {
-                    width: Fill
-                    height: Fit
+                body +: {
                     padding: Inset{left: 30 top: 5 right: 24 bottom: 8}
-                    draw_bg +: {
-                        color: theme.color_transparent
-                        border_size: 0.0
-                    }
                     md := mod.components.ChatMarkdown {}
                 }
             }
 
-            SubagentMsg := #(ToolFoldHeader::register_widget(vm)) {
-                width: Fill
-                height: Fit
-                flow: Down
-                body_walk: Walk{width: Fill, height: Fit}
-                margin: Inset{top: 4 bottom: 2 left: 20 right: 24}
-                opened: 0.0
-                animator +: {
-                    active: { default: @off }
-                }
-                header: ActivityHeader {
-                    width: Fill
+            SubagentMsg := mod.components.ChatFoldRowBase {
+                header +: {
                     height: 26
                     title_lbl +: { width: 92, text: "Agent tasks" }
                     icon_tile +: {
@@ -584,33 +542,18 @@ script_mod! {
                         status_indicator := ActivityStatusIndicator {}
                     }
                 }
-                body: RoundedView {
-                    width: Fill
-                    height: Fit
+                body +: {
                     padding: Inset{left: 30 top: 4 right: 18 bottom: 8}
                     flow: Down
                     spacing: 6
-                    draw_bg +: {
-                        color: theme.color_transparent
-                        border_size: 0.0
-                    }
                     rail := #(SubagentRail::register_widget(vm)) {
                         width: Fill
                         height: Fit
                         flow: Down
                         spacing: 7
                         draw_bg +: { color: theme.color_transparent }
-                        row_template: #(ToolFoldHeader::register_widget(vm)) {
-                            width: Fill
-                            height: Fit
-                            flow: Down
-                            body_walk: Walk{width: Fill, height: Fit}
-                            opened: 0.0
-                            animator +: {
-                                active: { default: @off }
-                            }
-                            header: ActivityHeader {
-                                width: Fill
+                        row_template: mod.components.ChatFoldRowBase {
+                            header +: {
                                 height: 28
                                 padding: Inset{left: 3 top: 0 right: 4 bottom: 0}
                                 title_lbl +: {
@@ -653,9 +596,7 @@ script_mod! {
                                     }
                                 }
                             }
-                            body: RoundedView {
-                                width: Fill
-                                height: Fit
+                            body +: {
                                 padding: Inset{left: 30 top: 2 right: 18 bottom: 6}
                                 working_detail := View {
                                     width: Fill
@@ -674,10 +615,6 @@ script_mod! {
                                         draw_text +: { color: theme.color_muted_foreground text_style +: { font_size: 9.0 } }
                                     }
                                 }
-                                draw_bg +: {
-                                    color: theme.color_transparent
-                                    border_size: 0.0
-                                }
                                 detail_md := mod.components.ChatMarkdown {}
                             }
                         }
@@ -685,18 +622,8 @@ script_mod! {
                 }
             }
 
-            ToolMsg := #(ToolFoldHeader::register_widget(vm)) {
-                width: Fill
-                height: Fit
-                flow: Down
-                body_walk: Walk{width: Fill, height: Fit}
-                margin: Inset{top: 4 bottom: 2 left: 20 right: 24}
-                opened: 0.0
-                animator +: {
-                    active: { default: @off }
-                }
-                header: ActivityHeader {
-                    width: Fill
+            ToolMsg := mod.components.ChatFoldRowBase {
+                header +: {
                     height: 26
                     title_lbl +: { width: 86 }
                     summary := View {
@@ -734,16 +661,10 @@ script_mod! {
                         status_indicator := ActivityStatusIndicator {}
                     }
                 }
-                body: RoundedView {
-                    width: Fill
-                    height: Fit
+                body +: {
                     padding: Inset{left: 30 top: 2 right: 18 bottom: 6}
                     flow: Down
                     spacing: 4
-                    draw_bg +: {
-                        color: theme.color_transparent
-                        border_size: 0.0
-                    }
                     details_row := View {
                         width: Fill
                         height: Fit
