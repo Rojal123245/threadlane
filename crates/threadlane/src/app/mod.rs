@@ -794,54 +794,59 @@ script_mod! {
             }
         }
 
-        jump_to_latest_btn := mod.components.IconButton {
-            width: 32
-            height: 32
-            margin: Inset{bottom: 12}
-            align: Align{x: 0.5 y: 1.0}
+        jump_to_latest_layer := View {
+            width: Fill
+            height: Fill
+            flow: Overlay
+            align: Align{x: 1.0 y: 1.0}
             visible: false
-            icon_walk: Walk{width: 17 height: 17 margin: 0}
-            draw_icon +: {
-                svg: crate_resource("self:resources/icons/jump-latest.svg")
-                color: theme.color_muted_foreground
-                color_hover: theme.color_foreground
-                color_focus: theme.color_foreground
-                color_down: theme.color_primary_foreground
-            }
-            draw_bg +: {
-                color: theme.color_card
-                color_hover: theme.color_secondary
-                color_focus: theme.color_secondary
-                color_down: theme.color_input
-                border_color: theme.color_border
-                border_color_hover: theme.color_border
-                border_color_focus: theme.color_border
-                border_color_down: theme.color_border
-                border_size: 1.0
-                border_radius: 18.0
-            }
-        }
 
-        jump_to_latest_hint := RoundedView {
-            width: 126
-            height: 28
-            margin: Inset{bottom: 52}
-            align: Align{x: 0.5 y: 1.0}
-            visible: false
-            padding: Inset{left: 9 right: 9 top: 5 bottom: 5}
-            draw_bg +: {
-                color: theme.color_popover
-                border_color: theme.color_border
-                border_size: 1.0
-                border_radius: 7.0
+            jump_to_latest_btn := mod.components.IconButton {
+                width: 32
+                height: 32
+                margin: Inset{right: 16 bottom: 12}
+                icon_walk: Walk{width: 17 height: 17 margin: 0}
+                draw_icon +: {
+                    svg: crate_resource("self:resources/icons/jump-latest.svg")
+                    color: theme.color_muted_foreground
+                    color_hover: theme.color_foreground
+                    color_focus: theme.color_foreground
+                    color_down: theme.color_primary_foreground
+                }
+                draw_bg +: {
+                    color: theme.color_card
+                    color_hover: theme.color_secondary
+                    color_focus: theme.color_secondary
+                    color_down: theme.color_input
+                    border_color: theme.color_border
+                    border_color_hover: theme.color_border
+                    border_color_focus: theme.color_border
+                    border_color_down: theme.color_border
+                    border_size: 1.0
+                    border_radius: 18.0
+                }
             }
-            lbl := Label {
-                width: Fill
-                height: Fit
-                text: "Jump to latest"
-                draw_text +: {
-                    color: theme.color_card_foreground
-                    text_style: theme.font_regular {font_size: 9.0}
+
+            jump_to_latest_hint := RoundedView {
+                width: 126
+                height: 28
+                margin: Inset{right: 16 bottom: 52}
+                visible: false
+                padding: Inset{left: 9 right: 9 top: 5 bottom: 5}
+                draw_bg +: {
+                    color: theme.color_popover
+                    border_color: theme.color_border
+                    border_size: 1.0
+                    border_radius: 7.0
+                }
+                lbl := Label {
+                    width: Fill
+                    height: Fit
+                    text: "Jump to latest"
+                    draw_text +: {
+                        color: theme.color_card_foreground
+                        text_style: theme.font_regular {font_size: 9.0}
+                    }
                 }
             }
         }

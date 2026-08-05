@@ -1112,12 +1112,15 @@ impl Widget for ChatList {
                 }
 
                 let can_jump_to_latest = !list.is_at_end() && !rows.is_empty();
-                self.view
-                    .button(cx, ids!(jump_to_latest_btn))
-                    .set_visible(cx, can_jump_to_latest);
-                self.view
-                    .widget(cx, ids!(jump_to_latest_hint))
-                    .set_visible(cx, can_jump_to_latest && self.hovered_jump_to_latest);
+                let jump_layer = self.view.widget(cx, ids!(jump_to_latest_layer));
+                jump_layer.set_visible(cx, can_jump_to_latest);
+                jump_layer.redraw(cx);
+                let jump_button = self.view.button(cx, ids!(jump_to_latest_btn));
+                jump_button.set_visible(cx, can_jump_to_latest);
+                jump_button.redraw(cx);
+                let jump_hint = self.view.widget(cx, ids!(jump_to_latest_hint));
+                jump_hint.set_visible(cx, can_jump_to_latest && self.hovered_jump_to_latest);
+                jump_hint.redraw(cx);
 
             }
         }
@@ -1147,15 +1150,21 @@ impl Widget for ChatList {
             let list = self.view.portal_list(cx, ids!(list));
             if list.scrolled(actions) {
                 let can_jump_to_latest = !list.is_at_end() && !self.cached_rows.is_empty();
-                self.view
-                    .button(cx, ids!(jump_to_latest_btn))
-                    .set_visible(cx, can_jump_to_latest);
+                let jump_layer = self.view.widget(cx, ids!(jump_to_latest_layer));
+                jump_layer.set_visible(cx, can_jump_to_latest);
+                jump_layer.redraw(cx);
+                let jump_button = self.view.button(cx, ids!(jump_to_latest_btn));
+                jump_button.set_visible(cx, can_jump_to_latest);
+                jump_button.redraw(cx);
                 if !can_jump_to_latest {
                     self.hovered_jump_to_latest = false;
-                    self.view
-                        .widget(cx, ids!(jump_to_latest_hint))
-                        .set_visible(cx, false);
+                    let jump_hint = self.view.widget(cx, ids!(jump_to_latest_hint));
+                    jump_hint.set_visible(cx, false);
+                    jump_hint.redraw(cx);
                 }
+            }
+            if list.smooth_scroll_reached(actions) {
+                list.set_tail_range(true);
             }
 
             let jump_button_ref = self.view.widget(cx, ids!(jump_to_latest_btn));
@@ -1166,16 +1175,22 @@ impl Widget for ChatList {
                 self.view.widget(cx, ids!(jump_to_latest_hint)).redraw(cx);
             } else if jump_button_view.finger_hover_out(actions).is_some() {
                 self.hovered_jump_to_latest = false;
-                self.view.widget(cx, ids!(jump_to_latest_hint)).set_visible(cx, false);
+                let jump_hint = self.view.widget(cx, ids!(jump_to_latest_hint));
+                jump_hint.set_visible(cx, false);
+                jump_hint.redraw(cx);
             }
             if jump_button.clicked(actions) {
-                list.set_tail_range(true);
-                list.scroll_to_end(cx);
-                self.view
-                    .button(cx, ids!(jump_to_latest_btn))
-                    .set_visible(cx, false);
+                list.set_tail_range(false);
+                list.smooth_scroll_to_end(cx, 12.0, None);
+                let jump_layer = self.view.widget(cx, ids!(jump_to_latest_layer));
+                jump_layer.set_visible(cx, false);
+                jump_layer.redraw(cx);
+                jump_button.set_visible(cx, false);
+                jump_button.redraw(cx);
                 self.hovered_jump_to_latest = false;
-                self.view.widget(cx, ids!(jump_to_latest_hint)).set_visible(cx, false);
+                let jump_hint = self.view.widget(cx, ids!(jump_to_latest_hint));
+                jump_hint.set_visible(cx, false);
+                jump_hint.redraw(cx);
                 self.view.redraw(cx);
             }
 

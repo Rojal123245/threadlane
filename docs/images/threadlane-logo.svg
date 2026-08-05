@@ -1,156 +1,19 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
-  <defs>
-    <!-- Thread gradients -->
-    <linearGradient id="t1" x1="80" y1="140" x2="280" y2="410" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#34D399"/>
-      <stop offset="45%" stop-color="#22D3EE"/>
-      <stop offset="100%" stop-color="#A78BFA"/>
-    </linearGradient>
-    <linearGradient id="t2" x1="80" y1="175" x2="300" y2="410" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#06B6D4"/>
-      <stop offset="50%" stop-color="#6366F1"/>
-      <stop offset="100%" stop-color="#818CF8"/>
-    </linearGradient>
-    <linearGradient id="t3" x1="80" y1="210" x2="320" y2="410" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#0891B2"/>
-      <stop offset="50%" stop-color="#4F46E5"/>
-      <stop offset="100%" stop-color="#7C3AED"/>
-    </linearGradient>
-
-    <!-- Lane divider gradient — visible dashed road markings -->
-    <linearGradient id="laneLine" x1="0" y1="230" x2="0" y2="400" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#94A3B8" stop-opacity="0"/>
-      <stop offset="15%" stop-color="#94A3B8" stop-opacity="0.7"/>
-      <stop offset="100%" stop-color="#CBD5E1" stop-opacity="0.45"/>
-    </linearGradient>
-
-    <!-- Lane edge rail gradient — solid outer boundaries -->
-    <linearGradient id="rail" x1="0" y1="230" x2="0" y2="400" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#64748B" stop-opacity="0"/>
-      <stop offset="12%" stop-color="#64748B" stop-opacity="0.6"/>
-      <stop offset="100%" stop-color="#475569" stop-opacity="0.4"/>
-    </linearGradient>
-
-    <!-- Particle gradient -->
-    <radialGradient id="particle" cx="50%" cy="50%" r="50%">
-      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.9"/>
-      <stop offset="60%" stop-color="#818CF8" stop-opacity="0.4"/>
-      <stop offset="100%" stop-color="#6366F1" stop-opacity="0"/>
-    </radialGradient>
-
-    <!-- Background -->
-    <radialGradient id="bg" cx="50%" cy="42%" r="58%">
-      <stop offset="0%" stop-color="#1a1640"/>
-      <stop offset="55%" stop-color="#0d1025"/>
-      <stop offset="100%" stop-color="#050510"/>
-    </radialGradient>
-
-    <!-- Thread glow -->
-    <filter id="glow">
-      <feGaussianBlur in="SourceGraphic" stdDeviation="6" result="b"/>
-      <feColorMatrix in="b" type="matrix" result="cb"
-        values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 0.4 0"/>
-      <feMerge><feMergeNode in="cb"/><feMergeNode in="SourceGraphic"/></feMerge>
-    </filter>
-
-    <!-- Soft particle glow -->
-    <filter id="particleGlow">
-      <feGaussianBlur in="SourceGraphic" stdDeviation="2"/>
-    </filter>
-  </defs>
-
-  <!-- Background -->
-  <rect x="12" y="12" width="488" height="488" rx="108" ry="108" fill="url(#bg)"/>
-  <rect x="12" y="12" width="488" height="488" rx="108" ry="108"
-        fill="none" stroke="#6366F1" stroke-width="1" stroke-opacity="0.12"/>
-
-  <!--
-    === LANE INFRASTRUCTURE ===
-    Visible lane guide rails and dashed dividers in the stem.
-    These sit BEHIND the threads so they peek through the gaps.
-  -->
-
-  <!-- Outer lane guide rails — solid lines, like road edges -->
-  <line x1="203" y1="235" x2="203" y2="400" stroke="url(#rail)" stroke-width="2.5" stroke-linecap="round"/>
-  <line x1="309" y1="235" x2="309" y2="400" stroke="url(#rail)" stroke-width="2.5" stroke-linecap="round"/>
-
-  <!-- Dashed lane dividers — like highway lane markings -->
-  <line x1="237" y1="250" x2="237" y2="398" stroke="url(#laneLine)" stroke-width="2.5"
-        stroke-dasharray="16 12" stroke-linecap="round"/>
-  <line x1="275" y1="250" x2="275" y2="398" stroke="url(#laneLine)" stroke-width="2.5"
-        stroke-dasharray="16 12" stroke-linecap="round"/>
-
-  <!--
-    === THE THREE THREAD-LANES ===
-  -->
-
-  <g filter="url(#glow)">
-    <!-- Thread 1: top lane → left stem lane -->
-    <path d="M 88 148 L 424 148" stroke="url(#t1)" stroke-width="20" stroke-linecap="round"/>
-    <path d="M 222 148 Q 222 205, 221 260 L 219 395" stroke="url(#t1)" stroke-width="20" stroke-linecap="round"/>
-
-    <!-- Thread 2: middle lane → center stem -->
-    <path d="M 88 186 L 424 186" stroke="url(#t2)" stroke-width="22" stroke-linecap="round"/>
-    <path d="M 256 186 L 256 395" stroke="url(#t2)" stroke-width="22" stroke-linecap="round"/>
-
-    <!-- Thread 3: bottom lane → right stem lane -->
-    <path d="M 88 224 L 424 224" stroke="url(#t3)" stroke-width="20" stroke-linecap="round"/>
-    <path d="M 290 224 Q 290 281, 291 338 L 293 395" stroke="url(#t3)" stroke-width="20" stroke-linecap="round"/>
+  <rect width="512" height="512" rx="108" fill="#000"/>
+  <g transform="translate(0 -5.333333) scale(21.333333)" stroke="#fff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M2 5h20"/>
+    <path d="M2 7.2h20"/>
+    <path d="M2 9.4h20"/>
+    <path d="M9.8 5L9.6 19.5"/>
+    <path d="M12 7.2V19.5"/>
+    <path d="M14.2 9.4L14.4 19.5"/>
+    <path d="M8 11.5L7.9 19.5" stroke-width="0.6"/>
+    <path d="M16 11.5L16.1 19.5" stroke-width="0.6"/>
+    <path d="M10.8 12.5v1.4" stroke-width="0.6"/>
+    <path d="M10.8 15.5v1.4" stroke-width="0.6"/>
+    <path d="M10.8 18.2v0.8" stroke-width="0.6"/>
+    <path d="M13.2 12.5v1.4" stroke-width="0.6"/>
+    <path d="M13.2 15.5v1.4" stroke-width="0.6"/>
+    <path d="M13.2 18.2v0.8" stroke-width="0.6"/>
   </g>
-
-  <!--
-    === LANE MARKINGS OVERLAY ===
-    A second pass of the dashed dividers ABOVE the threads
-    at very low opacity, so they subtly overlay the thread surfaces too,
-    reinforcing the lane structure even across the thick strokes.
-  -->
-  <line x1="237" y1="260" x2="237" y2="398" stroke="#CBD5E1" stroke-width="1.5"
-        stroke-dasharray="14 14" stroke-linecap="round" opacity="0.12"/>
-  <line x1="275" y1="260" x2="275" y2="398" stroke="#CBD5E1" stroke-width="1.5"
-        stroke-dasharray="14 14" stroke-linecap="round" opacity="0.12"/>
-
-  <!--
-    === FLOWING PARTICLES ===
-  -->
-
-  <!-- Particles on Thread 1 (left stem) -->
-  <circle r="3.5" fill="url(#particle)" filter="url(#particleGlow)">
-    <animateMotion dur="2.4s" repeatCount="indefinite" rotate="auto"
-      path="M 222 170 Q 222 220, 221 280 L 219 395"/>
-  </circle>
-  <circle r="2.5" fill="url(#particle)" filter="url(#particleGlow)" opacity="0.6">
-    <animateMotion dur="2.4s" repeatCount="indefinite" rotate="auto" begin="1.2s"
-      path="M 222 170 Q 222 220, 221 280 L 219 395"/>
-  </circle>
-
-  <!-- Particles on Thread 2 (center stem) -->
-  <circle r="4" fill="url(#particle)" filter="url(#particleGlow)">
-    <animateMotion dur="2s" repeatCount="indefinite"
-      path="M 256 200 L 256 395"/>
-  </circle>
-  <circle r="3" fill="url(#particle)" filter="url(#particleGlow)" opacity="0.6">
-    <animateMotion dur="2s" repeatCount="indefinite" begin="1s"
-      path="M 256 200 L 256 395"/>
-  </circle>
-
-  <!-- Particles on Thread 3 (right stem) -->
-  <circle r="3.5" fill="url(#particle)" filter="url(#particleGlow)">
-    <animateMotion dur="2.6s" repeatCount="indefinite" rotate="auto"
-      path="M 290 240 Q 290 300, 291 350 L 293 395"/>
-  </circle>
-  <circle r="2.5" fill="url(#particle)" filter="url(#particleGlow)" opacity="0.6">
-    <animateMotion dur="2.6s" repeatCount="indefinite" rotate="auto" begin="1.3s"
-      path="M 290 240 Q 290 300, 291 350 L 293 395"/>
-  </circle>
-
-  <!-- Crossbar particle -->
-  <circle r="3" fill="url(#particle)" filter="url(#particleGlow)" opacity="0.5">
-    <animateMotion dur="3s" repeatCount="indefinite"
-      path="M 88 186 L 424 186"/>
-  </circle>
-
-  <!-- Thread tips -->
-  <circle cx="219" cy="395" r="5" fill="#A78BFA" opacity="0.5"/>
-  <circle cx="256" cy="395" r="6" fill="#818CF8" opacity="0.6"/>
-  <circle cx="293" cy="395" r="5" fill="#7C3AED" opacity="0.5"/>
 </svg>
