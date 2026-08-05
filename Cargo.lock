@@ -3422,7 +3422,7 @@ dependencies = [
 
 [[package]]
 name = "threadlane"
-version = "0.0.9"
+version = "0.1.2"
 dependencies = [
  "arboard",
  "base64",
@@ -3588,7 +3588,7 @@ dependencies = [
 
 [[package]]
 name = "threadlane-updater"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "cargo-packager-updater",
 ]
