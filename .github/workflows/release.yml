@@ -143,10 +143,12 @@ jobs:
           VERSION="${RELEASE_TAG#v}"
           DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${ARCHIVE_NAME}"
           PUBLISHED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+          RELEASE_NOTES=$(gh release view "$RELEASE_TAG" --json body --jq '.body' 2>/dev/null \
+            || printf 'Threadlane %s' "$RELEASE_TAG")
 
           jq -n \
             --arg version "$VERSION" \
-            --arg notes "Threadlane $RELEASE_TAG" \
+            --arg notes "$RELEASE_NOTES" \
             --arg pub_date "$PUBLISHED_AT" \
             --arg url "$DOWNLOAD_URL" \
             --arg signature "$SIGNATURE" \

@@ -452,21 +452,39 @@ cargo run -p threadlane
 
 Open `$HOME/Applications/Threadlane Test.app` instead to test the complete installation and relaunch flow. Restore the intended package version and unset `THREADLANE_UPDATER_ENDPOINT` afterward.
 
-### Automated macOS Releases
+### Automated Releases
 
-The release workflow is defined in [`.github/workflows/release.yml`](.github/workflows/release.yml). A release tag must exactly match the version in `crates/threadlane/Cargo.toml`:
+[release-plz](https://release-plz.dev/) prepares releases from `main`. It opens
+or updates a release pull request containing the next workspace version and the
+root [`CHANGELOG.md`](CHANGELOG.md). Merging that pull request creates a
+`v<version>` tag and GitHub release. The release notes include the generated
+changelog and the GitHub contributors associated with the included pull
+requests.
+
+The repository uses a GitHub App token because GitHub does not allow tags made
+with a workflow's default `GITHUB_TOKEN` to start another workflow. Create and
+install a least-privilege GitHub App with **Contents: read and write** and
+**Pull requests: read and write**, then configure its credentials:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+gh secret set RELEASE_PLZ_APP_ID
+gh secret set RELEASE_PLZ_APP_PRIVATE_KEY < release-plz-app.private-key.pem
 ```
+
+The automation is split between
+[`.github/workflows/release-plz.yml`](.github/workflows/release-plz.yml), which
+manages the release pull request, changelog, tag, and GitHub release, and
+[`.github/workflows/release.yml`](.github/workflows/release.yml), which runs for
+the resulting tag and attaches the platform artifacts. The tag must exactly
+match the `threadlane` workspace version; the packaging workflow verifies that
+invariant before building.
 
 A tagged build publishes:
 
 - A user-facing DMG.
 - A signed `.app.tar.gz` updater bundle.
 - The updater signature.
-- A `latest.json` update manifest.
+- A `latest.json` update manifest containing the GitHub release notes.
 
 ### macOS Gatekeeper Note
 
