@@ -34,6 +34,7 @@ pub mod project_header;
 pub mod provider_card;
 pub mod provider_settings_modal;
 pub mod search_input;
+pub mod secondary_action_button;
 pub mod section_header;
 pub mod session_row;
 pub mod session_title;
@@ -43,14 +44,19 @@ pub mod status_dot;
 pub mod status_pill;
 pub mod task_sidebar;
 pub mod terminal_panel;
+pub mod themed_text_input;
 pub mod tool_fold_header;
 pub mod tool_section;
+pub mod user_msg_base;
 pub mod workspace_badge;
 
 pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     init::script_mod(vm);
     icon_button::script_mod(vm);
     sidebar_compose_button::script_mod(vm);
+    secondary_action_button::script_mod(vm);
+    themed_text_input::script_mod(vm);
+    user_msg_base::script_mod(vm);
     clipped_label::script_mod(vm);
     code_label::script_mod(vm);
     // The upstream code editor registers `CodeEditor` into `mod.widgets`, which

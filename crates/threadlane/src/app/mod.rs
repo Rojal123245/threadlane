@@ -426,39 +426,12 @@ script_mod! {
             selectable: true
             reuse_items: false
 
-            UserMsg := View {
-                width: Fill
-                height: Fit
-                align: Align{x: 1.0}
-                margin: Inset{top: 5 bottom: 5 left: 28 right: 20}
+            UserMsg := mod.components.UserMsgBase {}
 
-                user_bubble := ChatBubble {
-                    width: Fit{max: FitBound.Abs(680)}
-                    padding: Inset{left: 13 top: 8 right: 13 bottom: 8}
-                    md +: {
-                        width: Fit{max: FitBound.Abs(654)}
-                    }
-                    draw_bg +: {
-                        color: theme.color_card
-                        border_radius: 9.0
-                    }
-                }
-            }
-
-            UserMsgWrapped := View {
-                width: Fill
-                height: Fit
-                align: Align{x: 1.0}
-                margin: Inset{top: 5 bottom: 5 left: 28 right: 20}
-
-                user_bubble := ChatBubble {
+            UserMsgWrapped := mod.components.UserMsgBase {
+                user_bubble +: {
                     width: Fill{max: 680}
-                    padding: Inset{left: 13 top: 8 right: 13 bottom: 8}
                     md +: { width: Fill }
-                    draw_bg +: {
-                        color: theme.color_card
-                        border_radius: 9.0
-                    }
                 }
             }
 
@@ -966,30 +939,7 @@ script_mod! {
         }
     }
 
-    let SettingsActionButton = Button {
-        width: Fit
-        height: 28
-        padding: Inset{left: 10 right: 10 top: 4 bottom: 4}
-        draw_bg +: {
-            color: theme.color_card
-            color_hover: theme.color_secondary
-            color_focus: theme.color_secondary
-            color_down: theme.color_input
-            border_color: theme.color_secondary
-            border_color_hover: theme.color_primary
-            border_color_focus: theme.color_primary
-            border_color_down: theme.color_primary
-            border_size: 1.0
-            border_radius: 6.0
-        }
-        draw_text +: {
-            color: theme.color_card_foreground
-            color_hover: theme.color_foreground
-            color_focus: theme.color_primary_foreground
-            color_down: theme.color_primary_foreground
-            text_style +: { font_size: 9.0 }
-        }
-    }
+    let SettingsActionButton = mod.components.SecondaryActionButton
 
     let ProvidersModal = #(ProviderSettingsModal::register_widget(vm)) {
         width: Fill
@@ -1167,30 +1117,8 @@ script_mod! {
                                 }
                             }
 
-                            antigravity_doctor_btn := Button {
-                                width: Fit
-                                height: 28
-                                padding: Inset{left: 10 right: 10 top: 4 bottom: 4}
+                            antigravity_doctor_btn := mod.components.SecondaryActionButton {
                                 text: "Run Health Check"
-                                draw_bg +: {
-                                    color: theme.color_card
-                                    color_hover: theme.color_secondary
-                                    color_focus: theme.color_secondary
-                                    color_down: theme.color_input
-                                    border_color: theme.color_secondary
-                                    border_color_hover: theme.color_primary
-                                    border_color_focus: theme.color_primary
-                                    border_color_down: theme.color_primary
-                                    border_size: 1.0
-                                    border_radius: 6.0
-                                }
-                                draw_text +: {
-                                    color: theme.color_card_foreground
-                                    color_hover: theme.color_foreground
-                                    color_focus: theme.color_foreground
-                                    color_down: theme.color_primary_foreground
-                                    text_style +: { font_size: 9.0 }
-                                }
                             }
                         }
                     }
@@ -1302,24 +1230,8 @@ script_mod! {
                                     text_style: theme.font_bold { font_size: 9.5 }
                                 }
                             }
-                            opencode_clear_btn := Button {
-                                width: Fit
-                                height: 28
-                                padding: Inset{left: 10 right: 10 top: 4 bottom: 4}
+                            opencode_clear_btn := mod.components.SecondaryActionButton {
                                 text: "Clear"
-                                draw_bg +: {
-                                    color: theme.color_card
-                                    color_hover: theme.color_secondary
-                                    color_down: theme.color_input
-                                    border_color: theme.color_secondary
-                                    border_size: 1.0
-                                    border_radius: 6.0
-                                }
-                                draw_text +: {
-                                    color: theme.color_card_foreground
-                                    color_hover: theme.color_foreground
-                                    text_style +: { font_size: 9.0 }
-                                }
                             }
                         }
                     }
@@ -1552,42 +1464,14 @@ script_mod! {
                             spacing: 8
                             align: Align{y: 0.5}
 
-                            mcp_name_input := TextInput {
+                            mcp_name_input := mod.components.ThemedTextInput {
                                 width: 140
-                                height: 28
-                                padding: Inset{left: 8 right: 8}
                                 empty_text: "Name (e.g. fs)"
-                                draw_bg +: {
-                                    color: theme.color_input
-                                    color_focus: theme.color_input
-                                    border_color: theme.color_secondary
-                                    border_color_focus: theme.color_primary
-                                    border_radius: 5.0
-                                    border_size: 1.0
-                                }
-                                draw_text +: {
-                                    color: theme.color_foreground
-                                    color_empty: theme.color_muted_foreground
-                                }
                             }
 
-                            mcp_command_input := TextInput {
+                            mcp_command_input := mod.components.ThemedTextInput {
                                 width: Fill
-                                height: 28
-                                padding: Inset{left: 8 right: 8}
                                 empty_text: "Command (e.g. npx -y @modelcontextprotocol/server-filesystem /path)"
-                                draw_bg +: {
-                                    color: theme.color_input
-                                    color_focus: theme.color_input
-                                    border_color: theme.color_secondary
-                                    border_color_focus: theme.color_primary
-                                    border_radius: 5.0
-                                    border_size: 1.0
-                                }
-                                draw_text +: {
-                                    color: theme.color_foreground
-                                    color_empty: theme.color_muted_foreground
-                                }
                             }
 
                             mcp_submit_add_btn := SettingsActionButton {
@@ -1721,42 +1605,14 @@ script_mod! {
                             spacing: 8
                             align: Align{y: 0.5}
 
-                            acp_name_input := TextInput {
+                            acp_name_input := mod.components.ThemedTextInput {
                                 width: 140
-                                height: 28
-                                padding: Inset{left: 8 right: 8}
                                 empty_text: "Name (e.g. Gemini)"
-                                draw_bg +: {
-                                    color: theme.color_input
-                                    color_focus: theme.color_input
-                                    border_color: theme.color_secondary
-                                    border_color_focus: theme.color_primary
-                                    border_radius: 5.0
-                                    border_size: 1.0
-                                }
-                                draw_text +: {
-                                    color: theme.color_foreground
-                                    color_empty: theme.color_muted_foreground
-                                }
                             }
 
-                            acp_command_input := TextInput {
+                            acp_command_input := mod.components.ThemedTextInput {
                                 width: Fill
-                                height: 28
-                                padding: Inset{left: 8 right: 8}
                                 empty_text: "Command (e.g. gemini --experimental-acp)"
-                                draw_bg +: {
-                                    color: theme.color_input
-                                    color_focus: theme.color_input
-                                    border_color: theme.color_secondary
-                                    border_color_focus: theme.color_primary
-                                    border_radius: 5.0
-                                    border_size: 1.0
-                                }
-                                draw_text +: {
-                                    color: theme.color_foreground
-                                    color_empty: theme.color_muted_foreground
-                                }
                             }
 
                             acp_submit_add_btn := SettingsActionButton {

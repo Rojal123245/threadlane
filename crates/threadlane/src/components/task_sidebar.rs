@@ -29,12 +29,10 @@ script_mod! {
             border_radius: 8.0
         }
 
-        status_dot := RoundedView {
-            width: 7
-            height: 7
+        status_dot := mod.components.StatusDot {
+            visible: true
             draw_bg +: {
                 color: theme.color_warning
-                border_radius: 3.5
             }
         }
 
@@ -112,12 +110,10 @@ script_mod! {
         align: Align{y: 0.5}
         padding: Inset{left: 14 right: 12}
 
-        status_dot := RoundedView {
-            width: 7
-            height: 7
+        status_dot := mod.components.StatusDot {
+            visible: true
             draw_bg +: {
                 color: theme.color_muted_foreground
-                border_radius: 3.5
             }
         }
         step_lbl := mod.components.ClippedLabel {
