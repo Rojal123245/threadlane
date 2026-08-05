@@ -16,7 +16,7 @@
 
 Threadlane combines a GPU-accelerated desktop interface with a capable coding-agent runtime. It keeps projects, sessions, tools, skills, background agents, and model output in one focused native application—without requiring a browser-based editor shell.
 
-> **Release status:** automated release artifacts currently target Apple Silicon macOS. The Rust workspace can be built from source on hosts supported by its Makepad and native dependency stack.
+> **Release status:** automated release artifacts target Apple Silicon macOS and Ubuntu 24.04 x86_64 (`.deb`). The Rust workspace can be built from source on other hosts supported by its Makepad and native dependency stack.
 
 <p align="center">
   <a href="docs/images/threadlane-workspace.png">
@@ -75,7 +75,7 @@ flowchart TD
 - A current stable Rust toolchain.
 - The `wasm32-wasip1` Rust target.
 - A native C toolchain and the platform dependencies required by Makepad.
-- macOS is required for the repository's packaged `.app`/DMG release workflow.
+- macOS is required for the repository's packaged `.app`/DMG release workflow; Ubuntu 24.04 x86_64 is used for the packaged `.deb` release workflow.
 
 Install the WASI target if needed:
 
