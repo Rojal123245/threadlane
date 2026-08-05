@@ -3,6 +3,7 @@ pub mod compaction;
 pub mod engine;
 pub mod events;
 pub mod hooks;
+pub mod harness;
 pub mod loop_engine;
 pub mod op_log;
 pub mod queue;
@@ -19,7 +20,10 @@ pub use compaction::{
 pub use engine::get_runtime;
 pub use events::{AgentEvent, HarnessMetrics, SubagentRecoveryStatus};
 pub use hooks::*;
-pub use loop_engine::{repair_interrupted_tool_turn, AgentLoop, ToolIntentRecorder};
+pub use loop_engine::{
+    repair_interrupted_tool_turn, AgentLoop, AssistantMessageRecorder, ToolCompletionRecorder,
+    ProviderHookRecorder, ProviderUsageRecorder, ToolIntentRecorder,
+};
 pub use op_log::*;
 pub use queue::PendingMessageQueue;
 pub use rules::*;

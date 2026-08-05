@@ -3,13 +3,230 @@ use crate::coding_agent::{
 };
 use crate::packages::ExtensionScope;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use threadlane_agent::{
-    append_op_record_to_file, AgentEvent, AgentMessage, LaneQueue, OpRecord, QueueKind, TokenUsage,
+use threadlane_agent::harness::{
+    AgentHarness, JsonlStore, OperationIntent, OperationOutcome, ProvisionedEntry,
+    QueueKind as HarnessQueueKind, Record as HarnessRecord, Reducer, SessionStore,
 };
+use threadlane_agent::{
+    load_op_records_from_file, AgentEvent, AgentMessage, LaneQueue,
+    OpRecord, QueueKind, TokenUsage,
+};
+
+fn append_v2_lifecycle_record(session_file: &Path, record: HarnessRecord) -> Result<(), String> {
+    if let Some(parent) = session_file.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    if !session_file.exists() {
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(session_file)
+            .map_err(|error| error.to_string())?;
+    }
+    let mut store = JsonlStore::open(session_file).map_err(|error| error.to_string())?;
+    if store.records().iter().any(|current| current.id() == record.id()) {
+        return Ok(());
+    }
+    let seq = store
+        .entries()
+        .iter()
+        .map(|entry| entry.seq)
+        .chain(store.records().iter().map(HarnessRecord::seq))
+        .chain(store.legacy_records().iter().map(OpRecord::seq))
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let record = match record {
+        HarnessRecord::OperationStarted {
+            id,
+            lane,
+            timestamp,
+            source_leaf_id,
+            intent,
+            ..
+        } => HarnessRecord::OperationStarted {
+            id,
+            seq,
+            lane,
+            timestamp,
+            source_leaf_id,
+            intent,
+        },
+        HarnessRecord::OperationFinished {
+            id,
+            lane,
+            timestamp,
+            run_id,
+            outcome,
+            error,
+            ..
+        } => HarnessRecord::OperationFinished {
+            id,
+            seq,
+            lane,
+            timestamp,
+            run_id,
+            outcome,
+            error,
+        },
+        HarnessRecord::AbortRequested {
+            id,
+            lane,
+            timestamp,
+            run_id,
+            ..
+        } => HarnessRecord::AbortRequested {
+            id,
+            seq,
+            lane,
+            timestamp,
+            run_id,
+        },
+        HarnessRecord::QueueEnqueued {
+            id,
+            lane,
+            timestamp,
+            run_id,
+            queue,
+            priority,
+            target,
+            ..
+        } => HarnessRecord::QueueEnqueued {
+            id,
+            seq,
+            lane,
+            timestamp,
+            run_id,
+            queue,
+            priority,
+            target,
+        },
+        HarnessRecord::ToolStarted {
+            id,
+            lane,
+            timestamp,
+            run_id,
+            assistant_entry_id,
+            tool_index,
+            tool_call_id,
+            tool_name,
+            effective_args,
+            result_entry_id,
+            replay,
+            ..
+        } => HarnessRecord::ToolStarted {
+            id,
+            seq,
+            lane,
+            timestamp,
+            run_id,
+            assistant_entry_id,
+            tool_index,
+            tool_call_id,
+            tool_name,
+            effective_args,
+            result_entry_id,
+            replay,
+        },
+        HarnessRecord::ToolFinished {
+            id,
+            lane,
+            timestamp,
+            run_id,
+            tool_call_id,
+            result_entry_id,
+            terminate,
+            ..
+        } => HarnessRecord::ToolFinished {
+            id,
+            seq,
+            lane,
+            timestamp,
+            run_id,
+            tool_call_id,
+            result_entry_id,
+            terminate,
+        },
+        _ => return Err("unsupported V2 supervisor lifecycle record".into()),
+    };
+    store
+        .append_record(record)
+        .map_err(|error| error.to_string())
+}
+
+fn append_legacy_record(session_file: &Path, record: OpRecord) -> Result<(), String> {
+    if !session_file.exists() {
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(session_file)
+            .map_err(|error| error.to_string())?;
+    }
+    let mut store = JsonlStore::open(session_file).map_err(|error| error.to_string())?;
+    let record = record.with_seq(store.next_sequence());
+    store
+        .append_legacy_record(record)
+        .map_err(|error| error.to_string())
+}
+
+fn v2_from_legacy_lifecycle(record: &OpRecord) -> Option<HarnessRecord> {
+    match record {
+        OpRecord::OperationStarted {
+            id,
+            lane,
+            timestamp,
+            source_leaf_id,
+            ..
+        } => Some(HarnessRecord::OperationStarted {
+            id: id.clone(),
+            seq: 0,
+            lane: lane.clone(),
+            timestamp: *timestamp,
+            source_leaf_id: source_leaf_id.clone(),
+            intent: OperationIntent::Run,
+        }),
+        OpRecord::OperationFinished {
+            id,
+            lane,
+            timestamp,
+            run_id,
+            outcome,
+            error,
+            ..
+        } => Some(HarnessRecord::OperationFinished {
+            id: format!("v2-{id}"),
+            seq: 0,
+            lane: lane.clone(),
+            timestamp: *timestamp,
+            run_id: run_id.clone(),
+            outcome: match outcome {
+                threadlane_agent::OpOutcome::Completed => OperationOutcome::Completed,
+                threadlane_agent::OpOutcome::Aborted => OperationOutcome::Aborted,
+                threadlane_agent::OpOutcome::Failed => OperationOutcome::Failed,
+                threadlane_agent::OpOutcome::Declined => OperationOutcome::Declined,
+            },
+            error: error.clone(),
+        }),
+        OpRecord::AbortRequested {
+            id,
+            lane,
+            timestamp,
+            run_id,
+            ..
+        } => Some(HarnessRecord::AbortRequested {
+            id: format!("v2-{id}"),
+            seq: 0,
+            lane: lane.clone(),
+            timestamp: *timestamp,
+            run_id: run_id.clone(),
+        }),
+        _ => None,
+    }
+}
 use tokio::sync::broadcast;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,14 +309,77 @@ fn persist_queue_intent(
         lane: lane.name.clone(),
         timestamp: now_ms() as u64,
         run_id: lane.active_run_id.clone(),
-        queue,
+        queue: queue.clone(),
         priority,
-        target,
+        target: target.clone(),
     };
-    append_op_record_to_file(&session_file.with_extension("oplog.jsonl"), &record)
-        .map_err(|error| format!("Failed to append queue intent: {error}"))?;
+    if let Some(parent) = session_file.parent() {
+        if !parent.exists() {
+            return Err(format!("Failed to append queue intent: parent does not exist: {}", parent.display()));
+        }
+    }
+    append_v2_lifecycle_record(
+        session_file,
+        HarnessRecord::QueueEnqueued {
+            id: format!("v2-{}", record.id()),
+            seq: 0,
+            lane: lane.name.clone(),
+            timestamp: now_ms() as u64,
+            run_id: lane.active_run_id.clone(),
+            queue: match queue {
+                QueueKind::Steer => HarnessQueueKind::Steer,
+                QueueKind::FollowUp => HarnessQueueKind::FollowUp,
+                QueueKind::NextRun => HarnessQueueKind::NextRun,
+            },
+            priority,
+            target: ProvisionedEntry {
+                id: format!("legacy-{}", record.id()),
+                parent_id: lane.leaf_id.clone(),
+                message: target.clone(),
+            },
+        },
+    )?;
     lane.op_log.push(record);
     Ok(())
+}
+
+fn append_abort_requested_record(
+    session_file: &Path,
+    lane: &str,
+    run_id: &str,
+) -> Result<OpRecord, String> {
+    let path = session_file.with_extension("oplog.jsonl");
+    let records = load_op_records_from_file(&path)
+        .map_err(|error| format!("Failed to read abort log: {error}"))?;
+    let seq = records.iter().map(OpRecord::seq).max().unwrap_or(0) + 1;
+    let record = OpRecord::AbortRequested {
+        id: format!("abort-{run_id}-{seq}"),
+        seq,
+        lane: lane.to_owned(),
+        timestamp: now_ms() as u64,
+        run_id: run_id.to_owned(),
+    };
+    let has_v2_run = JsonlStore::open(session_file)
+        .ok()
+        .and_then(|store| Reducer::reduce(&store).ok())
+        .and_then(|state| state.lane(lane).and_then(|lane| lane.open_operation.clone()))
+        .is_some_and(|open_run| open_run == run_id);
+    if has_v2_run {
+        append_v2_lifecycle_record(
+            session_file,
+            HarnessRecord::AbortRequested {
+                id: format!("v2-{}", record.id()),
+                seq: 0,
+                lane: lane.to_owned(),
+                timestamp: now_ms() as u64,
+                run_id: run_id.to_owned(),
+            },
+        )?;
+        return Ok(record);
+    }
+    append_legacy_record(session_file, record.clone())
+        .map_err(|error| format!("Failed to append abort intent: {error}"))?;
+    Ok(record)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -398,14 +678,51 @@ impl HarnessSupervisor {
     ) -> Result<(), String> {
         let key = format!("{session_id}:{lane_name}");
         let operation_started = matches!(&record, OpRecord::OperationStarted { .. });
-        {
-            let mut lock = self.lanes.lock().unwrap();
-            lock.entry(key.clone())
-                .or_insert_with(|| Lane::new(lane_name, session_id));
-        }
-        append_op_record_to_file(&session_file.with_extension("oplog.jsonl"), &record)
-            .map_err(|error| format!("Failed to append lane operation: {error}"))?;
         let mut lock = self.lanes.lock().unwrap();
+        lock.entry(key.clone())
+            .or_insert_with(|| Lane::new(lane_name, session_id));
+        if let Some(v2) = v2_from_legacy_lifecycle(&record) {
+            let mirror = match &v2 {
+                HarnessRecord::OperationStarted { .. } => true,
+                HarnessRecord::OperationFinished { run_id, .. }
+                | HarnessRecord::AbortRequested { run_id, .. } => {
+                    let store = JsonlStore::open(session_file)
+                        .map_err(|error| error.to_string())?;
+                    let has_start = store.records().iter().any(|current| {
+                        matches!(current, HarnessRecord::OperationStarted { id, .. } if id == run_id)
+                    });
+                    match &v2 {
+                        HarnessRecord::OperationFinished { .. } => {
+                            has_start && !store.records().iter().any(|current| {
+                                matches!(current, HarnessRecord::OperationFinished { run_id: current_run, .. } if current_run == run_id)
+                            })
+                        }
+                        HarnessRecord::AbortRequested { .. } => {
+                            has_start && !store.records().iter().any(|current| {
+                                matches!(current, HarnessRecord::AbortRequested { run_id: current_run, .. } if current_run == run_id)
+                            })
+                        }
+                        _ => has_start,
+                    }
+                }
+                _ => true,
+            };
+            if mirror {
+                append_v2_lifecycle_record(session_file, v2)?;
+            }
+            if matches!(record, OpRecord::OperationFinished { .. }) {
+                let legacy_path = session_file.with_extension("oplog.jsonl");
+                if load_op_records_from_file(&legacy_path)
+                    .map(|records| !records.is_empty())
+                    .unwrap_or(false)
+                {
+                    append_legacy_record(session_file, record.clone())?;
+                }
+            }
+        } else {
+            append_legacy_record(session_file, record.clone())
+                .map_err(|error| format!("Failed to append lane operation: {error}"))?;
+        }
         let lane = lock.get_mut(&key).unwrap();
         lane.session_file = Some(session_file.to_path_buf());
         if operation_started {
@@ -414,6 +731,63 @@ impl HarnessSupervisor {
         }
         lane.op_log.push(record);
         Ok(())
+    }
+
+    fn persist_prompt_run(
+        &self,
+        session_id: &str,
+        session_file: &Path,
+        source_leaf_id: Option<String>,
+        prompt: &str,
+    ) -> Result<String, String> {
+        let key = format!("{session_id}:main");
+        let mut lock = self.lanes.lock().unwrap();
+        let lane = lock
+            .entry(key)
+            .or_insert_with(|| Lane::new("main", session_id));
+        let started_seq = lane.op_log.iter().map(OpRecord::seq).max().unwrap_or(0) + 1;
+        let run_id = format!("run-{session_id}-{started_seq}");
+        let started = OpRecord::OperationStarted {
+            id: run_id.clone(),
+            seq: started_seq,
+            lane: "main".into(),
+            timestamp: now_ms() as u64,
+            source_leaf_id: source_leaf_id.clone(),
+            kind: "prompt".into(),
+            system_prompt_override: None,
+        };
+        let attempt = OpRecord::TaskAttempt {
+            id: format!("attempt-{run_id}"),
+            seq: started_seq + 1,
+            lane: "main".into(),
+            timestamp: now_ms() as u64,
+            run_id: run_id.clone(),
+            task: prompt.to_owned(),
+            attempt: 1,
+        };
+        if let Some(parent) = session_file.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        if !session_file.exists() {
+            fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(session_file)
+                .map_err(|error| error.to_string())?;
+        }
+        let store = JsonlStore::open(session_file).map_err(|error| error.to_string())?;
+        let mut harness = AgentHarness::new(store);
+        harness
+            .accept_prompt(run_id.as_str(), AgentMessage::user(prompt, Vec::new()))
+            .map_err(|error| error.to_string())?;
+        harness
+            .drive_to_completion()
+            .map_err(|error| error.to_string())?;
+        lane.session_file = Some(session_file.to_path_buf());
+        lane.active_run_id = Some(run_id.clone());
+        lane.status = LaneStatus::Running;
+        lane.op_log.extend([started, attempt]);
+        Ok(run_id)
     }
 
     pub fn append_tool_started_record(
@@ -426,25 +800,22 @@ impl HarnessSupervisor {
         effective_args: serde_json::Value,
     ) -> Result<(), String> {
         let key = format!("{session_id}:{lane_name}");
-        let (run_id, tool_index, seq) = {
-            let lock = self.lanes.lock().unwrap();
-            let lane = lock
-                .get(&key)
-                .ok_or_else(|| format!("Lane '{key}' not found"))?;
-            let run_id = lane
-                .active_run_id
-                .clone()
-                .ok_or_else(|| format!("Lane '{key}' has no active run"))?;
-            let tool_index = lane
-                .op_log
-                .iter()
-                .filter(|record| {
-                    matches!(record, OpRecord::ToolStarted { run_id: record_run_id, .. } if record_run_id == &run_id)
-                })
-                .count();
-            let seq = lane.op_log.iter().map(OpRecord::seq).max().unwrap_or(0) + 1;
-            (run_id, tool_index, seq)
-        };
+        let mut lock = self.lanes.lock().unwrap();
+        let lane = lock
+            .get(&key)
+            .ok_or_else(|| format!("Lane '{key}' not found"))?;
+        let run_id = lane
+            .active_run_id
+            .clone()
+            .ok_or_else(|| format!("Lane '{key}' has no active run"))?;
+        let tool_index = lane
+            .op_log
+            .iter()
+            .filter(|record| {
+                matches!(record, OpRecord::ToolStarted { run_id: record_run_id, .. } if record_run_id == &run_id)
+            })
+            .count();
+        let seq = lane.op_log.iter().map(OpRecord::seq).max().unwrap_or(0) + 1;
         let record = OpRecord::ToolStarted {
             id: format!("tool-{run_id}-{tool_index}"),
             seq,
@@ -459,9 +830,167 @@ impl HarnessSupervisor {
             result_entry_id: format!("result-{tool_call_id}"),
             replay: threadlane_agent::classify_tool_replay_safety(tool_name),
         };
-        append_op_record_to_file(&session_file.with_extension("oplog.jsonl"), &record)
-            .map_err(|error| format!("Failed to append lane operation: {error}"))?;
+        let latest_assistant_entry_id = JsonlStore::open(session_file)
+            .map_err(|error| error.to_string())?
+            .entries()
+            .iter()
+            .rev()
+            .find_map(|entry| {
+                matches!(entry.message, AgentMessage::Assistant { .. }).then(|| entry.id.clone())
+            });
+        let mut v2_written = false;
+        if let Some(latest_assistant_entry_id) = latest_assistant_entry_id {
+            let v2_record = match &record {
+            OpRecord::ToolStarted {
+                id,
+                timestamp,
+                run_id,
+                assistant_entry_id: _,
+                tool_index,
+                tool_call_id,
+                tool_name,
+                effective_args,
+                result_entry_id,
+                replay,
+                ..
+            } => HarnessRecord::ToolStarted {
+                id: format!("v2-{id}"),
+                seq: 0,
+                lane: lane_name.to_owned(),
+                timestamp: *timestamp,
+                run_id: run_id.clone(),
+                assistant_entry_id: latest_assistant_entry_id,
+                tool_index: *tool_index,
+                tool_call_id: tool_call_id.clone(),
+                tool_name: tool_name.clone(),
+                effective_args: effective_args.clone(),
+                result_entry_id: result_entry_id.clone(),
+                replay: match replay {
+                    threadlane_agent::ToolReplaySafety::Safe => {
+                        threadlane_agent::harness::ToolReplaySafety::Safe
+                    }
+                    threadlane_agent::ToolReplaySafety::Never => {
+                        threadlane_agent::harness::ToolReplaySafety::Never
+                    }
+                },
+            },
+            _ => unreachable!("tool-start method created a different record"),
+            };
+            append_v2_lifecycle_record(session_file, v2_record)?;
+            v2_written = true;
+        }
+        if !v2_written {
+            append_legacy_record(session_file, record.clone())
+                .map_err(|error| format!("Failed to append lane operation: {error}"))?;
+        }
+        let lane = lock.get_mut(&key).unwrap();
+        lane.session_file = Some(session_file.to_path_buf());
+        lane.op_log.push(record);
+        Ok(())
+    }
+
+    pub fn append_tool_finished_record(
+        &self,
+        session_id: &str,
+        lane_name: &str,
+        session_file: &Path,
+        tool_call_id: &str,
+        terminate: bool,
+    ) -> Result<(), String> {
+        let key = format!("{session_id}:{lane_name}");
         let mut lock = self.lanes.lock().unwrap();
+        let lane = lock
+            .get(&key)
+            .ok_or_else(|| format!("Lane '{key}' not found"))?;
+        let run_id = lane
+            .active_run_id
+            .clone()
+            .ok_or_else(|| format!("Lane '{key}' has no active run"))?;
+        let intent = lane
+            .op_log
+            .iter()
+            .rev()
+            .find_map(|record| match record {
+                OpRecord::ToolStarted {
+                    run_id: record_run_id,
+                    tool_call_id: record_tool_call_id,
+                    result_entry_id,
+                    ..
+                } if record_run_id == &run_id && record_tool_call_id == tool_call_id => {
+                    Some(result_entry_id.clone())
+                }
+                _ => None,
+            })
+            .ok_or_else(|| format!("Tool '{tool_call_id}' has no durable intent"))?;
+        let seq = lane.op_log.iter().map(OpRecord::seq).max().unwrap_or(0) + 1;
+        let record = OpRecord::ToolFinished {
+            id: format!("tool-finished-{run_id}-{tool_call_id}"),
+            seq,
+            lane: lane_name.to_owned(),
+            timestamp: now_ms() as u64,
+            run_id,
+            tool_call_id: tool_call_id.to_owned(),
+            result_entry_id: intent,
+            terminate,
+        };
+        let (record_id, record_timestamp, record_run_id, record_result_entry_id) = match &record {
+            OpRecord::ToolFinished {
+                id,
+                timestamp,
+                run_id,
+                result_entry_id,
+                ..
+            } => (id, timestamp, run_id, result_entry_id),
+            _ => unreachable!("tool-finish method created a different record"),
+        };
+        let has_v2_intent = JsonlStore::open(session_file)
+            .map_err(|error| error.to_string())?
+            .records()
+            .iter()
+            .any(|current| {
+                matches!(
+                    current,
+                    HarnessRecord::ToolStarted {
+                        run_id: current_run_id,
+                        tool_call_id: current_call_id,
+                        ..
+                    } if current_run_id == record_run_id && current_call_id == tool_call_id
+                )
+            });
+        let has_v2_completion = JsonlStore::open(session_file)
+            .map_err(|error| error.to_string())?
+            .records()
+            .iter()
+            .any(|current| {
+                matches!(
+                    current,
+                    HarnessRecord::ToolFinished {
+                        run_id: current_run_id,
+                        tool_call_id: current_call_id,
+                        ..
+                    } if current_run_id == record_run_id && current_call_id == tool_call_id
+                )
+            });
+        if has_v2_intent {
+            if !has_v2_completion {
+                append_v2_lifecycle_record(
+                    session_file,
+                    HarnessRecord::ToolFinished {
+                        id: format!("v2-{record_id}"),
+                        seq: 0,
+                        lane: lane_name.to_owned(),
+                        timestamp: *record_timestamp,
+                        run_id: record_run_id.clone(),
+                        tool_call_id: tool_call_id.to_owned(),
+                        result_entry_id: record_result_entry_id.clone(),
+                        terminate,
+                    },
+                )?;
+            }
+        } else {
+            append_legacy_record(session_file, record.clone())
+                .map_err(|error| format!("Failed to append tool completion: {error}"))?;
+        }
         let lane = lock.get_mut(&key).unwrap();
         lane.session_file = Some(session_file.to_path_buf());
         lane.op_log.push(record);
@@ -489,8 +1018,60 @@ impl HarnessSupervisor {
         session_tree: &mut threadlane_agent::SessionTree,
     ) -> Result<threadlane_agent::RecoveryResult, String> {
         let oplog_file = session_file.with_extension("oplog.jsonl");
-        if !oplog_file.exists() {
-            return Ok(threadlane_agent::RecoveryResult::default());
+        if !oplog_file.exists()
+            || fs::metadata(&oplog_file)
+                .map(|metadata| metadata.len() == 0)
+                .unwrap_or(true)
+        {
+            let store = JsonlStore::open(session_file).map_err(|error| error.to_string())?;
+            let state = Reducer::reduce(&store).map_err(|error| error.to_string())?;
+            let mut open_operation_ids = Vec::new();
+            let mut abort_requested_operation_ids = Vec::new();
+            let mut lock = self.lanes.lock().unwrap();
+            for lane_state in &state.lanes {
+                if lane_state.open_operation.is_none() && lane_state.queued.is_empty() {
+                    continue;
+                }
+                let key = format!("{session_id}:{}", lane_state.name);
+                let lane = lock
+                    .entry(key)
+                    .or_insert_with(|| Lane::new(&lane_state.name, session_id));
+                lane.session_file = Some(session_file.to_path_buf());
+                lane.leaf_id = lane_state.leaf_id.clone();
+                lane.active_run_id = lane_state.open_operation.clone();
+                lane.status = lane_state
+                    .open_operation
+                    .as_ref()
+                    .map(|_| LaneStatus::Suspended)
+                    .unwrap_or(LaneStatus::Idle);
+                lane.queue = LaneQueue::default();
+                for queued in &lane_state.queued {
+                    match queued.queue {
+                        HarnessQueueKind::Steer => lane.queue.enqueue_steer_with_priority(
+                            queued.target.message.clone(),
+                            queued.priority.unwrap_or(threadlane_agent::SteerPriority::Normal),
+                        ),
+                        HarnessQueueKind::FollowUp => lane
+                            .queue
+                            .enqueue(QueueKind::FollowUp, queued.target.message.clone()),
+                        HarnessQueueKind::NextRun => lane
+                            .queue
+                            .enqueue(QueueKind::NextRun, queued.target.message.clone()),
+                    }
+                }
+                if let Some(run_id) = lane_state.open_operation.clone() {
+                    open_operation_ids.push(run_id.clone());
+                    if lane_state.abort_requested {
+                        abort_requested_operation_ids.push(run_id);
+                    }
+                }
+            }
+            return Ok(threadlane_agent::RecoveryResult {
+                recovered_open_operations: open_operation_ids.len(),
+                open_operation_ids,
+                abort_requested_operation_ids,
+                ..Default::default()
+            });
         }
 
         let records = threadlane_agent::load_op_records_from_file(&oplog_file)
@@ -553,6 +1134,72 @@ impl HarnessSupervisor {
             *lane = restored;
         }
 
+        // Once V2 lifecycle records exist, they are the recovery authority for
+        // open/finished/queue state. The legacy sidecar remains loaded above
+        // only as a compatibility fallback for fields with no V2 record.
+        if let Ok(store) = JsonlStore::open(session_file) {
+            let v2_lanes: HashSet<String> = store
+                .records()
+                .iter()
+                .filter_map(|record| match record {
+                    HarnessRecord::OperationStarted { lane, .. } => Some(lane.clone()),
+                    _ => None,
+                })
+                .collect();
+            if !v2_lanes.is_empty() {
+                let state = Reducer::reduce(&store).map_err(|error| error.to_string())?;
+                let mut open_operation_ids = Vec::new();
+                for lane_name in v2_lanes {
+                    let lane_state = state
+                        .lane(&lane_name)
+                        .ok_or_else(|| format!("V2 lane '{lane_name}' disappeared during recovery"))?;
+                    let key = format!("{session_id}:{lane_name}");
+                    let lane = lock
+                        .entry(key)
+                        .or_insert_with(|| Lane::new(&lane_name, session_id));
+                    lane.session_file = Some(session_file.to_path_buf());
+                    lane.leaf_id = lane_state.leaf_id.clone();
+                    lane.active_run_id = lane_state.open_operation.clone();
+                    lane.queue = LaneQueue::default();
+                    for queued in &lane_state.queued {
+                        match queued.queue {
+                            HarnessQueueKind::Steer => lane.queue.enqueue_steer_with_priority(
+                                queued.target.message.clone(),
+                                queued.priority
+                                    .unwrap_or(threadlane_agent::SteerPriority::Normal),
+                            ),
+                            HarnessQueueKind::FollowUp => lane
+                                .queue
+                                .enqueue(QueueKind::FollowUp, queued.target.message.clone()),
+                            HarnessQueueKind::NextRun => lane
+                                .queue
+                                .enqueue(QueueKind::NextRun, queued.target.message.clone()),
+                        }
+                    }
+                    lane.status = if lane_state.open_operation.is_some() {
+                        open_operation_ids.extend(lane_state.open_operation.clone());
+                        LaneStatus::Suspended
+                    } else {
+                        LaneStatus::Idle
+                    };
+                }
+                return Ok(threadlane_agent::RecoveryResult {
+                    recovered_open_operations: open_operation_ids.len(),
+                    open_operation_ids,
+                    abort_requested_operation_ids: state
+                        .lanes
+                        .iter()
+                        .filter_map(|lane| {
+                            lane.abort_requested
+                                .then(|| lane.open_operation.clone())
+                                .flatten()
+                        })
+                        .collect(),
+                    ..Default::default()
+                });
+            }
+        }
+
         Ok(recovery)
     }
 
@@ -609,6 +1256,35 @@ impl HarnessSupervisor {
     ) -> Result<bool, String> {
         if !session_tree.nodes.contains_key(target_node_id) {
             return Err(format!("Node '{target_node_id}' not found in session tree"));
+        }
+
+        let v2_file = self
+            .lanes
+            .lock()
+            .unwrap()
+            .get(&format!("{session_id}:{lane_name}"))
+            .and_then(|lane| lane.session_file.clone());
+        if let Some(session_file) = v2_file {
+            if let Ok(store) = JsonlStore::open(&session_file) {
+                if store.entries().iter().any(|entry| entry.id == target_node_id) {
+                    let run_id = format!("navigation-{}", now_ms());
+                    let mut harness = AgentHarness::new(store);
+                    harness
+                        .accept_navigation_on_lane(lane_name, &run_id, target_node_id, None)
+                        .map_err(|error| error.to_string())?;
+                    harness
+                        .drive_to_completion()
+                        .map_err(|error| error.to_string())?;
+                    let key = format!("{session_id}:{lane_name}");
+                    let mut lock = self.lanes.lock().unwrap();
+                    let lane = lock
+                        .entry(key)
+                        .or_insert_with(|| Lane::new(lane_name, session_id));
+                    lane.leaf_id = Some(target_node_id.to_string());
+                    lane.status = LaneStatus::Idle;
+                    return Ok(true);
+                }
+            }
         }
 
         let key = format!("{session_id}:{lane_name}");
@@ -939,46 +1615,15 @@ impl HarnessSupervisor {
         };
 
         let lane = self.get_or_create_lane(&session_id, "main");
-        let run_id = format!("run-{}", now_ms());
-        let started_seq = lane.op_log.iter().map(OpRecord::seq).max().unwrap_or(0) + 1;
         let session_file_for_log = session_file
             .as_deref()
             .ok_or_else(|| format!("Task ID '{task_id}' has no session file"))?;
-        self.append_persisted_lane_record(
+        let run_id = self.persist_prompt_run(
             &session_id,
-            "main",
             session_file_for_log,
-            OpRecord::OperationStarted {
-                id: run_id.clone(),
-                seq: started_seq,
-                lane: "main".into(),
-                timestamp: now_ms() as u64,
-                source_leaf_id: lane.leaf_id.clone(),
-                kind: "prompt".into(),
-                system_prompt_override: None,
-            },
+            lane.leaf_id.clone(),
+            &prompt,
         )?;
-        self.append_persisted_lane_record(
-            &session_id,
-            "main",
-            session_file_for_log,
-            OpRecord::TaskAttempt {
-                id: format!("attempt-{run_id}"),
-                seq: started_seq + 1,
-                lane: "main".into(),
-                timestamp: now_ms() as u64,
-                run_id: run_id.clone(),
-                task: prompt.clone(),
-                attempt: 1,
-            },
-        )?;
-        {
-            let mut lanes = self.lanes.lock().unwrap();
-            if let Some(lane) = lanes.get_mut(&format!("{session_id}:main")) {
-                lane.status = LaneStatus::Running;
-                lane.active_run_id = Some(run_id.clone());
-            }
-        }
 
         if let Some(task) = self.tasks.lock().unwrap().get_mut(task_id) {
             task.summary = prompt.clone();
@@ -1025,48 +1670,55 @@ impl HarnessSupervisor {
                                     runtime.recovery_loaded = true;
                                 }
                             }
-                        let replayed = agent
-                            .replay_safe_tools(&recovery.safe_tools_to_replay)
-                            .await;
-                        let replay_failed = replayed.iter().any(|result| result.is_error);
-                        for (record, result) in
-                            recovery.safe_tools_to_replay.iter().zip(replayed.iter())
-                        {
-                            if let threadlane_agent::OpRecord::ToolStarted {
-                                tool_call_id, ..
-                            } = record
+                            let replayed = agent
+                                .replay_safe_tools(&recovery.safe_tools_to_replay)
+                                .await;
+                            let replay_failed = replayed.iter().any(|result| result.is_error);
+                            for (record, result) in
+                                recovery.safe_tools_to_replay.iter().zip(replayed.iter())
                             {
-                                agent.session_tree.replace_tool_result(
+                                if let threadlane_agent::OpRecord::ToolStarted {
                                     tool_call_id,
-                                    result.content.clone(),
-                                    result.is_error,
+                                    ..
+                                } = record
+                                {
+                                    agent.session_tree.replace_tool_result(
+                                        tool_call_id,
+                                        result.content.clone(),
+                                        result.is_error,
+                                    );
+                                }
+                            }
+                            let recovered_run_ids: Vec<String> = recovery
+                                .open_operation_ids
+                                .iter()
+                                .filter(|run_id| *run_id != &run_id_for_run)
+                                .cloned()
+                                .collect();
+                            if !recovered_run_ids.is_empty() {
+                                let recovery_outcome = if recovery.unreplayable_tools > 0 {
+                                    threadlane_agent::OpOutcome::Aborted
+                                } else if recovered_run_ids.iter().any(|run_id| {
+                                    recovery
+                                        .abort_requested_operation_ids
+                                        .contains(run_id)
+                                }) {
+                                    threadlane_agent::OpOutcome::Aborted
+                                } else if replay_failed {
+                                    threadlane_agent::OpOutcome::Failed
+                                } else {
+                                    threadlane_agent::OpOutcome::Completed
+                                };
+                                let _ = supervisor.finish_recovered_operations(
+                                    &session_id_for_run,
+                                    session_file,
+                                    &recovered_run_ids,
+                                    recovery_outcome,
                                 );
                             }
-                        }
-                        let recovered_run_ids: Vec<String> = recovery
-                            .open_operation_ids
-                            .iter()
-                            .filter(|run_id| *run_id != &run_id_for_run)
-                            .cloned()
-                            .collect();
-                        if !recovered_run_ids.is_empty() {
-                            let recovery_outcome = if recovery.unreplayable_tools > 0 {
-                                threadlane_agent::OpOutcome::Aborted
-                            } else if replay_failed {
-                                threadlane_agent::OpOutcome::Failed
-                            } else {
-                                threadlane_agent::OpOutcome::Completed
-                            };
-                            let _ = supervisor.finish_recovered_operations(
-                                &session_id_for_run,
-                                session_file,
-                                &recovered_run_ids,
-                                recovery_outcome,
-                            );
-                        }
-                        if recovery.recovered_open_operations > 0 {
-                            agent.sync_session_history().await;
-                        }
+                            if recovery.recovered_open_operations > 0 {
+                                agent.sync_session_history().await;
+                            }
                         }
                         Err(_error) => {
                             let _ = supervisor.update_task_status(&tid, TaskStatus::Failed);
@@ -1087,24 +1739,48 @@ impl HarnessSupervisor {
                     let recorder_session_id = recorder_session_id.clone();
                     let recorder_session_file = recorder_session_file.clone();
                     Box::pin(async move {
-                    if child_task_id(&id).is_some() {
-                        return Ok(());
-                    }
-                    let effective_args = serde_json::from_str(&arguments)
-                        .unwrap_or_else(|_| serde_json::Value::String(arguments.clone()));
-                    recorder_supervisor.append_tool_started_record(
-                        &recorder_session_id,
-                        "main",
-                        &recorder_session_file,
-                        &id,
-                        &name,
-                        effective_args,
-                    )
+                        if child_task_id(&id).is_some() {
+                            return Ok(());
+                        }
+                        let effective_args = serde_json::from_str(&arguments)
+                            .unwrap_or_else(|_| serde_json::Value::String(arguments.clone()));
+                        recorder_supervisor.append_tool_started_record(
+                            &recorder_session_id,
+                            "main",
+                            &recorder_session_file,
+                            &id,
+                            &name,
+                            effective_args,
+                        )
+                    })
+                })));
+                let completion_supervisor = supervisor.clone();
+                let completion_session_id = session_id_for_run.clone();
+                let completion_session_file = session_file.to_path_buf();
+                agent.set_tool_completion_recorder(Some(Arc::new(move |tool_call_id, terminate| {
+                    let completion_supervisor = completion_supervisor.clone();
+                    let completion_session_id = completion_session_id.clone();
+                    let completion_session_file = completion_session_file.clone();
+                    let tool_call_id = tool_call_id.to_owned();
+                    Box::pin(async move {
+                        completion_supervisor.append_tool_finished_record(
+                            &completion_session_id,
+                            "main",
+                            &completion_session_file,
+                            &tool_call_id,
+                            terminate,
+                        )
                     })
                 })));
             }
+            if let Err(error) = agent.adopt_harness_run(&run_id_for_run) {
+                let _ = supervisor.update_task_status(&tid, TaskStatus::Failed);
+                eprintln!("failed to adopt supervisor harness run {run_id_for_run}: {error}");
+                return;
+            }
             let input_result = agent.handle_input(&prompt).await;
             agent.set_tool_intent_recorder(None);
+            agent.set_tool_completion_recorder(None);
             let (outcome, error) = match input_result {
                 Some(Err(error)) => (threadlane_agent::OpOutcome::Failed, Some(error)),
                 _ => (threadlane_agent::OpOutcome::Completed, None),
@@ -1190,21 +1866,49 @@ impl HarnessSupervisor {
                     .map(|session_file| (task.session_id, session_file, run_id))
             })
         };
-        let cancellation_guard =
-            if let Some((session_id, session_file, run_id)) = active_run {
-                let guard = abort_open_subagent_operations(&session_file)?;
-                if let Some(run_id) = run_id {
-                    let _ = self.finish_recovered_operations(
-                        &session_id,
-                        &session_file,
-                        &[run_id],
-                        threadlane_agent::OpOutcome::Aborted,
-                    );
+        let cancellation_guard = if let Some((session_id, session_file, run_id)) = active_run {
+            if let Some(run_id) = run_id.as_deref() {
+                let abort_record = append_abort_requested_record(&session_file, "main", run_id)?;
+                if let Some(lane) = self
+                    .lanes
+                    .lock()
+                    .unwrap()
+                    .get_mut(&format!("{session_id}:main"))
+                {
+                    lane.op_log.push(abort_record);
                 }
-                Some(guard)
-            } else {
-                None
-            };
+            }
+            let guard = abort_open_subagent_operations(&session_file)?;
+            if let Some(run_id) = run_id {
+                let _ = self.finish_recovered_operations(
+                    &session_id,
+                    &session_file,
+                    std::slice::from_ref(&run_id),
+                    threadlane_agent::OpOutcome::Aborted,
+                );
+                let legacy_path = session_file.with_extension("oplog.jsonl");
+                if load_op_records_from_file(&legacy_path)
+                    .map(|records| records.is_empty())
+                    .unwrap_or(true)
+                {
+                    append_legacy_record(
+                        &session_file,
+                        OpRecord::OperationFinished {
+                            id: format!("legacy-finish-{run_id}"),
+                            seq: 0,
+                            lane: "main".into(),
+                            timestamp: now_ms() as u64,
+                            run_id,
+                            outcome: threadlane_agent::OpOutcome::Aborted,
+                            error: None,
+                        },
+                    )?;
+                }
+            }
+            Some(guard)
+        } else {
+            None
+        };
         let handle = {
             let mut runtimes = self.runtimes.lock().unwrap();
             if let Some(runtime) = runtimes.get_mut(task_id) {
@@ -1492,6 +2196,85 @@ mod tests {
     use std::time::Duration;
     use threadlane_agent::TokenUsage;
 
+    #[test]
+    fn abort_request_is_persisted_before_cancellation() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("session.jsonl");
+        let record = append_abort_requested_record(&session_file, "main", "run-1").unwrap();
+        assert!(matches!(record, OpRecord::AbortRequested { ref run_id, .. } if run_id == "run-1"));
+        let records = threadlane_agent::load_op_records_from_file(
+            &session_file.with_extension("oplog.jsonl"),
+        )
+        .unwrap();
+        assert!(
+            matches!(records.as_slice(), [OpRecord::AbortRequested { run_id, .. }] if run_id == "run-1")
+        );
+    }
+
+    #[test]
+    fn v2_abort_request_does_not_create_a_legacy_sidecar_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("session.jsonl");
+        fs::File::create(&session_file).unwrap();
+        let mut harness = AgentHarness::new(JsonlStore::open(&session_file).unwrap());
+        harness
+            .accept_prompt("run-v2", AgentMessage::user("prompt", Vec::new()))
+            .unwrap();
+        harness.drive_to_completion().unwrap();
+
+        append_abort_requested_record(&session_file, "main", "run-v2").unwrap();
+
+        let legacy = session_file.with_extension("oplog.jsonl");
+        assert!(!legacy.exists() || load_op_records_from_file(&legacy).unwrap().is_empty());
+        let store = JsonlStore::open(&session_file).unwrap();
+        assert!(store.records().iter().any(|record| {
+            matches!(record, HarnessRecord::AbortRequested { run_id, .. } if run_id == "run-v2")
+        }));
+    }
+
+    #[test]
+    fn prompt_acceptance_allocates_unique_lane_sequences() {
+        let dir = tempfile::tempdir().unwrap();
+        let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
+        let session_file = dir.path().join("session.jsonl");
+        let first = supervisor
+            .persist_prompt_run("session-1", &session_file, None, "one")
+            .unwrap();
+        supervisor
+            .append_persisted_lane_record(
+                "session-1",
+                "main",
+                &session_file,
+                OpRecord::OperationFinished {
+                    id: "finish-first".into(),
+                    seq: 3,
+                    lane: "main".into(),
+                    timestamp: 3,
+                    run_id: first.clone(),
+                    outcome: threadlane_agent::OpOutcome::Completed,
+                    error: None,
+                },
+            )
+            .unwrap();
+        let second = supervisor
+            .persist_prompt_run("session-1", &session_file, None, "two")
+            .unwrap();
+        assert_ne!(first, second);
+        let records = threadlane_agent::load_op_records_from_file(
+            &session_file.with_extension("oplog.jsonl"),
+        )
+        .unwrap();
+        let sequences = records.iter().map(OpRecord::seq).collect::<Vec<_>>();
+        assert!(sequences.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(!records
+            .iter()
+            .any(|record| matches!(record, OpRecord::TaskAttempt { .. })));
+        let harness = JsonlStore::open(&session_file).unwrap();
+        assert!(harness.records().iter().any(|record| {
+            matches!(record, HarnessRecord::OperationStarted { id, .. } if id == &first)
+        }));
+    }
+
     #[tokio::test]
     async fn recovery_replay_does_not_record_a_main_lane_intent() {
         let dir = tempfile::tempdir().unwrap();
@@ -1559,15 +2342,12 @@ mod tests {
             .await;
 
         assert!(!results[0].is_error);
-        let records = threadlane_agent::load_op_records_from_file(
-            &session_file.with_extension("oplog.jsonl"),
-        )
-        .unwrap();
-        assert_eq!(records.len(), 1);
-        assert!(matches!(
-            records.last(),
-            Some(OpRecord::OperationStarted { id, .. }) if id == "run-1"
-        ));
+        let legacy = session_file.with_extension("oplog.jsonl");
+        assert!(!legacy.exists() || load_op_records_from_file(&legacy).unwrap().is_empty());
+        let harness = JsonlStore::open(&session_file).unwrap();
+        assert!(harness.records().iter().any(|record| {
+            matches!(record, HarnessRecord::OperationStarted { id, .. } if id == "run-1")
+        }));
     }
 
     #[tokio::test]
@@ -1613,18 +2393,16 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
 
-        let records = threadlane_agent::load_op_records_from_file(
-            &session_file.with_extension("oplog.jsonl"),
-        )
-        .unwrap();
-        let finished = records
+        let harness = JsonlStore::open(&session_file).unwrap();
+        let finished = harness
+            .records()
             .iter()
             .find_map(|record| match record {
-                OpRecord::OperationFinished { outcome, .. } => Some(outcome),
+                HarnessRecord::OperationFinished { outcome, .. } => Some(outcome),
                 _ => None,
             })
             .unwrap();
-        assert_eq!(finished, &threadlane_agent::OpOutcome::Failed);
+        assert_eq!(finished, &OperationOutcome::Failed);
         assert_eq!(
             supervisor.get_task_status(&task_id),
             Some(TaskStatus::Failed)
@@ -1669,7 +2447,6 @@ mod tests {
                 },
             )
             .unwrap();
-
         supervisor.cancel_task("task-1").unwrap();
 
         let records = threadlane_agent::load_op_records_from_file(
@@ -1757,16 +2534,14 @@ mod tests {
 
         supervisor.cancel_task("task-1").unwrap();
 
-        let records = threadlane_agent::load_op_records_from_file(
-            &session_file.with_extension("oplog.jsonl"),
-        )
-        .unwrap();
-        let aborted: Vec<_> = records
+        let harness = JsonlStore::open(&session_file).unwrap();
+        let aborted: Vec<_> = harness
+            .records()
             .iter()
             .filter_map(|record| match record {
-                OpRecord::OperationFinished {
+                HarnessRecord::OperationFinished {
                     run_id,
-                    outcome: threadlane_agent::OpOutcome::Aborted,
+                    outcome: OperationOutcome::Aborted,
                     ..
                 } => Some(run_id.as_str()),
                 _ => None,
@@ -1775,10 +2550,11 @@ mod tests {
         assert_eq!(aborted, ["run-open-1", "run-open-2"]);
         for run_id in ["run-open-1", "run-open-2", "run-finished"] {
             assert_eq!(
-                records
+                harness
+                    .records()
                     .iter()
                     .filter(|record| {
-                        matches!(record, OpRecord::OperationFinished { run_id: record_run_id, .. } if record_run_id == run_id)
+                        matches!(record, HarnessRecord::OperationFinished { run_id: record_run_id, .. } if record_run_id == run_id)
                     })
                     .count(),
                 1,
@@ -2081,19 +2857,16 @@ mod tests {
         let updated_lane = supervisor.get_or_create_lane("session-1", "main");
         assert_eq!(updated_lane.leaf_id.as_deref(), Some("node_1"));
         assert_eq!(updated_lane.queue.steer.len(), 1);
-        let records = threadlane_agent::load_op_records_from_file(
-            &session_file.with_extension("oplog.jsonl"),
-        )
-        .unwrap();
-        assert!(matches!(
-            records.last(),
-            Some(OpRecord::QueueEnqueued {
-                id,
-                queue: QueueKind::Steer,
-                target: AgentMessage::User { content },
+        let harness = JsonlStore::open(&session_file).unwrap();
+        assert!(harness.records().iter().any(|record| matches!(
+            record,
+            HarnessRecord::QueueEnqueued {
+                queue: HarnessQueueKind::Steer,
+                priority: Some(threadlane_agent::SteerPriority::Normal),
+                target,
                 ..
-            }) if !id.is_empty() && content == "steer msg"
-        ));
+            } if matches!(target.message, AgentMessage::User { ref content } if content == "steer msg")
+        )));
     }
 
     #[test]
@@ -2137,23 +2910,21 @@ mod tests {
                 threadlane_agent::SteerPriority::High,
             )
             .unwrap();
-        let records = threadlane_agent::load_op_records_from_file(
-            &session_file.with_extension("oplog.jsonl"),
-        )
-        .unwrap();
+        let harness = JsonlStore::open(&session_file).unwrap();
         assert!(matches!(
-            records.get(records.len() - 2),
-            Some(OpRecord::QueueEnqueued {
-                queue: QueueKind::FollowUp,
-                target: AgentMessage::User { content },
+            harness.records().iter().find(|record| matches!(record, HarnessRecord::QueueEnqueued { target, .. } if matches!(target.message, AgentMessage::User { ref content } if content == "next"))),
+            Some(HarnessRecord::QueueEnqueued {
+                queue: HarnessQueueKind::FollowUp,
+                target: ProvisionedEntry { message: AgentMessage::User { content }, .. },
                 ..
             }) if content == "next"
         ));
         assert!(matches!(
-            records.last(),
-            Some(OpRecord::QueueEnqueued {
-                queue: QueueKind::Steer,
-                target: AgentMessage::User { content },
+            harness.records().iter().find(|record| matches!(record, HarnessRecord::QueueEnqueued { target, .. } if matches!(target.message, AgentMessage::User { ref content } if content == "urgent"))),
+            Some(HarnessRecord::QueueEnqueued {
+                queue: HarnessQueueKind::Steer,
+                priority: Some(threadlane_agent::SteerPriority::High),
+                target: ProvisionedEntry { message: AgentMessage::User { content }, .. },
                 ..
             }) if content == "urgent"
         ));
@@ -2200,6 +2971,146 @@ mod tests {
     }
 
     #[test]
+    fn tool_completion_uses_the_intent_result_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
+        let session_file = dir.path().join("session.jsonl");
+        supervisor
+            .append_persisted_lane_record(
+                "session-1",
+                "main",
+                &session_file,
+                OpRecord::OperationStarted {
+                    id: "run-1".into(), seq: 1, lane: "main".into(), timestamp: 1,
+                    source_leaf_id: None, kind: "prompt".into(), system_prompt_override: None,
+                },
+            )
+            .unwrap();
+        supervisor
+            .append_tool_started_record(
+                "session-1", "main", &session_file, "call-1", "list_dir", serde_json::json!({}),
+            )
+            .unwrap();
+        supervisor
+            .append_tool_finished_record("session-1", "main", &session_file, "call-1", true)
+            .unwrap();
+        let records = threadlane_agent::load_op_records_from_file(
+            &session_file.with_extension("oplog.jsonl"),
+        )
+        .unwrap();
+        assert!(matches!(records.last(), Some(OpRecord::ToolFinished {
+            result_entry_id, terminate: true, ..
+        }) if result_entry_id == "result-call-1"));
+    }
+
+    #[test]
+    fn v2_tool_intent_does_not_create_a_legacy_sidecar_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
+        let session_file = dir.path().join("session.jsonl");
+        fs::File::create(&session_file).unwrap();
+        let mut harness = AgentHarness::new(JsonlStore::open(&session_file).unwrap());
+        harness
+            .accept_prompt("run-v2", AgentMessage::user("prompt", Vec::new()))
+            .unwrap();
+        harness.drive_to_completion().unwrap();
+        let store = harness.store();
+        let prompt_entry = store
+            .entries()
+            .iter()
+            .find(|entry| entry.id == "entry-run-v2-user")
+            .unwrap();
+        let assistant_seq = store
+            .entries()
+            .iter()
+            .map(|entry| entry.seq)
+            .chain(store.records().iter().map(HarnessRecord::seq))
+            .max()
+            .unwrap_or(prompt_entry.seq)
+            + 1;
+        let mut harness = AgentHarness::new(JsonlStore::open(&session_file).unwrap());
+        harness
+            .append_entry_gated(threadlane_agent::harness::Entry {
+                id: "assistant-run-v2".into(),
+                parent_id: Some(prompt_entry.id.clone()),
+                lane: "main".into(),
+                seq: assistant_seq,
+                timestamp: assistant_seq,
+                message: AgentMessage::Assistant {
+                    content: None,
+                    tool_calls: Some(vec![threadlane_provider::openai::ToolCall {
+                        id: "call-v2".into(),
+                        r#type: "function".into(),
+                        function: threadlane_provider::openai::ToolCallFunction {
+                            name: "view_file".into(),
+                            arguments: "{}".into(),
+                        },
+                        thought_signature: None,
+                    }]),
+                    stop_reason: None,
+                    deferred_handle: None,
+                },
+                terminate: false,
+            })
+            .unwrap();
+        harness.drive_to_completion().unwrap();
+        {
+            let mut lanes = supervisor.lanes.lock().unwrap();
+            let lane = lanes
+                .entry("session-1:main".into())
+                .or_insert_with(|| Lane::new("main", "session-1"));
+            lane.session_file = Some(session_file.clone());
+            lane.active_run_id = Some("run-v2".into());
+        }
+        supervisor
+            .append_tool_started_record(
+                "session-1",
+                "main",
+                &session_file,
+                "call-v2",
+                "view_file",
+                serde_json::json!({}),
+            )
+            .unwrap();
+        let mut store = JsonlStore::open(&session_file).unwrap();
+        let result_seq = store
+            .entries()
+            .iter()
+            .map(|entry| entry.seq)
+            .chain(store.records().iter().map(HarnessRecord::seq))
+            .max()
+            .unwrap()
+            + 1;
+        store
+            .append_entry(threadlane_agent::harness::Entry {
+                id: "result-call-v2".into(),
+                parent_id: Some("assistant-run-v2".into()),
+                lane: "main".into(),
+                seq: result_seq,
+                timestamp: result_seq,
+                message: AgentMessage::Tool {
+                    tool_call_id: "call-v2".into(),
+                    name: "view_file".into(),
+                    content: "ok".into(),
+                    is_error: false,
+                    terminate: false,
+                },
+                terminate: false,
+            })
+            .unwrap();
+        supervisor
+            .append_tool_finished_record("session-1", "main", &session_file, "call-v2", false)
+            .unwrap();
+
+        let legacy = session_file.with_extension("oplog.jsonl");
+        assert!(!legacy.exists() || load_op_records_from_file(&legacy).unwrap().is_empty());
+        let store = JsonlStore::open(&session_file).unwrap();
+        assert!(store.records().iter().any(|record| {
+            matches!(record, HarnessRecord::ToolFinished { tool_call_id, .. } if tool_call_id == "call-v2")
+        }));
+    }
+
+    #[test]
     fn lane_operation_records_are_persisted_and_retained() {
         let dir = tempfile::tempdir().unwrap();
         let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
@@ -2223,12 +3134,12 @@ mod tests {
             )
             .unwrap();
 
-        let records = threadlane_agent::load_op_records_from_file(
-            &session_file.with_extension("oplog.jsonl"),
-        )
-        .unwrap();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].id(), "run-1");
+        let legacy = session_file.with_extension("oplog.jsonl");
+        assert!(!legacy.exists() || load_op_records_from_file(&legacy).unwrap().is_empty());
+        let harness = JsonlStore::open(&session_file).unwrap();
+        assert!(harness.records().iter().any(|record| {
+            matches!(record, HarnessRecord::OperationStarted { id, .. } if id == "run-1")
+        }));
         assert_eq!(
             supervisor
                 .get_or_create_lane("session-1", "main")
@@ -2282,6 +3193,166 @@ mod tests {
     }
 
     #[test]
+    fn v2_only_open_run_is_restored_when_legacy_sidecar_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
+        let session_file = dir.path().join("session.jsonl");
+        fs::File::create(&session_file).unwrap();
+        let mut harness = AgentHarness::new(JsonlStore::open(&session_file).unwrap());
+        harness
+            .accept_prompt("run-v2", AgentMessage::user("prompt", Vec::new()))
+            .unwrap();
+        harness.drive_one().unwrap();
+        drop(harness);
+        fs::File::create(session_file.with_extension("oplog.jsonl")).unwrap();
+
+        let mut tree = threadlane_agent::SessionTree::new("session-1");
+        let recovery = supervisor
+            .restore_session_lanes("session-1", &session_file, &mut tree)
+            .unwrap();
+
+        assert_eq!(recovery.open_operation_ids, vec!["run-v2"]);
+        assert_eq!(
+            supervisor
+                .get_or_create_lane("session-1", "main")
+                .status,
+            LaneStatus::Suspended
+        );
+    }
+
+    #[test]
+    fn v2_open_run_wins_over_stale_legacy_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
+        let session_file = dir.path().join("session.jsonl");
+        fs::File::create(&session_file).unwrap();
+        let mut harness = AgentHarness::new(JsonlStore::open(&session_file).unwrap());
+        harness
+            .accept_prompt("run-v2", AgentMessage::user("prompt", Vec::new()))
+            .unwrap();
+        harness.drive_one().unwrap();
+        append_legacy_record(
+            &session_file,
+            OpRecord::OperationStarted {
+                id: "run-v2".into(),
+                seq: 1,
+                lane: "main".into(),
+                timestamp: 1,
+                source_leaf_id: None,
+                kind: "prompt".into(),
+                system_prompt_override: None,
+            },
+        )
+        .unwrap();
+        append_legacy_record(
+            &session_file,
+            OpRecord::OperationFinished {
+                id: "legacy-finish".into(),
+                seq: 2,
+                lane: "main".into(),
+                timestamp: 2,
+                run_id: "run-v2".into(),
+                outcome: threadlane_agent::OpOutcome::Completed,
+                error: None,
+            },
+        )
+        .unwrap();
+
+        let mut tree = threadlane_agent::SessionTree::new("session-1");
+        let recovery = supervisor
+            .restore_session_lanes("session-1", &session_file, &mut tree)
+            .unwrap();
+        assert_eq!(recovery.open_operation_ids, vec!["run-v2"]);
+        assert_eq!(
+            supervisor
+                .get_or_create_lane("session-1", "main")
+                .status,
+            LaneStatus::Suspended
+        );
+    }
+
+    #[test]
+    fn v2_only_recovery_restores_open_subagent_lanes() {
+        let dir = tempfile::tempdir().unwrap();
+        let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
+        let session_file = dir.path().join("session.jsonl");
+        fs::File::create(&session_file).unwrap();
+        let mut store = JsonlStore::open(&session_file).unwrap();
+        store
+            .append_entry(threadlane_agent::harness::Entry {
+                id: "subagent-root".into(),
+                parent_id: None,
+                lane: "subagent-1".into(),
+                seq: 1,
+                timestamp: 1,
+                message: AgentMessage::user("inspect", Vec::new()),
+                terminate: false,
+            })
+            .unwrap();
+        let mut harness = AgentHarness::new(store);
+        harness
+            .accept_prompt_on_lane(
+                "subagent-1",
+                "run-subagent",
+                AgentMessage::user("inspect", Vec::new()),
+            )
+            .unwrap();
+        harness.drive_to_completion().unwrap();
+        harness
+            .enqueue_unbound_on_lane(
+                "subagent-1",
+                HarnessQueueKind::FollowUp,
+                ProvisionedEntry {
+                    id: "queued-follow-up".into(),
+                    parent_id: None,
+                    message: AgentMessage::user("follow up", Vec::new()),
+                },
+            )
+            .unwrap();
+        harness.drive_to_completion().unwrap();
+        let mut store = JsonlStore::open(&session_file).unwrap();
+        let queue_seq = store
+            .entries()
+            .iter()
+            .map(|entry| entry.seq)
+            .chain(store.records().iter().map(HarnessRecord::seq))
+            .max()
+            .unwrap()
+            + 1;
+        store
+            .append_record(HarnessRecord::QueueEnqueued {
+                id: "queue-steer-high".into(),
+                seq: queue_seq,
+                lane: "subagent-1".into(),
+                timestamp: queue_seq,
+                run_id: Some("run-subagent".into()),
+                queue: HarnessQueueKind::Steer,
+                priority: Some(threadlane_agent::SteerPriority::High),
+                target: ProvisionedEntry {
+                    id: "queued-steer-high".into(),
+                    parent_id: None,
+                    message: AgentMessage::user("urgent", Vec::new()),
+                },
+            })
+            .unwrap();
+
+        let mut tree = threadlane_agent::SessionTree::new("session-1");
+        let recovery = supervisor
+            .restore_session_lanes("session-1", &session_file, &mut tree)
+            .unwrap();
+        assert_eq!(recovery.open_operation_ids, vec!["run-subagent"]);
+        let lane = supervisor.get_or_create_lane("session-1", "subagent-1");
+        assert_eq!(lane.status, LaneStatus::Suspended);
+        assert_eq!(lane.active_run_id.as_deref(), Some("run-subagent"));
+        assert_eq!(lane.queue.follow_up.len(), 1);
+        assert_eq!(lane.queue.steer.len(), 1);
+        assert_eq!(
+            lane.queue.steer[0].priority,
+            threadlane_agent::SteerPriority::High
+        );
+    }
+
+    #[test]
     fn supervisor_lane_navigation_and_deferred_redemption() {
         let dir = tempfile::tempdir().unwrap();
         let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
@@ -2321,6 +3392,82 @@ mod tests {
 
         let branch = tree.get_branch_messages(Some(&redeemed_id));
         assert_eq!(branch.len(), 2);
+    }
+
+    #[test]
+    fn v2_lane_navigation_persists_typed_navigation_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
+        let session_file = dir.path().join("session.jsonl");
+        let mut tree = threadlane_agent::SessionTree::new("session-test");
+        let root_id = tree.add_message(AgentMessage::user("root", Vec::new()));
+        let child_id = tree.add_message(AgentMessage::Assistant {
+            content: Some("child".into()),
+            tool_calls: None,
+            stop_reason: None,
+            deferred_handle: None,
+        });
+        let mut store = JsonlStore::open({
+            fs::File::create(&session_file).unwrap();
+            &session_file
+        })
+        .unwrap();
+        store
+            .append_entry(threadlane_agent::harness::Entry {
+                id: root_id.clone(),
+                parent_id: None,
+                lane: "main".into(),
+                seq: 1,
+                timestamp: 1,
+                message: AgentMessage::user("root", Vec::new()),
+                terminate: false,
+            })
+            .unwrap();
+        store
+            .append_entry(threadlane_agent::harness::Entry {
+                id: child_id.clone(),
+                parent_id: Some(root_id.clone()),
+                lane: "main".into(),
+                seq: 2,
+                timestamp: 2,
+                message: AgentMessage::Assistant {
+                    content: Some("child".into()),
+                    tool_calls: None,
+                    stop_reason: None,
+                    deferred_handle: None,
+                },
+                terminate: false,
+            })
+            .unwrap();
+        supervisor
+            .lanes
+            .lock()
+            .unwrap()
+            .entry("session-test:main".into())
+            .or_insert_with(|| Lane::new("main", "session-test"))
+            .session_file = Some(session_file.clone());
+
+        assert!(supervisor
+            .navigate_lane("session-test", "main", &root_id, &mut tree)
+            .unwrap());
+        let store = JsonlStore::open(&session_file).unwrap();
+        assert!(store.records().iter().any(|record| matches!(
+            record,
+            HarnessRecord::OperationStarted {
+                intent: OperationIntent::Navigation,
+                lane,
+                ..
+            } if lane == "main"
+        )));
+        assert!(store.records().iter().any(|record| matches!(
+            record,
+            HarnessRecord::LaneMoved { target_leaf_id, .. } if target_leaf_id == &root_id
+        )));
+        assert!(store.records().iter().any(|record| matches!(
+            record,
+            HarnessRecord::OperationFinished { outcome: OperationOutcome::Completed, .. }
+        )));
+        assert!(!session_file.with_extension("oplog.jsonl").exists());
     }
 
     #[test]

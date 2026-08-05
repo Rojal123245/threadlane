@@ -28,10 +28,12 @@ use crate::panels::chat::state::{
 use crate::panels::chat::{
     accepts_generation_event, concise_status, draft_for_cancellation, submitted_draft, ChatList,
     ChatListWidgetRefExt, ComposerState, ComposerStatus, GenerationEvent, StarterPromptAction,
-    SubagentRail, ToolFoldHeader,
+    SubagentRail, SubagentRailAction, ToolFoldHeader,
 };
 use crate::panels::command_palette::*;
-use terminal_handlers::{canonical_terminal_work_dir, truncate_terminal_output};
+use terminal_handlers::canonical_terminal_work_dir;
+#[cfg(test)]
+use terminal_handlers::truncate_terminal_output;
 
 use crate::panels::sessions::{
     set_search_query, ProjectRegistry, SessionContextMenu, SessionContextMenuAction, SessionList,
@@ -53,22 +55,25 @@ use base64::Engine as _;
 use makepad_widgets::text::selection::Cursor;
 use makepad_widgets::*;
 use robius_file_picker::FileDialog;
+use threadlane_agent::harness::{
+    JsonlStore, OperationOutcome, Record as HarnessRecord, Reducer,
+};
 use threadlane_agent::{
     get_runtime, load_op_records_from_file, AgentEvent, ImageAttachment, ReasoningEffort,
     SessionPlan, TokenUsage,
 };
 use threadlane_coding_agent::{
     cancel_open_subagent_operations, default_global_threadlane_dir, discover_agents, AgentConfig,
-    AgentScope, CapabilityCatalog, CodingAgent, CodingAgentOptions, CodingAgentWorkHandle,
-    ExtensionManager, ExtensionScope, HarnessSupervisor, ProjectContext, SkillMetadata,
-    SkillSettings, TaskRecord,
+    AgentScope, CapabilityCatalog, CodingAgent, CodingAgentCancellation, CodingAgentOptions,
+    CodingAgentWorkHandle, ExtensionManager, ExtensionScope, HarnessSupervisor, ProjectContext,
+    SkillMetadata, SkillSettings, TaskRecord,
 };
 use threadlane_provider::auth;
 use threadlane_provider::openai::fetch_available_models;
 use threadlane_provider::ProviderClient;
 
 use crate::panels::terminal::{ProjectTerminalGroup, ProjectTerminalSession};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -125,9 +130,254 @@ fn context_window_limit(_model: &str) -> u32 {
 
 fn restore_harness_activities(session_file: &Path) -> Vec<HarnessActivity> {
     let oplog_file = session_file.with_extension("oplog.jsonl");
-    load_op_records_from_file(&oplog_file)
+    let mut activities = load_op_records_from_file(&oplog_file)
         .map(|records| harness_activities_from_oplog(&records))
-        .unwrap_or_default()
+        .unwrap_or_default();
+    match JsonlStore::open_read_only(session_file) {
+        Ok(store) => {
+            if let Ok(state) = Reducer::reduce(&store) {
+            let v2_main_runs: HashSet<String> = store
+                .records()
+                .iter()
+                .filter_map(|record| match record {
+                    HarnessRecord::OperationStarted { id, lane, .. }
+                        if lane == "main" => Some(id.clone()),
+                    _ => None,
+                })
+                .collect();
+            activities.retain(|activity| {
+                let Some(run_id) = activity.key.strip_prefix("main-") else {
+                    return true;
+                };
+                !v2_main_runs.contains(run_id)
+            });
+            let v2_subagent_runs = store
+                .records()
+                .iter()
+                .filter_map(|record| match record {
+                    HarnessRecord::OperationStarted { id, lane, seq, .. }
+                        if lane != "main" => Some((id.clone(), lane.clone(), *seq)),
+                    _ => None,
+                });
+            for (run_id, lane_name, _started_seq) in v2_subagent_runs {
+                activities.retain(|activity| activity.key != run_id);
+                let Some(task) = store.entries().iter().filter_map(|entry| {
+                    (entry.lane == lane_name).then(|| match &entry.message {
+                        threadlane_agent::AgentMessage::User { content }
+                        | threadlane_agent::AgentMessage::UserWithImages { content, .. } => content.clone(),
+                        _ => String::new(),
+                    })
+                }).find(|task| !task.trim().is_empty()) else {
+                    continue;
+                };
+                let finished = store.records().iter().rev().find_map(|record| match record {
+                    HarnessRecord::OperationFinished { run_id: record_run_id, outcome, error, .. }
+                        if record_run_id == &run_id => Some((outcome, error.clone())),
+                    _ => None,
+                });
+                let (status, detail) = match finished {
+                    Some((OperationOutcome::Completed, error)) => (
+                        crate::panels::chat::state::HarnessActivityStatus::Recovered,
+                        error.unwrap_or_else(|| "Completed".into()),
+                    ),
+                    Some((OperationOutcome::Aborted, error)) => (
+                        crate::panels::chat::state::HarnessActivityStatus::Cancelled,
+                        error.unwrap_or_else(|| "Cancelled".into()),
+                    ),
+                    Some((OperationOutcome::Failed | OperationOutcome::Declined, error)) => (
+                        crate::panels::chat::state::HarnessActivityStatus::Aborted,
+                        error.unwrap_or_else(|| "Aborted".into()),
+                    ),
+                    None => (
+                        crate::panels::chat::state::HarnessActivityStatus::Recovering,
+                        "Suspended operation; resume or abort before continuing".into(),
+                    ),
+                };
+                activities.push(HarnessActivity {
+                    key: run_id,
+                    task,
+                    agent: "subagent".into(),
+                    status,
+                    detail,
+                });
+            }
+            if let Some(lane) = state.lane("main") {
+                if let Some(run_id) = lane.open_operation.as_deref() {
+                    let start = store.records().iter().find_map(|record| match record {
+                        HarnessRecord::OperationStarted {
+                            id,
+                            seq,
+                            source_leaf_id,
+                            ..
+                        } if id == run_id => Some((*seq, source_leaf_id.as_deref())),
+                        _ => None,
+                    });
+                    let task = start
+                        .and_then(|(start_seq, source_leaf_id)| {
+                            let source_seq = source_leaf_id.and_then(|id| {
+                                store
+                                    .entries()
+                                    .iter()
+                                    .find(|entry| entry.id == id)
+                                    .map(|entry| entry.seq)
+                            });
+                            store.entries().iter().rev().find_map(|entry| {
+                                (entry.seq <= start_seq
+                                    && source_seq.map_or(true, |source| entry.seq > source))
+                                    .then(|| match &entry.message {
+                                        threadlane_agent::AgentMessage::User { content }
+                                        | threadlane_agent::AgentMessage::UserWithImages {
+                                            content,
+                                            ..
+                                        } => content.clone(),
+                                        _ => String::new(),
+                                    })
+                            })
+                        })
+                        .filter(|task| !task.trim().is_empty())
+                        .unwrap_or_else(|| "Foreground operation".into());
+                    activities.push(HarnessActivity {
+                        key: format!("main-{run_id}"),
+                        task,
+                        agent: "main".into(),
+                        status: if lane.abort_requested {
+                            crate::panels::chat::state::HarnessActivityStatus::Aborted
+                        } else {
+                            crate::panels::chat::state::HarnessActivityStatus::Recovering
+                        },
+                        detail: "Suspended operation; resume or abort before continuing".into(),
+                    });
+                }
+            }
+        }
+        }
+        Err(error) if session_file.exists() => activities.push(HarnessActivity {
+            key: "main-harness-fault".into(),
+            task: "Harness storage".into(),
+            agent: "main".into(),
+            status: crate::panels::chat::state::HarnessActivityStatus::Aborted,
+            detail: format!("Harness storage fault: {error}"),
+        }),
+        Err(_) => {}
+    }
+    activities
+}
+
+fn harness_activities_from_snapshot(
+    snapshot: &threadlane_agent::harness::Snapshot,
+) -> Vec<HarnessActivity> {
+    use crate::panels::chat::state::HarnessActivityStatus;
+    let mut activities = Vec::new();
+    for (run_id, lane_name) in snapshot.records.iter().filter_map(|record| match record {
+        HarnessRecord::OperationStarted { id, lane, .. } if lane != "main" => {
+            Some((id.as_str(), lane.as_str()))
+        }
+        _ => None,
+    }) {
+        let Some(task) = snapshot.entries.iter().find_map(|entry| {
+            (entry.lane == lane_name).then(|| match &entry.message {
+                threadlane_agent::AgentMessage::User { content }
+                | threadlane_agent::AgentMessage::UserWithImages { content, .. } => content.clone(),
+                _ => String::new(),
+            })
+        })
+        .filter(|task| !task.trim().is_empty()) else {
+            continue;
+        };
+        let finished = snapshot.records.iter().rev().find_map(|record| match record {
+            HarnessRecord::OperationFinished {
+                run_id: record_run_id,
+                outcome,
+                error,
+                ..
+            } if record_run_id == run_id => Some((outcome, error.clone())),
+            _ => None,
+        });
+        let (status, detail) = match finished {
+            Some((OperationOutcome::Completed, error)) => (
+                HarnessActivityStatus::Recovered,
+                error.unwrap_or_else(|| "Completed".into()),
+            ),
+            Some((OperationOutcome::Aborted, error)) => (
+                HarnessActivityStatus::Cancelled,
+                error.unwrap_or_else(|| "Cancelled".into()),
+            ),
+            Some((OperationOutcome::Failed | OperationOutcome::Declined, error)) => (
+                HarnessActivityStatus::Aborted,
+                error.unwrap_or_else(|| "Aborted".into()),
+            ),
+            None => (
+                HarnessActivityStatus::Recovering,
+                "Suspended operation; resume or abort before continuing".into(),
+            ),
+        };
+        activities.push(HarnessActivity {
+            key: run_id.into(),
+            task,
+            agent: "subagent".into(),
+            status,
+            detail,
+        });
+    }
+    if let Some(lane) = snapshot.state.lane("main") {
+        if let Some(run_id) = lane.open_operation.as_deref() {
+            let task = snapshot
+                .records
+                .iter()
+                .find_map(|record| match record {
+                    HarnessRecord::OperationStarted {
+                        id,
+                        seq,
+                        source_leaf_id,
+                        ..
+                    } if id == run_id => Some((*seq, source_leaf_id.as_deref())),
+                    _ => None,
+                })
+                .and_then(|(start_seq, source_leaf_id)| {
+                    let source_seq = source_leaf_id.and_then(|id| {
+                        snapshot
+                            .entries
+                            .iter()
+                            .find(|entry| entry.id == id)
+                            .map(|entry| entry.seq)
+                    });
+                    snapshot.entries.iter().rev().find_map(|entry| {
+                        (entry.seq <= start_seq
+                            && source_seq.map_or(true, |source| entry.seq > source))
+                            .then(|| match &entry.message {
+                                threadlane_agent::AgentMessage::User { content }
+                                | threadlane_agent::AgentMessage::UserWithImages { content, .. } => {
+                                    content.clone()
+                                }
+                                _ => String::new(),
+                            })
+                    })
+                })
+                .filter(|task| !task.trim().is_empty())
+                .unwrap_or_else(|| "Foreground operation".into());
+            activities.push(HarnessActivity {
+                key: format!("main-{run_id}"),
+                task,
+                agent: "main".into(),
+                status: if lane.abort_requested {
+                    HarnessActivityStatus::Aborted
+                } else {
+                    HarnessActivityStatus::Recovering
+                },
+                detail: "Suspended operation; resume or abort before continuing".into(),
+            });
+        }
+    }
+    activities
+}
+
+fn suppress_live_main_recovery(activities: &mut Vec<HarnessActivity>, live: bool) {
+    if live {
+        activities.retain(|activity| {
+            !(activity.agent == "main"
+                && activity.status == crate::panels::chat::state::HarnessActivityStatus::Recovering)
+        });
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -431,7 +681,7 @@ script_mod! {
             UserMsgWrapped := mod.components.UserMsgBase {
                 user_bubble +: {
                     width: Fill{max: 680}
-                    user_md +: { width: Fill }
+                    md +: { width: Fill }
                 }
             }
 
@@ -658,6 +908,36 @@ script_mod! {
                                     status_indicator := ActivityStatusIndicator {
                                         height: 20
                                         align: Align{y: 0.5}
+                                    }
+                                    resume_btn := Button {
+                                        width: Fit
+                                        height: 20
+                                        text: "Resume"
+                                        padding: Inset{left: 6 right: 6}
+                                        visible: false
+                                        draw_bg +: {
+                                            color: theme.color_secondary
+                                            color_hover: theme.color_primary
+                                            color_focus: theme.color_primary
+                                            color_down: theme.color_primary
+                                            border_radius: 5.0
+                                        }
+                                        draw_text +: { color: theme.color_foreground text_style +: { font_size: 9.0 } }
+                                    }
+                                    abort_btn := Button {
+                                        width: Fit
+                                        height: 20
+                                        text: "Abort"
+                                        padding: Inset{left: 6 right: 6}
+                                        visible: false
+                                        draw_bg +: {
+                                            color: theme.color_secondary
+                                            color_hover: theme.color_destructive
+                                            color_focus: theme.color_destructive
+                                            color_down: theme.color_destructive
+                                            border_radius: 5.0
+                                        }
+                                        draw_text +: { color: theme.color_foreground text_style +: { font_size: 9.0 } }
                                     }
                                 }
                             }
@@ -3114,6 +3394,7 @@ pub struct AcpChat {
 
 struct SessionRuntime {
     agent: Arc<tokio::sync::Mutex<CodingAgent>>,
+    cancellation: CodingAgentCancellation,
     /// Live external agent conversation, when this chat is driven over ACP.
     acp: Option<AcpChat>,
     work_handle: CodingAgentWorkHandle,
@@ -3142,8 +3423,10 @@ impl SessionRuntime {
         let session_file = agent.session_tree.file_path.clone();
         let plan = agent.current_plan();
         let work_handle = agent.work_handle();
+        let cancellation = agent.cancellation_handle();
         Self {
             agent: Arc::new(tokio::sync::Mutex::new(agent)),
+            cancellation,
             acp: None,
             work_handle,
             session_file,
@@ -3689,6 +3972,81 @@ impl MatchEvent for App {
             self.apply_starter_prompt(cx, action);
         }
 
+        if let Some(action) = actions.iter().find_map(|action| {
+            action
+                .downcast_ref::<SubagentRailAction>()
+                .cloned()
+        }) {
+            let Some(key) = self.workspace_state.active_key().cloned() else {
+                return;
+            };
+            let Some(runtime) = self.session_runtimes.get(&key) else {
+                return;
+            };
+            let cancellation = runtime.cancellation.clone();
+            let agent = runtime.agent.clone();
+            let session_file = runtime.session_file.clone();
+            match action {
+                SubagentRailAction::Abort(activity_key) => {
+                    if let Some(run_id) = activity_key.strip_prefix("main-") {
+                        let run_id = run_id.to_owned();
+                        let tx = self.tx.clone();
+                        let work_dir = key.work_dir.clone();
+                        let session_id = key.session_id.clone();
+                        get_runtime().spawn(async move {
+                            let result = agent
+                                .lock()
+                                .await
+                                .cancel_suspended_deferred(&run_id)
+                                .await
+                                .map(|_| true);
+                            if let Some(tx) = tx {
+                                let _ = tx.send(GuiAgentEvent::HarnessResumeFinished {
+                                    work_dir,
+                                    session_id,
+                                    result,
+                                });
+                                SignalToUI::set_ui_signal();
+                            }
+                        });
+                    } else if let Err(error) = cancellation.cancel() {
+                        self.push_chat(MsgRole::System, format!("Harness abort failed: {error}"));
+                    }
+                    if let Some(workspace) = self.workspace_state.active_workspace_mut() {
+                        workspace.chat.harness_activities = restore_harness_activities(
+                            session_file.as_deref().unwrap_or(Path::new("")),
+                        );
+                    }
+                    self.ui.widget(cx, ids!(chat_list)).redraw(cx);
+                }
+                SubagentRailAction::Resume(activity_key) => {
+                    let tx = self.tx.clone();
+                    let work_dir = key.work_dir.clone();
+                    let session_id = key.session_id.clone();
+                    get_runtime().spawn(async move {
+                        let result = if let Some(run_id) = activity_key.strip_prefix("main-") {
+                            let run_id = run_id.to_owned();
+                            agent
+                                .lock()
+                                .await
+                                .redeem_suspended_deferred_from_provider(&run_id)
+                                .await
+                        } else {
+                            agent.lock().await.resume_suspended_harness().await
+                        };
+                        if let Some(tx) = tx {
+                            let _ = tx.send(GuiAgentEvent::HarnessResumeFinished {
+                                work_dir,
+                                session_id,
+                                result,
+                            });
+                            SignalToUI::set_ui_signal();
+                        }
+                    });
+                }
+            }
+        }
+
         let openai_login_clicked = self.ui.button(cx, ids!(openai_login_btn)).clicked(actions);
         let openai_creds = auth::load_credentials();
         let openai_own_connected = openai_creds
@@ -3882,7 +4240,6 @@ impl MatchEvent for App {
                 self.start_git_create_branch(cx, name);
             }
         }
-
 
         if self
             .ui
@@ -4621,11 +4978,13 @@ impl App {
                 }
             }
             let current_draft = self.prompt_text(cx);
-            let (restored_draft, restored_attachments) = self
+            let (restored_draft, restored_attachments, abort_agent) = self
                 .session_runtimes
                 .get_mut(&key)
                 .and_then(|runtime| {
                     let generation = runtime.generation.take()?;
+                    let abort_agent = runtime.agent.clone();
+                    let _ = runtime.cancellation.cancel();
                     let generation_id = generation.id;
                     generation.handle.abort();
                     // Aborting the task stops us listening, but the external
@@ -4648,9 +5007,30 @@ impl App {
                         .map(|(_, att)| att.clone());
                     runtime.submitted_draft = None;
                     runtime.submitted_attachments = None;
-                    Some((draft, attachments))
+                    Some((draft, attachments, Some(abort_agent)))
                 })
-                .unwrap_or((None, None));
+                .unwrap_or((None, None, None));
+            if let Some(agent) = abort_agent {
+                let tx = self.tx.clone();
+                let work_dir = key.work_dir.clone();
+                let session_id = key.session_id.clone();
+                get_runtime().spawn(async move {
+                    let result = agent
+                        .lock()
+                        .await
+                        .resume_suspended_harness()
+                        .await
+                        .map(|_| true);
+                    if let Some(tx) = tx {
+                        let _ = tx.send(GuiAgentEvent::HarnessResumeFinished {
+                            work_dir,
+                            session_id,
+                            result,
+                        });
+                        SignalToUI::set_ui_signal();
+                    }
+                });
+            }
             let draft = if current_draft.trim().is_empty() {
                 restored_draft.unwrap_or_default()
             } else {
@@ -4693,9 +5073,13 @@ impl App {
             return;
         };
         if let Some(runtime) = self.session_runtimes.get(&key) {
-            runtime
+            if let Err(error) = runtime
                 .work_handle
-                .queue_follow_up_with_images(input_text.to_string(), attachments.clone());
+                .queue_steer_with_images(input_text.to_string(), attachments.clone())
+            {
+                eprintln!("Failed to persist steer: {error}");
+                return;
+            }
             let agent = runtime.agent.clone();
             let _ = get_runtime().spawn(async move {
                 agent.lock().await.run_scheduled_agent_work().await;
@@ -7562,6 +7946,7 @@ impl App {
                 session_file: Some(entry.session_file.clone()),
                 system_prompt: Default::default(),
             });
+            let startup_error = agent.harness_error().map(str::to_owned);
             let model = agent.session_tree.model.clone().unwrap_or(model);
             let latest_usage = agent
                 .session_tree
@@ -7575,6 +7960,12 @@ impl App {
                 .workspace_mut(key.clone())
                 .chat
                 .replace_from_agent_messages(&messages);
+            if let Some(error) = startup_error {
+                self.workspace_state.workspace_mut(key.clone()).chat.push_chat(
+                    MsgRole::System,
+                    format!("Session unavailable: {error}"),
+                );
+            }
             let activities = restore_harness_activities(&entry.session_file);
             let health = session_health(&activities);
             self.workspace_state
@@ -7847,6 +8238,18 @@ impl App {
             // Poll input and its event stream in one task. This keeps event
             // forwarding scoped to the generation and preserves terminal order.
             let mut event_rx = agent_lock.subscribe();
+            let mut harness_watch = agent_lock.watch_harness().ok().flatten();
+            let mut harness_tick = tokio::time::interval(tokio::time::Duration::from_millis(50));
+            harness_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            if let Some(watch) = harness_watch.as_ref() {
+                let _ = tx.send(GuiAgentEvent::HarnessSnapshot {
+                    generation_id,
+                    work_dir: event_work_dir.clone(),
+                    session_id: event_session_id.clone(),
+                    snapshot: watch.snapshot().clone(),
+                });
+                SignalToUI::set_ui_signal();
+            }
             let input_future =
                 agent_lock.handle_input_with_images(&input_str, generation_attachments);
             tokio::pin!(input_future);
@@ -7865,6 +8268,21 @@ impl App {
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break None,
+                    },
+                    _ = harness_tick.tick() => {
+                        if let Some(watch) = harness_watch.as_mut() {
+                            if let Ok(events) = watch.poll() {
+                                for event in events {
+                                    let _ = tx.send(GuiAgentEvent::HarnessEvent {
+                                        generation_id,
+                                        work_dir: event_work_dir.clone(),
+                                        session_id: event_session_id.clone(),
+                                        event,
+                                    });
+                                    SignalToUI::set_ui_signal();
+                                }
+                            }
+                        }
                     }
                 }
             };
@@ -7876,6 +8294,19 @@ impl App {
                     event,
                 });
                 SignalToUI::set_ui_signal();
+            }
+            if let Some(watch) = harness_watch.as_mut() {
+                if let Ok(events) = watch.poll() {
+                    for event in events {
+                        let _ = tx.send(GuiAgentEvent::HarnessEvent {
+                            generation_id,
+                            work_dir: event_work_dir.clone(),
+                            session_id: event_session_id.clone(),
+                            event,
+                        });
+                        SignalToUI::set_ui_signal();
+                    }
+                }
             }
 
             if let Some(out) = output {
@@ -8130,13 +8561,13 @@ impl App {
                 }
                 if let Some(runtime) = self.session_runtimes.get_mut(&key) {
                     runtime.latest_usage = Some(usage.clone());
-                    let agent = runtime.agent.clone();
-                    get_runtime().spawn(async move {
-                        let mut agent = agent.lock().await;
-                        if let Ok(value) = serde_json::to_string(&usage) {
-                            let _ = agent.session_tree.set_fact(CONTEXT_USAGE_FACT, value);
-                        }
-                    });
+                        let agent = runtime.agent.clone();
+                        get_runtime().spawn(async move {
+                            let mut agent = agent.lock().await;
+                            if let Ok(value) = serde_json::to_string(&usage) {
+                            let _ = agent.set_fact(CONTEXT_USAGE_FACT, &value);
+                            }
+                        });
                 }
                 self.sync_context_window(cx);
                 self.workspace_state
@@ -8343,6 +8774,99 @@ impl App {
                     {
                         self.request_git_status();
                     }
+                }
+
+                GuiAgentEvent::HarnessEvent {
+                    generation_id,
+                    work_dir,
+                    session_id,
+                    event,
+                } => {
+                    let _ = event.id;
+                    let key = SessionKey::new(work_dir, session_id);
+                    let is_current = self
+                        .session_runtimes
+                        .get(&key)
+                        .and_then(|runtime| runtime.generation.as_ref())
+                        .is_some_and(|generation| generation.id == generation_id);
+                    if !is_current {
+                        continue;
+                    }
+                    if let Some(path) = self
+                        .session_runtimes
+                        .get(&key)
+                        .and_then(|runtime| runtime.session_file.as_deref())
+                    {
+                        let mut activities = restore_harness_activities(path);
+                        suppress_live_main_recovery(&mut activities, is_current);
+                        let health = session_health(&activities);
+                        self.workspace_state
+                            .workspace_mut(key.clone())
+                            .chat
+                            .harness_activities = activities;
+                        set_session_health(&key.work_dir, &key.session_id, health);
+                        self.ui.widget(cx, ids!(session_list)).redraw(cx);
+                    }
+                }
+
+                GuiAgentEvent::HarnessSnapshot {
+                    generation_id,
+                    work_dir,
+                    session_id,
+                    snapshot,
+                } => {
+                    let key = SessionKey::new(work_dir, session_id);
+                    let is_current = self
+                        .session_runtimes
+                        .get(&key)
+                        .and_then(|runtime| runtime.generation.as_ref())
+                        .is_some_and(|generation| generation.id == generation_id);
+                    if !is_current {
+                        continue;
+                    }
+                    if self
+                        .session_runtimes
+                        .get(&key)
+                        .and_then(|runtime| runtime.session_file.as_deref())
+                        .is_none()
+                    {
+                        continue;
+                    }
+                    let mut activities = harness_activities_from_snapshot(&snapshot);
+                    suppress_live_main_recovery(&mut activities, is_current);
+                    let health = session_health(&activities);
+                    self.workspace_state
+                        .workspace_mut(key.clone())
+                        .chat
+                        .harness_activities = activities;
+                    set_session_health(&key.work_dir, &key.session_id, health);
+                    self.ui.widget(cx, ids!(session_list)).redraw(cx);
+                }
+
+                GuiAgentEvent::HarnessResumeFinished {
+                    work_dir,
+                    session_id,
+                    result,
+                } => {
+                    let key = SessionKey::new(work_dir, session_id);
+                    if let Some(runtime) = self.session_runtimes.get(&key) {
+                        if let Some(path) = runtime.session_file.as_deref() {
+                            let activities = restore_harness_activities(path);
+                            self.workspace_state
+                                .workspace_mut(key.clone())
+                                .chat
+                                .harness_activities = activities;
+                        }
+                    }
+                    if let Err(error) = result {
+                        self.push_chat_to(
+                            key.clone(),
+                            MsgRole::System,
+                            format!("Harness resume failed: {error}"),
+                        );
+                    }
+                    self.ui.widget(cx, ids!(chat_list)).redraw(cx);
+                    self.set_session_status(cx, &key, UiStatus::Ready, "Ready");
                 }
 
                 GuiAgentEvent::SessionTitleGenerated => {
@@ -8705,13 +9229,16 @@ mod workspace_header_tests {
         compact_workspace_path, extension_reload_matches, extension_reload_status,
         left_sidebar_splitter_align, model_credential_error, normalize_generated_commit_message,
         ordered_model_options, project_name, reduce_harness_event, restore_harness_activities,
-        session_reload_count, task_sidebar_items, truncate_terminal_output, InputOrigin,
+        session_reload_count, suppress_live_main_recovery, task_sidebar_items,
+        truncate_terminal_output, InputOrigin,
         ANTIGRAVITY_MODELS, LEFT_SIDEBAR_WIDTH, MAX_TERMINAL_OUTPUT,
     };
     use crate::panels::chat::state::HarnessActivityStatus;
     use crate::workspace::WorkspaceUiState;
     use makepad_widgets::SplitterAlign;
     use std::path::{Path, PathBuf};
+    use threadlane_agent::harness::{Entry, JsonlStore, OperationIntent, Record, SessionStore};
+    use threadlane_agent::AgentMessage;
     use threadlane_agent::{
         AgentEvent, ImageAttachment, OpOutcome, OpRecord, SubagentRecoveryStatus,
     };
@@ -8773,11 +9300,111 @@ mod workspace_header_tests {
         std::fs::write(&oplog_file, contents).unwrap();
 
         let activities = restore_harness_activities(&session_file);
-
         assert_eq!(activities.len(), 1);
         assert_eq!(activities[0].key, "run-restore");
         assert_eq!(activities[0].status, HarnessActivityStatus::Cancelled);
         let _ = std::fs::remove_file(oplog_file);
+    }
+
+    #[test]
+    fn restore_harness_activities_surfaces_a_suspended_v2_main_run() {
+        let session_file = std::env::temp_dir().join(format!(
+            "threadlane-harness-v2-restore-{}.jsonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&session_file);
+        let _ = std::fs::remove_file(session_file.with_extension("harness.jsonl"));
+        std::fs::File::create(&session_file).unwrap();
+        let mut store = JsonlStore::open(&session_file).unwrap();
+        store
+            .append_entry(Entry {
+                id: "node-1".into(),
+                parent_id: None,
+                lane: "main".into(),
+                seq: 1,
+                timestamp: 1,
+                message: AgentMessage::user("Resume this", vec![]),
+                terminate: false,
+            })
+            .unwrap();
+        store
+            .append_record(Record::OperationStarted {
+                id: "run-v2".into(),
+                seq: 2,
+                lane: "main".into(),
+                timestamp: 2,
+                source_leaf_id: None,
+                intent: OperationIntent::Run,
+            })
+            .unwrap();
+
+        let activities = restore_harness_activities(&session_file);
+        assert!(activities.iter().any(|activity| {
+            activity.key == "main-run-v2"
+                && activity.task == "Resume this"
+                && activity.status == HarnessActivityStatus::Recovering
+        }));
+        let _ = std::fs::remove_file(&session_file);
+        let _ = std::fs::remove_file(session_file.with_extension("harness.jsonl"));
+    }
+
+    #[test]
+    fn live_foreground_runs_do_not_look_like_recovery() {
+        let mut activities = vec![crate::panels::chat::state::HarnessActivity {
+            key: "main-run".into(),
+            task: "Inspect the repo".into(),
+            agent: "main".into(),
+            status: HarnessActivityStatus::Recovering,
+            detail: "Suspended operation".into(),
+        }];
+        suppress_live_main_recovery(&mut activities, true);
+        assert!(activities.is_empty());
+        assert_eq!(
+            crate::panels::sessions::state::session_health(&activities),
+            crate::panels::sessions::state::SessionHealth::Healthy
+        );
+    }
+
+    #[test]
+    fn restore_harness_activities_surfaces_a_suspended_v2_subagent_run() {
+        let session_file = std::env::temp_dir().join(format!(
+            "threadlane-harness-v2-subagent-restore-{}.jsonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&session_file);
+        let _ = std::fs::remove_file(session_file.with_extension("harness.jsonl"));
+        std::fs::File::create(&session_file).unwrap();
+        let mut store = JsonlStore::open(&session_file).unwrap();
+        store
+            .append_entry(Entry {
+                id: "subagent-task".into(),
+                parent_id: None,
+                lane: "subagent-1@1".into(),
+                seq: 1,
+                timestamp: 1,
+                message: AgentMessage::user("Inspect this", vec![]),
+                terminate: false,
+            })
+            .unwrap();
+        store
+            .append_record(Record::OperationStarted {
+                id: "subagent-run-1".into(),
+                seq: 2,
+                lane: "subagent-1@1".into(),
+                timestamp: 2,
+                source_leaf_id: None,
+                intent: OperationIntent::Run,
+            })
+            .unwrap();
+
+        let activities = restore_harness_activities(&session_file);
+        assert!(activities.iter().any(|activity| {
+            activity.key == "subagent-run-1"
+                && activity.task == "Inspect this"
+                && activity.status == HarnessActivityStatus::Recovering
+        }));
+        let _ = std::fs::remove_file(&session_file);
+        let _ = std::fs::remove_file(session_file.with_extension("harness.jsonl"));
     }
 
     #[test]

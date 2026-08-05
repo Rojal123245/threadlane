@@ -3,7 +3,7 @@ use crate::types::AgentMessage;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::OpenOptions;
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +44,13 @@ pub enum OpRecord {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         system_prompt_override: Option<String>,
     },
+    AbortRequested {
+        id: String,
+        seq: u64,
+        lane: String,
+        timestamp: u64,
+        run_id: String,
+    },
     TaskAttempt {
         id: String,
         seq: u64,
@@ -66,6 +73,16 @@ pub enum OpRecord {
         effective_args: serde_json::Value,
         result_entry_id: String,
         replay: ToolReplaySafety,
+    },
+    ToolFinished {
+        id: String,
+        seq: u64,
+        lane: String,
+        timestamp: u64,
+        run_id: String,
+        tool_call_id: String,
+        result_entry_id: String,
+        terminate: bool,
     },
     QueueEnqueued {
         id: String,
@@ -110,11 +127,19 @@ pub enum OpRecord {
 }
 
 impl OpRecord {
+    pub fn with_seq(self, seq: u64) -> Self {
+        let mut value = serde_json::to_value(self).expect("operation records serialize");
+        value["seq"] = serde_json::json!(seq);
+        serde_json::from_value(value).expect("operation records deserialize")
+    }
+
     pub fn id(&self) -> &str {
         match self {
             Self::OperationStarted { id, .. }
+            | Self::AbortRequested { id, .. }
             | Self::TaskAttempt { id, .. }
             | Self::ToolStarted { id, .. }
+            | Self::ToolFinished { id, .. }
             | Self::QueueEnqueued { id, .. }
             | Self::WriteDeferred { id, .. }
             | Self::Navigation { id, .. }
@@ -125,8 +150,10 @@ impl OpRecord {
     pub fn seq(&self) -> u64 {
         match self {
             Self::OperationStarted { seq, .. }
+            | Self::AbortRequested { seq, .. }
             | Self::TaskAttempt { seq, .. }
             | Self::ToolStarted { seq, .. }
+            | Self::ToolFinished { seq, .. }
             | Self::QueueEnqueued { seq, .. }
             | Self::WriteDeferred { seq, .. }
             | Self::Navigation { seq, .. }
@@ -137,8 +164,10 @@ impl OpRecord {
     pub fn lane(&self) -> &str {
         match self {
             Self::OperationStarted { lane, .. }
+            | Self::AbortRequested { lane, .. }
             | Self::TaskAttempt { lane, .. }
             | Self::ToolStarted { lane, .. }
+            | Self::ToolFinished { lane, .. }
             | Self::QueueEnqueued { lane, .. }
             | Self::WriteDeferred { lane, .. }
             | Self::Navigation { lane, .. }
@@ -252,22 +281,28 @@ pub fn load_op_records_from_file(path: &Path) -> std::io::Result<Vec<OpRecord>> 
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let file = std::fs::File::open(path)?;
-    let reader = BufReader::new(file);
+    let data = std::fs::read_to_string(path)?;
     let mut records = Vec::new();
 
-    for (line_number, line) in reader.lines().enumerate() {
-        let line = line?;
+    let line_count = data.split('\n').count();
+    for (line_number, line) in data.split('\n').enumerate() {
         let line_trimmed = line.trim();
         if line_trimmed.is_empty() {
             continue;
         }
+        let torn_tail = line_number + 1 == line_count && !data.ends_with('\n');
         match serde_json::from_str::<OpRecord>(line_trimmed) {
             Ok(rec) => records.push(rec),
-            Err(error) => eprintln!(
-                "Failed to parse session oplog line {}: {error}",
-                line_number + 1
-            ),
+            Err(_) if torn_tail => break,
+            Err(error) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "Failed to parse session oplog line {}: {error}",
+                        line_number + 1
+                    ),
+                ));
+            }
         }
     }
 
@@ -278,6 +313,7 @@ pub fn load_op_records_from_file(path: &Path) -> std::io::Result<Vec<OpRecord>> 
 pub struct RecoveryResult {
     pub recovered_open_operations: usize,
     pub open_operation_ids: Vec<String>,
+    pub abort_requested_operation_ids: Vec<String>,
     pub unreplayable_tools: usize,
     pub safe_tools_to_replay: Vec<OpRecord>,
 }
@@ -305,6 +341,7 @@ pub fn interrupted_subagent_lanes(records: &[OpRecord]) -> Vec<InterruptedSubage
         task_attempted: bool,
         messages: Vec<(u64, AgentMessage)>,
         tools: Vec<OpRecord>,
+        completed_tools: HashSet<String>,
         active: bool,
     }
 
@@ -333,9 +370,13 @@ pub fn interrupted_subagent_lanes(records: &[OpRecord]) -> Vec<InterruptedSubage
                     task_attempted: false,
                     messages: Vec::new(),
                     tools: Vec::new(),
+                    completed_tools: HashSet::new(),
                     active: true,
                 });
-                active.entry((lane.clone(), id.clone())).or_default().push(index);
+                active
+                    .entry((lane.clone(), id.clone()))
+                    .or_default()
+                    .push(index);
             }
             OpRecord::TaskAttempt {
                 lane, run_id, task, ..
@@ -370,6 +411,19 @@ pub fn interrupted_subagent_lanes(records: &[OpRecord]) -> Vec<InterruptedSubage
                     occurrences[*index].tools.push(record.clone());
                 }
             }
+            OpRecord::ToolFinished {
+                lane,
+                run_id,
+                tool_call_id,
+                ..
+            } => {
+                if let Some(index) = active
+                    .get(&(lane.clone(), run_id.clone()))
+                    .and_then(|occurrences| occurrences.last())
+                {
+                    occurrences[*index].completed_tools.insert(tool_call_id.clone());
+                }
+            }
             OpRecord::OperationFinished { lane, run_id, .. } => {
                 let key = (lane.clone(), run_id.clone());
                 let remove_key = if let Some(occurrences_for_run) = active.get_mut(&key) {
@@ -389,20 +443,26 @@ pub fn interrupted_subagent_lanes(records: &[OpRecord]) -> Vec<InterruptedSubage
     }
 
     let mut lanes = Vec::new();
-    for occurrence in occurrences.into_iter().filter(|occurrence| occurrence.active) {
+    for occurrence in occurrences
+        .into_iter()
+        .filter(|occurrence| occurrence.active)
+    {
         let mut messages = occurrence.messages;
-        let completed_tool_calls: HashSet<String> = messages
+        let mut completed_tool_calls: HashSet<String> = messages
             .iter()
             .filter_map(|(_, message)| match message {
                 AgentMessage::Tool { tool_call_id, .. } => Some(tool_call_id.clone()),
                 _ => None,
             })
             .collect();
+        completed_tool_calls.extend(occurrence.completed_tools);
         let mut tools: HashMap<String, (Option<OpRecord>, Option<OpRecord>)> = HashMap::new();
 
         for record in occurrence.tools {
             let OpRecord::ToolStarted {
-                tool_call_id, replay, ..
+                tool_call_id,
+                replay,
+                ..
             } = &record
             else {
                 continue;
@@ -438,6 +498,7 @@ pub fn interrupted_subagent_lanes(records: &[OpRecord]) -> Vec<InterruptedSubage
                                 "[Interrupted tool execution for '{tool_name}' automatically recovered]"
                             ),
                             is_error: true,
+                            terminate: false,
                         },
                     ));
                 }
@@ -481,7 +542,9 @@ pub fn reconcile_op_log_recovery(
     records: &[OpRecord],
 ) -> RecoveryResult {
     let mut open_operations: HashSet<String> = HashSet::new();
+    let mut abort_requested: HashSet<String> = HashSet::new();
     let mut tool_intents: Vec<&OpRecord> = Vec::new();
+    let mut completed_tool_ids: HashSet<(String, String)> = HashSet::new();
 
     for record in records {
         if record.lane().starts_with("subagent-") {
@@ -493,9 +556,20 @@ pub fn reconcile_op_log_recovery(
             }
             OpRecord::OperationFinished { run_id, .. } => {
                 open_operations.remove(run_id);
+                abort_requested.remove(run_id);
+            }
+            OpRecord::AbortRequested { run_id, .. } => {
+                abort_requested.insert(run_id.clone());
             }
             rec @ OpRecord::ToolStarted { .. } => {
                 tool_intents.push(rec);
+            }
+            OpRecord::ToolFinished {
+                run_id,
+                tool_call_id,
+                ..
+            } => {
+                completed_tool_ids.insert((run_id.clone(), tool_call_id.clone()));
             }
             _ => {}
         }
@@ -507,6 +581,11 @@ pub fn reconcile_op_log_recovery(
 
     let mut open_operation_ids: Vec<String> = open_operations.iter().cloned().collect();
     open_operation_ids.sort();
+    let mut abort_requested_operation_ids: Vec<String> = abort_requested
+        .into_iter()
+        .filter(|run_id| open_operations.contains(run_id))
+        .collect();
+    abort_requested_operation_ids.sort();
 
     // Check for ToolStarted records belonging to open operations that have no matching result entry
     let existing_tool_ids: HashSet<String> = session_tree
@@ -531,7 +610,10 @@ pub fn reconcile_op_log_recovery(
             ..
         } = intent
         {
-            if open_operations.contains(run_id) && !existing_tool_ids.contains(tool_call_id) {
+            if open_operations.contains(run_id)
+                && !existing_tool_ids.contains(tool_call_id)
+                && !completed_tool_ids.contains(&(run_id.clone(), tool_call_id.clone()))
+            {
                 if replay == &ToolReplaySafety::Never {
                     unreplayable_tools += 1;
                     let synthetic_msg = AgentMessage::Tool {
@@ -539,6 +621,7 @@ pub fn reconcile_op_log_recovery(
                         name: tool_name.clone(),
                         content: format!("[Interrupted tool execution for '{tool_name}' automatically recovered]"),
                         is_error: true,
+                        terminate: false,
                     };
                     let anchor = if session_tree.nodes.contains_key(assistant_entry_id) {
                         Some(assistant_entry_id.clone())
@@ -554,6 +637,7 @@ pub fn reconcile_op_log_recovery(
                             "[Recovered tool result for read-only operation '{tool_name}']"
                         ),
                         is_error: false,
+                        terminate: false,
                     };
                     let anchor = if session_tree.nodes.contains_key(assistant_entry_id) {
                         Some(assistant_entry_id.clone())
@@ -570,6 +654,7 @@ pub fn reconcile_op_log_recovery(
     RecoveryResult {
         recovered_open_operations: open_operations.len(),
         open_operation_ids,
+        abort_requested_operation_ids,
         unreplayable_tools,
         safe_tools_to_replay,
     }
@@ -718,6 +803,7 @@ mod tests {
                     name: "read_file".into(),
                     content: "done".into(),
                     is_error: false,
+                    terminate: false,
                 },
             },
             OpRecord::ToolStarted {
@@ -879,13 +965,7 @@ mod tests {
                 ToolReplaySafety::Never,
                 3,
             ),
-            subagent_tool(
-                "subagent-1:0",
-                "run-1",
-                "call-1",
-                ToolReplaySafety::Safe,
-                4,
-            ),
+            subagent_tool("subagent-1:0", "run-1", "call-1", ToolReplaySafety::Safe, 4),
         ];
 
         let lanes = interrupted_subagent_lanes(&records);
@@ -938,9 +1018,29 @@ mod tests {
 
         let lanes = interrupted_subagent_lanes(&records);
 
-        assert_eq!(lanes.iter().map(|lane| lane.lane.as_str()).collect::<Vec<_>>(), ["subagent-early", "subagent-late"]);
-        assert_eq!(lanes[1].safe_tools.iter().map(OpRecord::seq).collect::<Vec<_>>(), [22, 24]);
-        assert_eq!(lanes[1].unsafe_tools.iter().map(OpRecord::seq).collect::<Vec<_>>(), [23, 25]);
+        assert_eq!(
+            lanes
+                .iter()
+                .map(|lane| lane.lane.as_str())
+                .collect::<Vec<_>>(),
+            ["subagent-early", "subagent-late"]
+        );
+        assert_eq!(
+            lanes[1]
+                .safe_tools
+                .iter()
+                .map(OpRecord::seq)
+                .collect::<Vec<_>>(),
+            [22, 24]
+        );
+        assert_eq!(
+            lanes[1]
+                .unsafe_tools
+                .iter()
+                .map(OpRecord::seq)
+                .collect::<Vec<_>>(),
+            [23, 25]
+        );
     }
 
     #[test]
@@ -993,6 +1093,58 @@ mod tests {
     }
 
     #[test]
+    fn recovery_preserves_abort_requested_operations() {
+        let mut tree = SessionTree::new("test_session");
+        let records = vec![
+            OpRecord::OperationStarted {
+                id: "run-1".into(),
+                seq: 1,
+                lane: "main".into(),
+                timestamp: 1,
+                source_leaf_id: None,
+                kind: "run".into(),
+                system_prompt_override: None,
+            },
+            OpRecord::AbortRequested {
+                id: "abort-1".into(),
+                seq: 2,
+                lane: "main".into(),
+                timestamp: 2,
+                run_id: "run-1".into(),
+            },
+        ];
+        let recovered = reconcile_op_log_recovery(&mut tree, &records);
+        assert_eq!(recovered.abort_requested_operation_ids, vec!["run-1"]);
+    }
+
+    #[test]
+    fn tool_finished_record_is_the_completion_identity_during_recovery() {
+        let mut tree = SessionTree::new("test_session");
+        let records = vec![
+            OpRecord::OperationStarted {
+                id: "run-1".into(), seq: 1, lane: "main".into(), timestamp: 1,
+                source_leaf_id: None, kind: "run".into(), system_prompt_override: None,
+            },
+            OpRecord::ToolStarted {
+                id: "tool-1".into(), seq: 2, lane: "main".into(), timestamp: 2,
+                run_id: "run-1".into(), assistant_entry_id: String::new(), tool_index: 0,
+                tool_call_id: "call-1".into(), tool_name: "list_dir".into(),
+                effective_args: serde_json::json!({}), result_entry_id: "result-1".into(),
+                replay: ToolReplaySafety::Never,
+            },
+            OpRecord::ToolFinished {
+                id: "tool-finished-1".into(), seq: 3, lane: "main".into(), timestamp: 3,
+                run_id: "run-1".into(), tool_call_id: "call-1".into(),
+                result_entry_id: "result-1".into(), terminate: false,
+            },
+        ];
+        let recovered = reconcile_op_log_recovery(&mut tree, &records);
+        assert_eq!(recovered.unreplayable_tools, 0);
+        assert!(recovered.safe_tools_to_replay.is_empty());
+        assert!(tree.nodes.is_empty());
+    }
+
+    #[test]
     fn oplog_file_round_trip_under_lock() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.oplog.jsonl");
@@ -1011,6 +1163,28 @@ mod tests {
         let loaded = load_op_records_from_file(&path).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].id(), "run-99");
+    }
+
+    #[test]
+    fn malformed_complete_oplog_lines_fail_and_torn_tail_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.oplog.jsonl");
+        let rec = OpRecord::OperationStarted {
+            id: "run-1".into(),
+            seq: 1,
+            lane: "main".into(),
+            timestamp: 1,
+            source_leaf_id: None,
+            kind: "run".into(),
+            system_prompt_override: None,
+        };
+        let valid = serde_json::to_string(&rec).unwrap();
+
+        std::fs::write(&path, format!("{valid}\nnot-json\n")).unwrap();
+        assert!(load_op_records_from_file(&path).is_err());
+
+        std::fs::write(&path, format!("{valid}\n{{\"id\"")).unwrap();
+        assert_eq!(load_op_records_from_file(&path).unwrap().len(), 1);
     }
 
     #[test]

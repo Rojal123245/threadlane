@@ -743,10 +743,35 @@ pub struct SubagentRail {
     pub items: Vec<SubagentRailItem>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SubagentRailAction {
+    Resume(String),
+    Abort(String),
+}
+
 impl Widget for SubagentRail {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         for row in self.rows.values_mut() {
             row.handle_event(cx, event, scope);
+        }
+        if let Event::Actions(actions) = event {
+            for (index, item) in self.items.iter().enumerate() {
+                if item.status != "Recovering" {
+                    continue;
+                }
+                let row_id = LiveId::from_num(1, index as u64);
+                let Some(row) = self.rows.get_mut(&row_id) else {
+                    continue;
+                };
+                let Some(key) = item.key.as_ref() else {
+                    continue;
+                };
+                if row.button(cx, ids!(resume_btn)).clicked(actions) {
+                    cx.widget_action(self.uid, SubagentRailAction::Resume(key.clone()));
+                } else if row.button(cx, ids!(abort_btn)).clicked(actions) {
+                    cx.widget_action(self.uid, SubagentRailAction::Abort(key.clone()));
+                }
+            }
         }
     }
 
@@ -792,6 +817,10 @@ impl Widget for SubagentRail {
                 cx,
                 item.status == "Working" && item.detail.trim().is_empty(),
             );
+            row.button(cx, ids!(resume_btn))
+                .set_visible(cx, item.status == "Recovering");
+            row.button(cx, ids!(abort_btn))
+                .set_visible(cx, item.status == "Recovering");
             update_activity_status(
                 cx,
                 row,

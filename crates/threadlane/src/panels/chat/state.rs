@@ -831,6 +831,7 @@ impl ChatData {
                     name,
                     content,
                     is_error,
+                    ..
                 } => {
                     let status = if *is_error {
                         ToolStatus::Error

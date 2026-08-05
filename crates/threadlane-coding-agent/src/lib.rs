@@ -33,7 +33,7 @@ pub use agents::{discover_agents, AgentConfig, AgentDiscoveryResult, AgentScope,
 pub use capabilities::CapabilityCatalog;
 pub use coding_agent::{
     cancel_open_subagent_operations, CodingAgent, CodingAgentCancellation, CodingAgentOptions,
-    CodingAgentWorkHandle, ExtensionBeforeToolHook,
+    CodingAgentWorkHandle, ExtensionBeforeToolHook, HarnessWatch,
 };
 pub use commands::{execute_slash_command, parse_slash_command, CommandAction};
 pub use context::{ProjectContext, ProjectInstruction};
