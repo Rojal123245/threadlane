@@ -431,7 +431,7 @@ script_mod! {
             UserMsgWrapped := mod.components.UserMsgBase {
                 user_bubble +: {
                     width: Fill{max: 680}
-                    user_md +: { width: Fill }
+                    md +: { width: Fill }
                 }
             }
 
@@ -3882,7 +3882,6 @@ impl MatchEvent for App {
                 self.start_git_create_branch(cx, name);
             }
         }
-
 
         if self
             .ui
