@@ -19,7 +19,7 @@ script_mod! {
                 border_radius: 9.0
             }
 
-            user_md := mod.components.ChatMarkdown {
+            md := mod.components.ChatMarkdown {
                 width: Fit{max: FitBound.Abs(654)}
                 selectable: true
             }
