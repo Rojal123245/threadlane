@@ -5,7 +5,7 @@ extracting generic, parameterized components. Goal: measurably fewer duplicate
 DSL blocks and near-identical Rust handlers, with **zero visual or behavioral
 change**.
 
-Status: planning (evidence gathered from a full read of `crates/threadlane/src`).
+Status: completed (Phases 1 through 5 successfully executed and verified).
 
 ---
 

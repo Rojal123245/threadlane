@@ -2,6 +2,7 @@
 
 use crate::panels::sessions::state::set_session_context_target;
 use makepad_widgets::*;
+use super::overlay_popup_base::is_overlay_dismissal_event;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum SessionContextMenuAction {
@@ -77,15 +78,8 @@ impl Widget for SessionContextMenu {
             }
         }
 
-        match event {
-            Event::MouseDown(event)
-                if event.button.is_primary() && !self.menu_rect.contains(event.abs) =>
-            {
-                self.close(cx)
-            }
-            Event::KeyDown(event) if event.key_code == KeyCode::Escape => self.close(cx),
-            Event::BackPressed { .. } => self.close(cx),
-            _ => {}
+        if is_overlay_dismissal_event(event, self.menu_rect) || matches!(event, Event::BackPressed { .. }) {
+            self.close(cx);
         }
     }
 
