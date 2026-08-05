@@ -16,7 +16,7 @@ script_mod! {
         animator +: {
             active: { default: @off }
         }
-        header: ActivityHeader {}
+        header: mod.components.ActivityHeader {}
         body: RoundedView {
             width: Fill
             height: Fit

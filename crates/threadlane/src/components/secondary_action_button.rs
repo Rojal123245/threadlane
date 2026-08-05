@@ -29,4 +29,16 @@ script_mod! {
             text_style +: { font_size: 9.0 }
         }
     }
+
+    mod.components.ScopeButton = mod.components.SecondaryActionButton {
+        height: 24
+        padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
+    }
+
+    mod.components.SelectedScopeButton = mod.components.ScopeButton {
+        draw_bg +: {
+            color: theme.color_primary
+            border_color: theme.color_primary
+        }
+    }
 }

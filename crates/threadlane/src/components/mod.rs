@@ -66,22 +66,23 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     themed_label::script_mod(vm);
     add_server_card::script_mod(vm);
     settings_page::script_mod(vm);
+    status_dot::script_mod(vm);
+    chat_bubble::script_mod(vm);
+    activity_header::script_mod(vm);
     user_msg_base::script_mod(vm);
+    chat_fold_row_base::script_mod(vm);
     clipped_label::script_mod(vm);
     code_label::script_mod(vm);
     // The upstream code editor registers `CodeEditor` into `mod.widgets`, which
     // `CodeEditorView` inherits from, so it must be registered first.
     makepad_code_editor::script_mod(vm);
     code_editor_view::script_mod(vm);
-    status_dot::script_mod(vm);
     notice_banner::script_mod(vm);
     section_header::script_mod(vm);
     page_header::script_mod(vm);
     workspace_badge::script_mod(vm);
-    activity_header::script_mod(vm);
     activity_loader::script_mod(vm);
     auth_row::script_mod(vm);
-    chat_bubble::script_mod(vm);
     capability_row::script_mod(vm);
     header_chip::script_mod(vm);
     command_input::script_mod(vm);
@@ -109,6 +110,5 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     starter_prompt_card::script_mod(vm);
     task_sidebar::script_mod(vm);
     terminal_panel::script_mod(vm);
-    chat_fold_row_base::script_mod(vm);
     tool_section::script_mod(vm)
 }

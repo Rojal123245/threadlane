@@ -431,7 +431,7 @@ script_mod! {
             UserMsgWrapped := mod.components.UserMsgBase {
                 user_bubble +: {
                     width: Fill{max: 680}
-                    md +: { width: Fill }
+                    user_md +: { width: Fill }
                 }
             }
 
@@ -461,12 +461,24 @@ script_mod! {
                 }
             }
 
-            ActivityGroupMsg := mod.components.ChatFoldRowBase {
-                header +: {
+            ActivityGroupMsg := #(ToolFoldHeader::register_widget(vm)) {
+                width: Fill
+                height: Fit
+                flow: Down
+                body_walk: Walk{width: Fill, height: Fit}
+                margin: Inset{top: 4 bottom: 2 left: 20 right: 24}
+                opened: 0.0
+                animator +: { active: { default: @off } }
+                header := mod.components.ActivityHeader {
                     height: 28
-                    title_lbl +: {
+                    title_lbl := Label {
                         width: 62
+                        height: Fit
                         text: "Worked"
+                        draw_text +: {
+                            color: theme.color_muted_foreground
+                            text_style: theme.font_bold { font_size: 9.0 }
+                        }
                     }
                     summary := View {
                         width: Fill
@@ -481,24 +493,45 @@ script_mod! {
                         status_indicator := ActivityStatusIndicator {}
                     }
                 }
-                body +: {
+                body := RoundedView {
+                    width: Fill
+                    height: Fit
+                    padding: Inset{left: 30 top: 3 right: 18 bottom: 7}
+                    draw_bg +: {
+                        color: theme.color_transparent
+                        border_size: 0.0
+                    }
                     md := mod.components.ChatMarkdown {}
                 }
             }
 
-            ThinkingMsg := mod.components.ChatFoldRowBase {
-                header +: {
-                    icon_tile +: {
-                        icon_stack +: {
-                            icon_generic +: { visible: false }
-                            icon_thinking +: {
+            ThinkingMsg := #(ToolFoldHeader::register_widget(vm)) {
+                width: Fill
+                height: Fit
+                flow: Down
+                body_walk: Walk{width: Fill, height: Fit}
+                margin: Inset{top: 4 bottom: 2 left: 20 right: 24}
+                opened: 0.0
+                animator +: { active: { default: @off } }
+                header := mod.components.ActivityHeader {
+                    icon_tile := View {
+                        width: 20
+                        height: 20
+                        align: Align{x: 0.5 y: 0.5}
+                        icon_stack := View {
+                            width: 14
+                            height: 14
+                            flow: Overlay
+                            icon_generic := mod.components.ActivitySvgIcon { visible: false }
+                            icon_thinking := mod.components.ActivitySvgIcon {
                                 visible: true
                                 icon +: { draw_icon +: { color: theme.color_muted_foreground } }
                             }
                         }
                     }
-                    title_lbl +: {
+                    title_lbl := Label {
                         width: 70
+                        height: Fit
                         text: "Thinking"
                         draw_text +: { color: theme.color_card_foreground }
                     }
@@ -512,20 +545,39 @@ script_mod! {
                         }
                     }
                 }
-                body +: {
+                body := RoundedView {
+                    width: Fill
+                    height: Fit
                     padding: Inset{left: 30 top: 5 right: 24 bottom: 8}
+                    draw_bg +: {
+                        color: theme.color_transparent
+                        border_size: 0.0
+                    }
                     md := mod.components.ChatMarkdown {}
                 }
             }
 
-            SubagentMsg := mod.components.ChatFoldRowBase {
-                header +: {
+            SubagentMsg := #(ToolFoldHeader::register_widget(vm)) {
+                width: Fill
+                height: Fit
+                flow: Down
+                body_walk: Walk{width: Fill, height: Fit}
+                margin: Inset{top: 4 bottom: 2 left: 20 right: 24}
+                opened: 0.0
+                animator +: { active: { default: @off } }
+                header := mod.components.ActivityHeader {
                     height: 26
-                    title_lbl +: { width: 92, text: "Agent tasks" }
-                    icon_tile +: {
-                        icon_stack +: {
-                            icon_generic +: { visible: false }
-                            icon_subagent +: { visible: true }
+                    title_lbl := Label { width: 92, text: "Agent tasks" }
+                    icon_tile := View {
+                        width: 20
+                        height: 20
+                        align: Align{x: 0.5 y: 0.5}
+                        icon_stack := View {
+                            width: 14
+                            height: 14
+                            flow: Overlay
+                            icon_generic := mod.components.ActivitySvgIcon { visible: false }
+                            icon_subagent := mod.components.ActivitySvgIcon { visible: true }
                         }
                     }
                     summary := View {
@@ -542,21 +594,34 @@ script_mod! {
                         status_indicator := ActivityStatusIndicator {}
                     }
                 }
-                body +: {
+                body := RoundedView {
+                    width: Fill
+                    height: Fit
                     padding: Inset{left: 30 top: 4 right: 18 bottom: 8}
                     flow: Down
                     spacing: 6
+                    draw_bg +: {
+                        color: theme.color_transparent
+                        border_size: 0.0
+                    }
                     rail := #(SubagentRail::register_widget(vm)) {
                         width: Fill
                         height: Fit
                         flow: Down
                         spacing: 7
                         draw_bg +: { color: theme.color_transparent }
-                        row_template: mod.components.ChatFoldRowBase {
-                            header +: {
+                        row_template: #(ToolFoldHeader::register_widget(vm)) {
+                            width: Fill
+                            height: Fit
+                            flow: Down
+                            body_walk: Walk{width: Fill, height: Fit}
+                            margin: Inset{top: 4 bottom: 2 left: 20 right: 24}
+                            opened: 0.0
+                            animator +: { active: { default: @off } }
+                            header := mod.components.ActivityHeader {
                                 height: 28
                                 padding: Inset{left: 3 top: 0 right: 4 bottom: 0}
-                                title_lbl +: {
+                                title_lbl := Label {
                                     width: 82
                                     height: 20
                                     padding: 0
@@ -596,8 +661,14 @@ script_mod! {
                                     }
                                 }
                             }
-                            body +: {
+                            body := RoundedView {
+                                width: Fill
+                                height: Fit
                                 padding: Inset{left: 30 top: 2 right: 18 bottom: 6}
+                                draw_bg +: {
+                                    color: theme.color_transparent
+                                    border_size: 0.0
+                                }
                                 working_detail := View {
                                     width: Fill
                                     height: 18
@@ -622,10 +693,17 @@ script_mod! {
                 }
             }
 
-            ToolMsg := mod.components.ChatFoldRowBase {
-                header +: {
+            ToolMsg := #(ToolFoldHeader::register_widget(vm)) {
+                width: Fill
+                height: Fit
+                flow: Down
+                body_walk: Walk{width: Fill, height: Fit}
+                margin: Inset{top: 4 bottom: 2 left: 20 right: 24}
+                opened: 0.0
+                animator +: { active: { default: @off } }
+                header := mod.components.ActivityHeader {
                     height: 26
-                    title_lbl +: { width: 86 }
+                    title_lbl := Label { width: 86 }
                     summary := View {
                         width: Fill
                         height: 20
@@ -661,10 +739,16 @@ script_mod! {
                         status_indicator := ActivityStatusIndicator {}
                     }
                 }
-                body +: {
+                body := RoundedView {
+                    width: Fill
+                    height: Fit
                     padding: Inset{left: 30 top: 2 right: 18 bottom: 6}
                     flow: Down
                     spacing: 4
+                    draw_bg +: {
+                        color: theme.color_transparent
+                        border_size: 0.0
+                    }
                     details_row := View {
                         width: Fill
                         height: Fit
@@ -1013,29 +1097,8 @@ script_mod! {
 
                         ag_actions := mod.components.ProviderCardActions {
 
-                            antigravity_login_btn := Button {
-                                width: Fit
-                                height: 28
-                                padding: Inset{left: 12 right: 12 top: 4 bottom: 4}
+                            antigravity_login_btn := mod.components.PrimaryActionButton {
                                 text: "Sign in with Google"
-                                draw_bg +: {
-                                    color: theme.color_primary
-                                    color_hover: theme.color_primary
-                                    color_focus: theme.color_primary
-                                    color_down: theme.color_primary
-                                    border_color: theme.color_primary
-                                    border_color_hover: theme.color_primary
-                                    border_color_focus: theme.color_primary
-                                    border_color_down: theme.color_primary
-                                    border_radius: 6.0
-                                }
-                                draw_text +: {
-                                    color: theme.color_primary_foreground
-                                    color_hover: theme.color_primary_foreground
-                                    color_focus: theme.color_primary_foreground
-                                    color_down: theme.color_primary_foreground
-                                    text_style: theme.font_bold { font_size: 9.5 }
-                                }
                             }
 
                             antigravity_doctor_btn := mod.components.SecondaryActionButton {
@@ -1135,21 +1198,8 @@ script_mod! {
                         }
 
                         oc_actions := mod.components.ProviderCardActions {
-                            opencode_save_btn := Button {
-                                width: Fit
-                                height: 28
-                                padding: Inset{left: 12 right: 12 top: 4 bottom: 4}
+                            opencode_save_btn := mod.components.PrimaryActionButton {
                                 text: "Save API key"
-                                draw_bg +: {
-                                    color: theme.color_primary
-                                    color_hover: theme.color_primary
-                                    color_down: theme.color_primary
-                                    border_radius: 6.0
-                                }
-                                draw_text +: {
-                                    color: theme.color_primary_foreground
-                                    text_style: theme.font_bold { font_size: 9.5 }
-                                }
                             }
                             opencode_clear_btn := mod.components.SecondaryActionButton {
                                 text: "Clear"
@@ -1189,20 +1239,8 @@ script_mod! {
                                 text_style +: { font_size: 8.75 }
                             }
                         }
-                        capability_scope_global_btn := SettingsActionButton {
-                            height: 24
-                            padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
-                            text: "Global"
-                        }
-                        capability_scope_project_btn := SettingsActionButton {
-                            height: 24
-                            padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
-                            text: "Project"
-                            draw_bg +: {
-                                color: theme.color_primary
-                                border_color: theme.color_primary
-                            }
-                        }
+                        capability_scope_global_btn := mod.components.ScopeButton { text: "Global" }
+                        capability_scope_project_btn := mod.components.SelectedScopeButton { text: "Project" }
                         capability_add_btn := mod.components.IconButton {
                             draw_icon +: {
                                 svg: crate_resource("self:resources/icons/plus.svg")
@@ -1311,20 +1349,8 @@ script_mod! {
                             text: "MCP Servers"
                         }
 
-                        mcp_scope_global_btn := SettingsActionButton {
-                            height: 24
-                            padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
-                            text: "Global"
-                        }
-                        mcp_scope_project_btn := SettingsActionButton {
-                            height: 24
-                            padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
-                            text: "Project"
-                            draw_bg +: {
-                                color: theme.color_primary
-                                border_color: theme.color_primary
-                            }
-                        }
+                        mcp_scope_global_btn := mod.components.ScopeButton { text: "Global" }
+                        mcp_scope_project_btn := mod.components.SelectedScopeButton { text: "Project" }
                         mcp_refresh_btn := mod.components.IconButton {
                             draw_icon +: {
                                 svg: crate_resource("self:resources/icons/refresh.svg")
@@ -1340,13 +1366,20 @@ script_mod! {
                     mcp_add_card := mod.components.AddServerCard {
                         add_title +: { text: "Add MCP Server" }
                         add_inputs +: {
-                            mcp_name_input := name_input {
+                            mcp_name_input := mod.components.ThemedTextInput {
+                                width: 140
+                                height: 30
                                 empty_text: "Name (e.g. fs)"
                             }
-                            mcp_command_input := command_input {
+                            mcp_command_input := mod.components.ThemedTextInput {
+                                width: Fill
+                                height: 30
                                 empty_text: "Command (e.g. npx -y @modelcontextprotocol/server-filesystem /path)"
                             }
-                            mcp_submit_add_btn := submit_add_btn {}
+                            mcp_submit_add_btn := mod.components.PrimaryActionButton {
+                                height: 30
+                                text: "Add Server"
+                            }
                         }
                     }
 
@@ -1392,20 +1425,8 @@ script_mod! {
                             }
                         }
 
-                        acp_scope_global_btn := SettingsActionButton {
-                            height: 24
-                            padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
-                            text: "Global"
-                        }
-                        acp_scope_project_btn := SettingsActionButton {
-                            height: 24
-                            padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
-                            text: "Project"
-                            draw_bg +: {
-                                color: theme.color_primary
-                                border_color: theme.color_primary
-                            }
-                        }
+                        acp_scope_global_btn := mod.components.ScopeButton { text: "Global" }
+                        acp_scope_project_btn := mod.components.SelectedScopeButton { text: "Project" }
                         acp_refresh_btn := mod.components.IconButton {
                             draw_icon +: {
                                 svg: crate_resource("self:resources/icons/refresh.svg")
@@ -1427,13 +1448,20 @@ script_mod! {
                     acp_add_card := mod.components.AddServerCard {
                         add_title +: { text: "Add ACP Agent" }
                         add_inputs +: {
-                            acp_name_input := name_input {
+                            acp_name_input := mod.components.ThemedTextInput {
+                                width: 140
+                                height: 30
                                 empty_text: "Name (e.g. Gemini)"
                             }
-                            acp_command_input := command_input {
+                            acp_command_input := mod.components.ThemedTextInput {
+                                width: Fill
+                                height: 30
                                 empty_text: "Command (e.g. gemini --experimental-acp)"
                             }
-                            acp_submit_add_btn := submit_add_btn {}
+                            acp_submit_add_btn := mod.components.PrimaryActionButton {
+                                height: 30
+                                text: "Add Agent"
+                            }
                         }
                     }
 
@@ -1633,18 +1661,12 @@ script_mod! {
                                     }
                                 }
                                 sidebar_brand_spacer := mod.components.FlexSpacer {}
-                                left_sidebar_toggle_btn := mod.components.IconButton {
-                                    width: 26
-                                    height: 26
-                                    icon_walk: Walk{width: 14 height: 14}
+                                left_sidebar_toggle_btn := mod.components.ToolbarIconButton {
                                     draw_icon +: {
                                         svg: crate_resource("self:resources/icons/sidebar_left.svg")
                                     }
                                 }
-                                settings_btn := mod.components.IconButton {
-                                    width: 26
-                                    height: 26
-                                    icon_walk: Walk{width: 14 height: 14}
+                                settings_btn := mod.components.ToolbarIconButton {
                                     draw_icon +: {
                                         svg: crate_resource("self:resources/icons/settings.svg")
                                     }
@@ -1734,11 +1756,8 @@ script_mod! {
                             spacing: 8
                             padding: Inset{left: 4 top: 1 right: 2 bottom: 2}
 
-                            left_sidebar_expand_btn := mod.components.IconButton {
-                                width: 26
-                                height: 26
+                            left_sidebar_expand_btn := mod.components.ToolbarIconButton {
                                 visible: false
-                                icon_walk: Walk{width: 14 height: 14}
                                 draw_icon +: {
                                     svg: crate_resource("self:resources/icons/sidebar_left.svg")
                                 }
@@ -1788,18 +1807,12 @@ script_mod! {
                                 }
                             }
 
-                            terminal_header_btn := mod.components.IconButton {
-                                width: 26
-                                height: 26
-                                icon_walk: Walk{width: 14 height: 14}
+                            terminal_header_btn := mod.components.ToolbarIconButton {
                                 draw_icon +: { svg: crate_resource("self:resources/icons/panel-down.svg") }
                             }
 
-                            right_sidebar_toggle_btn := mod.components.IconButton {
-                                width: 26
-                                height: 26
+                            right_sidebar_toggle_btn := mod.components.ToolbarIconButton {
                                 visible: false
-                                icon_walk: Walk{width: 14 height: 14}
                                 draw_icon +: {
                                     svg: crate_resource("self:resources/icons/sidebar_right.svg")
                                 }
@@ -2743,64 +2756,17 @@ script_mod! {
                                         border_size: 1.0
                                         border_radius: 6.0
                                     }
-                                    tasks_tab_btn := mod.components.IconButton {
-                                        width: 36
-                                        height: 28
-                                        text: ""
-                                        icon_walk: Walk{width: 12 height: 12}
-                                        align: Align{x: 0.5 y: 0.5}
-                                        padding: 0
-                                        spacing: 0
-                                        draw_icon +: {
-                                            svg: crate_resource("self:resources/icons/subagent.svg")
-                                            color: theme.color_muted_foreground
-                                            color_hover: theme.color_foreground
-                                            color_down: theme.color_primary
-                                        }
+                                    tasks_tab_btn := mod.components.RightSidebarTabButton {
+                                        draw_icon +: { svg: crate_resource("self:resources/icons/subagent.svg") }
                                     }
-                                    git_tab_btn := mod.components.IconButton {
-                                        width: 36
-                                        height: 28
-                                        text: ""
-                                        icon_walk: Walk{width: 12 height: 12}
-                                        align: Align{x: 0.5 y: 0.5}
-                                        padding: 0
-                                        spacing: 0
-                                        draw_icon +: {
-                                            svg: crate_resource("self:resources/icons/git.svg")
-                                            color: theme.color_muted_foreground
-                                            color_hover: theme.color_foreground
-                                            color_down: theme.color_primary
-                                        }
+                                    git_tab_btn := mod.components.RightSidebarTabButton {
+                                        draw_icon +: { svg: crate_resource("self:resources/icons/git.svg") }
                                     }
-                                    code_editor_tab_btn := mod.components.IconButton {
-                                        width: 36
-                                        height: 28
-                                        text: ""
-                                        icon_walk: Walk{width: 12 height: 12}
-                                        align: Align{x: 0.5 y: 0.5}
-                                        padding: 0
-                                        spacing: 0
-                                        draw_icon +: {
-                                            svg: crate_resource("self:resources/icons/edit-file.svg")
-                                            color: theme.color_muted_foreground
-                                            color_hover: theme.color_foreground
-                                            color_down: theme.color_primary
-                                        }
-                                    file_tree_tab_btn := mod.components.IconButton {
-                                        width: 36
-                                        height: 28
-                                        text: ""
-                                        icon_walk: Walk{width: 12 height: 12}
-                                        align: Align{x: 0.5 y: 0.5}
-                                        padding: 0
-                                        spacing: 0
-                                        draw_icon +: {
-                                            svg: crate_resource("self:resources/icons/folder.svg")
-                                            color: theme.color_muted_foreground
-                                            color_hover: theme.color_foreground
-                                            color_down: theme.color_primary
-                                        }
+                                    code_editor_tab_btn := mod.components.RightSidebarTabButton {
+                                        draw_icon +: { svg: crate_resource("self:resources/icons/edit-file.svg") }
+                                    }
+                                    file_tree_tab_btn := mod.components.RightSidebarTabButton {
+                                        draw_icon +: { svg: crate_resource("self:resources/icons/folder.svg") }
                                     }
                                 }
                             }
@@ -2876,15 +2842,11 @@ script_mod! {
 
                         }
                     }
-
-
-                    }
                 }
             }
         }
     }
 }
-
 }
 
 #[derive(Clone, Debug)]
