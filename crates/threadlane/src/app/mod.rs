@@ -1238,16 +1238,7 @@ script_mod! {
                         }
                     }
 
-                    capability_status_lbl := Label {
-                        width: Fill
-                        height: Fit
-                        padding: 0
-                        text: ""
-                        draw_text +: {
-                            color: theme.color_primary
-                            text_style +: { font_size: 9.5 }
-                        }
-                    }
+                    capability_status_lbl := mod.components.SettingsStatusLabel {}
                 }
 
                 skills_page := View {
@@ -1296,16 +1287,7 @@ script_mod! {
                         }
                     }
 
-                    skill_status_lbl := Label {
-                        width: Fill
-                        height: Fit
-                        padding: 0
-                        text: ""
-                        draw_text +: {
-                            color: theme.color_primary
-                            text_style +: { font_size: 9.5 }
-                        }
-                    }
+                    skill_status_lbl := mod.components.SettingsStatusLabel {}
                 }
 
                 mcp_page := View {
@@ -1355,61 +1337,16 @@ script_mod! {
                         text: "Model Context Protocol servers providing external tools over stdio."
                     }
 
-                    mcp_add_card := RoundedView {
-                        width: Fill
-                        height: Fit
-                        flow: Down
-                        padding: Inset{left: 12 top: 10 right: 12 bottom: 10}
-                        spacing: 8
-                        draw_bg +: {
-                            color: theme.color_card
-                            border_radius: 8.0
-                            border_size: 1.0
-                            border_color: theme.color_input
-                        }
-
-                        mcp_add_title := Label {
-                            width: Fill
-                            height: Fit
-                            text: "Add MCP Server"
-                            draw_text +: {
-                                color: theme.color_foreground
-                                text_style: theme.font_bold { font_size: 11.0 }
-                            }
-                        }
-
-                        mcp_add_inputs := View {
-                            width: Fill
-                            height: Fit
-                            flow: Right
-                            spacing: 8
-                            align: Align{y: 0.5}
-
-                            mcp_name_input := mod.components.ThemedTextInput {
-                                width: 140
+                    mcp_add_card := mod.components.AddServerCard {
+                        add_title +: { text: "Add MCP Server" }
+                        add_inputs +: {
+                            mcp_name_input := name_input {
                                 empty_text: "Name (e.g. fs)"
                             }
-
-                            mcp_command_input := mod.components.ThemedTextInput {
-                                width: Fill
+                            mcp_command_input := command_input {
                                 empty_text: "Command (e.g. npx -y @modelcontextprotocol/server-filesystem /path)"
                             }
-
-                            mcp_submit_add_btn := SettingsActionButton {
-                                height: 28
-                                padding: Inset{left: 12 right: 12 top: 4 bottom: 4}
-                                text: "Add"
-                                draw_bg +: {
-                                    color: theme.color_primary
-                                    border_color: theme.color_primary
-                                }
-                                draw_text +: {
-                                    color: theme.color_primary_foreground
-                                    color_hover: theme.color_primary_foreground
-                                    color_focus: theme.color_primary_foreground
-                                    color_down: theme.color_primary_foreground
-                                }
-                            }
+                            mcp_submit_add_btn := submit_add_btn {}
                         }
                     }
 
@@ -1426,16 +1363,7 @@ script_mod! {
                         }
                     }
 
-                    mcp_status_lbl := Label {
-                        width: Fill
-                        height: Fit
-                        padding: 0
-                        text: ""
-                        draw_text +: {
-                            color: theme.color_primary
-                            text_style +: { font_size: 9.5 }
-                        }
-                    }
+                    mcp_status_lbl := mod.components.SettingsStatusLabel {}
                 }
 
                 acp_page := View {
@@ -1496,61 +1424,16 @@ script_mod! {
                         }
                     }
 
-                    acp_add_card := RoundedView {
-                        width: Fill
-                        height: Fit
-                        flow: Down
-                        padding: Inset{left: 12 top: 10 right: 12 bottom: 10}
-                        spacing: 8
-                        draw_bg +: {
-                            color: theme.color_card
-                            border_radius: 8.0
-                            border_size: 1.0
-                            border_color: theme.color_input
-                        }
-
-                        acp_add_title := Label {
-                            width: Fill
-                            height: Fit
-                            text: "Add ACP Agent"
-                            draw_text +: {
-                                color: theme.color_foreground
-                                text_style: theme.font_bold { font_size: 11.0 }
-                            }
-                        }
-
-                        acp_add_inputs := View {
-                            width: Fill
-                            height: Fit
-                            flow: Right
-                            spacing: 8
-                            align: Align{y: 0.5}
-
-                            acp_name_input := mod.components.ThemedTextInput {
-                                width: 140
+                    acp_add_card := mod.components.AddServerCard {
+                        add_title +: { text: "Add ACP Agent" }
+                        add_inputs +: {
+                            acp_name_input := name_input {
                                 empty_text: "Name (e.g. Gemini)"
                             }
-
-                            acp_command_input := mod.components.ThemedTextInput {
-                                width: Fill
+                            acp_command_input := command_input {
                                 empty_text: "Command (e.g. gemini --experimental-acp)"
                             }
-
-                            acp_submit_add_btn := SettingsActionButton {
-                                height: 28
-                                padding: Inset{left: 12 right: 12 top: 4 bottom: 4}
-                                text: "Add"
-                                draw_bg +: {
-                                    color: theme.color_primary
-                                    border_color: theme.color_primary
-                                }
-                                draw_text +: {
-                                    color: theme.color_primary_foreground
-                                    color_hover: theme.color_primary_foreground
-                                    color_focus: theme.color_primary_foreground
-                                    color_down: theme.color_primary_foreground
-                                }
-                            }
+                            acp_submit_add_btn := submit_add_btn {}
                         }
                     }
 
@@ -1567,16 +1450,7 @@ script_mod! {
                         }
                     }
 
-                    acp_status_lbl := Label {
-                        width: Fill
-                        height: Fit
-                        padding: 0
-                        text: ""
-                        draw_text +: {
-                            color: theme.color_primary
-                            text_style +: { font_size: 9.5 }
-                        }
-                    }
+                    acp_status_lbl := mod.components.SettingsStatusLabel {}
                 }
 
                 about_page := View {
