@@ -428,6 +428,42 @@ mod tests {
     }
 
     #[test]
+    fn test_build_authorization_url() {
+        let code_challenge = "test_challenge_123";
+        let state = "test_state_456";
+        let url_str = build_authorization_url(code_challenge, state);
+
+        let url = url::Url::parse(&url_str).unwrap();
+
+        assert_eq!(url.scheme(), "https");
+        assert_eq!(url.host_str(), Some("accounts.google.com"));
+        assert_eq!(url.path(), "/o/oauth2/v2/auth");
+
+        let query_params: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+
+        assert_eq!(query_params.get("response_type").unwrap(), "code");
+        assert_eq!(query_params.get("code_challenge").unwrap(), code_challenge);
+        assert_eq!(query_params.get("code_challenge_method").unwrap(), "S256");
+        assert_eq!(query_params.get("access_type").unwrap(), "offline");
+        assert_eq!(query_params.get("prompt").unwrap(), "consent");
+        assert_eq!(query_params.get("state").unwrap(), state);
+        assert_eq!(query_params.get("redirect_uri").unwrap(), DEFAULT_REDIRECT_URI);
+
+        let scopes = query_params.get("scope").unwrap();
+        assert!(scopes.contains("https://www.googleapis.com/auth/cloud-platform"));
+        assert!(scopes.contains("https://www.googleapis.com/auth/userinfo.email"));
+        assert!(scopes.contains("https://www.googleapis.com/auth/userinfo.profile"));
+        assert!(scopes.contains("https://www.googleapis.com/auth/cclog"));
+        assert!(scopes.contains("https://www.googleapis.com/auth/experimentsandconfigs"));
+
+        if let Ok(client_id) = std::env::var("ANTIGRAVITY_CLIENT_ID") {
+            assert_eq!(query_params.get("client_id").unwrap(), &client_id);
+        } else {
+            assert_eq!(query_params.get("client_id").unwrap(), DEFAULT_CLIENT_ID);
+        }
+    }
+
+    #[test]
     fn test_antigravity_provider_id() {
         let provider = AntigravityAuthProvider;
         assert_eq!(provider.provider_id(), "antigravity");
