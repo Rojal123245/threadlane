@@ -514,14 +514,22 @@ impl SessionTree {
         next.active_node_id = active_node_id;
 
         if let Some(path) = next.file_path.clone() {
-            let _guard = session_file_lock()
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
             next.save_transactionally(&path)
                 .map_err(|error| format!("Failed to persist passive branch: {error}"))?;
         }
         *self = next;
         Ok(created)
+    }
+
+    pub fn append_passive_branch_in_memory(
+        &mut self,
+        parent_leaf_id: Option<&str>,
+        messages: Vec<AgentMessage>,
+    ) -> Result<Vec<String>, String> {
+        let path = self.file_path.take();
+        let result = self.append_passive_branch(parent_leaf_id, messages);
+        self.file_path = path;
+        result
     }
 
     /// Replaces the active context with a new root branch while retaining old

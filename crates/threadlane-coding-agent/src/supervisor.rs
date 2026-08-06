@@ -348,13 +348,9 @@ fn append_abort_requested_record(
     lane: &str,
     run_id: &str,
 ) -> Result<OpRecord, String> {
-    let path = session_file.with_extension("oplog.jsonl");
-    let records = load_op_records_from_file(&path)
-        .map_err(|error| format!("Failed to read abort log: {error}"))?;
-    let seq = records.iter().map(OpRecord::seq).max().unwrap_or(0) + 1;
     let record = OpRecord::AbortRequested {
-        id: format!("abort-{run_id}-{seq}"),
-        seq,
+        id: format!("abort-{run_id}"),
+        seq: 0,
         lane: lane.to_owned(),
         timestamp: now_ms() as u64,
         run_id: run_id.to_owned(),
@@ -377,6 +373,22 @@ fn append_abort_requested_record(
         )?;
         return Ok(record);
     }
+    let path = session_file.with_extension("oplog.jsonl");
+    let records = load_op_records_from_file(&path)
+        .map_err(|error| format!("Failed to read abort log: {error}"))?;
+    let seq = records.iter().map(OpRecord::seq).max().unwrap_or(0) + 1;
+    let record = match record {
+        OpRecord::AbortRequested {
+            lane, timestamp, run_id, ..
+        } => OpRecord::AbortRequested {
+            id: format!("abort-{run_id}-{seq}"),
+            seq,
+            lane,
+            timestamp,
+            run_id,
+        },
+        _ => unreachable!("abort helper created a different record"),
+    };
     append_legacy_record(session_file, record.clone())
         .map_err(|error| format!("Failed to append abort intent: {error}"))?;
     Ok(record)
@@ -1635,7 +1647,7 @@ impl HarnessSupervisor {
         let runtimes_map = self.runtimes.clone();
         let supervisor = self.clone();
         let session_file_for_run = session_file.clone();
-        let session_id_for_run = session_id.clone();
+        let session_id_for_run = session_id.to_string();
         let run_id_for_run = run_id.clone();
 
         let handle = tokio::spawn(async move {

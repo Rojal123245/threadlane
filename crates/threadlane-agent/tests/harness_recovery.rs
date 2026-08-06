@@ -334,6 +334,38 @@ fn tool_intent_and_result_recovery_stay_on_a_child_lane() {
             .lane,
         "child"
     );
+
+    harness
+        .append_entry_gated(threadlane_agent::harness::Entry {
+            id: "child-assistant-2".into(),
+            parent_id: Some("child-tool-result".into()),
+            lane: "child".into(),
+            seq: 9,
+            timestamp: 9,
+            message: AgentMessage::Assistant {
+                content: None,
+                tool_calls: None,
+                stop_reason: None,
+                deferred_handle: None,
+            },
+            terminate: false,
+        })
+        .unwrap();
+    harness.drive_to_completion().unwrap();
+    harness
+        .start_tool_batch(
+            "child-run",
+            "child-assistant-2",
+            &[ToolSpec {
+                index: 0,
+                call_id: "call-child-2".into(),
+                name: "read_file".into(),
+                effective_args: serde_json::json!({"path":"Cargo.toml"}),
+                result_entry_id: "child-tool-result-2".into(),
+                replay: ToolReplaySafety::Safe,
+            }],
+        )
+        .unwrap();
 }
 
 #[test]

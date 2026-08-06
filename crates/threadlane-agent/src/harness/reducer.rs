@@ -394,6 +394,7 @@ impl Reducer {
                     lane.usage.accumulate(usage)
                 }
                 Record::ToolStarted {
+                    id,
                     run_id,
                     assistant_entry_id,
                     tool_index,
@@ -436,7 +437,9 @@ impl Reducer {
                             "tool intent does not match assistant declaration".into(),
                         ));
                     }
-                    if lane.tools.iter().any(|tool| {
+                    let replay_claim = id.starts_with("replay-claim-")
+                        && matches!(replay, super::types::ToolReplaySafety::Never);
+                    if !replay_claim && lane.tools.iter().any(|tool| {
                         tool.run_id == *run_id
                             && (tool.tool_call_id == *tool_call_id
                                 || (tool.assistant_entry_id == *assistant_entry_id
@@ -445,6 +448,14 @@ impl Reducer {
                         return Err(ReduceError::InvalidRecord(
                             "tool intent duplicates call or ordinal".into(),
                         ));
+                    }
+                    if replay_claim {
+                        lane.tools.retain(|tool| {
+                            !(tool.run_id == *run_id
+                                && tool.tool_call_id == *tool_call_id
+                                && tool.assistant_entry_id == *assistant_entry_id
+                                && tool.tool_index == *tool_index)
+                        });
                     }
                     lane.tools.push(super::types::ToolState {
                         run_id: run_id.clone(),

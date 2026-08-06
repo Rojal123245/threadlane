@@ -334,7 +334,9 @@ impl OperationProcedure {
         effects: &mut GatedEffects,
     ) -> Result<(), ProcedureError> {
         let lane = open_lane(store, run_id)?;
-        if lane.tools.iter().any(|tool| tool.run_id == run_id && !tool.completed) {
+        if outcome != OperationOutcome::Aborted
+            && lane.tools.iter().any(|tool| tool.run_id == run_id && !tool.completed)
+        {
             return Err(ProcedureError::Invalid(
                 "operation has an incomplete tool batch".into(),
             ));
@@ -1865,9 +1867,9 @@ impl ToolBatchProcedure {
                 continue;
             }
             effects.park(EffectAction::AppendRecord {
-                id: format!("tool-intent-action-{run_id}-{}", spec.index),
+                id: format!("tool-intent-action-{run_id}-{}", spec.call_id),
                 record: Record::ToolStarted {
-                    id: format!("tool-intent-{run_id}-{}", spec.index),
+                    id: format!("tool-intent-{run_id}-{}", spec.call_id),
                     seq,
                     lane: lane.name.clone(),
                     timestamp: seq,
