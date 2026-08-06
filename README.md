@@ -452,21 +452,34 @@ cargo run -p threadlane
 
 Open `$HOME/Applications/Threadlane Test.app` instead to test the complete installation and relaunch flow. Restore the intended package version and unset `THREADLANE_UPDATER_ENDPOINT` afterward.
 
-### Automated macOS Releases
+### Automated Releases
 
-The release workflow is defined in [`.github/workflows/release.yml`](.github/workflows/release.yml). A release tag must exactly match the version in `crates/threadlane/Cargo.toml`:
+[release-plz](https://release-plz.dev/) prepares releases from `main`. It opens
+or updates a release pull request containing the next workspace version and the
+root [`CHANGELOG.md`](CHANGELOG.md). Merging that pull request creates a
+`v<version>` tag and GitHub release. The release notes include the generated
+changelog and the GitHub contributors associated with the included pull
+requests.
 
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
+The automation is split between
+[`.github/workflows/release-plz.yml`](.github/workflows/release-plz.yml), which
+manages the release pull request, changelog, tag, and GitHub release, and
+[`.github/workflows/release.yml`](.github/workflows/release.yml), which is called
+directly after release-plz creates a release and attaches the platform
+artifacts. Both workflows use the repository's built-in `GITHUB_TOKEN`; no
+release-specific token or GitHub App is required. The packaging workflow also
+retains its tag-push and manual triggers. The tag must exactly match the
+`threadlane` workspace version; the packaging workflow verifies that invariant
+before building. In **Settings → Actions → General → Workflow permissions**,
+enable **Allow GitHub Actions to create and approve pull requests** so
+release-plz can maintain its release pull request.
 
 A tagged build publishes:
 
 - A user-facing DMG.
 - A signed `.app.tar.gz` updater bundle.
 - The updater signature.
-- A `latest.json` update manifest.
+- A `latest.json` update manifest containing the GitHub release notes.
 
 ### macOS Gatekeeper Note
 
