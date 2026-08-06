@@ -5,8 +5,8 @@ edition = "2021"
 description = "OpenAI REST & Codex backend streaming client and device auth for threadlane agent"
 
 [dependencies]
-threadlane-tools = { path = "../threadlane-tools" }
-threadlane-auth = { path = "../threadlane-auth" }
+threadlane-tools = { version = "0.1.0", path = "../threadlane-tools" }
+threadlane-auth = { version = "0.1.0", path = "../threadlane-auth" }
 async-trait = "0.1"
 tokio = { version = "1.38", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }

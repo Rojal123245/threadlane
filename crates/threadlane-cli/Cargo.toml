@@ -9,13 +9,13 @@ name = "threadlane"
 path = "src/main.rs"
 
 [dependencies]
-threadlane-coding-agent = { path = "../threadlane-coding-agent" }
-threadlane-agent = { path = "../threadlane-agent" }
-threadlane-auth = { path = "../threadlane-auth" }
-threadlane-provider = { path = "../threadlane-provider" }
-threadlane-git = { path = "../threadlane-git" }
-threadlane-tools = { path = "../threadlane-tools" }
-threadlane-skills = { path = "../threadlane-skills" }
+threadlane-coding-agent = { version = "0.1.0", path = "../threadlane-coding-agent" }
+threadlane-agent = { version = "0.1.0", path = "../threadlane-agent" }
+threadlane-auth = { version = "0.1.0", path = "../threadlane-auth" }
+threadlane-provider = { version = "0.1.0", path = "../threadlane-provider" }
+threadlane-git = { version = "0.1.0", path = "../threadlane-git" }
+threadlane-tools = { version = "0.1.0", path = "../threadlane-tools" }
+threadlane-skills = { version = "0.1.0", path = "../threadlane-skills" }
 
 ratatui = "0.29"
 crossterm = "0.28"
