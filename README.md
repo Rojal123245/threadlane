@@ -454,25 +454,24 @@ Open `$HOME/Applications/Threadlane Test.app` instead to test the complete insta
 
 ### Automated Releases
 
-[release-plz](https://release-plz.dev/) prepares releases from `main`. It opens
+[Release Please](https://github.com/googleapis/release-please) prepares releases from `main`. It opens
 or updates a release pull request containing the next workspace version and the
 root [`CHANGELOG.md`](CHANGELOG.md). Merging that pull request creates a
 `v<version>` tag and GitHub release. The release notes include the generated
-changelog and the GitHub contributors associated with the included pull
-requests.
+changelog entries for the included conventional commits.
 
 The automation is split between
-[`.github/workflows/release-plz.yml`](.github/workflows/release-plz.yml), which
+[`.github/workflows/release-please.yml`](.github/workflows/release-please.yml), which
 manages the release pull request, changelog, tag, and GitHub release, and
 [`.github/workflows/release.yml`](.github/workflows/release.yml), which is called
-directly after release-plz creates a release and attaches the platform
+directly after Release Please creates a release and attaches the platform
 artifacts. Both workflows use the repository's built-in `GITHUB_TOKEN`; no
 release-specific token or GitHub App is required. The packaging workflow also
 retains its tag-push and manual triggers. The tag must exactly match the
 `threadlane` workspace version; the packaging workflow verifies that invariant
 before building. In **Settings → Actions → General → Workflow permissions**,
 enable **Allow GitHub Actions to create and approve pull requests** so
-release-plz can maintain its release pull request.
+Release Please can maintain its release pull request.
 
 A tagged build publishes:
 
