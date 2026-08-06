@@ -362,7 +362,7 @@ fn discover_sessions_in_project(work_dir: &Path) -> Vec<SessionEntry> {
         if path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.ends_with(".harness.jsonl") || name.ends_with(".oplog.jsonl"))
+            .is_some_and(|name| name.ends_with(".harness.jsonl"))
         {
             continue;
         }
@@ -1128,7 +1128,7 @@ mod tests {
     }
 
     #[test]
-    fn session_discovery_ignores_harness_and_legacy_sidecars() {
+    fn session_discovery_ignores_harness_sidecars() {
         let work_dir = unique_test_dir("session-sidecars");
         let sessions_dir = work_dir.join(".threadlane/sessions");
         std::fs::create_dir_all(&sessions_dir).unwrap();
@@ -1138,12 +1138,6 @@ mod tests {
             "{}\n",
         )
         .unwrap();
-        std::fs::write(
-            sessions_dir.join(format!("{}.oplog.jsonl", session.id)),
-            "{}\n",
-        )
-        .unwrap();
-
         refresh_sessions(std::slice::from_ref(&work_dir));
         let data = SESSIONS_DATA.read().unwrap();
         assert_eq!(data.projects[0].sessions.len(), 1);

@@ -1,7 +1,6 @@
 use super::reducer::{validate_candidate_entry, validate_candidate_record};
 use super::store::SessionStore;
-use super::types::{Entry, LaneState, LaneStatus, Record, ReduceError};
-use crate::op_log::OpRecord;
+use super::types::{Entry, Record, ReduceError};
 use crate::session_tree::SessionNode;
 use crate::types::PlanItem;
 use serde::de::DeserializeOwned;
@@ -105,7 +104,6 @@ pub struct JsonlStore {
     tree: crate::SessionTree,
     entries: Vec<Entry>,
     records: Vec<Record>,
-    legacy_records: Vec<OpRecord>,
 }
 
 impl JsonlStore {
@@ -129,8 +127,6 @@ impl JsonlStore {
     fn load(path: PathBuf, claim: Arc<WriterClaim>, writable: bool) -> io::Result<Self> {
         validate_session_lines(&path)?;
         let tree = crate::SessionTree::load_from_file(&path)?;
-        let legacy_records = read_strict(&path.with_extension("oplog.jsonl"))?;
-        validate_records(&legacy_records, &path.with_extension("oplog.jsonl"))?;
         let (entries, mut records) = read_entries(&path)?;
         records.extend(read_strict(&path.with_extension("harness.jsonl"))?);
         records.sort_by_key(Record::seq);
@@ -142,7 +138,6 @@ impl JsonlStore {
             tree,
             entries,
             records,
-            legacy_records,
         };
         super::Reducer::reduce(&store)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
@@ -159,61 +154,22 @@ impl JsonlStore {
         self.tree = refreshed.0;
         self.entries = refreshed.1;
         self.records = refreshed.2;
-        self.legacy_records = refreshed.3;
         super::Reducer::reduce(self)
             .map(|_| ())
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
     }
 
-    pub fn append_legacy_record(&mut self, record: OpRecord) -> Result<(), ReduceError> {
-        if !self.writable {
-            return Err(ReduceError::Storage("session store is read-only".into()));
-        }
-        let claim = self.claim.clone();
-        let _guard = claim
-            .gate
-            .lock()
-            .map_err(|error| ReduceError::Storage(error.to_string()))?;
-        self.reload_unlocked()?;
-        if self
-            .legacy_records
-            .iter()
-            .any(|current| current.id() == record.id())
-        {
-            return Err(ReduceError::DuplicateId(record.id().into()));
-        }
-        let legacy_next = self
-            .legacy_records
-            .iter()
-            .map(OpRecord::seq)
-            .max()
-            .unwrap_or(0)
-            + 1;
-        if record.seq() < legacy_next {
-            return Err(ReduceError::NonMonotonicSequence {
-                previous: legacy_next - 1,
-                current: record.seq(),
-            });
-        }
-        append_json_line(&self.path.with_extension("oplog.jsonl"), &record)?;
-        self.legacy_records.push(record);
-        Ok(())
-    }
-
     fn load_parts(
         path: &Path,
-    ) -> io::Result<(crate::SessionTree, Vec<Entry>, Vec<Record>, Vec<OpRecord>)> {
+    ) -> io::Result<(crate::SessionTree, Vec<Entry>, Vec<Record>)> {
         validate_session_lines(path)?;
         let tree = crate::SessionTree::load_from_file(path)?;
-        let legacy_path = path.with_extension("oplog.jsonl");
-        let legacy_records = read_strict(&legacy_path)?;
-        validate_records(&legacy_records, &legacy_path)?;
         let (entries, mut records) = read_entries(path)?;
         let record_path = path.with_extension("harness.jsonl");
         records.extend(read_strict(&record_path)?);
         records.sort_by_key(Record::seq);
         validate_harness_records(&records, &record_path)?;
-        Ok((tree, entries, records, legacy_records))
+        Ok((tree, entries, records))
     }
 
     pub fn path(&self) -> &Path {
@@ -234,32 +190,6 @@ impl JsonlStore {
         &self.records
     }
 
-    pub fn legacy_records(&self) -> &[OpRecord] {
-        &self.legacy_records
-    }
-
-    pub fn legacy_main_lane(&self) -> LaneState {
-        LaneState {
-            name: "main".into(),
-            status: LaneStatus::Idle,
-            leaf_id: self.tree.active_node_id().map(str::to_owned),
-            open_operation: None,
-            attempts: 0,
-            retry: None,
-            queued: Vec::new(),
-            deferred_writes: Vec::new(),
-            abort_requested: false,
-            usage: Default::default(),
-            tools: Vec::new(),
-            facts: self
-                .tree
-                .global_facts
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect(),
-            resume_data: Default::default(),
-        }
-    }
 }
 
 impl SessionStore for JsonlStore {
@@ -519,7 +449,6 @@ impl JsonlStore {
         self.tree = refreshed.0;
         self.entries = refreshed.1;
         self.records = refreshed.2;
-        self.legacy_records = refreshed.3;
         super::Reducer::reduce(self).map(|_| ())
     }
 
@@ -528,7 +457,6 @@ impl JsonlStore {
             .iter()
             .map(|entry| entry.seq)
             .chain(self.records.iter().map(Record::seq))
-            .chain(self.legacy_records.iter().map(OpRecord::seq))
             .max()
             .unwrap_or(0)
             + 1
@@ -593,29 +521,6 @@ fn read_entries(path: &Path) -> io::Result<(Vec<Entry>, Vec<Record>)> {
 
 fn validate_harness_records(records: &[Record], path: &Path) -> io::Result<()> {
     let mut ids = IdSet::new();
-    let mut previous = 0;
-    for (index, record) in records.iter().enumerate() {
-        if record.id().trim().is_empty() || !ids.insert(record.id().to_owned()) {
-            return Err(invalid_line(
-                path,
-                index + 1,
-                "duplicate or empty record id",
-            ));
-        }
-        if record.seq() <= previous {
-            return Err(invalid_line(
-                path,
-                index + 1,
-                "non-monotonic record sequence",
-            ));
-        }
-        previous = record.seq();
-    }
-    Ok(())
-}
-
-fn validate_records(records: &[OpRecord], path: &Path) -> io::Result<()> {
-    let mut ids = HashSet::new();
     let mut previous = 0;
     for (index, record) in records.iter().enumerate() {
         if record.id().trim().is_empty() || !ids.insert(record.id().to_owned()) {

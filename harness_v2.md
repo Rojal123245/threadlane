@@ -4,11 +4,11 @@
 
 > [!NOTE]
 > **Implementation Status (Updated 2026-08-05):**
-> - **Milestones 0–8 & 11**: Fully implemented and tested in `threadlane-agent` (SessionStore, JsonlStore, SqliteStore, MemoryStore, Reducer, GatedEffects, Procedure, Tool Batches, Compaction, Navigation, Hooks, Telemetry, and Events).
-> - **Milestone 9 (CodingAgent)**: Core harness wiring completed. Legacy `.oplog.jsonl` remains only as a compatibility fallback for supervisor-owned legacy sessions.
-> - **Milestone 10 (Makepad UI)**: UI event/status integration completed, including startup suspended-operation Resume/Abort controls.
-> - **Milestone 12 (Cutover Audit & Deletion)**: Pending final legacy fallback audit and dead code cleanup.
-> - **Verification checkpoint**: `threadlane-agent` passes; `threadlane-coding-agent` still has 7 V2 subagent/legacy-recovery test failures, so the workspace is not yet green.
+> - **Milestones 0–11**: Implemented and covered by the workspace test suite.
+> - **Milestone 9 (CodingAgent)**: Foreground chat, built-in subagents, and explicit `/task` use V2-only persistence.
+> - **Milestone 10 (Makepad UI)**: UI event/status integration is complete, including startup suspended-operation Resume/Abort controls.
+> - **Milestone 12 (Cutover Audit & Deletion)**: Legacy sidecar persistence and fallback recovery have been removed. Pre-V2 sidecar operations are intentionally unsupported after this cutover; tree-only transcripts remain readable.
+> - **Verification checkpoint**: Workspace tests, focused tests, `cargo check -p threadlane`, and whitespace checks pass. `cargo fmt --check` reports existing repository-wide drift; Makepad Studio runtime verification is unavailable on hosts without a Metal device.
 
 **Goal:** Make every accepted foreground or background agent operation crash-recoverable from its last safe effect boundary, while preserving existing Threadlane sessions and UI behavior.
 
@@ -53,7 +53,7 @@ Threadlane should adopt these invariants, not copy the reference TypeScript layo
 | Provider-neutral routing | `threadlane-provider::router::ProviderClient` maps OpenAI and other providers to shared stream events | Reuse; expose one-response primitive beneath the loop |
 | Steering/follow-up queues | `AgentLoop` has process-local queues; `HarnessSupervisor` has per-lane steer/follow-up/next-run queues with durable enqueue-before-mutate behavior | Merge into the durable lane core |
 | Lane inventory | `HarnessSupervisor::Lane` tracks leaf, status, parent, queue, operation log, usage, and active run | Useful model, but currently scheduler-local and incomplete |
-| Recovery helpers | `reconcile_op_log_recovery`, `interrupted_subagent_lanes`, safe replay, unsafe synthesis, and subagent checkpoints | Preserve tests and fold behavior into the general reducer |
+| Recovery helpers | `interrupted_subagent_lanes`, safe replay, unsafe synthesis, and subagent checkpoints | Preserve tests and fold behavior into the general reducer |
 | Subagent durability | `SubagentLaneJournal` records child intent, checkpoints turns, replays safe tools, aborts unsafe work, and commits passive sibling branches | Most mature durable path; use it as migration evidence |
 | Cancellation | Background tasks and foreground generations can be aborted; subagent cancellation is persisted | External cancellation exists, but general run abort is not durable/reconciled |
 | Event stream | `AgentEvent` plus Tokio broadcast; UI forwards events onto the Makepad thread | Reuse transport; enrich event identity and commit ordering |
@@ -510,12 +510,26 @@ Run the app through the repository's supported Makepad/Studio flow and visually 
 
 **Work:**
 
-- [ ] Search for every direct `SessionTree` append, `append_op_record_to_file`, `load_op_records_from_file`, raw foreground generation abort, and specialized recovery caller.
-- [ ] Delete superseded queue/recovery/persistence paths only when the V2 path covers their tests.
-- [ ] Keep the thin `AgentLoop` compatibility facade only for genuine external/internal consumers.
-- [ ] Verify old sessions load idle and first V2 write preserves their logical transcript.
-- [ ] Run formatting, whitespace checks, focused tests, full workspace tests, and Makepad runtime verification.
-- [ ] Document the final on-disk format, recovery policy, replay declarations, and operator response to corruption/faulted sessions.
+- [x] Search for every direct `SessionTree` append, `append_op_record_to_file`, `load_op_records_from_file`, raw foreground generation abort, and specialized recovery caller.
+- [x] Delete superseded queue/recovery/persistence paths; V2 is now the only supported persistence path.
+- [x] Keep the thin `AgentLoop` compatibility facade only for genuine external/internal consumers.
+- [x] Verify old sessions load idle and first V2 write preserves their logical transcript.
+- [x] Run whitespace checks, focused tests, and full workspace tests. `cargo fmt --check` remains a repository-wide baseline cleanup item, and Makepad runtime verification requires a Metal-capable host.
+- [x] Document the final on-disk format, recovery policy, replay declarations, and operator response to corruption/faulted sessions.
+
+**Cutover boundary:** `*.harness.jsonl` and the V2 records embedded in the session
+JSONL are the only supported durable format. The `*.oplog.jsonl` reader, writer,
+legacy activity reducer, and specialized sidecar recovery path have been deleted.
+`AgentLoop` remains as the public compatibility facade; production callers use the
+V2-backed `CodingAgent` path.
+
+**Recovery policy:** Open V2 operations restore as suspended and require explicit
+resume or abort. Safe tools replay only when both the tool declaration and the
+recorded intent permit replay; unsafe tools are never replayed. Abort reconciliation
+materializes results for every unfinished tool and closes the run. Malformed or
+inconsistent durable records fault the session before execution proceeds; operators
+should preserve the files for diagnosis and restart from a valid prior session
+version rather than hand-editing a journal.
 
 **Verification:**
 

@@ -69,15 +69,13 @@ only the torn final line after confirming the preceding records are valid.
 
 ## Backend and compatibility rules
 
-MemoryStore defines reducer semantics. JSONL is the supported compatibility
-backend; SQLite provides transactional sequence allocation, writer leasing,
-forks, and the same reducer validation. Existing JSONL sessions are not
-automatically converted to SQLite.
+MemoryStore defines reducer semantics. JSONL is the supported default backend;
+SQLite provides transactional sequence allocation, writer leasing, forks, and
+the same reducer validation. Tree-only historical JSONL can still be read as a
+transcript, but pre-V2 sidecar operations are not migrated or recovered.
 
 Foreground chat uses the `main` lane. Explicit background `/task` work remains
 owned by `HarnessSupervisor`; ordinary foreground sessions and built-in
 subagents use the same durable harness core without becoming supervisor tasks.
-Legacy `.oplog.jsonl` data is read only for sessions without V2 lifecycle
-records or for legacy record shapes that have no V2 equivalent. Once a lane has
-V2 lifecycle state, V2 is authoritative and supervisor writes do not duplicate
-operation, abort, tool, queue, or navigation records into the legacy sidecar.
+There is no legacy `.oplog.jsonl` compatibility path. Operation, abort, tool,
+queue, navigation, and recovery state are written through V2 records only.

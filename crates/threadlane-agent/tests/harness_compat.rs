@@ -3,30 +3,7 @@ use tempfile::tempdir;
 use threadlane_agent::harness::{
     Entry, JsonlStore, LaneStatus, OperationIntent, Record, SessionStore,
 };
-use threadlane_agent::OpRecord;
 use threadlane_agent::{AgentMessage, SessionTree};
-
-#[test]
-fn legacy_session_opens_as_idle_main_with_the_existing_active_leaf() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("chat.jsonl");
-    let mut tree = SessionTree::new("chat");
-    tree.file_path = Some(path.clone());
-    let first = tree.add_message(AgentMessage::user("hello", vec![]));
-    let second = tree.add_message(AgentMessage::Assistant {
-        content: Some("hi".into()),
-        tool_calls: None,
-        stop_reason: Some("stop".into()),
-        deferred_handle: None,
-    });
-
-    let store = JsonlStore::open(&path).unwrap();
-    let lane = store.legacy_main_lane();
-    assert_eq!(lane.status, LaneStatus::Idle);
-    assert_eq!(lane.leaf_id, Some(second));
-    assert_ne!(lane.leaf_id, Some(first));
-    assert_eq!(store.tree().get_active_branch_messages().len(), 2);
-}
 
 #[test]
 fn legacy_global_facts_are_present_in_the_reduced_main_lane() {
@@ -177,29 +154,6 @@ fn legacy_loader_does_not_silently_drop_malformed_complete_lines() {
     let path = dir.path().join("chat.jsonl");
     fs::write(&path, "not-json\n").unwrap();
     assert!(SessionTree::load_from_file(&path).is_err());
-}
-
-#[test]
-fn jsonl_store_rejects_duplicate_operation_ids() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("chat.jsonl");
-    fs::write(&path, "{\"id\":\"node_1\",\"parent_id\":null,\"timestamp\":1,\"message\":{\"role\":\"user\",\"content\":\"ok\"}}\n").unwrap();
-    let record = OpRecord::OperationStarted {
-        id: "run-1".into(),
-        seq: 1,
-        lane: "main".into(),
-        timestamp: 1,
-        source_leaf_id: None,
-        kind: "run".into(),
-        system_prompt_override: None,
-    };
-    let line = serde_json::to_string(&record).unwrap();
-    fs::write(
-        path.with_extension("oplog.jsonl"),
-        format!("{line}\n{line}\n"),
-    )
-    .unwrap();
-    assert!(JsonlStore::open(&path).is_err());
 }
 
 #[test]

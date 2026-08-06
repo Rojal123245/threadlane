@@ -134,7 +134,6 @@ fn harness_next_seq(store: &JsonlStore) -> u64 {
         .iter()
         .map(|entry| entry.seq)
         .chain(store.records().iter().map(HarnessRecord::seq))
-        .chain(store.legacy_records().iter().map(OpRecord::seq))
         .max()
         .unwrap_or(0)
         + 1

@@ -3,7 +3,7 @@ use crate::coding_agent::{
 };
 use crate::packages::ExtensionScope;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -12,8 +12,7 @@ use threadlane_agent::harness::{
     QueueKind as HarnessQueueKind, Record as HarnessRecord, Reducer, SessionStore,
 };
 use threadlane_agent::{
-    load_op_records_from_file, AgentEvent, AgentMessage, LaneQueue,
-    OpRecord, QueueKind, TokenUsage,
+    AgentEvent, AgentMessage, LaneQueue, OpRecord, QueueKind, TokenUsage,
 };
 
 fn append_v2_lifecycle_record(session_file: &Path, record: HarnessRecord) -> Result<(), String> {
@@ -36,7 +35,6 @@ fn append_v2_lifecycle_record(session_file: &Path, record: HarnessRecord) -> Res
         .iter()
         .map(|entry| entry.seq)
         .chain(store.records().iter().map(HarnessRecord::seq))
-        .chain(store.legacy_records().iter().map(OpRecord::seq))
         .max()
         .unwrap_or(0)
         + 1;
@@ -158,22 +156,7 @@ fn append_v2_lifecycle_record(session_file: &Path, record: HarnessRecord) -> Res
         .map_err(|error| error.to_string())
 }
 
-fn append_legacy_record(session_file: &Path, record: OpRecord) -> Result<(), String> {
-    if !session_file.exists() {
-        fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(session_file)
-            .map_err(|error| error.to_string())?;
-    }
-    let mut store = JsonlStore::open(session_file).map_err(|error| error.to_string())?;
-    let record = record.with_seq(store.next_sequence());
-    store
-        .append_legacy_record(record)
-        .map_err(|error| error.to_string())
-}
-
-fn v2_from_legacy_lifecycle(record: &OpRecord) -> Option<HarnessRecord> {
+fn v2_lifecycle_from_op_record(record: &OpRecord) -> Option<HarnessRecord> {
     match record {
         OpRecord::OperationStarted {
             id,
@@ -333,7 +316,7 @@ fn persist_queue_intent(
             },
             priority,
             target: ProvisionedEntry {
-                id: format!("legacy-{}", record.id()),
+                id: format!("queue-{}", record.id()),
                 parent_id: lane.leaf_id.clone(),
                 message: target.clone(),
             },
@@ -373,24 +356,16 @@ fn append_abort_requested_record(
         )?;
         return Ok(record);
     }
-    let path = session_file.with_extension("oplog.jsonl");
-    let records = load_op_records_from_file(&path)
-        .map_err(|error| format!("Failed to read abort log: {error}"))?;
-    let seq = records.iter().map(OpRecord::seq).max().unwrap_or(0) + 1;
-    let record = match record {
-        OpRecord::AbortRequested {
-            lane, timestamp, run_id, ..
-        } => OpRecord::AbortRequested {
-            id: format!("abort-{run_id}-{seq}"),
-            seq,
-            lane,
-            timestamp,
-            run_id,
+    append_v2_lifecycle_record(
+        session_file,
+        HarnessRecord::AbortRequested {
+            id: format!("v2-{}", record.id()),
+            seq: 0,
+            lane: lane.to_owned(),
+            timestamp: now_ms() as u64,
+            run_id: run_id.to_owned(),
         },
-        _ => unreachable!("abort helper created a different record"),
-    };
-    append_legacy_record(session_file, record.clone())
-        .map_err(|error| format!("Failed to append abort intent: {error}"))?;
+    )?;
     Ok(record)
 }
 
@@ -693,7 +668,7 @@ impl HarnessSupervisor {
         let mut lock = self.lanes.lock().unwrap();
         lock.entry(key.clone())
             .or_insert_with(|| Lane::new(lane_name, session_id));
-        if let Some(v2) = v2_from_legacy_lifecycle(&record) {
+        if let Some(v2) = v2_lifecycle_from_op_record(&record) {
             let mirror = match &v2 {
                 HarnessRecord::OperationStarted { .. } => true,
                 HarnessRecord::OperationFinished { run_id, .. }
@@ -722,18 +697,6 @@ impl HarnessSupervisor {
             if mirror {
                 append_v2_lifecycle_record(session_file, v2)?;
             }
-            if matches!(record, OpRecord::OperationFinished { .. }) {
-                let legacy_path = session_file.with_extension("oplog.jsonl");
-                if load_op_records_from_file(&legacy_path)
-                    .map(|records| !records.is_empty())
-                    .unwrap_or(false)
-                {
-                    append_legacy_record(session_file, record.clone())?;
-                }
-            }
-        } else {
-            append_legacy_record(session_file, record.clone())
-                .map_err(|error| format!("Failed to append lane operation: {error}"))?;
         }
         let lane = lock.get_mut(&key).unwrap();
         lane.session_file = Some(session_file.to_path_buf());
@@ -892,8 +855,7 @@ impl HarnessSupervisor {
             v2_written = true;
         }
         if !v2_written {
-            append_legacy_record(session_file, record.clone())
-                .map_err(|error| format!("Failed to append lane operation: {error}"))?;
+            return Err("tool intent has no assistant entry in the V2 session".into());
         }
         let lane = lock.get_mut(&key).unwrap();
         lane.session_file = Some(session_file.to_path_buf());
@@ -1000,8 +962,7 @@ impl HarnessSupervisor {
                 )?;
             }
         } else {
-            append_legacy_record(session_file, record.clone())
-                .map_err(|error| format!("Failed to append tool completion: {error}"))?;
+            return Err("tool completion has no V2 tool intent".into());
         }
         let lane = lock.get_mut(&key).unwrap();
         lane.session_file = Some(session_file.to_path_buf());
@@ -1029,190 +990,56 @@ impl HarnessSupervisor {
         session_file: &Path,
         session_tree: &mut threadlane_agent::SessionTree,
     ) -> Result<threadlane_agent::RecoveryResult, String> {
-        let oplog_file = session_file.with_extension("oplog.jsonl");
-        if !oplog_file.exists()
-            || fs::metadata(&oplog_file)
-                .map(|metadata| metadata.len() == 0)
-                .unwrap_or(true)
-        {
-            let store = JsonlStore::open(session_file).map_err(|error| error.to_string())?;
-            let state = Reducer::reduce(&store).map_err(|error| error.to_string())?;
-            let mut open_operation_ids = Vec::new();
-            let mut abort_requested_operation_ids = Vec::new();
-            let mut lock = self.lanes.lock().unwrap();
-            for lane_state in &state.lanes {
-                if lane_state.open_operation.is_none() && lane_state.queued.is_empty() {
-                    continue;
-                }
-                let key = format!("{session_id}:{}", lane_state.name);
-                let lane = lock
-                    .entry(key)
-                    .or_insert_with(|| Lane::new(&lane_state.name, session_id));
-                lane.session_file = Some(session_file.to_path_buf());
-                lane.leaf_id = lane_state.leaf_id.clone();
-                lane.active_run_id = lane_state.open_operation.clone();
-                lane.status = lane_state
-                    .open_operation
-                    .as_ref()
-                    .map(|_| LaneStatus::Suspended)
-                    .unwrap_or(LaneStatus::Idle);
-                lane.queue = LaneQueue::default();
-                for queued in &lane_state.queued {
-                    match queued.queue {
-                        HarnessQueueKind::Steer => lane.queue.enqueue_steer_with_priority(
-                            queued.target.message.clone(),
-                            queued.priority.unwrap_or(threadlane_agent::SteerPriority::Normal),
-                        ),
-                        HarnessQueueKind::FollowUp => lane
-                            .queue
-                            .enqueue(QueueKind::FollowUp, queued.target.message.clone()),
-                        HarnessQueueKind::NextRun => lane
-                            .queue
-                            .enqueue(QueueKind::NextRun, queued.target.message.clone()),
-                    }
-                }
-                if let Some(run_id) = lane_state.open_operation.clone() {
-                    open_operation_ids.push(run_id.clone());
-                    if lane_state.abort_requested {
-                        abort_requested_operation_ids.push(run_id);
-                    }
-                }
-            }
-            return Ok(threadlane_agent::RecoveryResult {
-                recovered_open_operations: open_operation_ids.len(),
-                open_operation_ids,
-                abort_requested_operation_ids,
-                ..Default::default()
-            });
-        }
-
-        let records = threadlane_agent::load_op_records_from_file(&oplog_file)
-            .map_err(|e| format!("Failed to read oplog file: {e}"))?;
-
-        let recovery = threadlane_agent::reconcile_op_log_recovery(session_tree, &records);
-
-        let mut grouped: HashMap<String, Vec<OpRecord>> = HashMap::new();
-        for rec in records {
-            grouped.entry(rec.lane().to_string()).or_default().push(rec);
-        }
-
+        let _ = session_tree;
+        let store = JsonlStore::open(session_file).map_err(|error| error.to_string())?;
+        let state = Reducer::reduce(&store).map_err(|error| error.to_string())?;
+        let mut open_operation_ids = Vec::new();
+        let mut abort_requested_operation_ids = Vec::new();
         let mut lock = self.lanes.lock().unwrap();
-        for (lane_name, lane_records) in grouped {
-            let key = format!("{session_id}:{lane_name}");
+        for lane_state in &state.lanes {
+            if lane_state.open_operation.is_none() && lane_state.queued.is_empty() {
+                continue;
+            }
+            let key = format!("{session_id}:{}", lane_state.name);
             let lane = lock
                 .entry(key)
-                .or_insert_with(|| Lane::new(&lane_name, session_id));
-            let parent_lane = lane.parent_lane.clone();
-            let accumulated_usage = lane.accumulated_usage.clone();
-            let leaf_id = lane.leaf_id.clone();
-            let mut restored = Lane::new(&lane_name, session_id);
-            restored.session_file = Some(session_file.to_path_buf());
-            let finished_runs: std::collections::HashSet<String> = lane_records
-                .iter()
-                .filter_map(|record| match record {
-                    OpRecord::OperationFinished { run_id, .. } => Some(run_id.clone()),
-                    _ => None,
-                })
-                .collect();
-            restored.active_run_id = lane_records.iter().rev().find_map(|record| match record {
-                OpRecord::OperationStarted { id, .. } if !finished_runs.contains(id) => {
-                    Some(id.clone())
-                }
-                _ => None,
-            });
-            for record in &lane_records {
-                if let OpRecord::QueueEnqueued {
-                    queue,
-                    priority,
-                    target,
-                    ..
-                } = record
-                {
-                    if queue == &QueueKind::Steer {
-                        restored.queue.enqueue_steer_with_priority(
-                            target.clone(),
-                            priority.unwrap_or(threadlane_agent::SteerPriority::Normal),
-                        );
-                    } else {
-                        restored.queue.enqueue(queue.clone(), target.clone());
-                    }
+                .or_insert_with(|| Lane::new(&lane_state.name, session_id));
+            lane.session_file = Some(session_file.to_path_buf());
+            lane.leaf_id = lane_state.leaf_id.clone();
+            lane.active_run_id = lane_state.open_operation.clone();
+            lane.status = lane_state
+                .open_operation
+                .as_ref()
+                .map(|_| LaneStatus::Suspended)
+                .unwrap_or(LaneStatus::Idle);
+            lane.queue = LaneQueue::default();
+            for queued in &lane_state.queued {
+                match queued.queue {
+                    HarnessQueueKind::Steer => lane.queue.enqueue_steer_with_priority(
+                        queued.target.message.clone(),
+                        queued.priority.unwrap_or(threadlane_agent::SteerPriority::Normal),
+                    ),
+                    HarnessQueueKind::FollowUp => lane
+                        .queue
+                        .enqueue(QueueKind::FollowUp, queued.target.message.clone()),
+                    HarnessQueueKind::NextRun => lane
+                        .queue
+                        .enqueue(QueueKind::NextRun, queued.target.message.clone()),
                 }
             }
-            restored.op_log = lane_records;
-            restored.status = LaneStatus::Suspended;
-            restored.parent_lane = parent_lane;
-            restored.accumulated_usage = accumulated_usage;
-            restored.leaf_id = leaf_id;
-            *lane = restored;
-        }
-
-        // Once V2 lifecycle records exist, they are the recovery authority for
-        // open/finished/queue state. The legacy sidecar remains loaded above
-        // only as a compatibility fallback for fields with no V2 record.
-        if let Ok(store) = JsonlStore::open(session_file) {
-            let v2_lanes: HashSet<String> = store
-                .records()
-                .iter()
-                .filter_map(|record| match record {
-                    HarnessRecord::OperationStarted { lane, .. } => Some(lane.clone()),
-                    _ => None,
-                })
-                .collect();
-            if !v2_lanes.is_empty() {
-                let state = Reducer::reduce(&store).map_err(|error| error.to_string())?;
-                let mut open_operation_ids = Vec::new();
-                for lane_name in v2_lanes {
-                    let lane_state = state
-                        .lane(&lane_name)
-                        .ok_or_else(|| format!("V2 lane '{lane_name}' disappeared during recovery"))?;
-                    let key = format!("{session_id}:{lane_name}");
-                    let lane = lock
-                        .entry(key)
-                        .or_insert_with(|| Lane::new(&lane_name, session_id));
-                    lane.session_file = Some(session_file.to_path_buf());
-                    lane.leaf_id = lane_state.leaf_id.clone();
-                    lane.active_run_id = lane_state.open_operation.clone();
-                    lane.queue = LaneQueue::default();
-                    for queued in &lane_state.queued {
-                        match queued.queue {
-                            HarnessQueueKind::Steer => lane.queue.enqueue_steer_with_priority(
-                                queued.target.message.clone(),
-                                queued.priority
-                                    .unwrap_or(threadlane_agent::SteerPriority::Normal),
-                            ),
-                            HarnessQueueKind::FollowUp => lane
-                                .queue
-                                .enqueue(QueueKind::FollowUp, queued.target.message.clone()),
-                            HarnessQueueKind::NextRun => lane
-                                .queue
-                                .enqueue(QueueKind::NextRun, queued.target.message.clone()),
-                        }
-                    }
-                    lane.status = if lane_state.open_operation.is_some() {
-                        open_operation_ids.extend(lane_state.open_operation.clone());
-                        LaneStatus::Suspended
-                    } else {
-                        LaneStatus::Idle
-                    };
+            if let Some(run_id) = lane_state.open_operation.clone() {
+                open_operation_ids.push(run_id.clone());
+                if lane_state.abort_requested {
+                    abort_requested_operation_ids.push(run_id);
                 }
-                return Ok(threadlane_agent::RecoveryResult {
-                    recovered_open_operations: open_operation_ids.len(),
-                    open_operation_ids,
-                    abort_requested_operation_ids: state
-                        .lanes
-                        .iter()
-                        .filter_map(|lane| {
-                            lane.abort_requested
-                                .then(|| lane.open_operation.clone())
-                                .flatten()
-                        })
-                        .collect(),
-                    ..Default::default()
-                });
             }
         }
-
-        Ok(recovery)
+        Ok(threadlane_agent::RecoveryResult {
+            recovered_open_operations: open_operation_ids.len(),
+            open_operation_ids,
+            abort_requested_operation_ids,
+            ..Default::default()
+        })
     }
 
     pub fn finish_recovered_operations(
@@ -1898,24 +1725,6 @@ impl HarnessSupervisor {
                     std::slice::from_ref(&run_id),
                     threadlane_agent::OpOutcome::Aborted,
                 );
-                let legacy_path = session_file.with_extension("oplog.jsonl");
-                if load_op_records_from_file(&legacy_path)
-                    .map(|records| records.is_empty())
-                    .unwrap_or(true)
-                {
-                    append_legacy_record(
-                        &session_file,
-                        OpRecord::OperationFinished {
-                            id: format!("legacy-finish-{run_id}"),
-                            seq: 0,
-                            lane: "main".into(),
-                            timestamp: now_ms() as u64,
-                            run_id,
-                            outcome: threadlane_agent::OpOutcome::Aborted,
-                            error: None,
-                        },
-                    )?;
-                }
             }
             Some(guard)
         } else {
@@ -2212,15 +2021,25 @@ mod tests {
     fn abort_request_is_persisted_before_cancellation() {
         let dir = tempfile::tempdir().unwrap();
         let session_file = dir.path().join("session.jsonl");
-        let record = append_abort_requested_record(&session_file, "main", "run-1").unwrap();
-        assert!(matches!(record, OpRecord::AbortRequested { ref run_id, .. } if run_id == "run-1"));
-        let records = threadlane_agent::load_op_records_from_file(
-            &session_file.with_extension("oplog.jsonl"),
+        fs::File::create(&session_file).unwrap();
+        append_v2_lifecycle_record(
+            &session_file,
+            HarnessRecord::OperationStarted {
+                id: "run-1".into(),
+                seq: 0,
+                lane: "main".into(),
+                timestamp: 1,
+                source_leaf_id: None,
+                intent: OperationIntent::Run,
+            },
         )
         .unwrap();
-        assert!(
-            matches!(records.as_slice(), [OpRecord::AbortRequested { run_id, .. }] if run_id == "run-1")
-        );
+        let record = append_abort_requested_record(&session_file, "main", "run-1").unwrap();
+        assert!(matches!(record, OpRecord::AbortRequested { ref run_id, .. } if run_id == "run-1"));
+        let store = JsonlStore::open(&session_file).unwrap();
+        assert!(store.records().iter().any(|record| {
+            matches!(record, HarnessRecord::AbortRequested { run_id, .. } if run_id == "run-1")
+        }));
     }
 
     #[test]
@@ -2236,8 +2055,6 @@ mod tests {
 
         append_abort_requested_record(&session_file, "main", "run-v2").unwrap();
 
-        let legacy = session_file.with_extension("oplog.jsonl");
-        assert!(!legacy.exists() || load_op_records_from_file(&legacy).unwrap().is_empty());
         let store = JsonlStore::open(&session_file).unwrap();
         assert!(store.records().iter().any(|record| {
             matches!(record, HarnessRecord::AbortRequested { run_id, .. } if run_id == "run-v2")
@@ -2272,19 +2089,15 @@ mod tests {
             .persist_prompt_run("session-1", &session_file, None, "two")
             .unwrap();
         assert_ne!(first, second);
-        let records = threadlane_agent::load_op_records_from_file(
-            &session_file.with_extension("oplog.jsonl"),
-        )
-        .unwrap();
-        let sequences = records.iter().map(OpRecord::seq).collect::<Vec<_>>();
-        assert!(sequences.windows(2).all(|pair| pair[0] < pair[1]));
-        assert!(!records
-            .iter()
-            .any(|record| matches!(record, OpRecord::TaskAttempt { .. })));
         let harness = JsonlStore::open(&session_file).unwrap();
-        assert!(harness.records().iter().any(|record| {
-            matches!(record, HarnessRecord::OperationStarted { id, .. } if id == &first)
-        }));
+        assert_eq!(
+            harness
+                .records()
+                .iter()
+                .filter(|record| matches!(record, HarnessRecord::OperationStarted { .. }))
+                .count(),
+            2
+        );
     }
 
     #[tokio::test]
@@ -2354,8 +2167,6 @@ mod tests {
             .await;
 
         assert!(!results[0].is_error);
-        let legacy = session_file.with_extension("oplog.jsonl");
-        assert!(!legacy.exists() || load_op_records_from_file(&legacy).unwrap().is_empty());
         let harness = JsonlStore::open(&session_file).unwrap();
         assert!(harness.records().iter().any(|record| {
             matches!(record, HarnessRecord::OperationStarted { id, .. } if id == "run-1")
@@ -2461,15 +2272,12 @@ mod tests {
             .unwrap();
         supervisor.cancel_task("task-1").unwrap();
 
-        let records = threadlane_agent::load_op_records_from_file(
-            &session_file.with_extension("oplog.jsonl"),
-        )
-        .unwrap();
-        assert!(records.iter().any(|record| matches!(
+        let store = JsonlStore::open(&session_file).unwrap();
+        assert!(store.records().iter().any(|record| matches!(
             record,
-            OpRecord::OperationFinished {
+            HarnessRecord::OperationFinished {
                 run_id,
-                outcome: threadlane_agent::OpOutcome::Aborted,
+                outcome: OperationOutcome::Aborted,
                 ..
             } if run_id == "run-1"
         )));
@@ -2983,39 +2791,6 @@ mod tests {
     }
 
     #[test]
-    fn tool_completion_uses_the_intent_result_identity() {
-        let dir = tempfile::tempdir().unwrap();
-        let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
-        let session_file = dir.path().join("session.jsonl");
-        supervisor
-            .append_persisted_lane_record(
-                "session-1",
-                "main",
-                &session_file,
-                OpRecord::OperationStarted {
-                    id: "run-1".into(), seq: 1, lane: "main".into(), timestamp: 1,
-                    source_leaf_id: None, kind: "prompt".into(), system_prompt_override: None,
-                },
-            )
-            .unwrap();
-        supervisor
-            .append_tool_started_record(
-                "session-1", "main", &session_file, "call-1", "list_dir", serde_json::json!({}),
-            )
-            .unwrap();
-        supervisor
-            .append_tool_finished_record("session-1", "main", &session_file, "call-1", true)
-            .unwrap();
-        let records = threadlane_agent::load_op_records_from_file(
-            &session_file.with_extension("oplog.jsonl"),
-        )
-        .unwrap();
-        assert!(matches!(records.last(), Some(OpRecord::ToolFinished {
-            result_entry_id, terminate: true, ..
-        }) if result_entry_id == "result-call-1"));
-    }
-
-    #[test]
     fn v2_tool_intent_does_not_create_a_legacy_sidecar_record() {
         let dir = tempfile::tempdir().unwrap();
         let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
@@ -3114,8 +2889,6 @@ mod tests {
             .append_tool_finished_record("session-1", "main", &session_file, "call-v2", false)
             .unwrap();
 
-        let legacy = session_file.with_extension("oplog.jsonl");
-        assert!(!legacy.exists() || load_op_records_from_file(&legacy).unwrap().is_empty());
         let store = JsonlStore::open(&session_file).unwrap();
         assert!(store.records().iter().any(|record| {
             matches!(record, HarnessRecord::ToolFinished { tool_call_id, .. } if tool_call_id == "call-v2")
@@ -3146,8 +2919,6 @@ mod tests {
             )
             .unwrap();
 
-        let legacy = session_file.with_extension("oplog.jsonl");
-        assert!(!legacy.exists() || load_op_records_from_file(&legacy).unwrap().is_empty());
         let harness = JsonlStore::open(&session_file).unwrap();
         assert!(harness.records().iter().any(|record| {
             matches!(record, HarnessRecord::OperationStarted { id, .. } if id == "run-1")
@@ -3159,26 +2930,6 @@ mod tests {
                 .len(),
             1
         );
-
-        supervisor
-            .append_tool_started_record(
-                "session-1",
-                "main",
-                &session_file,
-                "call-1",
-                "view_file",
-                serde_json::json!({"path":"src/lib.rs"}),
-            )
-            .unwrap();
-        let records = threadlane_agent::load_op_records_from_file(
-            &session_file.with_extension("oplog.jsonl"),
-        )
-        .unwrap();
-        assert!(matches!(
-            records.last(),
-            Some(OpRecord::ToolStarted { tool_call_id, replay, .. })
-                if tool_call_id == "call-1" && replay == &threadlane_agent::ToolReplaySafety::Safe
-        ));
 
         let mut tree = threadlane_agent::SessionTree::new("session-1");
         let recovery = supervisor
@@ -3205,7 +2956,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_only_open_run_is_restored_when_legacy_sidecar_is_empty() {
+    fn v2_only_open_run_is_restored() {
         let dir = tempfile::tempdir().unwrap();
         let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
         let session_file = dir.path().join("session.jsonl");
@@ -3216,64 +2967,12 @@ mod tests {
             .unwrap();
         harness.drive_one().unwrap();
         drop(harness);
-        fs::File::create(session_file.with_extension("oplog.jsonl")).unwrap();
 
         let mut tree = threadlane_agent::SessionTree::new("session-1");
         let recovery = supervisor
             .restore_session_lanes("session-1", &session_file, &mut tree)
             .unwrap();
 
-        assert_eq!(recovery.open_operation_ids, vec!["run-v2"]);
-        assert_eq!(
-            supervisor
-                .get_or_create_lane("session-1", "main")
-                .status,
-            LaneStatus::Suspended
-        );
-    }
-
-    #[test]
-    fn v2_open_run_wins_over_stale_legacy_completion() {
-        let dir = tempfile::tempdir().unwrap();
-        let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
-        let session_file = dir.path().join("session.jsonl");
-        fs::File::create(&session_file).unwrap();
-        let mut harness = AgentHarness::new(JsonlStore::open(&session_file).unwrap());
-        harness
-            .accept_prompt("run-v2", AgentMessage::user("prompt", Vec::new()))
-            .unwrap();
-        harness.drive_one().unwrap();
-        append_legacy_record(
-            &session_file,
-            OpRecord::OperationStarted {
-                id: "run-v2".into(),
-                seq: 1,
-                lane: "main".into(),
-                timestamp: 1,
-                source_leaf_id: None,
-                kind: "prompt".into(),
-                system_prompt_override: None,
-            },
-        )
-        .unwrap();
-        append_legacy_record(
-            &session_file,
-            OpRecord::OperationFinished {
-                id: "legacy-finish".into(),
-                seq: 2,
-                lane: "main".into(),
-                timestamp: 2,
-                run_id: "run-v2".into(),
-                outcome: threadlane_agent::OpOutcome::Completed,
-                error: None,
-            },
-        )
-        .unwrap();
-
-        let mut tree = threadlane_agent::SessionTree::new("session-1");
-        let recovery = supervisor
-            .restore_session_lanes("session-1", &session_file, &mut tree)
-            .unwrap();
         assert_eq!(recovery.open_operation_ids, vec!["run-v2"]);
         assert_eq!(
             supervisor
