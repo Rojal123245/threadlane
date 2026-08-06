@@ -459,6 +459,8 @@ or updates a release pull request containing the next workspace version and the
 root [`CHANGELOG.md`](CHANGELOG.md). Merging that pull request creates a
 `v<version>` tag and GitHub release. The release notes include the generated
 changelog entries for the included conventional commits.
+At least one included commit must use a release-worthy Conventional Commit
+prefix such as `fix:` or `feat:`; other messages do not trigger a release PR.
 
 The automation is split between
 [`.github/workflows/release-please.yml`](.github/workflows/release-please.yml), which
