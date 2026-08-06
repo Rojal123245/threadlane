@@ -461,23 +461,18 @@ root [`CHANGELOG.md`](CHANGELOG.md). Merging that pull request creates a
 changelog and the GitHub contributors associated with the included pull
 requests.
 
-The repository uses a GitHub App token because GitHub does not allow tags made
-with a workflow's default `GITHUB_TOKEN` to start another workflow. Create and
-install a least-privilege GitHub App with **Contents: read and write** and
-**Pull requests: read and write**, then configure its credentials:
-
-```bash
-gh secret set RELEASE_PLZ_APP_ID
-gh secret set RELEASE_PLZ_APP_PRIVATE_KEY < release-plz-app.private-key.pem
-```
-
 The automation is split between
 [`.github/workflows/release-plz.yml`](.github/workflows/release-plz.yml), which
 manages the release pull request, changelog, tag, and GitHub release, and
-[`.github/workflows/release.yml`](.github/workflows/release.yml), which runs for
-the resulting tag and attaches the platform artifacts. The tag must exactly
-match the `threadlane` workspace version; the packaging workflow verifies that
-invariant before building.
+[`.github/workflows/release.yml`](.github/workflows/release.yml), which is called
+directly after release-plz creates a release and attaches the platform
+artifacts. Both workflows use the repository's built-in `GITHUB_TOKEN`; no
+release-specific token or GitHub App is required. The packaging workflow also
+retains its tag-push and manual triggers. The tag must exactly match the
+`threadlane` workspace version; the packaging workflow verifies that invariant
+before building. In **Settings → Actions → General → Workflow permissions**,
+enable **Allow GitHub Actions to create and approve pull requests** so
+release-plz can maintain its release pull request.
 
 A tagged build publishes:
 
