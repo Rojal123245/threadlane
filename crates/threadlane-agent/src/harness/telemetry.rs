@@ -9,7 +9,11 @@ pub struct ExecutionContext {
 }
 
 impl ExecutionContext {
-    pub fn with_run(session_id: impl Into<String>, lane: impl Into<String>, run_id: impl Into<String>) -> Self {
+    pub fn with_run(
+        session_id: impl Into<String>,
+        lane: impl Into<String>,
+        run_id: impl Into<String>,
+    ) -> Self {
         Self {
             session_id: Some(session_id.into()),
             lane: Some(lane.into()),
@@ -30,7 +34,10 @@ impl ExecutionContext {
             "content",
             "response",
         ];
-        if sensitive.iter().any(|part| key.to_ascii_lowercase().contains(part)) {
+        if sensitive
+            .iter()
+            .any(|part| key.to_ascii_lowercase().contains(part))
+        {
             return;
         }
         self.attributes.insert(key, value.into());

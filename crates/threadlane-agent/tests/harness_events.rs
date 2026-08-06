@@ -138,7 +138,11 @@ fn committed_attempt_events_include_turn_identity() {
     let hub = HarnessEventHub::new(8);
     let mut harness = AgentHarness::with_events(MemoryStore::new("session-1"), hub.clone());
     harness
-        .start_operation("run-1", None, threadlane_agent::harness::OperationIntent::Run)
+        .start_operation(
+            "run-1",
+            None,
+            threadlane_agent::harness::OperationIntent::Run,
+        )
         .unwrap();
     harness.drive_to_completion().unwrap();
     let mut subscription = hub.subscribe(harness.store()).unwrap();
@@ -245,5 +249,8 @@ fn cloned_event_hubs_share_commits_across_harness_adapters() {
     let events = hub.poll(&mut subscription).unwrap();
     assert_eq!(events.len(), 2);
     assert!(matches!(events[0].payload, EventPayload::EntryCommitted(_)));
-    assert!(matches!(events[1].payload, EventPayload::RecordCommitted(_)));
+    assert!(matches!(
+        events[1].payload,
+        EventPayload::RecordCommitted(_)
+    ));
 }

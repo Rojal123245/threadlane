@@ -210,6 +210,12 @@ mod tests {
                 intent: OperationIntent::Run,
             })
             .unwrap_err();
-        assert!(matches!(error, ReduceError::NonMonotonicSequence { previous: 5, current: 4 }));
+        assert!(matches!(
+            error,
+            ReduceError::NonMonotonicSequence {
+                previous: 5,
+                current: 4
+            }
+        ));
     }
 }

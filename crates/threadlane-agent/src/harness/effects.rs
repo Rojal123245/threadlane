@@ -3,8 +3,8 @@ use super::store::SessionStore;
 use super::telemetry::{ExecutionContext, NoopTelemetry, TelemetrySink};
 use super::types::Entry;
 use super::types::{Record, ReduceError};
-use std::sync::Arc;
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum EffectAction {
@@ -147,10 +147,13 @@ impl GatedEffects {
         let mut context = ExecutionContext::default();
         context.lane = Some(action.lane().to_owned());
         context.run_id = action.run_id().map(str::to_owned);
-        context.set_attribute("effect", match action {
-            EffectAction::AppendEntry { .. } => "append_entry",
-            EffectAction::AppendRecord { .. } => "append_record",
-        });
+        context.set_attribute(
+            "effect",
+            match action {
+                EffectAction::AppendEntry { .. } => "append_entry",
+                EffectAction::AppendRecord { .. } => "append_record",
+            },
+        );
         context.set_attribute("effect_id", action.id().to_owned());
         self.telemetry.event("effect_committed", &context);
     }
@@ -258,7 +261,10 @@ impl GatedEffects {
             self.fault = Some(error.clone());
             return Err(EffectsError::Faulted(error));
         }
-        let action = self.pending.remove(index).expect("action index was present");
+        let action = self
+            .pending
+            .remove(index)
+            .expect("action index was present");
         self.notify_committed(&action);
         Ok(action)
     }
@@ -508,9 +514,8 @@ mod tests {
     fn injected_executor_commits_through_the_same_procedure_gate() {
         let store = std::sync::Arc::new(std::sync::Mutex::new(MemoryStore::new("session")));
         let target = store.clone();
-        let mut effects = GatedEffects::with_executor(move |action| {
-            action.apply(&mut *target.lock().unwrap())
-        });
+        let mut effects =
+            GatedEffects::with_executor(move |action| action.apply(&mut *target.lock().unwrap()));
         effects
             .park(EffectAction::AppendEntry {
                 entry: Entry {

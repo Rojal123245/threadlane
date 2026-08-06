@@ -80,10 +80,7 @@ impl HookRegistry {
             .collect()
     }
 
-    pub fn run_before_tool(
-        &self,
-        context: &HookContext,
-    ) -> Result<(), Vec<HookFailure>> {
+    pub fn run_before_tool(&self, context: &HookContext) -> Result<(), Vec<HookFailure>> {
         let failures = self.run(HookKind::BeforeTool, context);
         if failures.is_empty() {
             Ok(())
@@ -112,10 +109,7 @@ impl HookRegistry {
         self.resume_data.remove(hook_id);
     }
 
-    pub fn restore_resume_data(
-        &mut self,
-        persisted: &std::collections::BTreeMap<String, String>,
-    ) {
+    pub fn restore_resume_data(&mut self, persisted: &std::collections::BTreeMap<String, String>) {
         self.resume_data = persisted
             .iter()
             .filter(|(hook_id, _)| self.hooks.iter().any(|hook| &hook.id == *hook_id))

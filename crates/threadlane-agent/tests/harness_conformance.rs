@@ -103,7 +103,9 @@ fn memory_jsonl_and_sqlite_have_identical_logical_state() {
     assert_eq!(Reducer::reduce(&memory), Reducer::reduce(&sqlite));
 }
 
-fn invalid_append_cases<S: SessionStore>(store: &mut S) -> Vec<threadlane_agent::harness::ReduceError> {
+fn invalid_append_cases<S: SessionStore>(
+    store: &mut S,
+) -> Vec<threadlane_agent::harness::ReduceError> {
     store
         .append_entry(Entry {
             id: "root".into(),

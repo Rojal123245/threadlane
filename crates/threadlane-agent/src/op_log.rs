@@ -368,7 +368,9 @@ pub fn interrupted_subagent_lanes(records: &[OpRecord]) -> Vec<InterruptedSubage
                     .get(&(lane.clone(), run_id.clone()))
                     .and_then(|occurrences| occurrences.last())
                 {
-                    occurrences[*index].completed_tools.insert(tool_call_id.clone());
+                    occurrences[*index]
+                        .completed_tools
+                        .insert(tool_call_id.clone());
                 }
             }
             OpRecord::OperationFinished { lane, run_id, .. } => {

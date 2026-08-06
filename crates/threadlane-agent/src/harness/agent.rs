@@ -1,11 +1,9 @@
 use super::{
-    AbortProcedure, CompactionProcedure, DeferredProcedure, DeferredResolution, EffectAction,
-    EffectsError, GatedEffects, HarnessEventHub, HookRegistry, NavigationProcedure, NoToolRun,
-    AssistantAttemptProcedure, NoopTelemetry, OperationProcedure, ProcedureError, PromptProcedure,
-    ProvisionedEntry,
-    QueueKind, QueueProcedure,
-    ReduceError, SessionStore, Snapshot, TelemetrySink, ToolBatchProcedure, ToolRecovery,
-    ToolResult, ToolSpec,
+    AbortProcedure, AssistantAttemptProcedure, CompactionProcedure, DeferredProcedure,
+    DeferredResolution, EffectAction, EffectsError, GatedEffects, HarnessEventHub, HookRegistry,
+    NavigationProcedure, NoToolRun, NoopTelemetry, OperationProcedure, ProcedureError,
+    PromptProcedure, ProvisionedEntry, QueueKind, QueueProcedure, ReduceError, SessionStore,
+    Snapshot, TelemetrySink, ToolBatchProcedure, ToolRecovery, ToolResult, ToolSpec,
 };
 use crate::types::{AgentMessage, TokenUsage};
 use std::sync::Arc;
@@ -201,12 +199,7 @@ impl<S: SessionStore> AgentHarness<S> {
         run_id: &str,
         usage: TokenUsage,
     ) -> Result<(), ProcedureError> {
-        AssistantAttemptProcedure::record_adjustment(
-            &self.store,
-            run_id,
-            usage,
-            &mut self.effects,
-        )
+        AssistantAttemptProcedure::record_adjustment(&self.store, run_id, usage, &mut self.effects)
     }
 
     pub fn schedule_retry(
@@ -295,11 +288,7 @@ impl<S: SessionStore> AgentHarness<S> {
             .map_err(ProcedureError::from)
     }
 
-    pub fn accept_compaction(
-        &mut self,
-        run_id: &str,
-        summary: &str,
-    ) -> Result<(), ProcedureError> {
+    pub fn accept_compaction(&mut self, run_id: &str, summary: &str) -> Result<(), ProcedureError> {
         CompactionProcedure::accept(&self.store, run_id, summary, &mut self.effects)
     }
 
@@ -309,13 +298,7 @@ impl<S: SessionStore> AgentHarness<S> {
         run_id: &str,
         summary: &str,
     ) -> Result<(), ProcedureError> {
-        CompactionProcedure::accept_on_lane(
-            &self.store,
-            lane,
-            run_id,
-            summary,
-            &mut self.effects,
-        )
+        CompactionProcedure::accept_on_lane(&self.store, lane, run_id, summary, &mut self.effects)
     }
 
     pub fn accept_navigation(
@@ -436,14 +419,7 @@ impl<S: SessionStore> AgentHarness<S> {
         queue: QueueKind,
         target: ProvisionedEntry,
     ) -> Result<(), ProcedureError> {
-        QueueProcedure::enqueue_on_lane(
-            &self.store,
-            lane,
-            run_id,
-            queue,
-            target,
-            &mut self.effects,
-        )
+        QueueProcedure::enqueue_on_lane(&self.store, lane, run_id, queue, target, &mut self.effects)
     }
 
     pub fn enqueue_unbound_on_lane(
@@ -452,13 +428,7 @@ impl<S: SessionStore> AgentHarness<S> {
         queue: QueueKind,
         target: ProvisionedEntry,
     ) -> Result<(), ProcedureError> {
-        QueueProcedure::enqueue_unbound_on_lane(
-            &self.store,
-            lane,
-            queue,
-            target,
-            &mut self.effects,
-        )
+        QueueProcedure::enqueue_unbound_on_lane(&self.store, lane, queue, target, &mut self.effects)
     }
 
     pub fn cancel_queued(&mut self, run_id: &str, entry_id: &str) -> Result<(), ProcedureError> {
@@ -540,7 +510,9 @@ impl<S: SessionStore> AgentHarness<S> {
     ) -> Result<(), ProcedureError> {
         let key = key.into();
         if lane.trim().is_empty() || key.trim().is_empty() {
-            return Err(ProcedureError::Invalid("fact lane and key must be non-empty".into()));
+            return Err(ProcedureError::Invalid(
+                "fact lane and key must be non-empty".into(),
+            ));
         }
         let seq = self
             .store
@@ -640,11 +612,7 @@ impl<S: SessionStore> AgentHarness<S> {
         )
     }
 
-    pub fn finish_tool(
-        &mut self,
-        run_id: &str,
-        result: ToolResult,
-    ) -> Result<(), ProcedureError> {
+    pub fn finish_tool(&mut self, run_id: &str, result: ToolResult) -> Result<(), ProcedureError> {
         ToolBatchProcedure::finish(&self.store, run_id, result, &mut self.effects)
     }
 
@@ -654,13 +622,7 @@ impl<S: SessionStore> AgentHarness<S> {
         result: ToolResult,
         usage: TokenUsage,
     ) -> Result<(), ProcedureError> {
-        ToolBatchProcedure::finish_with_usage(
-            &self.store,
-            run_id,
-            result,
-            usage,
-            &mut self.effects,
-        )
+        ToolBatchProcedure::finish_with_usage(&self.store, run_id, result, usage, &mut self.effects)
     }
 
     pub fn finish_tool_batch(
@@ -669,13 +631,7 @@ impl<S: SessionStore> AgentHarness<S> {
         results: &[ToolResult],
         usage: TokenUsage,
     ) -> Result<(), ProcedureError> {
-        ToolBatchProcedure::finish_batch(
-            &self.store,
-            run_id,
-            results,
-            usage,
-            &mut self.effects,
-        )
+        ToolBatchProcedure::finish_batch(&self.store, run_id, results, usage, &mut self.effects)
     }
 
     pub fn finish_existing_tool(
@@ -793,7 +749,11 @@ impl<S: SessionStore> AgentHarness<S> {
     }
 
     pub fn watch(&self, lane: &str) -> Result<super::Subscription, ReduceError> {
-        if !super::Reducer::reduce(&self.store)?.lanes.iter().any(|state| state.name == lane) {
+        if !super::Reducer::reduce(&self.store)?
+            .lanes
+            .iter()
+            .any(|state| state.name == lane)
+        {
             return Err(ReduceError::InvalidLane(lane.into()));
         }
         self.events.subscribe_for_lane(&self.store, Some(lane))

@@ -229,11 +229,7 @@ impl SessionTree {
         Ok(())
     }
 
-    pub fn set_fact_in_memory(
-        &mut self,
-        key: impl Into<String>,
-        value: impl Into<String>,
-    ) {
+    pub fn set_fact_in_memory(&mut self, key: impl Into<String>, value: impl Into<String>) {
         self.global_facts.insert(key.into(), value.into());
     }
 
@@ -932,10 +928,7 @@ impl SessionTree {
                     Err(error) => {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::InvalidData,
-                            format!(
-                                "Failed to parse harness line {}: {error}",
-                                line_number + 1
-                            ),
+                            format!("Failed to parse harness line {}: {error}", line_number + 1),
                         ));
                     }
                 };

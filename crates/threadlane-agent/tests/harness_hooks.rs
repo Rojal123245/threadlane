@@ -5,10 +5,18 @@ use threadlane_agent::harness::{AgentHarness, HookContext, HookKind, HookRegistr
 fn hooks_run_in_registration_order_and_before_tool_fails_closed() {
     let mut hooks = HookRegistry::default();
     hooks
-        .register(HookKind::BeforeTool, "first", Arc::new(|_| Err("blocked".into())))
+        .register(
+            HookKind::BeforeTool,
+            "first",
+            Arc::new(|_| Err("blocked".into())),
+        )
         .unwrap();
     hooks
-        .register(HookKind::BeforeTool, "second", Arc::new(|_| Err("also blocked".into())))
+        .register(
+            HookKind::BeforeTool,
+            "second",
+            Arc::new(|_| Err("also blocked".into())),
+        )
         .unwrap();
     let context = HookContext {
         session_id: "s".into(),
@@ -17,7 +25,13 @@ fn hooks_run_in_registration_order_and_before_tool_fails_closed() {
         resume_data: None,
     };
     let failures = hooks.run_before_tool(&context).unwrap_err();
-    assert_eq!(failures.iter().map(|failure| failure.id.as_str()).collect::<Vec<_>>(), ["first", "second"]);
+    assert_eq!(
+        failures
+            .iter()
+            .map(|failure| failure.id.as_str())
+            .collect::<Vec<_>>(),
+        ["first", "second"]
+    );
 }
 
 #[test]
@@ -41,7 +55,10 @@ fn resume_data_is_scoped_to_the_matching_stable_hook_id() {
             HookKind::BeforeResume,
             "second",
             Arc::new(move |context| {
-                second_seen.lock().unwrap().push(context.resume_data.clone());
+                second_seen
+                    .lock()
+                    .unwrap()
+                    .push(context.resume_data.clone());
                 Ok(())
             }),
         )

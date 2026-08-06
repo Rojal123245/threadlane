@@ -159,9 +159,7 @@ impl JsonlStore {
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
     }
 
-    fn load_parts(
-        path: &Path,
-    ) -> io::Result<(crate::SessionTree, Vec<Entry>, Vec<Record>)> {
+    fn load_parts(path: &Path) -> io::Result<(crate::SessionTree, Vec<Entry>, Vec<Record>)> {
         validate_session_lines(path)?;
         let tree = crate::SessionTree::load_from_file(path)?;
         let (entries, mut records) = read_entries(path)?;
@@ -189,7 +187,6 @@ impl JsonlStore {
     pub fn records(&self) -> &[Record] {
         &self.records
     }
-
 }
 
 impl SessionStore for JsonlStore {

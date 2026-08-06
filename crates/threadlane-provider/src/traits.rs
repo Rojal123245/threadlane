@@ -30,11 +30,17 @@ pub trait ModelProvider: Send + Sync {
     /// model request. Providers that do not expose deferred responses keep the
     /// safe unsupported default.
     async fn fetch_deferred(&self, _handle_id: &str) -> Result<DeferredResponse, String> {
-        Err(format!("provider {} does not support deferred responses", self.provider_id()))
+        Err(format!(
+            "provider {} does not support deferred responses",
+            self.provider_id()
+        ))
     }
 
     /// Best-effort cancellation for a previously accepted deferred response.
     async fn cancel_deferred(&self, _handle_id: &str) -> Result<(), String> {
-        Err(format!("provider {} does not support deferred responses", self.provider_id()))
+        Err(format!(
+            "provider {} does not support deferred responses",
+            self.provider_id()
+        ))
     }
 }

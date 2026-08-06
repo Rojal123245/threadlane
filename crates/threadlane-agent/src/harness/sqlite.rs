@@ -31,7 +31,9 @@ struct WriterClaim {
 }
 
 fn writer_claim(path: &Path) -> Result<Arc<WriterClaim>, ReduceError> {
-    static CLAIMS: OnceLock<Mutex<std::collections::HashMap<std::path::PathBuf, Weak<WriterClaim>>>> = OnceLock::new();
+    static CLAIMS: OnceLock<
+        Mutex<std::collections::HashMap<std::path::PathBuf, Weak<WriterClaim>>>,
+    > = OnceLock::new();
     let claims = CLAIMS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
     let mut claims = claims
         .lock()

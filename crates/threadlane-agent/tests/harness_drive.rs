@@ -1,20 +1,16 @@
+use std::sync::{Arc, Mutex};
 use threadlane_agent::harness::{
     AbortProcedure, AgentHarness, DeferredProcedure, DeferredResolution, GatedEffects, LaneStatus,
-    MemoryStore, NoToolRun, OperationIntent, ProvisionedEntry, QueueKind, QueueProcedure, Record,
-    PromptProcedure, Reducer, RetryPolicy, UsageCause,
+    MemoryStore, NoToolRun, OperationIntent, PromptProcedure, ProvisionedEntry, QueueKind,
+    QueueProcedure, Record, Reducer, RetryPolicy, UsageCause,
 };
 use threadlane_agent::AgentMessage;
 use threadlane_agent::TokenUsage;
-use std::sync::{Arc, Mutex};
 
 struct RecordingTelemetry(Arc<Mutex<Vec<(String, std::collections::BTreeMap<String, String>)>>>);
 
 impl threadlane_agent::harness::TelemetrySink for RecordingTelemetry {
-    fn event(
-        &self,
-        name: &str,
-        context: &threadlane_agent::harness::ExecutionContext,
-    ) {
+    fn event(&self, name: &str, context: &threadlane_agent::harness::ExecutionContext) {
         self.0
             .lock()
             .unwrap()
@@ -55,8 +51,13 @@ fn no_tool_run_is_parked_without_writes_then_completes() {
 fn a_lane_rejects_a_second_prompt_while_the_first_mutation_is_parked() {
     let store = MemoryStore::new("session-1");
     let mut effects = GatedEffects::new();
-    PromptProcedure::accept(&store, "run-1", AgentMessage::user("one", vec![]), &mut effects)
-        .unwrap();
+    PromptProcedure::accept(
+        &store,
+        "run-1",
+        AgentMessage::user("one", vec![]),
+        &mut effects,
+    )
+    .unwrap();
 
     let error = PromptProcedure::accept(
         &store,
@@ -99,7 +100,12 @@ fn retry_is_durable_with_capped_exponential_backoff() {
         base_delay: 10,
         max_delay: 15,
     };
-    assert_eq!(harness.schedule_retry("run-1", "transient", policy).unwrap(), 1);
+    assert_eq!(
+        harness
+            .schedule_retry("run-1", "transient", policy)
+            .unwrap(),
+        1
+    );
     harness.drive_to_completion().unwrap();
     let retry = harness
         .snapshot()
@@ -113,11 +119,27 @@ fn retry_is_durable_with_capped_exponential_backoff() {
     assert_eq!(retry.attempt, 1);
     assert_eq!(retry.retry_at, 12);
 
-    assert!(harness.schedule_retry("run-1", "duplicate", policy).is_err());
+    assert!(harness
+        .schedule_retry("run-1", "duplicate", policy)
+        .is_err());
     assert_eq!(harness.begin_retry("run-1").unwrap(), 1);
     harness.drive_to_completion().unwrap();
-    assert_eq!(harness.snapshot().unwrap().state.lane("main").unwrap().attempts, 1);
-    assert_eq!(harness.schedule_retry("run-1", "transient-again", policy).unwrap(), 2);
+    assert_eq!(
+        harness
+            .snapshot()
+            .unwrap()
+            .state
+            .lane("main")
+            .unwrap()
+            .attempts,
+        1
+    );
+    assert_eq!(
+        harness
+            .schedule_retry("run-1", "transient-again", policy)
+            .unwrap(),
+        2
+    );
 }
 
 #[test]
@@ -127,12 +149,50 @@ fn failed_provider_usage_advances_the_next_retry_attempt() {
         .start_operation("run-1", None, OperationIntent::Run)
         .unwrap();
     harness.drive_to_completion().unwrap();
-    assert_eq!(harness.record_provider_usage("run-1", TokenUsage::default()).unwrap(), 1);
+    assert_eq!(
+        harness
+            .record_provider_usage("run-1", TokenUsage::default())
+            .unwrap(),
+        1
+    );
     harness.drive_to_completion().unwrap();
-    assert_eq!(harness.schedule_retry("run-1", "timeout", RetryPolicy { max_attempts: 3, base_delay: 1, max_delay: 2 }).unwrap(), 2);
+    assert_eq!(
+        harness
+            .schedule_retry(
+                "run-1",
+                "timeout",
+                RetryPolicy {
+                    max_attempts: 3,
+                    base_delay: 1,
+                    max_delay: 2
+                }
+            )
+            .unwrap(),
+        2
+    );
     harness.drive_to_completion().unwrap();
-    assert_eq!(harness.snapshot().unwrap().state.lane("main").unwrap().retry.as_ref().unwrap().attempt, 2);
-    assert_eq!(harness.store().records().iter().filter(|record| matches!(record, Record::Usage { .. })).count(), 1);
+    assert_eq!(
+        harness
+            .snapshot()
+            .unwrap()
+            .state
+            .lane("main")
+            .unwrap()
+            .retry
+            .as_ref()
+            .unwrap()
+            .attempt,
+        2
+    );
+    assert_eq!(
+        harness
+            .store()
+            .records()
+            .iter()
+            .filter(|record| matches!(record, Record::Usage { .. }))
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -173,18 +233,26 @@ fn usage_ledger_accepts_discarded_requests_and_adjustments() {
     assert_eq!(usage.total_tokens, 5);
     assert!(harness.store().records().iter().any(|record| matches!(
         record,
-        Record::Usage { cause: UsageCause::Discarded, .. }
+        Record::Usage {
+            cause: UsageCause::Discarded,
+            ..
+        }
     )));
     assert!(harness.store().records().iter().any(|record| matches!(
         record,
-        Record::Usage { cause: UsageCause::Adjustment, .. }
+        Record::Usage {
+            cause: UsageCause::Adjustment,
+            ..
+        }
     )));
 }
 
 #[test]
 fn provider_usage_commits_before_assistant_finalization_without_double_counting() {
     let mut harness = AgentHarness::new(MemoryStore::new("session-1"));
-    harness.accept_prompt("run-1", AgentMessage::user("hello", vec![])).unwrap();
+    harness
+        .accept_prompt("run-1", AgentMessage::user("hello", vec![]))
+        .unwrap();
     harness.drive_to_completion().unwrap();
     let seq = harness
         .store()
@@ -208,7 +276,13 @@ fn provider_usage_commits_before_assistant_finalization_without_double_counting(
         .unwrap();
     harness.drive_to_completion().unwrap();
     harness
-        .record_provider_usage("run-1", TokenUsage { total_tokens: 7, ..TokenUsage::default() })
+        .record_provider_usage(
+            "run-1",
+            TokenUsage {
+                total_tokens: 7,
+                ..TokenUsage::default()
+            },
+        )
         .unwrap();
     harness.drive_to_completion().unwrap();
     harness
@@ -224,7 +298,15 @@ fn provider_usage_commits_before_assistant_finalization_without_double_counting(
             .count(),
         1
     );
-    assert_eq!(harness.store().records().iter().filter(|record| matches!(record, Record::StepAttempt { .. })).count(), 1);
+    assert_eq!(
+        harness
+            .store()
+            .records()
+            .iter()
+            .filter(|record| matches!(record, Record::StepAttempt { .. }))
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -259,7 +341,13 @@ fn provider_usage_records_each_request_in_one_attempt() {
             .store()
             .records()
             .iter()
-            .filter(|record| matches!(record, Record::Usage { cause: UsageCause::Provider, .. }))
+            .filter(|record| matches!(
+                record,
+                Record::Usage {
+                    cause: UsageCause::Provider,
+                    ..
+                }
+            ))
             .count(),
         2
     );
@@ -288,7 +376,10 @@ fn a_consumed_retry_finishes_with_the_consumed_attempt_number() {
         base_delay: 1,
         max_delay: 2,
     };
-    assert_eq!(harness.schedule_retry("run-1", "timeout", policy).unwrap(), 1);
+    assert_eq!(
+        harness.schedule_retry("run-1", "timeout", policy).unwrap(),
+        1
+    );
     harness.drive_to_completion().unwrap();
     assert_eq!(harness.begin_retry("run-1").unwrap(), 1);
     harness.drive_to_completion().unwrap();
@@ -318,7 +409,13 @@ fn a_consumed_retry_finishes_with_the_consumed_attempt_number() {
         .unwrap();
     harness.drive_to_completion().unwrap();
     assert_eq!(
-        harness.snapshot().unwrap().state.lane("main").unwrap().attempts,
+        harness
+            .snapshot()
+            .unwrap()
+            .state
+            .lane("main")
+            .unwrap()
+            .attempts,
         1
     );
 }
@@ -326,13 +423,17 @@ fn a_consumed_retry_finishes_with_the_consumed_attempt_number() {
 #[test]
 fn lane_facts_are_durable_and_reduced_after_commit() {
     let mut harness = AgentHarness::new(MemoryStore::new("session-1"));
-    harness
-        .set_fact("main", "model", "gpt-test", None)
-        .unwrap();
+    harness.set_fact("main", "model", "gpt-test", None).unwrap();
     assert!(harness.store().records().is_empty());
     harness.drive_to_completion().unwrap();
     assert_eq!(
-        harness.snapshot().unwrap().state.lane("main").unwrap().facts["model"],
+        harness
+            .snapshot()
+            .unwrap()
+            .state
+            .lane("main")
+            .unwrap()
+            .facts["model"],
         "gpt-test"
     );
 }
@@ -807,7 +908,11 @@ fn deferred_redemption_requires_the_same_handle_and_persists_terminal_result() {
     .unwrap());
     ready.run_to_completion(&mut store).unwrap();
     assert_eq!(
-        Reducer::reduce(&store).unwrap().lane("main").unwrap().status,
+        Reducer::reduce(&store)
+            .unwrap()
+            .lane("main")
+            .unwrap()
+            .status,
         LaneStatus::SuspendedCrash
     );
     let finish_seq = store
@@ -827,5 +932,12 @@ fn deferred_redemption_requires_the_same_handle_and_persists_terminal_result() {
         outcome: threadlane_agent::harness::OperationOutcome::Completed,
         error: None,
     });
-    assert_eq!(Reducer::reduce(&store).unwrap().lane("main").unwrap().status, LaneStatus::Completed);
+    assert_eq!(
+        Reducer::reduce(&store)
+            .unwrap()
+            .lane("main")
+            .unwrap()
+            .status,
+        LaneStatus::Completed
+    );
 }

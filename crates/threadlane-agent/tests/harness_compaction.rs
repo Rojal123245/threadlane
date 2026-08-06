@@ -31,7 +31,10 @@ fn compaction_appends_a_summary_without_rewriting_history() {
     let reduced = Reducer::reduce(&store).unwrap();
     assert_eq!(reduced.lane("main").unwrap().status, LaneStatus::Completed);
     assert_eq!(store.entries().len(), 2);
-    assert_eq!(reduced.lane("main").unwrap().leaf_id.as_deref(), Some("compaction-run-compaction-1-summary"));
+    assert_eq!(
+        reduced.lane("main").unwrap().leaf_id.as_deref(),
+        Some("compaction-run-compaction-1-summary")
+    );
     assert!(store.entries()[1].parent_id.is_none());
     assert!(matches!(
         &store.entries()[1].message,

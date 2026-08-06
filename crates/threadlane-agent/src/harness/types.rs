@@ -652,7 +652,8 @@ impl Record {
             | Self::ToolFinished { run_id, .. }
             | Self::QueueCancelled { run_id, .. }
             | Self::QueueConsumed { run_id, .. }
-            | Self::WriteDeferred { run_id, .. } | Self::WriteApplied { run_id, .. } => Some(run_id),
+            | Self::WriteDeferred { run_id, .. }
+            | Self::WriteApplied { run_id, .. } => Some(run_id),
             Self::FactSet { run_id, .. } => run_id.as_deref(),
             Self::HookResumeData { run_id, .. } => run_id.as_deref(),
             Self::QueueEnqueued { run_id, .. } | Self::Usage { run_id, .. } => run_id.as_deref(),

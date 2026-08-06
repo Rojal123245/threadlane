@@ -26,7 +26,9 @@ impl SessionIdGenerator {
                 }
             })
             .collect::<String>();
-        let kind = kind.trim().replace(|character: char| !character.is_ascii_alphanumeric(), "-");
+        let kind = kind
+            .trim()
+            .replace(|character: char| !character.is_ascii_alphanumeric(), "-");
         let base = format!("{session}-{kind}");
         let mut counter = 1u64;
         loop {
@@ -129,7 +131,9 @@ pub trait SessionStore {
         run_id: Option<&str>,
     ) -> Result<(), ReduceError> {
         if lane.trim().is_empty() || key.trim().is_empty() {
-            return Err(ReduceError::InvalidRecord("fact lane and key must be non-empty".into()));
+            return Err(ReduceError::InvalidRecord(
+                "fact lane and key must be non-empty".into(),
+            ));
         }
         let seq = self
             .entries()
@@ -169,8 +173,13 @@ mod tests {
         assert_eq!(store.branch(Some(&second), 1).len(), 1);
         assert_eq!(store.branch(Some(&second), 2).len(), 2);
         assert_eq!(store.lanes(), vec!["main"]);
-        store.append_fact("main", "model", "gpt-test", None).unwrap();
-        assert_eq!(Reducer::reduce(&store).unwrap().lane("main").unwrap().facts["model"], "gpt-test");
+        store
+            .append_fact("main", "model", "gpt-test", None)
+            .unwrap();
+        assert_eq!(
+            Reducer::reduce(&store).unwrap().lane("main").unwrap().facts["model"],
+            "gpt-test"
+        );
 
         store.append_record(Record::Usage {
             id: "usage-1".into(),

@@ -103,8 +103,14 @@ fn child_lane_entries_do_not_advance_main_leaf() {
     });
 
     let state = Reducer::reduce(&store).unwrap();
-    assert_eq!(state.lane("main").unwrap().leaf_id.as_deref(), Some(root.as_str()));
-    assert_eq!(state.lane("child@1").unwrap().leaf_id.as_deref(), Some("child-entry"));
+    assert_eq!(
+        state.lane("main").unwrap().leaf_id.as_deref(),
+        Some(root.as_str())
+    );
+    assert_eq!(
+        state.lane("child@1").unwrap().leaf_id.as_deref(),
+        Some("child-entry")
+    );
 }
 
 #[test]
@@ -161,7 +167,15 @@ fn prompt_acceptance_commits_input_and_provisions_the_first_attempt() {
         Record::StepAttempt { run_id, result_entry_id, attempt: 1, .. }
             if run_id == "run-1" && result_entry_id == "entry-run-1-assistant-1"
     )));
-    assert_eq!(Reducer::reduce(harness.store()).unwrap().lane("main").unwrap().open_operation.as_deref(), Some("run-1"));
+    assert_eq!(
+        Reducer::reduce(harness.store())
+            .unwrap()
+            .lane("main")
+            .unwrap()
+            .open_operation
+            .as_deref(),
+        Some("run-1")
+    );
 }
 
 #[test]
@@ -196,13 +210,15 @@ fn no_tool_acceptance_writes_prompt_and_result_on_a_child_lane() {
     harness.drive_to_completion().unwrap();
     let state = Reducer::reduce(harness.store()).unwrap();
     assert_eq!(state.lane("child").unwrap().status, LaneStatus::Completed);
-    assert!(harness
-        .store()
-        .entries()
-        .iter()
-        .filter(|entry| entry.lane == "child")
-        .count()
-        >= 2);
+    assert!(
+        harness
+            .store()
+            .entries()
+            .iter()
+            .filter(|entry| entry.lane == "child")
+            .count()
+            >= 2
+    );
 }
 
 #[test]
@@ -327,11 +343,7 @@ fn tool_intent_and_result_recovery_stay_on_a_child_lane() {
         .iter()
         .any(|tool| tool.completed));
     assert_eq!(
-        harness
-            .store()
-            .entry("child-tool-result")
-            .unwrap()
-            .lane,
+        harness.store().entry("child-tool-result").unwrap().lane,
         "child"
     );
 

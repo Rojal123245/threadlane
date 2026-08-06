@@ -201,7 +201,11 @@ fn sqlite_serializes_concurrent_writers_with_stale_sequence_inputs() {
     let reopened = SqliteStore::open(&path, "session").unwrap();
     assert_eq!(reopened.entries().len(), 3);
     assert_eq!(
-        reopened.entries().iter().map(|entry| entry.seq).collect::<Vec<_>>(),
+        reopened
+            .entries()
+            .iter()
+            .map(|entry| entry.seq)
+            .collect::<Vec<_>>(),
         vec![1, 2, 3]
     );
 }

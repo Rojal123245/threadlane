@@ -141,11 +141,19 @@ pub fn merge_harness_activities(
             key: Some(activity.key.clone()),
             agent: {
                 let agent = normalize_whitespace_bounded(&activity.agent, 48);
-                if agent.is_empty() { "subagent".into() } else { agent }
+                if agent.is_empty() {
+                    "subagent".into()
+                } else {
+                    agent
+                }
             },
             task: {
                 let task = normalize_whitespace_bounded(&activity.task, 160);
-                if task.is_empty() { "Subagent task".into() } else { task }
+                if task.is_empty() {
+                    "Subagent task".into()
+                } else {
+                    task
+                }
             },
             status: harness_activity_label(activity),
             detail: harness_activity_detail(activity),
@@ -229,9 +237,10 @@ pub fn reduce_harness_event(data: &mut ChatData, event: AgentEvent) {
         } => {
             let (task, agent) = harness_activity_identity(&data.harness_activities, &run_id);
             let (status, fallback) = match status {
-                SubagentRecoveryStatus::Started => {
-                    (HarnessActivityStatus::Recovering, "Recovering interrupted task")
-                }
+                SubagentRecoveryStatus::Started => (
+                    HarnessActivityStatus::Recovering,
+                    "Recovering interrupted task",
+                ),
                 SubagentRecoveryStatus::Recovered => {
                     (HarnessActivityStatus::Recovered, "Recovered prior work")
                 }
@@ -1356,7 +1365,10 @@ mod tests {
         let mut rail_items = Vec::new();
         merge_harness_activities(
             &mut rail_items,
-            &[harness_activity("lane-a", HarnessActivityStatus::Recovering)],
+            &[harness_activity(
+                "lane-a",
+                HarnessActivityStatus::Recovering,
+            )],
         );
         merge_harness_activities(
             &mut rail_items,
@@ -1489,10 +1501,7 @@ mod tests {
     #[test]
     fn harness_activity_event_distinguishes_cancelled_and_unsafe_failures() {
         let mut data = ChatData::default();
-        for (task_index, error) in [
-            (0, "parent is cancelling"),
-            (1, "unsafe tool interruption"),
-        ] {
+        for (task_index, error) in [(0, "parent is cancelling"), (1, "unsafe tool interruption")] {
             reduce_harness_event(
                 &mut data,
                 AgentEvent::SubagentQueued {
@@ -1514,8 +1523,14 @@ mod tests {
             );
         }
 
-        assert_eq!(data.harness_activities[0].status, HarnessActivityStatus::Cancelled);
-        assert_eq!(data.harness_activities[1].status, HarnessActivityStatus::Aborted);
+        assert_eq!(
+            data.harness_activities[0].status,
+            HarnessActivityStatus::Cancelled
+        );
+        assert_eq!(
+            data.harness_activities[1].status,
+            HarnessActivityStatus::Aborted
+        );
     }
 
     #[test]

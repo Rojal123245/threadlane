@@ -381,12 +381,7 @@ fn sidebar_rows(
     items: &[TaskSidebarItem],
     current_session_id: Option<&str>,
 ) -> Vec<TaskSidebarRow> {
-    sidebar_rows_filtered(
-        plan,
-        items,
-        current_session_id,
-        &HashMap::new(),
-    )
+    sidebar_rows_filtered(plan, items, current_session_id, &HashMap::new())
 }
 
 fn sidebar_rows_filtered(

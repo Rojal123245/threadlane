@@ -1,7 +1,7 @@
 //! Sessions panel state: projects, session discovery, file operations, and active selection.
 
-use crate::path_utils::{canonicalize_path, truncate_chars};
 use crate::panels::chat::state::{HarnessActivity, HarnessActivityStatus};
+use crate::path_utils::{canonicalize_path, truncate_chars};
 use threadlane_agent::{AgentMessage, SessionTree};
 
 use std::collections::{HashMap, HashSet};
@@ -34,17 +34,19 @@ pub enum SessionHealth {
 }
 
 pub fn session_health(activities: &[HarnessActivity]) -> SessionHealth {
-    activities.iter().fold(SessionHealth::Healthy, |health, activity| {
-        match activity.status {
-            HarnessActivityStatus::Retrying | HarnessActivityStatus::Aborted => {
-                SessionHealth::Warning
+    activities
+        .iter()
+        .fold(SessionHealth::Healthy, |health, activity| {
+            match activity.status {
+                HarnessActivityStatus::Retrying | HarnessActivityStatus::Aborted => {
+                    SessionHealth::Warning
+                }
+                HarnessActivityStatus::Recovering if health == SessionHealth::Healthy => {
+                    SessionHealth::Recovering
+                }
+                _ => health,
             }
-            HarnessActivityStatus::Recovering if health == SessionHealth::Healthy => {
-                SessionHealth::Recovering
-            }
-            _ => health,
-        }
-    })
+        })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -507,10 +509,13 @@ pub fn set_session_health(work_dir: &Path, session_id: &str, health: SessionHeal
     let mut data = SESSIONS_DATA.write().unwrap();
     let work_dir = canonicalize_path(work_dir);
     if health == SessionHealth::Healthy {
-        let remove_project = data.session_health.get_mut(&work_dir).is_some_and(|sessions| {
-            sessions.remove(session_id);
-            sessions.is_empty()
-        });
+        let remove_project = data
+            .session_health
+            .get_mut(&work_dir)
+            .is_some_and(|sessions| {
+                sessions.remove(session_id);
+                sessions.is_empty()
+            });
         if remove_project {
             data.session_health.remove(&work_dir);
         }

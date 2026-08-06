@@ -1179,7 +1179,8 @@ impl crate::traits::ModelProvider for OpenAIClient {
             crate::router::PayloadFormat::ChatCompletions
         };
         let payload = payload_source.resolve(format).await;
-        self.stream_chat_completion(payload, prompt_cache_key, event_tx).await;
+        self.stream_chat_completion(payload, prompt_cache_key, event_tx)
+            .await;
     }
 
     async fn fetch_deferred(
@@ -1217,7 +1218,11 @@ impl crate::traits::ModelProvider for OpenAIClient {
                 },
             });
         }
-        match value.get("status").and_then(Value::as_str).unwrap_or("pending") {
+        match value
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("pending")
+        {
             "completed" | "succeeded" => extract_deferred_text(&value)
                 .map(|content| crate::traits::DeferredResponse::Ready { content })
                 .ok_or_else(|| "deferred response completed without text".to_string()),
@@ -1253,7 +1258,9 @@ impl crate::traits::ModelProvider for OpenAIClient {
         } else {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            Err(format!("deferred response cancellation failed ({status}): {body}"))
+            Err(format!(
+                "deferred response cancellation failed ({status}): {body}"
+            ))
         }
     }
 }

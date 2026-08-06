@@ -1,5 +1,7 @@
 use super::store::SessionStore;
-use super::types::{Entry, LaneState, LaneStatus, OperationOutcome, Record, ReduceError, ReducedState};
+use super::types::{
+    Entry, LaneState, LaneStatus, OperationOutcome, Record, ReduceError, ReducedState,
+};
 use std::collections::HashMap;
 
 pub struct Reducer;
@@ -125,21 +127,23 @@ impl Reducer {
             if entry.lane.trim().is_empty() {
                 return Err(ReduceError::InvalidLane(entry.lane.clone()));
             }
-            let lane = lanes.entry(entry.lane.clone()).or_insert_with(|| LaneState {
-                name: entry.lane.clone(),
-                status: LaneStatus::Idle,
-                leaf_id: None,
-                open_operation: None,
-                attempts: 0,
-                retry: None,
-                queued: Vec::new(),
-                deferred_writes: Vec::new(),
-                abort_requested: false,
-                usage: Default::default(),
-                tools: Vec::new(),
-                facts: Default::default(),
-                resume_data: Default::default(),
-            });
+            let lane = lanes
+                .entry(entry.lane.clone())
+                .or_insert_with(|| LaneState {
+                    name: entry.lane.clone(),
+                    status: LaneStatus::Idle,
+                    leaf_id: None,
+                    open_operation: None,
+                    attempts: 0,
+                    retry: None,
+                    queued: Vec::new(),
+                    deferred_writes: Vec::new(),
+                    abort_requested: false,
+                    usage: Default::default(),
+                    tools: Vec::new(),
+                    facts: Default::default(),
+                    resume_data: Default::default(),
+                });
             let current_seq = lane.leaf_id.as_deref().and_then(|current_id| {
                 store
                     .entries()
@@ -429,7 +433,9 @@ impl Reducer {
                         } => calls.get(*tool_index).is_some_and(|call| {
                             call.id == *tool_call_id && call.function.name == *tool_name
                         }),
-                        crate::types::AgentMessage::Assistant { tool_calls: None, .. } => true,
+                        crate::types::AgentMessage::Assistant {
+                            tool_calls: None, ..
+                        } => true,
                         _ => false,
                     };
                     if !declared {
@@ -439,12 +445,14 @@ impl Reducer {
                     }
                     let replay_claim = id.starts_with("replay-claim-")
                         && matches!(replay, super::types::ToolReplaySafety::Never);
-                    if !replay_claim && lane.tools.iter().any(|tool| {
-                        tool.run_id == *run_id
-                            && (tool.tool_call_id == *tool_call_id
-                                || (tool.assistant_entry_id == *assistant_entry_id
-                                    && tool.tool_index == *tool_index))
-                    }) {
+                    if !replay_claim
+                        && lane.tools.iter().any(|tool| {
+                            tool.run_id == *run_id
+                                && (tool.tool_call_id == *tool_call_id
+                                    || (tool.assistant_entry_id == *assistant_entry_id
+                                        && tool.tool_index == *tool_index))
+                        })
+                    {
                         return Err(ReduceError::InvalidRecord(
                             "tool intent duplicates call or ordinal".into(),
                         ));

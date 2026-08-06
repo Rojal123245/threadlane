@@ -62,7 +62,9 @@ impl RetryProcedure {
         effects: &mut GatedEffects,
     ) -> Result<u32, ProcedureError> {
         if reason.trim().is_empty() {
-            return Err(ProcedureError::Invalid("retry reason must be non-empty".into()));
+            return Err(ProcedureError::Invalid(
+                "retry reason must be non-empty".into(),
+            ));
         }
         let lane = open_lane(store, run_id)?;
         if lane.retry.is_some() {
@@ -70,7 +72,9 @@ impl RetryProcedure {
         }
         let attempt = next_attempt(store, run_id);
         if attempt == 0 || attempt > policy.max_attempts {
-            return Err(ProcedureError::Invalid("retry attempt cap exhausted".into()));
+            return Err(ProcedureError::Invalid(
+                "retry attempt cap exhausted".into(),
+            ));
         }
         let seq = next_seq(store);
         let retry_at = seq.saturating_add(policy.delay_for(attempt));
@@ -155,8 +159,8 @@ impl AssistantAttemptProcedure {
         let lane = open_lane(store, run_id)?;
         if !matches!(cause, UsageCause::Provider) {
             let seq = next_seq(store);
-            let attempt = matches!(cause, UsageCause::Discarded)
-                .then(|| current_attempt(store, run_id));
+            let attempt =
+                matches!(cause, UsageCause::Discarded).then(|| current_attempt(store, run_id));
             effects.park(EffectAction::AppendRecord {
                 id: format!("usage-action-{run_id}-{seq}"),
                 record: Record::Usage {
@@ -221,7 +225,9 @@ impl AssistantAttemptProcedure {
                     attempt,
                     result_entry_id: record_entry_id,
                     ..
-                } if record_run_id == run_id && record_entry_id == result_entry_id => Some(*attempt),
+                } if record_run_id == run_id && record_entry_id == result_entry_id => {
+                    Some(*attempt)
+                }
                 _ => None,
             })
             .unwrap_or_else(|| current_attempt(store, run_id));
@@ -288,7 +294,9 @@ impl OperationProcedure {
         effects: &mut GatedEffects,
     ) -> Result<(), ProcedureError> {
         if lane_name.trim().is_empty() {
-            return Err(ProcedureError::Invalid("lane name must be non-empty".into()));
+            return Err(ProcedureError::Invalid(
+                "lane name must be non-empty".into(),
+            ));
         }
         if run_id.trim().is_empty() {
             return Err(ProcedureError::Invalid("run id must be non-empty".into()));
@@ -299,7 +307,11 @@ impl OperationProcedure {
             )));
         }
         if let Some(source_leaf_id) = &source_leaf_id {
-            if !store.entries().iter().any(|entry| &entry.id == source_leaf_id) {
+            if !store
+                .entries()
+                .iter()
+                .any(|entry| &entry.id == source_leaf_id)
+            {
                 return Err(ProcedureError::Invalid("source leaf does not exist".into()));
             }
         }
@@ -335,7 +347,10 @@ impl OperationProcedure {
     ) -> Result<(), ProcedureError> {
         let lane = open_lane(store, run_id)?;
         if outcome != OperationOutcome::Aborted
-            && lane.tools.iter().any(|tool| tool.run_id == run_id && !tool.completed)
+            && lane
+                .tools
+                .iter()
+                .any(|tool| tool.run_id == run_id && !tool.completed)
         {
             return Err(ProcedureError::Invalid(
                 "operation has an incomplete tool batch".into(),
@@ -381,10 +396,14 @@ impl PromptProcedure {
         effects: &mut GatedEffects,
     ) -> Result<String, ProcedureError> {
         if lane_name.trim().is_empty() || run_id.trim().is_empty() {
-            return Err(ProcedureError::Invalid("lane and run id must be non-empty".into()));
+            return Err(ProcedureError::Invalid(
+                "lane and run id must be non-empty".into(),
+            ));
         }
         if !prompt.is_user() {
-            return Err(ProcedureError::Invalid("accepted prompt must be a user message".into()));
+            return Err(ProcedureError::Invalid(
+                "accepted prompt must be a user message".into(),
+            ));
         }
         if effects.has_pending_on_lane(lane_name) {
             return Err(ProcedureError::Invalid(format!(
@@ -399,11 +418,14 @@ impl PromptProcedure {
         {
             return Err(ProcedureError::Invalid(format!("lane {lane_name} is busy")));
         }
-        let source_leaf_id = reduced.lane(lane_name).and_then(|lane| lane.leaf_id.clone()).or_else(|| {
-            (lane_name == "main")
-                .then(|| store.entries().last().map(|entry| entry.id.clone()))
-                .flatten()
-        });
+        let source_leaf_id = reduced
+            .lane(lane_name)
+            .and_then(|lane| lane.leaf_id.clone())
+            .or_else(|| {
+                (lane_name == "main")
+                    .then(|| store.entries().last().map(|entry| entry.id.clone()))
+                    .flatten()
+            });
         let first_seq = next_seq(store);
         let prompt_id = format!("entry-{run_id}-user");
         let result_entry_id = format!("entry-{run_id}-assistant-1");
@@ -466,7 +488,9 @@ impl NoToolRun {
         effects: &mut GatedEffects,
     ) -> Result<(), ProcedureError> {
         if lane_name.trim().is_empty() {
-            return Err(ProcedureError::Invalid("lane name must be non-empty".into()));
+            return Err(ProcedureError::Invalid(
+                "lane name must be non-empty".into(),
+            ));
         }
         if run_id.trim().is_empty() || prompt.trim().is_empty() {
             return Err(ProcedureError::Invalid(
@@ -681,14 +705,7 @@ impl NoToolRun {
         summary: Option<String>,
         effects: &mut GatedEffects,
     ) -> Result<(), ProcedureError> {
-        Self::resume_navigation_on_lane(
-            store,
-            "main",
-            run_id,
-            target_leaf_id,
-            summary,
-            effects,
-        )
+        Self::resume_navigation_on_lane(store, "main", run_id, target_leaf_id, summary, effects)
     }
 
     fn resume_navigation_on_lane<S: SessionStore>(
@@ -813,14 +830,7 @@ impl NavigationProcedure {
         summary: Option<String>,
         effects: &mut GatedEffects,
     ) -> Result<(), ProcedureError> {
-        NoToolRun::resume_navigation_on_lane(
-            store,
-            lane,
-            run_id,
-            target_leaf_id,
-            summary,
-            effects,
-        )
+        NoToolRun::resume_navigation_on_lane(store, lane, run_id, target_leaf_id, summary, effects)
     }
 
     pub fn accept<S: SessionStore>(
@@ -842,7 +852,9 @@ impl NavigationProcedure {
         effects: &mut GatedEffects,
     ) -> Result<(), ProcedureError> {
         if lane_name.trim().is_empty() {
-            return Err(ProcedureError::Invalid("lane name must be non-empty".into()));
+            return Err(ProcedureError::Invalid(
+                "lane name must be non-empty".into(),
+            ));
         }
         if run_id.trim().is_empty() || target_leaf_id.trim().is_empty() {
             return Err(ProcedureError::Invalid(
@@ -978,7 +990,9 @@ impl CompactionProcedure {
         effects: &mut GatedEffects,
     ) -> Result<(), ProcedureError> {
         if lane_name.trim().is_empty() {
-            return Err(ProcedureError::Invalid("lane name must be non-empty".into()));
+            return Err(ProcedureError::Invalid(
+                "lane name must be non-empty".into(),
+            ));
         }
         if run_id.trim().is_empty() || summary.trim().is_empty() {
             return Err(ProcedureError::Invalid(
@@ -1098,7 +1112,9 @@ impl QueueProcedure {
         effects: &mut GatedEffects,
     ) -> Result<(), ProcedureError> {
         if lane_name.trim().is_empty() {
-            return Err(ProcedureError::Invalid("lane name must be non-empty".into()));
+            return Err(ProcedureError::Invalid(
+                "lane name must be non-empty".into(),
+            ));
         }
         if target.id.trim().is_empty() {
             return Err(ProcedureError::Invalid(
@@ -1151,7 +1167,9 @@ impl QueueProcedure {
         effects: &mut GatedEffects,
     ) -> Result<(), ProcedureError> {
         if lane_name.trim().is_empty() {
-            return Err(ProcedureError::Invalid("lane name must be non-empty".into()));
+            return Err(ProcedureError::Invalid(
+                "lane name must be non-empty".into(),
+            ));
         }
         if run_id.trim().is_empty() || target.id.trim().is_empty() {
             return Err(ProcedureError::Invalid(
@@ -1202,7 +1220,9 @@ impl QueueProcedure {
         effects: &mut GatedEffects,
     ) -> Result<(), ProcedureError> {
         if lane_name.trim().is_empty() {
-            return Err(ProcedureError::Invalid("lane name must be non-empty".into()));
+            return Err(ProcedureError::Invalid(
+                "lane name must be non-empty".into(),
+            ));
         }
         if run_id.trim().is_empty() || entry_id.trim().is_empty() {
             return Err(ProcedureError::Invalid(
@@ -1250,7 +1270,9 @@ impl QueueProcedure {
         effects: &mut GatedEffects,
     ) -> Result<(), ProcedureError> {
         if lane_name.trim().is_empty() {
-            return Err(ProcedureError::Invalid("lane name must be non-empty".into()));
+            return Err(ProcedureError::Invalid(
+                "lane name must be non-empty".into(),
+            ));
         }
         if entry_id.trim().is_empty() {
             return Err(ProcedureError::Invalid(
@@ -1295,7 +1317,9 @@ impl QueueProcedure {
         effects: &mut GatedEffects,
     ) -> Result<(), ProcedureError> {
         if lane_name.trim().is_empty() {
-            return Err(ProcedureError::Invalid("lane name must be non-empty".into()));
+            return Err(ProcedureError::Invalid(
+                "lane name must be non-empty".into(),
+            ));
         }
         if run_id.trim().is_empty() || entry_id.trim().is_empty() {
             return Err(ProcedureError::Invalid(
@@ -1343,7 +1367,9 @@ impl QueueProcedure {
         effects: &mut GatedEffects,
     ) -> Result<(), ProcedureError> {
         if lane_name.trim().is_empty() {
-            return Err(ProcedureError::Invalid("lane name must be non-empty".into()));
+            return Err(ProcedureError::Invalid(
+                "lane name must be non-empty".into(),
+            ));
         }
         if entry_id.trim().is_empty() {
             return Err(ProcedureError::Invalid(
@@ -1438,11 +1464,15 @@ impl AbortProcedure {
             ));
         }
         let mut seq = next_seq(store);
-        let mut parent_id = lane.leaf_id.clone().or_else(|| {
-            (lane.name == "main")
-                .then(|| store.entries().last().map(|entry| entry.id.clone()))
-                .flatten()
-        }).or_else(|| assistant_exists.then(|| assistant_entry_id.into()));
+        let mut parent_id = lane
+            .leaf_id
+            .clone()
+            .or_else(|| {
+                (lane.name == "main")
+                    .then(|| store.entries().last().map(|entry| entry.id.clone()))
+                    .flatten()
+            })
+            .or_else(|| assistant_exists.then(|| assistant_entry_id.into()));
         DeferredProcedure::apply_pending(store, run_id, effects)?;
         seq += lane
             .deferred_writes
@@ -1937,7 +1967,9 @@ impl ToolBatchProcedure {
             .find(|tool| tool.run_id == run_id && tool.tool_call_id == result.call_id)
             .ok_or_else(|| ProcedureError::Invalid("tool intent does not exist".into()))?;
         if tool.tool_name != result.name {
-            return Err(ProcedureError::Invalid("tool result name does not match intent".into()));
+            return Err(ProcedureError::Invalid(
+                "tool result name does not match intent".into(),
+            ));
         }
         let usage = usage.unwrap_or_default();
         if tool.completed {
@@ -1977,7 +2009,9 @@ impl ToolBatchProcedure {
         if !matches!(&entry.message, AgentMessage::Tool { tool_call_id, name, .. } if tool_call_id == &result.call_id && name == &result.name)
             || entry.terminate != result.terminate
         {
-            return Err(ProcedureError::Invalid("persisted tool result does not match intent".into()));
+            return Err(ProcedureError::Invalid(
+                "persisted tool result does not match intent".into(),
+            ));
         }
         let seq = next_seq_with_effects(store, effects);
         effects.park(EffectAction::AppendRecord {

@@ -53,10 +53,10 @@ use base64::Engine as _;
 use makepad_widgets::text::selection::Cursor;
 use makepad_widgets::*;
 use robius_file_picker::FileDialog;
-use threadlane_agent::harness::{
-    JsonlStore, OperationOutcome, Record as HarnessRecord, Reducer,
+use threadlane_agent::harness::{JsonlStore, OperationOutcome, Record as HarnessRecord, Reducer};
+use threadlane_agent::{
+    get_runtime, AgentEvent, ImageAttachment, ReasoningEffort, SessionPlan, TokenUsage,
 };
-use threadlane_agent::{get_runtime, AgentEvent, ImageAttachment, ReasoningEffort, SessionPlan, TokenUsage};
 use threadlane_coding_agent::{
     cancel_open_subagent_operations, default_global_threadlane_dir, discover_agents, AgentConfig,
     AgentScope, CapabilityCatalog, CodingAgent, CodingAgentCancellation, CodingAgentOptions,
@@ -128,78 +128,91 @@ fn restore_harness_activities(session_file: &Path) -> Vec<HarnessActivity> {
     match JsonlStore::open_read_only(session_file) {
         Ok(store) => {
             if let Ok(state) = Reducer::reduce(&store) {
-            let v2_subagent_runs = store
-                .records()
-                .iter()
-                .filter_map(|record| match record {
-                    HarnessRecord::OperationStarted { id, lane, seq, .. }
-                        if lane != "main" => Some((id.clone(), lane.clone(), *seq)),
+                let v2_subagent_runs = store.records().iter().filter_map(|record| match record {
+                    HarnessRecord::OperationStarted { id, lane, seq, .. } if lane != "main" => {
+                        Some((id.clone(), lane.clone(), *seq))
+                    }
                     _ => None,
                 });
-            for (run_id, lane_name, _started_seq) in v2_subagent_runs {
-                let Some(task) = store.entries().iter().filter_map(|entry| {
-                    (entry.lane == lane_name).then(|| match &entry.message {
-                        threadlane_agent::AgentMessage::User { content }
-                        | threadlane_agent::AgentMessage::UserWithImages { content, .. } => content.clone(),
-                        _ => String::new(),
-                    })
-                }).find(|task| !task.trim().is_empty()) else {
-                    continue;
-                };
-                let finished = store.records().iter().rev().find_map(|record| match record {
-                    HarnessRecord::OperationFinished { run_id: record_run_id, outcome, error, .. }
-                        if record_run_id == &run_id => Some((outcome, error.clone())),
-                    _ => None,
-                });
-                let (status, detail) = match finished {
-                    Some((OperationOutcome::Completed, error)) => (
-                        crate::panels::chat::state::HarnessActivityStatus::Recovered,
-                        error.unwrap_or_else(|| "Completed".into()),
-                    ),
-                    Some((OperationOutcome::Aborted, error)) => (
-                        crate::panels::chat::state::HarnessActivityStatus::Cancelled,
-                        error.unwrap_or_else(|| "Cancelled".into()),
-                    ),
-                    Some((OperationOutcome::Failed | OperationOutcome::Declined, error)) => (
-                        crate::panels::chat::state::HarnessActivityStatus::Aborted,
-                        error.unwrap_or_else(|| "Aborted".into()),
-                    ),
-                    None => (
-                        crate::panels::chat::state::HarnessActivityStatus::Recovering,
-                        "Suspended operation; resume or abort before continuing".into(),
-                    ),
-                };
-                activities.push(HarnessActivity {
-                    key: run_id,
-                    task,
-                    agent: "subagent".into(),
-                    status,
-                    detail,
-                });
-            }
-            if let Some(lane) = state.lane("main") {
-                if let Some(run_id) = lane.open_operation.as_deref() {
-                    let start = store.records().iter().find_map(|record| match record {
-                        HarnessRecord::OperationStarted {
-                            id,
-                            seq,
-                            source_leaf_id,
-                            ..
-                        } if id == run_id => Some((*seq, source_leaf_id.as_deref())),
-                        _ => None,
+                for (run_id, lane_name, _started_seq) in v2_subagent_runs {
+                    let Some(task) = store
+                        .entries()
+                        .iter()
+                        .filter_map(|entry| {
+                            (entry.lane == lane_name).then(|| match &entry.message {
+                                threadlane_agent::AgentMessage::User { content }
+                                | threadlane_agent::AgentMessage::UserWithImages {
+                                    content, ..
+                                } => content.clone(),
+                                _ => String::new(),
+                            })
+                        })
+                        .find(|task| !task.trim().is_empty())
+                    else {
+                        continue;
+                    };
+                    let finished = store
+                        .records()
+                        .iter()
+                        .rev()
+                        .find_map(|record| match record {
+                            HarnessRecord::OperationFinished {
+                                run_id: record_run_id,
+                                outcome,
+                                error,
+                                ..
+                            } if record_run_id == &run_id => Some((outcome, error.clone())),
+                            _ => None,
+                        });
+                    let (status, detail) = match finished {
+                        Some((OperationOutcome::Completed, error)) => (
+                            crate::panels::chat::state::HarnessActivityStatus::Recovered,
+                            error.unwrap_or_else(|| "Completed".into()),
+                        ),
+                        Some((OperationOutcome::Aborted, error)) => (
+                            crate::panels::chat::state::HarnessActivityStatus::Cancelled,
+                            error.unwrap_or_else(|| "Cancelled".into()),
+                        ),
+                        Some((OperationOutcome::Failed | OperationOutcome::Declined, error)) => (
+                            crate::panels::chat::state::HarnessActivityStatus::Aborted,
+                            error.unwrap_or_else(|| "Aborted".into()),
+                        ),
+                        None => (
+                            crate::panels::chat::state::HarnessActivityStatus::Recovering,
+                            "Suspended operation; resume or abort before continuing".into(),
+                        ),
+                    };
+                    activities.push(HarnessActivity {
+                        key: run_id,
+                        task,
+                        agent: "subagent".into(),
+                        status,
+                        detail,
                     });
-                    let task = start
-                        .and_then(|(start_seq, source_leaf_id)| {
-                            let source_seq = source_leaf_id.and_then(|id| {
-                                store
-                                    .entries()
-                                    .iter()
-                                    .find(|entry| entry.id == id)
-                                    .map(|entry| entry.seq)
-                            });
-                            store.entries().iter().rev().find_map(|entry| {
-                                (entry.seq <= start_seq
-                                    && source_seq.map_or(true, |source| entry.seq > source))
+                }
+                if let Some(lane) = state.lane("main") {
+                    if let Some(run_id) = lane.open_operation.as_deref() {
+                        let start = store.records().iter().find_map(|record| match record {
+                            HarnessRecord::OperationStarted {
+                                id,
+                                seq,
+                                source_leaf_id,
+                                ..
+                            } if id == run_id => Some((*seq, source_leaf_id.as_deref())),
+                            _ => None,
+                        });
+                        let task = start
+                            .and_then(|(start_seq, source_leaf_id)| {
+                                let source_seq = source_leaf_id.and_then(|id| {
+                                    store
+                                        .entries()
+                                        .iter()
+                                        .find(|entry| entry.id == id)
+                                        .map(|entry| entry.seq)
+                                });
+                                store.entries().iter().rev().find_map(|entry| {
+                                    (entry.seq <= start_seq
+                                        && source_seq.map_or(true, |source| entry.seq > source))
                                     .then(|| match &entry.message {
                                         threadlane_agent::AgentMessage::User { content }
                                         | threadlane_agent::AgentMessage::UserWithImages {
@@ -208,24 +221,24 @@ fn restore_harness_activities(session_file: &Path) -> Vec<HarnessActivity> {
                                         } => content.clone(),
                                         _ => String::new(),
                                     })
+                                })
                             })
-                        })
-                        .filter(|task| !task.trim().is_empty())
-                        .unwrap_or_else(|| "Foreground operation".into());
-                    activities.push(HarnessActivity {
-                        key: format!("main-{run_id}"),
-                        task,
-                        agent: "main".into(),
-                        status: if lane.abort_requested {
-                            crate::panels::chat::state::HarnessActivityStatus::Aborted
-                        } else {
-                            crate::panels::chat::state::HarnessActivityStatus::Recovering
-                        },
-                        detail: "Suspended operation; resume or abort before continuing".into(),
-                    });
+                            .filter(|task| !task.trim().is_empty())
+                            .unwrap_or_else(|| "Foreground operation".into());
+                        activities.push(HarnessActivity {
+                            key: format!("main-{run_id}"),
+                            task,
+                            agent: "main".into(),
+                            status: if lane.abort_requested {
+                                crate::panels::chat::state::HarnessActivityStatus::Aborted
+                            } else {
+                                crate::panels::chat::state::HarnessActivityStatus::Recovering
+                            },
+                            detail: "Suspended operation; resume or abort before continuing".into(),
+                        });
+                    }
                 }
             }
-        }
         }
         Err(error) if session_file.exists() => activities.push(HarnessActivity {
             key: "main-harness-fault".into(),
@@ -250,25 +263,35 @@ fn harness_activities_from_snapshot(
         }
         _ => None,
     }) {
-        let Some(task) = snapshot.entries.iter().find_map(|entry| {
-            (entry.lane == lane_name).then(|| match &entry.message {
-                threadlane_agent::AgentMessage::User { content }
-                | threadlane_agent::AgentMessage::UserWithImages { content, .. } => content.clone(),
-                _ => String::new(),
+        let Some(task) = snapshot
+            .entries
+            .iter()
+            .find_map(|entry| {
+                (entry.lane == lane_name).then(|| match &entry.message {
+                    threadlane_agent::AgentMessage::User { content }
+                    | threadlane_agent::AgentMessage::UserWithImages { content, .. } => {
+                        content.clone()
+                    }
+                    _ => String::new(),
+                })
             })
-        })
-        .filter(|task| !task.trim().is_empty()) else {
+            .filter(|task| !task.trim().is_empty())
+        else {
             continue;
         };
-        let finished = snapshot.records.iter().rev().find_map(|record| match record {
-            HarnessRecord::OperationFinished {
-                run_id: record_run_id,
-                outcome,
-                error,
-                ..
-            } if record_run_id == run_id => Some((outcome, error.clone())),
-            _ => None,
-        });
+        let finished = snapshot
+            .records
+            .iter()
+            .rev()
+            .find_map(|record| match record {
+                HarnessRecord::OperationFinished {
+                    run_id: record_run_id,
+                    outcome,
+                    error,
+                    ..
+                } if record_run_id == run_id => Some((outcome, error.clone())),
+                _ => None,
+            });
         let (status, detail) = match finished {
             Some((OperationOutcome::Completed, error)) => (
                 HarnessActivityStatus::Recovered,
@@ -320,13 +343,13 @@ fn harness_activities_from_snapshot(
                     snapshot.entries.iter().rev().find_map(|entry| {
                         (entry.seq <= start_seq
                             && source_seq.map_or(true, |source| entry.seq > source))
-                            .then(|| match &entry.message {
-                                threadlane_agent::AgentMessage::User { content }
-                                | threadlane_agent::AgentMessage::UserWithImages { content, .. } => {
-                                    content.clone()
-                                }
-                                _ => String::new(),
-                            })
+                        .then(|| match &entry.message {
+                            threadlane_agent::AgentMessage::User { content }
+                            | threadlane_agent::AgentMessage::UserWithImages { content, .. } => {
+                                content.clone()
+                            }
+                            _ => String::new(),
+                        })
                     })
                 })
                 .filter(|task| !task.trim().is_empty())
@@ -3948,11 +3971,10 @@ impl MatchEvent for App {
             self.apply_starter_prompt(cx, action);
         }
 
-        if let Some(action) = actions.iter().find_map(|action| {
-            action
-                .downcast_ref::<SubagentRailAction>()
-                .cloned()
-        }) {
+        if let Some(action) = actions
+            .iter()
+            .find_map(|action| action.downcast_ref::<SubagentRailAction>().cloned())
+        {
             let Some(key) = self.workspace_state.active_key().cloned() else {
                 return;
             };
@@ -7937,10 +7959,10 @@ impl App {
                 .chat
                 .replace_from_agent_messages(&messages);
             if let Some(error) = startup_error {
-                self.workspace_state.workspace_mut(key.clone()).chat.push_chat(
-                    MsgRole::System,
-                    format!("Session unavailable: {error}"),
-                );
+                self.workspace_state
+                    .workspace_mut(key.clone())
+                    .chat
+                    .push_chat(MsgRole::System, format!("Session unavailable: {error}"));
             }
             let activities = restore_harness_activities(&entry.session_file);
             let health = session_health(&activities);
@@ -8537,13 +8559,13 @@ impl App {
                 }
                 if let Some(runtime) = self.session_runtimes.get_mut(&key) {
                     runtime.latest_usage = Some(usage.clone());
-                        let agent = runtime.agent.clone();
-                        get_runtime().spawn(async move {
-                            let mut agent = agent.lock().await;
-                            if let Ok(value) = serde_json::to_string(&usage) {
+                    let agent = runtime.agent.clone();
+                    get_runtime().spawn(async move {
+                        let mut agent = agent.lock().await;
+                        if let Ok(value) = serde_json::to_string(&usage) {
                             let _ = agent.set_fact(CONTEXT_USAGE_FACT, &value);
-                            }
-                        });
+                        }
+                    });
                 }
                 self.sync_context_window(cx);
                 self.workspace_state
@@ -9206,8 +9228,8 @@ mod workspace_header_tests {
         left_sidebar_splitter_align, model_credential_error, normalize_generated_commit_message,
         ordered_model_options, project_name, reduce_harness_event, restore_harness_activities,
         session_reload_count, suppress_live_main_recovery, task_sidebar_items,
-        truncate_terminal_output, InputOrigin,
-        ANTIGRAVITY_MODELS, LEFT_SIDEBAR_WIDTH, MAX_TERMINAL_OUTPUT,
+        truncate_terminal_output, InputOrigin, ANTIGRAVITY_MODELS, LEFT_SIDEBAR_WIDTH,
+        MAX_TERMINAL_OUTPUT,
     };
     use crate::panels::chat::state::HarnessActivityStatus;
     use crate::workspace::WorkspaceUiState;

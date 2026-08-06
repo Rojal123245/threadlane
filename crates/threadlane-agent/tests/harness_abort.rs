@@ -112,9 +112,7 @@ fn abort_reconciliation_resumes_after_a_persisted_result_prefix() {
     let mut first_effects = GatedEffects::new();
     AbortProcedure::reconcile(&store, "run-1", "assistant-1", &mut first_effects).unwrap();
     let first_id = first_effects.peek_action().unwrap().id().to_owned();
-    first_effects
-        .execute_action(&mut store, &first_id)
-        .unwrap();
+    first_effects.execute_action(&mut store, &first_id).unwrap();
     assert_eq!(store.entries().len(), 2);
 
     let mut resumed_effects = GatedEffects::new();
@@ -171,7 +169,12 @@ fn abort_reconciliation_can_materialize_a_missing_provisioned_result() {
         entry.id == "assistant-result-1"
             && matches!(entry.message, AgentMessage::Assistant { stop_reason: Some(ref reason), .. } if reason == "aborted")
     }));
-    assert!(Reducer::reduce(&store).unwrap().lane("main").unwrap().open_operation.is_none());
+    assert!(Reducer::reduce(&store)
+        .unwrap()
+        .lane("main")
+        .unwrap()
+        .open_operation
+        .is_none());
 }
 
 #[test]
@@ -201,7 +204,11 @@ fn abort_drains_steer_and_follow_up_but_preserves_next_run() {
     AbortProcedure::reconcile(&store, "run-1", "assistant-1", &mut effects).unwrap();
     effects.run_to_completion(&mut store).unwrap();
 
-    let lane = Reducer::reduce(&store).unwrap().lane("main").unwrap().clone();
+    let lane = Reducer::reduce(&store)
+        .unwrap()
+        .lane("main")
+        .unwrap()
+        .clone();
     assert_eq!(lane.queued.len(), 1);
     assert_eq!(lane.queued[0].target.id, "next-1");
 }

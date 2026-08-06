@@ -3,7 +3,10 @@
 //! Panel-specific state slices live in `crate::panels::<panel>::state`.
 
 use std::path::PathBuf;
-use threadlane_agent::{harness::{HarnessEvent, Snapshot}, AgentEvent};
+use threadlane_agent::{
+    harness::{HarnessEvent, Snapshot},
+    AgentEvent,
+};
 use threadlane_coding_agent::{
     CapabilityCatalog, ExtensionRecord, ExtensionScope, SkillManager, TaskAgentEvent,
 };

@@ -33,7 +33,9 @@ struct AbortOnDrop<T> {
 
 impl<T> AbortOnDrop<T> {
     fn new(handle: tokio::task::JoinHandle<T>) -> Self {
-        Self { handle: Some(handle) }
+        Self {
+            handle: Some(handle),
+        }
     }
 
     async fn join(mut self) -> Result<T, tokio::task::JoinError> {
@@ -405,35 +407,33 @@ pub type ToolIntentRecorder = Arc<
 >;
 
 pub type ToolCompletionRecorder = Arc<
-    dyn Fn(&str, bool) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>
-        + Send
-        + Sync,
+    dyn Fn(&str, bool) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync,
 >;
 
 pub type ProviderUsageRecorder = Arc<
-    dyn Fn(TokenUsage) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>
-        + Send
-        + Sync,
+    dyn Fn(TokenUsage) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync,
 >;
 
 pub type ProviderDiscardedUsageRecorder = ProviderUsageRecorder;
 
 pub type StreamingStateRecorder = Arc<
-    dyn Fn(crate::harness::StreamingState) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>
+    dyn Fn(
+            crate::harness::StreamingState,
+        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>
         + Send
         + Sync,
 >;
 
 pub type ProviderHookRecorder = Arc<
-    dyn Fn(crate::harness::HookKind) -> Pin<Box<dyn Future<Output = Result<Vec<String>, String>> + Send>>
+    dyn Fn(
+            crate::harness::HookKind,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, String>> + Send>>
         + Send
         + Sync,
 >;
 
 pub type AssistantMessageRecorder = Arc<
-    dyn Fn(AgentMessage) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>
-        + Send
-        + Sync,
+    dyn Fn(AgentMessage) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync,
 >;
 
 async fn run_provider_hook(
@@ -566,11 +566,7 @@ impl AgentLoop {
     pub fn set_stream_rules(&mut self, rules: Vec<crate::rules::StreamRule>) {
         self.stream_rules = rules
             .into_iter()
-            .filter_map(|rule| {
-                regex::Regex::new(&rule.pattern)
-                    .ok()
-                    .map(|re| (rule, re))
-            })
+            .filter_map(|rule| regex::Regex::new(&rule.pattern).ok().map(|re| (rule, re)))
             .collect();
     }
 
@@ -1335,10 +1331,7 @@ impl AgentLoop {
 
     /// Replays already-intended safe tools. The before hook is intentionally
     /// not rerun: the durable ToolStarted record is the clearance boundary.
-    pub async fn execute_tools_for_replay(
-        &self,
-        tool_calls: &[ToolCall],
-    ) -> Vec<AgentToolResult> {
+    pub async fn execute_tools_for_replay(&self, tool_calls: &[ToolCall]) -> Vec<AgentToolResult> {
         self.execute_tools_with_options(tool_calls, None, true)
             .await
     }
@@ -1393,9 +1386,9 @@ impl AgentLoop {
             let mut executed_indices = Vec::new();
             for (index, call) in prepared {
                 let fallback_call = call.tc.clone();
-                let handle = AbortOnDrop::new(
-                    tokio::spawn(async move { Self::execute_prepared_tool(call).await }),
-                );
+                let handle = AbortOnDrop::new(tokio::spawn(async move {
+                    Self::execute_prepared_tool(call).await
+                }));
                 handles.push((index, fallback_call, handle));
                 executed_indices.push(index);
             }
@@ -1746,8 +1739,8 @@ fn normalize_tool_arguments(
 #[cfg(test)]
 mod normalize_tool_arguments_tests {
     use super::*;
-    use async_trait::async_trait;
     use crate::types::{AfterToolCallResult, AgentState, AgentToolCall, BeforeToolCallResult};
+    use async_trait::async_trait;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex as StdMutex;
     use threadlane_provider::openai::{ToolCall, ToolCallFunction};
@@ -1784,8 +1777,10 @@ mod normalize_tool_arguments_tests {
     #[test]
     fn provider_step_accumulator_returns_one_stateless_result() {
         let mut step = ProviderStepAccumulator::default();
-        step.push(&StreamEvent::ContentToken("answer".into())).unwrap();
-        step.push(&StreamEvent::ReasoningToken("thought".into())).unwrap();
+        step.push(&StreamEvent::ContentToken("answer".into()))
+            .unwrap();
+        step.push(&StreamEvent::ReasoningToken("thought".into()))
+            .unwrap();
         let result = step
             .push(&StreamEvent::Finished {
                 tool_calls: Vec::new(),
@@ -1822,7 +1817,8 @@ mod normalize_tool_arguments_tests {
     #[test]
     fn provider_step_accumulator_rejects_incomplete_streams() {
         let mut step = ProviderStepAccumulator::default();
-        step.push(&StreamEvent::ContentToken("partial".into())).unwrap();
+        step.push(&StreamEvent::ContentToken("partial".into()))
+            .unwrap();
         assert_eq!(
             step.finish().unwrap_err(),
             "provider stream ended without a final response"
@@ -2095,7 +2091,10 @@ mod normalize_tool_arguments_tests {
             .await;
 
         assert!(!results[0].is_error);
-        assert_eq!(completed.lock().unwrap().as_slice(), [("call-1".into(), false)]);
+        assert_eq!(
+            completed.lock().unwrap().as_slice(),
+            [("call-1".into(), false)]
+        );
     }
 
     #[test]

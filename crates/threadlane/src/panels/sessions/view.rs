@@ -524,7 +524,10 @@ mod tests {
         assert_eq!(session_row_template(true, true, false), id!(SessionRow));
         assert_eq!(session_row_template(true, false, false), id!(SessionRow));
         assert_eq!(session_row_template(false, true, false), id!(SessionRow));
-        assert_eq!(session_row_template(false, false, true), id!(SessionRowLast));
+        assert_eq!(
+            session_row_template(false, false, true),
+            id!(SessionRowLast)
+        );
         assert_eq!(session_row_template(false, false, false), id!(SessionRow));
     }
 

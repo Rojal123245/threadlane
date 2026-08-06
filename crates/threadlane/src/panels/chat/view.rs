@@ -373,12 +373,14 @@ fn display_rows_with_harness(
             }
         }
         for item in row.rail_items.iter_mut().filter(|item| item.key.is_none()) {
-            let Some((index, activity)) = activities.iter().enumerate().find(|(index, activity)| {
-                !matched[*index]
-                    && item.task
-                        == super::state::normalize_whitespace_bounded(&activity.task, 160)
-                    && item.agent == activity.agent
-            }) else {
+            let Some((index, activity)) =
+                activities.iter().enumerate().find(|(index, activity)| {
+                    !matched[*index]
+                        && item.task
+                            == super::state::normalize_whitespace_bounded(&activity.task, 160)
+                        && item.agent == activity.agent
+                })
+            else {
                 continue;
             };
             item.key = Some(activity.key.clone());
@@ -394,10 +396,7 @@ fn display_rows_with_harness(
     for (index, activity) in activities.iter().enumerate() {
         if !matched[index] {
             let mut rail_items = Vec::new();
-            super::state::merge_harness_activities(
-                &mut rail_items,
-                std::slice::from_ref(activity),
-            );
+            super::state::merge_harness_activities(&mut rail_items, std::slice::from_ref(activity));
             rows.push(DisplayRow::SubagentTool(CachedSubagentTool {
                 rail_items,
                 preview: harness_activity_preview(std::slice::from_ref(activity)),
@@ -428,7 +427,10 @@ fn harness_activity_preview(activities: &[HarnessActivity]) -> String {
             .expect("selected harness activity status"),
     );
     let count = activities.len();
-    format!("{label} · {count} {}", if count == 1 { "task" } else { "tasks" })
+    format!(
+        "{label} · {count} {}",
+        if count == 1 { "task" } else { "tasks" }
+    )
 }
 
 fn activity_kind(name: &str, icon: ToolIcon) -> ActivityKind {
@@ -855,12 +857,8 @@ impl Widget for ChatList {
             || data.revision != self.cached_revision
         {
             if msg_count != self.cached_msg_count || data.revision != self.cached_base_revision {
-                self.cached_base_rows = display_rows_with_harness(
-                    &data.messages,
-                    None,
-                    "",
-                    &data.harness_activities,
-                );
+                self.cached_base_rows =
+                    display_rows_with_harness(&data.messages, None, "", &data.harness_activities);
                 self.cached_base_revision = data.revision;
             }
 
@@ -1150,7 +1148,6 @@ impl Widget for ChatList {
                 let jump_hint = self.view.widget(cx, ids!(jump_to_latest_hint));
                 jump_hint.set_visible(cx, can_jump_to_latest && self.hovered_jump_to_latest);
                 jump_hint.redraw(cx);
-
             }
         }
         DrawStep::done()
@@ -1249,10 +1246,22 @@ impl Widget for ChatList {
 impl ChatList {
     fn focused_starter_action(&self, cx: &Cx) -> Option<StarterPromptAction> {
         [
-            (ids!(empty_state.cards_row.explore_card.btn), StarterPromptAction::Explore),
-            (ids!(empty_state.cards_row.build_card.btn), StarterPromptAction::Build),
-            (ids!(empty_state.cards_row.review_card.btn), StarterPromptAction::Review),
-            (ids!(empty_state.cards_row.fix_card.btn), StarterPromptAction::Fix),
+            (
+                ids!(empty_state.cards_row.explore_card.btn),
+                StarterPromptAction::Explore,
+            ),
+            (
+                ids!(empty_state.cards_row.build_card.btn),
+                StarterPromptAction::Build,
+            ),
+            (
+                ids!(empty_state.cards_row.review_card.btn),
+                StarterPromptAction::Review,
+            ),
+            (
+                ids!(empty_state.cards_row.fix_card.btn),
+                StarterPromptAction::Fix,
+            ),
         ]
         .into_iter()
         .find_map(|(path, action)| {
@@ -1473,8 +1482,7 @@ mod tests {
         let rows = display_rows_with_harness(&messages, None, "", &activities);
 
         assert_eq!(rows.len(), 2);
-        let [DisplayRow::SubagentTool(first), DisplayRow::SubagentTool(second)] = &rows[..]
-        else {
+        let [DisplayRow::SubagentTool(first), DisplayRow::SubagentTool(second)] = &rows[..] else {
             panic!("expected two delegation rows");
         };
         assert_eq!(first.rail_items[0].key.as_deref(), Some("lane-a"));
