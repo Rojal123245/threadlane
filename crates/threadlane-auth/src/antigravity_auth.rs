@@ -472,9 +472,21 @@ mod tests {
     #[test]
     fn test_generate_pkce_pair() {
         let (verifier, challenge) = generate_pkce_pair();
-        assert!(!verifier.is_empty());
-        assert!(!challenge.is_empty());
-        assert_ne!(verifier, challenge);
+
+        // 32 bytes encoded in unpadded base64url is exactly 43 characters
+        assert_eq!(verifier.len(), 43, "Verifier should be 43 characters long");
+        assert_eq!(challenge.len(), 43, "Challenge should be 43 characters long");
+
+        // Check character set for URL-safe base64
+        for c in verifier.chars() {
+            assert!(c.is_ascii_alphanumeric() || c == '-' || c == '_', "Invalid char in verifier");
+        }
+
+        // Verify the SHA256 relationship
+        let mut hasher = Sha256::new();
+        hasher.update(verifier.as_bytes());
+        let expected_challenge = URL_SAFE_NO_PAD.encode(hasher.finalize());
+        assert_eq!(challenge, expected_challenge, "Challenge must be SHA256 of verifier");
     }
 
     #[cfg(unix)]
