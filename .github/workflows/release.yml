@@ -50,7 +50,7 @@ jobs:
           targets: wasm32-wasip1
 
       - name: Verify release tag matches the app version
-        if: github.event_name == 'workflow_call' || startsWith(github.ref, 'refs/tags/')
+        if: inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
           APP_VERSION=$(cargo metadata --no-deps --format-version 1 \
@@ -143,7 +143,7 @@ jobs:
           codesign --verify --strict --verbose=4 "${dmgs[0]}"
 
       - name: Generate signed update manifest
-        if: github.event_name == 'workflow_call' || startsWith(github.ref, 'refs/tags/')
+        if: inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/')
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -186,7 +186,7 @@ jobs:
 
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v2
-        if: github.event_name == 'workflow_call' || startsWith(github.ref, 'refs/tags/')
+        if: inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/')
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           files: |
@@ -202,7 +202,7 @@ jobs:
     name: Build & Package (Ubuntu 24.04 x86_64)
     if: >-
       ${{
-        github.event_name == 'workflow_call' ||
+        inputs.release_tag != '' ||
         startsWith(github.ref, 'refs/tags/') ||
         (github.event_name == 'workflow_dispatch' && inputs.build_ubuntu_24_x86_64)
       }}
@@ -281,7 +281,7 @@ jobs:
           fi
 
       - name: Upload Ubuntu Release Asset
-        if: github.event_name == 'workflow_call' || startsWith(github.ref, 'refs/tags/')
+        if: inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
