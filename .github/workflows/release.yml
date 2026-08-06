@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       release_tag:
-        description: 'Release tag created by release-plz'
+        description: 'Release tag created by Release Please'
         required: true
         type: string
   push:
