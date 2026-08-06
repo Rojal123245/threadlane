@@ -53,7 +53,9 @@ use base64::Engine as _;
 use makepad_widgets::text::selection::Cursor;
 use makepad_widgets::*;
 use robius_file_picker::FileDialog;
-use threadlane_agent::harness::{JsonlStore, OperationOutcome, Record as HarnessRecord, Reducer};
+use threadlane_agent::harness::{
+    EventPayload, JsonlStore, OperationOutcome, Record as HarnessRecord, Reducer, StreamingState,
+};
 use threadlane_agent::{
     get_runtime, AgentEvent, ImageAttachment, ReasoningEffort, SessionPlan, TokenUsage,
 };
@@ -61,7 +63,7 @@ use threadlane_coding_agent::{
     cancel_open_subagent_operations, default_global_threadlane_dir, discover_agents, AgentConfig,
     AgentScope, CapabilityCatalog, CodingAgent, CodingAgentCancellation, CodingAgentOptions,
     CodingAgentWorkHandle, ExtensionManager, ExtensionScope, HarnessSupervisor, ProjectContext,
-    SkillMetadata, SkillSettings, TaskRecord,
+    SkillMetadata, SkillSettings, TaskKind, TaskRecord,
 };
 use threadlane_provider::auth;
 use threadlane_provider::openai::fetch_available_models;
@@ -179,7 +181,22 @@ fn restore_harness_activities(session_file: &Path) -> Vec<HarnessActivity> {
                         ),
                         None => (
                             crate::panels::chat::state::HarnessActivityStatus::Recovering,
-                            "Suspended operation; resume or abort before continuing".into(),
+                            store
+                                .records()
+                                .iter()
+                                .find_map(|record| match record {
+                                    HarnessRecord::OperationStarted { id, lane, .. }
+                                        if id == &run_id =>
+                                    {
+                                        state
+                                            .lane(lane)
+                                            .map(|lane| harness_lane_activity(lane, None))
+                                    }
+                                    _ => None,
+                                })
+                                .unwrap_or_else(|| {
+                                    "Suspended operation; resume or abort before continuing".into()
+                                }),
                         ),
                     };
                     activities.push(HarnessActivity {
@@ -234,7 +251,7 @@ fn restore_harness_activities(session_file: &Path) -> Vec<HarnessActivity> {
                             } else {
                                 crate::panels::chat::state::HarnessActivityStatus::Recovering
                             },
-                            detail: "Suspended operation; resume or abort before continuing".into(),
+                            detail: harness_lane_activity(lane, None),
                         });
                     }
                 }
@@ -244,7 +261,7 @@ fn restore_harness_activities(session_file: &Path) -> Vec<HarnessActivity> {
             key: "main-harness-fault".into(),
             task: "Harness storage".into(),
             agent: "main".into(),
-            status: crate::panels::chat::state::HarnessActivityStatus::Aborted,
+            status: crate::panels::chat::state::HarnessActivityStatus::Faulted,
             detail: format!("Harness storage fault: {error}"),
         }),
         Err(_) => {}
@@ -307,7 +324,13 @@ fn harness_activities_from_snapshot(
             ),
             None => (
                 HarnessActivityStatus::Recovering,
-                "Suspended operation; resume or abort before continuing".into(),
+                snapshot
+                    .state
+                    .lane(lane_name)
+                    .map(|lane| harness_lane_activity(lane, snapshot.streaming.as_ref()))
+                    .unwrap_or_else(|| {
+                        "Suspended operation; resume or abort before continuing".into()
+                    }),
             ),
         };
         activities.push(HarnessActivity {
@@ -360,14 +383,102 @@ fn harness_activities_from_snapshot(
                 agent: "main".into(),
                 status: if lane.abort_requested {
                     HarnessActivityStatus::Aborted
+                } else if snapshot
+                    .streaming
+                    .as_ref()
+                    .is_some_and(|stream| stream.lane == lane.name)
+                {
+                    HarnessActivityStatus::Working
                 } else {
                     HarnessActivityStatus::Recovering
                 },
-                detail: "Suspended operation; resume or abort before continuing".into(),
+                detail: harness_lane_activity(lane, snapshot.streaming.as_ref()),
             });
         }
     }
     activities
+}
+
+fn harness_lane_activity(
+    lane: &threadlane_agent::harness::LaneState,
+    streaming: Option<&threadlane_agent::harness::StreamingState>,
+) -> String {
+    let action = lane
+        .tools
+        .iter()
+        .rev()
+        .find(|tool| !tool.completed)
+        .map(|tool| {
+            format!(
+                "Running tool: {} · {}",
+                tool.tool_name,
+                match tool.replay {
+                    threadlane_agent::harness::ToolReplaySafety::Safe => "replay-safe",
+                    threadlane_agent::harness::ToolReplaySafety::Never => "no replay",
+                }
+            )
+        })
+        .or_else(|| {
+            streaming.and_then(|stream| {
+                if stream.lane == lane.name && !stream.tool_call_ids.is_empty() {
+                    Some(format!("Calling {} tool(s)", stream.tool_call_ids.len()))
+                } else if stream.lane == lane.name && !stream.reasoning.is_empty() {
+                    Some("Thinking".into())
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or_else(|| match lane.status {
+            threadlane_agent::harness::LaneStatus::SuspendedCrash
+            | threadlane_agent::harness::LaneStatus::SuspendedDeferred => {
+                "Recovering suspended operation".into()
+            }
+            _ => "Working".into(),
+        });
+
+    let mut detail = action;
+    let mut queue_counts = Vec::new();
+    for (queue, label) in [
+        (threadlane_agent::harness::QueueKind::Steer, "steer"),
+        (threadlane_agent::harness::QueueKind::FollowUp, "follow-up"),
+        (threadlane_agent::harness::QueueKind::NextRun, "next-run"),
+    ] {
+        let count = lane
+            .queued
+            .iter()
+            .filter(|entry| entry.queue == queue)
+            .count();
+        if count > 0 {
+            queue_counts.push(format!("{label} {count}"));
+        }
+    }
+    if !queue_counts.is_empty() {
+        detail.push_str(" · queued: ");
+        detail.push_str(&queue_counts.join(", "));
+    }
+    if lane.usage.total_tokens > 0 {
+        detail.push_str(" · ");
+        detail.push_str(&format_token_count(lane.usage.total_tokens));
+        detail.push_str(" tokens");
+    }
+    if !lane.deferred_writes.is_empty() {
+        detail.push_str(&format!(
+            " · {} deferred write(s)",
+            lane.deferred_writes.len()
+        ));
+    }
+    detail
+}
+
+fn format_token_count(tokens: u32) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}m", tokens as f32 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.1}k", tokens as f32 / 1_000.0)
+    } else {
+        tokens.to_string()
+    }
 }
 
 fn suppress_live_main_recovery(activities: &mut Vec<HarnessActivity>, live: bool) {
@@ -377,6 +488,129 @@ fn suppress_live_main_recovery(activities: &mut Vec<HarnessActivity>, live: bool
                 && activity.status == crate::panels::chat::state::HarnessActivityStatus::Recovering)
         });
     }
+}
+
+fn harness_live_streaming_detail(stream: &StreamingState) -> String {
+    if !stream.tool_call_ids.is_empty() {
+        let count = stream.tool_call_ids.len();
+        if count == 1 {
+            "Using tool".into()
+        } else {
+            format!("Using {count} tools")
+        }
+    } else if !stream.assistant_text.is_empty() {
+        "Responding".into()
+    } else if !stream.reasoning.is_empty() {
+        "Thinking".into()
+    } else {
+        "Working".into()
+    }
+}
+
+fn live_main_activity(detail: impl Into<String>) -> HarnessActivity {
+    HarnessActivity {
+        key: "main-live".into(),
+        task: "Foreground agent".into(),
+        agent: "main".into(),
+        status: crate::panels::chat::state::HarnessActivityStatus::Working,
+        detail: detail.into(),
+    }
+}
+
+fn set_live_main_activity(
+    chat: &mut crate::panels::chat::state::ChatData,
+    detail: impl Into<String>,
+) {
+    crate::panels::chat::state::reduce_harness_activity(
+        &mut chat.harness_activities,
+        live_main_activity(detail),
+    );
+    chat.revision = chat.revision.wrapping_add(1);
+}
+
+fn clear_live_main_activity(chat: &mut crate::panels::chat::state::ChatData) {
+    let before = chat.harness_activities.len();
+    chat.harness_activities
+        .retain(|activity| activity.key != "main-live");
+    if chat.harness_activities.len() != before {
+        chat.revision = chat.revision.wrapping_add(1);
+    }
+}
+
+fn background_task_harness_activity(
+    task_id: &str,
+    task: &TaskRecord,
+    event: &AgentEvent,
+) -> Option<HarnessActivity> {
+    use crate::panels::chat::state::HarnessActivityStatus;
+    let (status, detail) = match event {
+        AgentEvent::AgentStart => (
+            HarnessActivityStatus::Working,
+            task.current_activity
+                .clone()
+                .unwrap_or_else(|| "Working on task".into()),
+        ),
+        AgentEvent::AgentEnd { usage } => {
+            let mut detail = "Task completed".to_string();
+            if usage.total_tokens > 0 {
+                detail.push_str(&format!(" · {:.1}k tokens", usage.total_tokens as f32 / 1000.0));
+            }
+            (HarnessActivityStatus::Recovered, detail)
+        }
+        AgentEvent::AgentError { error } => (
+            HarnessActivityStatus::Aborted,
+            error.clone(),
+        ),
+        AgentEvent::TurnStart { .. } | AgentEvent::MessageStart { .. } => (
+            HarnessActivityStatus::Working,
+            "Generating response".into(),
+        ),
+        AgentEvent::ToolExecutionStart { name, .. } => {
+            (HarnessActivityStatus::Working, format!("Using tool: {name}"))
+        }
+        AgentEvent::SubagentQueued { .. } => (
+            HarnessActivityStatus::Working,
+            "Delegating subtask".into(),
+        ),
+        AgentEvent::SubagentStarted { .. } => (
+            HarnessActivityStatus::Working,
+            "Subtasks running".into(),
+        ),
+        AgentEvent::SubagentFinished { succeeded, error, .. } => {
+            if *succeeded {
+                (
+                    HarnessActivityStatus::Working,
+                    "Subtasks completed".into(),
+                )
+            } else {
+                (
+                    HarnessActivityStatus::Working,
+                    error
+                        .as_deref()
+                        .unwrap_or("Subtask issue")
+                        .into(),
+                )
+            }
+        }
+        AgentEvent::SubagentRecovery { detail, .. } => {
+            let detail_text = detail
+                .clone()
+                .unwrap_or_else(|| "Recovery in progress".into());
+            (HarnessActivityStatus::Working, detail_text)
+        }
+        _ => return None,
+    };
+    Some(HarnessActivity {
+        key: format!("bg-task-{task_id}"),
+        task: if task.summary.is_empty() {
+            "Background task".into()
+        } else {
+            task.summary.clone()
+        },
+        agent: "Background task".into(),
+        status,
+        detail,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -2181,6 +2415,8 @@ script_mod! {
                                     margin: Inset{top: 8 bottom: 4}
                                     padding: Inset{left: 20}
                                     visible: false
+                                    flow: Right
+                                    spacing: 8
                                     align: Align{x: 0.0 y: 0.5}
                                     chat_working_spinner := ActivityLoader {
                                         width: 28
@@ -2188,6 +2424,13 @@ script_mod! {
                                         draw_bg +: {
                                             dot_radius: 1.15
                                             speed: 8.0
+                                        }
+                                    }
+                                    chat_working_label := mod.components.ClippedLabel {
+                                        width: Fill
+                                        draw_text +: {
+                                            color: theme.color_muted_foreground
+                                            text_style +: { font_size: 9.0 }
                                         }
                                     }
                                 }
@@ -3346,6 +3589,7 @@ fn task_sidebar_items(
         .into_iter()
         .map(|record| {
             let cancellable = record.cancellable();
+            let resumable = record.kind == TaskKind::Background && !record.active();
             let label = session_label(&record).unwrap_or_else(|| {
                 if record.session_id == "draft" {
                     "Project draft".to_owned()
@@ -3363,6 +3607,7 @@ fn task_sidebar_items(
                 activity: record.current_activity.unwrap_or_default(),
                 status: record.status,
                 cancellable,
+                resumable,
                 started_at_ms: record.started_at_ms,
                 finished_at_ms: record.finished_at_ms,
             }
@@ -4465,6 +4710,23 @@ impl MatchEvent for App {
                         }
                     }
                     self.sync_task_sidebar(cx);
+                }
+                TaskSidebarAction::Resume(task_id) => {
+                    if let Some(supervisor) = &self.supervisor {
+                        match supervisor.resume_task(&task_id) {
+                            Ok(()) => {
+                                self.push_chat(
+                                    MsgRole::System,
+                                    format!("Resumed task {task_id}."),
+                                );
+                            }
+                            Err(error) => {
+                                self.push_chat(MsgRole::System, error);
+                            }
+                        }
+                    }
+                    self.sync_task_sidebar(cx);
+                    cx.redraw_all();
                 }
                 TaskSidebarAction::ToggleSession(session_id) => {
                     if let Some(mut sidebar) = self
@@ -7776,6 +8038,10 @@ impl App {
             UiStatus::Error => ComposerStatus::Error,
         };
         self.composer_state.set_status(composer_status, text);
+        self.ui
+            .label(cx, ids!(chat_working_label))
+            .set_text(cx, text);
+        self.ui.label(cx, ids!(chat_working_label)).redraw(cx);
         self.busy = status == UiStatus::Working;
         let working = status == UiStatus::Working;
         self.ui
@@ -7783,6 +8049,16 @@ impl App {
             .set_visible(cx, working);
         self.ui.widget(cx, ids!(chat_working_indicator)).redraw(cx);
         self.apply_composer_presentation(cx);
+    }
+
+    fn set_live_composer_activity(&mut self, cx: &mut Cx, key: &SessionKey, text: &str) {
+        if !self.workspace_state.is_active(key) {
+            return;
+        }
+        self.ui
+            .label(cx, ids!(chat_working_label))
+            .set_text(cx, text);
+        self.ui.label(cx, ids!(chat_working_label)).redraw(cx);
     }
 
     fn apply_composer_presentation(&mut self, cx: &mut Cx) {
@@ -8459,6 +8735,11 @@ impl App {
             AgentEvent::AgentStart => {
                 if let Some(key) = target_key {
                     self.set_session_status(cx, &key, UiStatus::Working, "Working...");
+                    self.set_live_composer_activity(cx, &key, "Thinking");
+                    set_live_main_activity(
+                        &mut self.workspace_state.workspace_mut(key).chat,
+                        "Thinking",
+                    );
                 }
             }
             AgentEvent::MessageUpdate {
@@ -8467,7 +8748,12 @@ impl App {
                 tool_call_name,
             } => {
                 let Some(key) = target_key else { return };
-                let workspace = self.workspace_state.workspace_mut(key);
+                let workspace = self.workspace_state.workspace_mut(key.clone());
+                let activity_detail = tool_call_name
+                    .as_ref()
+                    .map(|name| format!("Preparing tool: {name}"))
+                    .or_else(|| reasoning_delta.as_ref().map(|_| "Thinking".into()))
+                    .or_else(|| text_delta.as_ref().map(|_| "Responding".into()));
                 if let Some(delta) = reasoning_delta {
                     workspace
                         .chat
@@ -8481,10 +8767,14 @@ impl App {
                 if tool_call_name.is_some() {
                     workspace.chat.flush_tool_call_preamble();
                 }
+                if let Some(detail) = activity_detail {
+                    set_live_main_activity(&mut workspace.chat, detail.clone());
+                    self.set_live_composer_activity(cx, &key, &detail);
+                }
             }
             AgentEvent::MessageEnd { message } => {
                 let Some(key) = target_key else { return };
-                let workspace = self.workspace_state.workspace_mut(key);
+                let workspace = self.workspace_state.workspace_mut(key.clone());
                 if matches!(
                     message,
                     threadlane_agent::AgentMessage::Assistant {
@@ -8503,11 +8793,11 @@ impl App {
                 arguments,
             } => {
                 let Some(key) = target_key else { return };
-                self.workspace_state.workspace_mut(key).chat.push_tool(
-                    tool_call_id,
-                    name,
-                    arguments,
-                );
+                let activity_detail = format!("Running tool: {name}");
+                let workspace = self.workspace_state.workspace_mut(key.clone());
+                workspace.chat.push_tool(tool_call_id, name, arguments);
+                set_live_main_activity(&mut workspace.chat, activity_detail.clone());
+                self.set_live_composer_activity(cx, &key, &activity_detail);
             }
             AgentEvent::ToolExecutionUpdate {
                 tool_call_id,
@@ -8526,7 +8816,8 @@ impl App {
                 ..
             } => {
                 let Some(key) = target_key else { return };
-                self.workspace_state.workspace_mut(key).chat.update_tool(
+                let workspace = self.workspace_state.workspace_mut(key.clone());
+                workspace.chat.update_tool(
                     &tool_call_id,
                     result.content,
                     Some(if result.is_error {
@@ -8535,6 +8826,8 @@ impl App {
                         ToolStatus::Done
                     }),
                 );
+                set_live_main_activity(&mut workspace.chat, "Working");
+                self.set_live_composer_activity(cx, &key, "Working");
             }
             AgentEvent::TurnEnd { .. } => {
                 if let Some(key) = target_key {
@@ -8572,6 +8865,10 @@ impl App {
                     .workspace_mut(key.clone())
                     .chat
                     .flush_streaming();
+                set_live_main_activity(
+                    &mut self.workspace_state.workspace_mut(key.clone()).chat,
+                    "Finishing",
+                );
                 self.set_session_status(cx, &key, UiStatus::Working, "Finishing...");
             }
             AgentEvent::AgentError { error } => {
@@ -8631,6 +8928,7 @@ impl App {
                 };
                 let workspace = self.workspace_state.workspace_mut(key.clone());
                 workspace.chat.flush_streaming();
+                clear_live_main_activity(&mut workspace.chat);
                 workspace.ui.draft = draft.clone();
                 if let Some(attachments) = restored_attachments {
                     workspace.ui.attachments = attachments;
@@ -8747,10 +9045,9 @@ impl App {
                         runtime.submitted_draft = None;
                         runtime.submitted_attachments = None;
                     }
-                    self.workspace_state
-                        .workspace_mut(key.clone())
-                        .chat
-                        .flush_streaming();
+                    let workspace = self.workspace_state.workspace_mut(key.clone());
+                    workspace.chat.flush_streaming();
+                    clear_live_main_activity(&mut workspace.chat);
                     self.set_session_status(cx, &key, UiStatus::Ready, "Ready");
 
                     // If a message was pending in the queue popup, dispatch it now.
@@ -8790,12 +9087,52 @@ impl App {
                     if !is_current {
                         continue;
                     }
+                    if let EventPayload::Streaming(state) = &event.payload {
+                        if let Some(stream) = state {
+                            let detail = harness_live_streaming_detail(stream);
+                            set_live_main_activity(
+                                &mut self.workspace_state.workspace_mut(key.clone()).chat,
+                                detail,
+                            );
+                        }
+                        self.ui.widget(cx, ids!(chat_list)).redraw(cx);
+                        continue;
+                    }
                     if let Some(path) = self
                         .session_runtimes
                         .get(&key)
                         .and_then(|runtime| runtime.session_file.as_deref())
                     {
+                        let live_main = self
+                            .workspace_state
+                            .workspace(&key)
+                            .and_then(|workspace| {
+                                workspace
+                                    .chat
+                                    .harness_activities
+                                    .iter()
+                                    .find(|activity| {
+                                        activity.agent == "main"
+                                            && activity.status
+                                                == crate::panels::chat::state::HarnessActivityStatus::Working
+                                    })
+                                    .cloned()
+                            });
                         let mut activities = restore_harness_activities(path);
+                        if let Some(activity) = live_main {
+                            activities.push(activity);
+                        }
+                        if let EventPayload::Fault(error) =
+                            &event.payload
+                        {
+                            activities.push(HarnessActivity {
+                                key: format!("harness-fault-{}", event.id),
+                                task: "Harness storage".into(),
+                                agent: "main".into(),
+                                status: crate::panels::chat::state::HarnessActivityStatus::Faulted,
+                                detail: format!("Harness storage fault: {error}"),
+                            });
+                        }
                         suppress_live_main_recovery(&mut activities, is_current);
                         let health = session_health(&activities);
                         self.workspace_state
@@ -9180,7 +9517,39 @@ impl App {
                     }
                 }
                 GuiAgentEvent::BackgroundTask(event) => {
-                    let _ = event.into_parts();
+                    let (task_id, project_id, agent_event) = event.into_parts();
+                    let project_work_dir = self
+                        .supervisor_projects
+                        .iter()
+                        .find(|(_, pid)| *pid == &project_id)
+                        .map(|(work_dir, _)| work_dir.clone());
+                    if let (Some(work_dir), Some(supervisor)) =
+                        (project_work_dir, &self.supervisor)
+                    {
+                        if let Some(task) = supervisor.get_task(&task_id) {
+                            let activity = background_task_harness_activity(
+                                &task_id, &task, &agent_event,
+                            );
+                            if let Some(activity) = activity {
+                                let keys: Vec<SessionKey> = self
+                                    .workspace_state
+                                    .keys_for_project(&work_dir)
+                                    .cloned()
+                                    .collect();
+                                for key in keys {
+                                    crate::panels::chat::state::reduce_harness_activity(
+                                        &mut self
+                                            .workspace_state
+                                            .workspace_mut(key)
+                                            .chat
+                                            .harness_activities,
+                                        activity.clone(),
+                                    );
+                                }
+                                self.ui.widget(cx, ids!(chat_list)).redraw(cx);
+                            }
+                        }
+                    }
                     self.refresh_registered_sessions();
                     self.sync_task_sidebar(cx);
                 }
@@ -9239,6 +9608,54 @@ mod workspace_header_tests {
     use threadlane_agent::AgentMessage;
     use threadlane_agent::{AgentEvent, ImageAttachment, SubagentRecoveryStatus};
     use threadlane_coding_agent::{ExtensionScope, TaskKind, TaskRecord, TaskStatus};
+
+    #[test]
+    fn harness_lane_activity_includes_live_tool_queue_and_usage() {
+        let mut lane = threadlane_agent::harness::LaneState::default();
+        lane.tools.push(threadlane_agent::harness::ToolState {
+            run_id: "run-1".into(),
+            assistant_entry_id: "assistant-1".into(),
+            tool_index: 0,
+            tool_call_id: "call-1".into(),
+            tool_name: "shell".into(),
+            result_entry_id: "result-1".into(),
+            replay: threadlane_agent::harness::ToolReplaySafety::Safe,
+            completed: false,
+            terminate: false,
+        });
+        lane.usage.total_tokens = 1_234;
+        lane.queued.push(threadlane_agent::harness::QueuedEntry {
+            id: "queue-1".into(),
+            run_id: Some("run-1".into()),
+            queue: threadlane_agent::harness::QueueKind::FollowUp,
+            priority: None,
+            target: threadlane_agent::harness::ProvisionedEntry {
+                id: "entry-1".into(),
+                parent_id: None,
+                message: AgentMessage::User {
+                    content: "next".into(),
+                },
+            },
+        });
+
+        assert_eq!(
+            super::harness_lane_activity(&lane, None),
+            "Running tool: shell · replay-safe · queued: follow-up 1 · 1.2k tokens"
+        );
+    }
+
+    #[test]
+    fn live_main_activity_is_visible_while_foreground_generation_runs() {
+        let activity = super::live_main_activity("Thinking");
+        assert_eq!(activity.key, "main-live");
+        assert_eq!(activity.agent, "main");
+        assert_eq!(activity.status, HarnessActivityStatus::Working);
+        assert_eq!(activity.detail, "Thinking");
+
+        let mut chat = crate::panels::chat::state::ChatData::default();
+        super::set_live_main_activity(&mut chat, "Thinking");
+        assert_eq!(chat.revision, 1);
+    }
 
     #[test]
     fn generated_commit_messages_are_normalized_to_one_subject_line() {

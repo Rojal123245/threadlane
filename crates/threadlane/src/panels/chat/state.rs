@@ -81,6 +81,7 @@ pub enum HarnessActivityStatus {
     Retrying,
     Aborted,
     Cancelled,
+    Faulted,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,6 +103,7 @@ pub fn reduce_harness_activity(activities: &mut Vec<HarnessActivity>, activity: 
             HarnessActivityStatus::Recovered
                 | HarnessActivityStatus::Aborted
                 | HarnessActivityStatus::Cancelled
+                | HarnessActivityStatus::Faulted
         ) {
             *existing = activity;
         }
@@ -119,6 +121,7 @@ pub fn harness_activity_label(activity: &HarnessActivity) -> String {
         HarnessActivityStatus::Retrying => "Retrying recovery",
         HarnessActivityStatus::Aborted => "Aborted · unsafe tool",
         HarnessActivityStatus::Cancelled => "Cancelled",
+        HarnessActivityStatus::Faulted => "Harness fault",
     }
     .into()
 }
@@ -1348,6 +1351,7 @@ mod tests {
             (HarnessActivityStatus::Retrying, "Retrying recovery"),
             (HarnessActivityStatus::Aborted, "Aborted · unsafe tool"),
             (HarnessActivityStatus::Cancelled, "Cancelled"),
+            (HarnessActivityStatus::Faulted, "Harness fault"),
         ];
 
         for (status, expected) in cases {

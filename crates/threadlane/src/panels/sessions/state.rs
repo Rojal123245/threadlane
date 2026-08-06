@@ -38,9 +38,9 @@ pub fn session_health(activities: &[HarnessActivity]) -> SessionHealth {
         .iter()
         .fold(SessionHealth::Healthy, |health, activity| {
             match activity.status {
-                HarnessActivityStatus::Retrying | HarnessActivityStatus::Aborted => {
-                    SessionHealth::Warning
-                }
+                HarnessActivityStatus::Retrying
+                | HarnessActivityStatus::Aborted
+                | HarnessActivityStatus::Faulted => SessionHealth::Warning,
                 HarnessActivityStatus::Recovering if health == SessionHealth::Healthy => {
                     SessionHealth::Recovering
                 }

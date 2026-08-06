@@ -393,15 +393,15 @@ fn display_rows_with_harness(
         }
     }
 
-    for (index, activity) in activities.iter().enumerate() {
-        if !matched[index] {
-            let mut rail_items = Vec::new();
-            super::state::merge_harness_activities(&mut rail_items, std::slice::from_ref(activity));
-            rows.push(DisplayRow::SubagentTool(CachedSubagentTool {
-                rail_items,
-                preview: harness_activity_preview(std::slice::from_ref(activity)),
-            }));
-        }
+    let unmatched = activities
+        .iter()
+        .enumerate()
+        .filter_map(|(index, activity)| (!matched[index]).then_some(activity))
+        .collect::<Vec<_>>();
+    if !unmatched.is_empty() {
+        rows.push(DisplayRow::ActivityGroup(harness_activity_group(
+            &unmatched,
+        )));
     }
 
     rows
@@ -410,6 +410,7 @@ fn display_rows_with_harness(
 fn harness_activity_preview(activities: &[HarnessActivity]) -> String {
     let status = [
         HarnessActivityStatus::Aborted,
+        HarnessActivityStatus::Faulted,
         HarnessActivityStatus::Retrying,
         HarnessActivityStatus::Recovering,
         HarnessActivityStatus::Working,
@@ -431,6 +432,55 @@ fn harness_activity_preview(activities: &[HarnessActivity]) -> String {
         "{label} · {count} {}",
         if count == 1 { "task" } else { "tasks" }
     )
+}
+
+fn harness_activity_group(activities: &[&HarnessActivity]) -> CachedActivityGroup {
+    let running = activities.iter().any(|activity| {
+        matches!(
+            activity.status,
+            HarnessActivityStatus::Queued
+                | HarnessActivityStatus::Working
+                | HarnessActivityStatus::Recovering
+                | HarnessActivityStatus::Retrying
+        )
+    });
+    let has_error = activities.iter().any(|activity| {
+        matches!(
+            activity.status,
+            HarnessActivityStatus::Aborted
+                | HarnessActivityStatus::Faulted
+                | HarnessActivityStatus::Retrying
+        )
+    });
+    let has_cancelled = activities
+        .iter()
+        .any(|activity| activity.status == HarnessActivityStatus::Cancelled);
+    let detail = activities
+        .iter()
+        .map(|activity| {
+            format!(
+                "- {} — {}",
+                super::state::normalize_whitespace_bounded(&activity.task, 240),
+                super::state::harness_activity_detail(activity)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    CachedActivityGroup {
+        detail,
+        preview: harness_activity_preview(
+            &activities
+                .iter()
+                .map(|activity| (*activity).clone())
+                .collect::<Vec<_>>(),
+        ),
+        title: if running { "Working" } else { "Worked" },
+        tool_icon: ToolIcon::Generic,
+        running,
+        has_error,
+        has_cancelled,
+    }
 }
 
 fn activity_kind(name: &str, icon: ToolIcon) -> ActivityKind {
@@ -1416,7 +1466,7 @@ mod tests {
     }
 
     #[test]
-    fn harness_activity_uses_one_existing_subagent_rail_row() {
+    fn standalone_harness_activity_uses_the_worked_activity_group() {
         let activities = vec![super::super::state::HarnessActivity {
             key: "lane-a".into(),
             task: "Recover interrupted work".into(),
@@ -1428,12 +1478,12 @@ mod tests {
         let rows = display_rows_with_harness(&[], None, "", &activities);
 
         assert_eq!(rows.len(), 1);
-        let DisplayRow::SubagentTool(row) = &rows[0] else {
-            panic!("expected a subagent rail row");
+        let DisplayRow::ActivityGroup(row) = &rows[0] else {
+            panic!("expected a worked activity group");
         };
-        assert_eq!(row.rail_items.len(), 1);
-        assert_eq!(row.rail_items[0].key.as_deref(), Some("lane-a"));
-        assert_eq!(row.rail_items[0].status, "Recovering");
+        assert_eq!(row.title, "Working");
+        assert_eq!(row.preview, "Recovering · 1 task");
+        assert!(row.detail.contains("Recover interrupted work"));
     }
 
     #[test]

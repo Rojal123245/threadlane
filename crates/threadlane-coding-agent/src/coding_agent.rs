@@ -73,6 +73,15 @@ fn is_retryable_generation_error(error: &str) -> bool {
     .iter()
     .any(|marker| error.contains(marker))
 }
+
+fn generation_event_drain_error(error: broadcast::error::TryRecvError) -> Option<&'static str> {
+    match error {
+        broadcast::error::TryRecvError::Lagged(_) => None,
+        broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed => {
+            Some("generation ended without a durable AgentEnd event")
+        }
+    }
+}
 static NEXT_SUBAGENT_UI_RUN_ID: AtomicU64 = AtomicU64::new(1);
 
 type AgentRunner = Arc<
@@ -6260,11 +6269,10 @@ impl CodingAgent {
                 Ok(AgentEvent::AgentEnd { usage }) => break (usage, None),
                 Ok(AgentEvent::AgentError { error }) => break (TokenUsage::default(), Some(error)),
                 Ok(_) => continue,
-                Err(_) => {
-                    break (
-                        TokenUsage::default(),
-                        Some("generation ended without a durable AgentEnd event".into()),
-                    )
+                Err(error) => {
+                    if let Some(message) = generation_event_drain_error(error) {
+                        break (TokenUsage::default(), Some(message.into()));
+                    }
                 }
             }
         };
@@ -7140,6 +7148,18 @@ mod tests {
     use crate::wasi_extension::{WasiExtension, WasiExtensionInvocation, WasiExtensionResponse};
     use std::sync::Mutex;
     use std::time::{Duration as StdDuration, Instant};
+
+    #[test]
+    fn lagged_generation_event_drain_is_recoverable() {
+        assert_eq!(
+            generation_event_drain_error(broadcast::error::TryRecvError::Lagged(3)),
+            None
+        );
+        assert_eq!(
+            generation_event_drain_error(broadcast::error::TryRecvError::Empty),
+            Some("generation ended without a durable AgentEnd event")
+        );
+    }
 
     #[test]
     fn harness_journal_round_trips_foreground_operation_boundaries() {

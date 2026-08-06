@@ -407,7 +407,7 @@ impl TaskRecord {
         self.kind == TaskKind::Background && self.active()
     }
 
-    fn active(&self) -> bool {
+    pub fn active(&self) -> bool {
         matches!(
             self.status,
             TaskStatus::Idle | TaskStatus::Running | TaskStatus::Waiting
@@ -1780,6 +1780,27 @@ impl HarnessSupervisor {
         Ok(())
     }
 
+    pub fn resume_task(&self, task_id: &str) -> Result<(), String> {
+        let summary = {
+            let task = self
+                .tasks
+                .lock()
+                .unwrap()
+                .get(task_id)
+                .cloned()
+                .ok_or_else(|| format!("Task ID '{task_id}' not found"))?;
+            if task.status == TaskStatus::Running || task.status == TaskStatus::Idle {
+                return Err("Task is already running".into());
+            }
+            task.summary.clone()
+        };
+        if summary.is_empty() {
+            return Err("Task has no prompt to resume".into());
+        }
+        self.update_task_status(task_id, TaskStatus::Running);
+        self.submit_input(task_id, summary)
+    }
+
     fn update_task_status(&self, task_id: &str, status: TaskStatus) {
         let mut t_lock = self.tasks.lock().unwrap();
         if let Some(tr) = t_lock.get_mut(task_id) {
@@ -1803,6 +1824,11 @@ impl HarnessSupervisor {
     pub fn get_task_status(&self, task_id: &str) -> Option<TaskStatus> {
         let lock = self.tasks.lock().unwrap();
         lock.get(task_id).map(|t| t.status)
+    }
+
+    pub fn get_task(&self, task_id: &str) -> Option<TaskRecord> {
+        let lock = self.tasks.lock().unwrap();
+        lock.get(task_id).cloned()
     }
 
     pub fn list_tasks_for_project(&self, project_id: &str) -> Vec<TaskRecord> {
