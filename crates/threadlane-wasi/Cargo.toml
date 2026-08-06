@@ -5,7 +5,7 @@ edition = "2021"
 description = "WASI WebAssembly extension sandbox host and capability broker for threadlane agent"
 
 [dependencies]
-threadlane-agent = { path = "../threadlane-agent" }
+threadlane-agent = { version = "0.1.0", path = "../threadlane-agent" }
 wasmi = "0.36"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

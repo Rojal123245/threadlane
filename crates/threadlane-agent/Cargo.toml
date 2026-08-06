@@ -5,8 +5,8 @@ edition = "2021"
 description = "Generic LLM session state, system prompt, and agent execution loop"
 
 [dependencies]
-threadlane-provider = { path = "../threadlane-provider" }
-threadlane-tools = { path = "../threadlane-tools" }
+threadlane-provider = { version = "0.1.0", path = "../threadlane-provider" }
+threadlane-tools = { version = "0.1.0", path = "../threadlane-tools" }
 tokio = { version = "1.38", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
