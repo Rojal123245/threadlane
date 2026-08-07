@@ -7,6 +7,7 @@ pub mod coding_agent;
 pub mod commands;
 pub mod config;
 pub mod context;
+pub mod error;
 pub mod extension_broker;
 pub mod frontmatter;
 pub mod mcp;
@@ -41,6 +42,7 @@ pub use coding_agent::{
 pub use commands::{execute_slash_command, parse_slash_command, CommandAction};
 pub use config::{CodingAgentConfig, CodingAgentConfigBuilder};
 pub use context::{ProjectContext, ProjectInstruction};
+pub use error::CodingAgentError;
 pub use policy::ToolPolicy;
 pub use prompt_templates::{
     expand_prompt_template, load_prompt_templates, parse_command_args, substitute_args,

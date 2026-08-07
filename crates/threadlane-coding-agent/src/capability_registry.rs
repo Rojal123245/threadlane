@@ -7,6 +7,7 @@
 //! This replaces the imperative tool/hook registration previously scattered
 //! across `CodingAgent::new()`.
 
+use crate::error::CodingAgentError;
 use std::sync::Arc;
 use threadlane_agent::harness::{HookHandler, HookKind};
 use threadlane_agent::ToolExecutor;
@@ -73,8 +74,8 @@ impl CapabilityRegistry {
 
     /// Wires all capabilities into the given agent loop: registers tool
     /// executors and hooks. Returns the count of successfully registered
-    /// items.
-    pub fn wire_all(&self, agent: &mut threadlane_agent::Agent) -> (usize, Vec<String>) {
+    /// items and any errors encountered.
+    pub fn wire_all(&self, agent: &mut threadlane_agent::Agent) -> (usize, Vec<CodingAgentError>) {
         let mut tool_count = 0;
         let mut hook_count = 0;
         let mut errors = Vec::new();
@@ -82,14 +83,18 @@ impl CapabilityRegistry {
         for executor in self.all_tool_executors() {
             match agent.loop_engine.register_tool_executor(executor) {
                 Ok(()) => tool_count += 1,
-                Err(error) => errors.push(format!("tool registration failed: {error}")),
+                Err(error) => errors.push(CodingAgentError::Init(format!(
+                    "tool registration failed: {error}"
+                ))),
             }
         }
 
         for (kind, id, handler) in self.all_hooks() {
             match agent.loop_engine.hook_registry.replace(kind, id, handler) {
                 Ok(()) => hook_count += 1,
-                Err(error) => errors.push(format!("hook '{id}' registration failed: {error:?}")),
+                Err(error) => errors.push(CodingAgentError::Init(format!(
+                    "hook '{id}' registration failed: {error:?}"
+                ))),
             }
         }
 

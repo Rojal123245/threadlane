@@ -2,6 +2,7 @@ pub mod agent;
 pub mod compaction;
 pub mod config;
 pub mod engine;
+pub mod error;
 pub mod events;
 pub mod harness;
 pub mod loop_engine;
@@ -22,6 +23,7 @@ pub use compaction::{
 };
 pub use config::{AgentConfig, AgentConfigBuilder};
 pub use engine::get_runtime;
+pub use error::AgentError;
 pub use events::{AgentEvent, HarnessMetrics, SubagentRecoveryStatus};
 pub use loop_engine::{
     repair_interrupted_tool_turn, AgentLoop, AssistantMessageRecorder, ProviderHookRecorder,

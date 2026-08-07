@@ -4533,7 +4533,7 @@ impl CodingAgent {
             mcp_manager: mcp_manager.clone(),
         }));
         let (_wired, errors) = registry.wire_all(&mut agent);
-        for error in errors {
+        for error in &errors {
             eprintln!("{error}");
         }
 
@@ -6930,11 +6930,12 @@ async fn run_subagent_task(
             });
         }
         if let Some(tool_observer) = context.child_tool_observer.as_ref() {
-            agent.loop_engine.register_tool_executor(Arc::new(
-                DeterministicSubagentToolExecutor {
+            agent
+                .loop_engine
+                .register_tool_executor(Arc::new(DeterministicSubagentToolExecutor {
                     observed: tool_observer.clone(),
-                },
-            ))?;
+                }))
+                .map_err(|e| e.to_string())?;
             let tool_results = agent
                 .loop_engine
                 .execute_tools(&[threadlane_provider::openai::ToolCall {

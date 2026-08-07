@@ -796,7 +796,7 @@ fn test_registration_rejects_duplicate_and_core_tool_schemas() {
         calls: calls.clone(),
         panic_on: None,
     }));
-    assert!(duplicate.unwrap_err().contains("conflicts"));
+    assert!(duplicate.unwrap_err().to_string().contains("conflicts"));
 
     let core_duplicate = agent_loop.register_tool_executor(Arc::new(RecordingExecutor {
         id: "third",
@@ -805,7 +805,10 @@ fn test_registration_rejects_duplicate_and_core_tool_schemas() {
         calls,
         panic_on: None,
     }));
-    assert!(core_duplicate.unwrap_err().contains("read_file"));
+    assert!(core_duplicate
+        .unwrap_err()
+        .to_string()
+        .contains("read_file"));
     assert_eq!(agent_loop.tool_executor_count(), 1);
 }
 

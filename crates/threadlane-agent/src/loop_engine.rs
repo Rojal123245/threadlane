@@ -3,6 +3,7 @@ use crate::compaction::{
     should_auto_compact,
 };
 use crate::config::AgentConfig;
+use crate::error::AgentError;
 use crate::events::AgentEvent;
 use crate::harness::HookRegistry;
 use crate::provider::ProviderRouter;
@@ -563,7 +564,7 @@ impl AgentLoop {
     pub fn register_tool_executor(
         &mut self,
         executor: Arc<dyn ToolExecutor>,
-    ) -> Result<(), String> {
+    ) -> Result<(), AgentError> {
         // Keep both registries in sync: ToolDispatcher for execution,
         // self.tool_executors for payload building.
         self.tool_dispatcher

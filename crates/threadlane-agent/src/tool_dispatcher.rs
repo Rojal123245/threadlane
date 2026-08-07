@@ -3,6 +3,7 @@
 //! Extracted from [`AgentLoop`] to own the executor registry, hook pipeline,
 //! and parallel/sequential dispatch logic. Independently testable.
 
+use crate::error::AgentError;
 use crate::events::AgentEvent;
 use crate::harness::{HookContext, HookRegistry};
 use crate::loop_engine::AbortOnDrop;
@@ -102,19 +103,21 @@ impl ToolDispatcher {
     pub fn register_tool_executor(
         &mut self,
         executor: Arc<dyn ToolExecutor>,
-    ) -> Result<(), String> {
+    ) -> Result<(), AgentError> {
         let executor_id = executor.executor_id().trim();
         if executor_id.is_empty() {
-            return Err("Tool executor id must not be empty".into());
+            return Err(AgentError::ToolRegistration(
+                "Tool executor id must not be empty".into(),
+            ));
         }
         if self
             .ordered_tool_executors()
             .iter()
             .any(|registered| registered.executor_id() == executor_id)
         {
-            return Err(format!(
+            return Err(AgentError::ToolRegistration(format!(
                 "Tool executor '{executor_id}' is already registered"
-            ));
+            )));
         }
 
         let mut known_names: HashSet<String> = core_tool_definitions()
@@ -126,15 +129,15 @@ impl ToolDispatcher {
         }
         for definition in executor.tool_definitions() {
             if definition.name.trim().is_empty() {
-                return Err(format!(
+                return Err(AgentError::ToolRegistration(format!(
                     "Tool executor '{executor_id}' provided an empty tool name"
-                ));
+                )));
             }
             if !known_names.insert(definition.name.clone()) {
-                return Err(format!(
+                return Err(AgentError::ToolRegistration(format!(
                     "Tool schema '{}' from executor '{executor_id}' conflicts with an existing schema",
                     definition.name
-                ));
+                )));
             }
         }
 
