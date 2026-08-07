@@ -3398,6 +3398,104 @@ fn timestamp() -> u64 {
 
 const SUBAGENT_TOOL_NAME: &str = "subagent";
 
+// ── Capability implementations ─────────────────────────────────────────
+// Each wraps a subsystem and implements [`crate::capability_registry::Capability`]
+// so tools and hooks can be registered declaratively.
+
+use crate::capability_registry::Capability;
+
+struct SkillCapability {
+    skills: Arc<SkillRegistry>,
+}
+impl Capability for SkillCapability {
+    fn id(&self) -> &str {
+        "skills"
+    }
+    fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
+        vec![Arc::new(LoadSkillToolExecutor::new(self.skills.clone()))]
+    }
+}
+
+struct SubagentCapability {
+    agent_runner: AgentRunner,
+}
+impl Capability for SubagentCapability {
+    fn id(&self) -> &str {
+        "subagent"
+    }
+    fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
+        vec![Arc::new(SubagentToolExecutor::new(
+            self.agent_runner.clone(),
+        ))]
+    }
+}
+
+struct PlanCapability {
+    plan_store: SessionPlanStore,
+    event_tx: broadcast::Sender<threadlane_agent::AgentEvent>,
+}
+impl Capability for PlanCapability {
+    fn id(&self) -> &str {
+        "plan"
+    }
+    fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
+        vec![Arc::new(UpdatePlanToolExecutor::new(
+            self.plan_store.clone(),
+            self.event_tx.clone(),
+        ))]
+    }
+}
+
+struct WasiCapability {
+    extensions: Arc<WasiExtensionManager>,
+    broker_dispatcher: Arc<CapabilityDispatcher>,
+    tool_policy: Arc<tokio::sync::Mutex<ToolPolicy>>,
+}
+impl Capability for WasiCapability {
+    fn id(&self) -> &str {
+        "wasi"
+    }
+    fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
+        vec![Arc::new(BrokerAwareWasiToolExecutor {
+            extensions: self.extensions.clone(),
+            broker_dispatcher: self.broker_dispatcher.clone(),
+        })]
+    }
+    fn hooks(&self) -> Vec<(HookKind, &str, HookHandler)> {
+        vec![
+            (
+                HookKind::BeforeTool,
+                "extension-before-tool",
+                extension_before_tool_hook_handler(
+                    self.tool_policy.clone(),
+                    self.extensions.clone(),
+                    self.broker_dispatcher.clone(),
+                ),
+            ),
+            (
+                HookKind::AfterTool,
+                "extension-after-tool",
+                create_after_tool_hook_handler(
+                    self.extensions.clone(),
+                    self.broker_dispatcher.clone(),
+                ),
+            ),
+        ]
+    }
+}
+
+struct McpCapability {
+    mcp_manager: Arc<McpManager>,
+}
+impl Capability for McpCapability {
+    fn id(&self) -> &str {
+        "mcp"
+    }
+    fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
+        vec![Arc::new(McpToolExecutor::new(self.mcp_manager.clone()))]
+    }
+}
+
 #[derive(Clone)]
 pub struct SubagentToolExecutor {
     runner: AgentRunner,
@@ -4410,45 +4508,39 @@ impl CodingAgent {
             agent_work.clone(),
             Some(agent_runner.clone()),
         );
-        agent
-            .loop_engine
-            .register_tool_executor(Arc::new(LoadSkillToolExecutor::new(skills.clone())))
-            .expect("reserved load_skill tool must register");
-        agent
-            .loop_engine
-            .register_tool_executor(Arc::new(SubagentToolExecutor::new(agent_runner.clone())))
-            .expect("reserved subagent tool must register");
-        agent
-            .loop_engine
-            .register_tool_executor(Arc::new(UpdatePlanToolExecutor::new(
-                plan_store.clone(),
-                agent.loop_engine.event_tx.clone(),
-            )))
-            .expect("reserved update_plan tool must register");
-        if let Err(error) =
-            agent
-                .loop_engine
-                .register_tool_executor(Arc::new(BrokerAwareWasiToolExecutor {
-                    extensions: wasi_extensions.clone(),
-                    broker_dispatcher: broker_dispatcher.clone(),
-                }))
-        {
-            eprintln!("WASI tool registration failed: {error}");
-        }
+        // ── Capability registry: register tools + hooks declaratively ──
         let mcp_manager = Arc::new(McpManager::new(
             default_global_threadlane_dir(),
             Some(options.work_dir.clone()),
         ));
+        let mut registry = crate::capability_registry::CapabilityRegistry::new();
+        registry.register(Box::new(SkillCapability {
+            skills: skills.clone(),
+        }));
+        registry.register(Box::new(SubagentCapability {
+            agent_runner: agent_runner.clone(),
+        }));
+        registry.register(Box::new(PlanCapability {
+            plan_store: plan_store.clone(),
+            event_tx: agent.loop_engine.event_tx.clone(),
+        }));
+        registry.register(Box::new(WasiCapability {
+            extensions: wasi_extensions.clone(),
+            broker_dispatcher: broker_dispatcher.clone(),
+            tool_policy: tool_policy.clone(),
+        }));
+        registry.register(Box::new(McpCapability {
+            mcp_manager: mcp_manager.clone(),
+        }));
+        let (_wired, errors) = registry.wire_all(&mut agent);
+        for error in errors {
+            eprintln!("{error}");
+        }
+
         let manager_clone = mcp_manager.clone();
         threadlane_agent::get_runtime().spawn(async move {
             manager_clone.discover_and_connect().await;
         });
-        if let Err(error) = agent
-            .loop_engine
-            .register_tool_executor(Arc::new(McpToolExecutor::new(mcp_manager.clone())))
-        {
-            eprintln!("MCP tool registration failed: {error}");
-        }
         agent.loop_engine.work_dir = Some(options.work_dir.clone());
 
         let mut system_prompt_config = options.system_prompt.clone();
@@ -4468,29 +4560,6 @@ impl CodingAgent {
             agent_catalog: Some(&agent_catalog),
             loaded_extension_count: loaded_ext_count,
         });
-
-        agent
-            .loop_engine
-            .hook_registry
-            .replace(
-                HookKind::BeforeTool,
-                "extension-before-tool",
-                extension_before_tool_hook_handler(
-                    tool_policy.clone(),
-                    wasi_extensions.clone(),
-                    broker_dispatcher.clone(),
-                ),
-            )
-            .expect("extension before-tool hook must register");
-        agent
-            .loop_engine
-            .hook_registry
-            .replace(
-                HookKind::AfterTool,
-                "extension-after-tool",
-                create_after_tool_hook_handler(wasi_extensions.clone(), broker_dispatcher.clone()),
-            )
-            .expect("extension after-tool hook must register");
 
         {
             let mut state = agent

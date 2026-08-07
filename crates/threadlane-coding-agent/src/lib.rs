@@ -2,6 +2,7 @@ pub mod acp;
 pub mod acp_bridge;
 pub mod agents;
 pub mod capabilities;
+pub mod capability_registry;
 pub mod coding_agent;
 pub mod commands;
 pub mod config;
@@ -32,6 +33,7 @@ pub use acp_bridge::{
 };
 pub use agents::{discover_agents, AgentConfig, AgentDiscoveryResult, AgentScope, AgentSource};
 pub use capabilities::CapabilityCatalog;
+pub use capability_registry::{Capability, CapabilityRegistry};
 pub use coding_agent::{
     cancel_open_subagent_operations, extension_before_tool_hook_handler, CodingAgent,
     CodingAgentCancellation, CodingAgentOptions, CodingAgentWorkHandle, HarnessWatch,
