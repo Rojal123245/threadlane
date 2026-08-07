@@ -2,62 +2,58 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::tempdir;
+use threadlane_agent::harness::{HookContext, HookEffect, HookKind};
 use threadlane_agent::{
-    compact_messages, repair_interrupted_tool_turn, AfterToolCallHook, AfterToolCallResult, Agent,
-    AgentLoop, AgentMessage, AgentState, AgentToolCall, AgentToolDefinition, AgentToolResult,
-    BeforeToolCallHook, BeforeToolCallResult, CompactionOptions, ImageAttachment, ReasoningEffort,
-    SessionTree, TokenUsage, ToolExecutionMode, ToolExecutor,
+    compact_messages, repair_interrupted_tool_turn, Agent, AgentLoop, AgentMessage,
+    AgentToolDefinition, CompactionOptions, ImageAttachment, ReasoningEffort, SessionTree,
+    TokenUsage, ToolExecutionMode, ToolExecutor,
 };
 use threadlane_provider::openai::{ToolCall, ToolCallFunction};
 use tokio::sync::Notify;
 
-struct TestBeforeHook;
-
-#[async_trait::async_trait]
-impl BeforeToolCallHook for TestBeforeHook {
-    async fn before_tool_call(
-        &self,
-        tool_call: &AgentToolCall,
-        _state: &AgentState,
-    ) -> BeforeToolCallResult {
-        if tool_call.name == "forbidden_tool" {
-            BeforeToolCallResult {
-                block: true,
-                reason: Some("Tool forbidden by policy".to_string()),
-            }
-        } else {
-            BeforeToolCallResult::default()
-        }
-    }
-}
-
-struct TestAfterHook;
-
-#[async_trait::async_trait]
-impl AfterToolCallHook for TestAfterHook {
-    async fn after_tool_call(
-        &self,
-        _tool_call: &AgentToolCall,
-        result: &AgentToolResult,
-        _state: &AgentState,
-    ) -> AfterToolCallResult {
-        if result.name == "exit_tool" {
-            AfterToolCallResult {
-                terminate: Some(true),
-                ..Default::default()
-            }
-        } else {
-            AfterToolCallResult::default()
-        }
-    }
+fn register_test_hooks(agent: &mut AgentLoop) {
+    agent
+        .hook_registry
+        .register(
+            HookKind::BeforeTool,
+            "test-before-tool",
+            Arc::new(|context: HookContext| {
+                Box::pin(async move {
+                    if context.tool_name.as_deref() == Some("forbidden_tool") {
+                        Err("Tool forbidden by policy".into())
+                    } else {
+                        Ok(HookEffect::default())
+                    }
+                })
+            }),
+        )
+        .unwrap();
+    agent
+        .hook_registry
+        .register(
+            HookKind::AfterTool,
+            "test-after-tool",
+            Arc::new(|context: HookContext| {
+                Box::pin(async move {
+                    if context.tool_name.as_deref() == Some("exit_tool") {
+                        Ok(HookEffect {
+                            terminate: Some(true),
+                            ..Default::default()
+                        })
+                    } else {
+                        Ok(HookEffect::default())
+                    }
+                })
+            }),
+        )
+        .unwrap();
 }
 
 #[tokio::test]
 async fn test_agent_creation_and_events() {
     let mut agent = Agent::new("fake_key", None, "gpt-4o");
     agent.set_tool_execution_mode(ToolExecutionMode::Parallel);
-    agent.loop_engine.before_tool_call_hook = Some(std::sync::Arc::new(TestBeforeHook));
-    agent.loop_engine.after_tool_call_hook = Some(std::sync::Arc::new(TestAfterHook));
+    register_test_hooks(&mut agent.loop_engine);
     let _rx = agent.subscribe();
 
     agent.steer(AgentMessage::User {
@@ -891,56 +887,47 @@ async fn test_executor_cannot_hijack_core_or_peer_owned_tools() {
     assert_eq!(results[1].content, "owner result");
 }
 
-struct WaitingBeforeHook {
-    entered: Arc<Notify>,
-    release: Arc<Notify>,
-}
-
-#[async_trait::async_trait]
-impl BeforeToolCallHook for WaitingBeforeHook {
-    async fn before_tool_call(
-        &self,
-        _tool_call: &AgentToolCall,
-        _state: &AgentState,
-    ) -> BeforeToolCallResult {
-        self.entered.notify_one();
-        self.release.notified().await;
-        BeforeToolCallResult::default()
-    }
-}
-
-struct WaitingAfterHook {
-    entered: Arc<Notify>,
-    release: Arc<Notify>,
-}
-
-#[async_trait::async_trait]
-impl AfterToolCallHook for WaitingAfterHook {
-    async fn after_tool_call(
-        &self,
-        _tool_call: &AgentToolCall,
-        _result: &AgentToolResult,
-        _state: &AgentState,
-    ) -> AfterToolCallResult {
-        self.entered.notify_one();
-        self.release.notified().await;
-        AfterToolCallResult::default()
-    }
-}
-
 async fn assert_state_is_unlocked_while_hook_waits(mut agent_loop: AgentLoop, before: bool) {
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     if before {
-        agent_loop.before_tool_call_hook = Some(Arc::new(WaitingBeforeHook {
-            entered: entered.clone(),
-            release: release.clone(),
-        }));
+        let entered = entered.clone();
+        let release = release.clone();
+        agent_loop
+            .hook_registry
+            .register(
+                HookKind::BeforeTool,
+                "waiting-before-tool",
+                Arc::new(move |_context| {
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    Box::pin(async move {
+                        entered.notify_one();
+                        release.notified().await;
+                        Ok(HookEffect::default())
+                    })
+                }),
+            )
+            .unwrap();
     } else {
-        agent_loop.after_tool_call_hook = Some(Arc::new(WaitingAfterHook {
-            entered: entered.clone(),
-            release: release.clone(),
-        }));
+        let entered = entered.clone();
+        let release = release.clone();
+        agent_loop
+            .hook_registry
+            .register(
+                HookKind::AfterTool,
+                "waiting-after-tool",
+                Arc::new(move |_context| {
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    Box::pin(async move {
+                        entered.notify_one();
+                        release.notified().await;
+                        Ok(HookEffect::default())
+                    })
+                }),
+            )
+            .unwrap();
     }
     agent_loop.tool_execution_mode = ToolExecutionMode::Sequential;
     agent_loop

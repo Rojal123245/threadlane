@@ -36,11 +36,20 @@ impl<S: SessionStore> AgentHarness<S> {
         events: HarnessEventHub,
         executor: impl FnMut(EffectAction) -> Result<(), ReduceError> + Send + Sync + 'static,
     ) -> Self {
+        Self::with_executor_and_hooks(store, events, executor, HookRegistry::default())
+    }
+
+    pub fn with_executor_and_hooks(
+        store: S,
+        events: HarnessEventHub,
+        executor: impl FnMut(EffectAction) -> Result<(), ReduceError> + Send + Sync + 'static,
+        hooks: HookRegistry,
+    ) -> Self {
         Self {
             store,
             effects: GatedEffects::with_executor(executor),
             events,
-            hooks: HookRegistry::default(),
+            hooks,
             telemetry: Arc::new(NoopTelemetry),
         }
     }

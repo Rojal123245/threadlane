@@ -32,8 +32,8 @@ pub use acp_bridge::{
 pub use agents::{discover_agents, AgentConfig, AgentDiscoveryResult, AgentScope, AgentSource};
 pub use capabilities::CapabilityCatalog;
 pub use coding_agent::{
-    cancel_open_subagent_operations, CodingAgent, CodingAgentCancellation, CodingAgentOptions,
-    CodingAgentWorkHandle, ExtensionBeforeToolHook, HarnessWatch,
+    cancel_open_subagent_operations, extension_before_tool_hook_handler, CodingAgent,
+    CodingAgentCancellation, CodingAgentOptions, CodingAgentWorkHandle, HarnessWatch,
 };
 pub use commands::{execute_slash_command, parse_slash_command, CommandAction};
 pub use context::{ProjectContext, ProjectInstruction};

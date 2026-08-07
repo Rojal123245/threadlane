@@ -1,42 +1,5 @@
-use crate::types::{
-    AfterToolCallResult, AgentMessage, AgentState, AgentToolCall, AgentToolDefinition,
-    AgentToolResult, BeforeToolCallResult,
-};
+use crate::types::{AgentToolCall, AgentToolDefinition};
 use async_trait::async_trait;
-
-#[async_trait]
-pub trait BeforeToolCallHook: Send + Sync {
-    async fn before_tool_call(
-        &self,
-        tool_call: &AgentToolCall,
-        state: &AgentState,
-    ) -> BeforeToolCallResult;
-}
-
-#[async_trait]
-pub trait AfterToolCallHook: Send + Sync {
-    async fn after_tool_call(
-        &self,
-        tool_call: &AgentToolCall,
-        result: &AgentToolResult,
-        state: &AgentState,
-    ) -> AfterToolCallResult;
-}
-
-#[async_trait]
-pub trait TransformContextHook: Send + Sync {
-    async fn transform_context(&self, messages: Vec<AgentMessage>) -> Vec<AgentMessage>;
-}
-
-#[async_trait]
-pub trait ShouldStopAfterTurnHook: Send + Sync {
-    async fn should_stop_after_turn(
-        &self,
-        turn_number: usize,
-        tool_results: &[AgentToolResult],
-        state: &AgentState,
-    ) -> bool;
-}
 
 #[async_trait]
 pub trait ToolExecutor: Send + Sync {

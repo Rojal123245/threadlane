@@ -16,7 +16,9 @@ pub use effects::{EffectAction, EffectsError, GatedEffects};
 pub use events::{
     EventError, EventPayload, HarnessEvent, HarnessEventHub, Snapshot, StreamingState, Subscription,
 };
-pub use hooks::{HookContext, HookFailure, HookHandler, HookKind, HookRegistry};
+pub use hooks::{
+    HookContext, HookEffect, HookFailure, HookHandler, HookKind, HookRegistry, HookRun,
+};
 pub use jsonl::JsonlStore;
 pub use memory::MemoryStore;
 pub use procedure::{

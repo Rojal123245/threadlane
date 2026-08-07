@@ -357,19 +357,6 @@ impl AgentToolResult {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct BeforeToolCallResult {
-    pub block: bool,
-    pub reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct AfterToolCallResult {
-    pub override_content: Option<String>,
-    pub override_is_error: Option<bool>,
-    pub terminate: Option<bool>,
-}
-
 #[derive(Debug, Clone)]
 pub struct AgentState {
     pub system_prompt: String,

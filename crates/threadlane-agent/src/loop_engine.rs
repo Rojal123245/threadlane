@@ -3,11 +3,9 @@ use crate::compaction::{
     should_auto_compact, AUTO_COMPACTION_KEEP_RECENT_TOKENS,
 };
 use crate::events::AgentEvent;
-use crate::hooks::{
-    AfterToolCallHook, BeforeToolCallHook, ShouldStopAfterTurnHook, ToolExecutor,
-    TransformContextHook,
-};
+use crate::harness::{HookContext, HookRegistry};
 use crate::queue::PendingMessageQueue;
+use crate::tool_executor::ToolExecutor;
 use crate::types::{
     AgentMessage, AgentState, AgentToolCall, AgentToolDefinition, AgentToolResult, QueueMode,
     TokenUsage, ToolExecutionMode,
@@ -451,15 +449,14 @@ async fn run_provider_hook(
 
 #[derive(Clone)]
 struct ToolRunContext {
-    before_hook: Option<Arc<dyn BeforeToolCallHook>>,
-    after_hook: Option<Arc<dyn AfterToolCallHook>>,
+    hooks: HookRegistry,
     intent_recorder: Option<ToolIntentRecorder>,
     event_tx: broadcast::Sender<AgentEvent>,
-    state: Arc<Mutex<AgentState>>,
     tool_routes: Vec<ToolExecutorRoute>,
     allowed_tool_names: Option<HashSet<String>>,
     work_dir: Option<PathBuf>,
     skip_before_hook: bool,
+    session_id: String,
 }
 
 struct PreparedToolCall {
@@ -479,8 +476,7 @@ pub struct AgentLoop {
     allowed_tool_names: Option<HashSet<String>>,
     steering_queue: PendingMessageQueue,
     follow_up_queue: PendingMessageQueue,
-    pub before_tool_call_hook: Option<Arc<dyn BeforeToolCallHook>>,
-    pub after_tool_call_hook: Option<Arc<dyn AfterToolCallHook>>,
+    pub hook_registry: HookRegistry,
     pub tool_intent_recorder: Option<ToolIntentRecorder>,
     pub tool_completion_recorder: Option<ToolCompletionRecorder>,
     pub provider_usage_recorder: Option<ProviderUsageRecorder>,
@@ -489,8 +485,7 @@ pub struct AgentLoop {
     pub provider_hook_recorder: Option<ProviderHookRecorder>,
     pub assistant_message_recorder: Option<AssistantMessageRecorder>,
     pub tool_message_recorder: Option<AssistantMessageRecorder>,
-    transform_context_hook: Option<Arc<dyn TransformContextHook>>,
-    should_stop_hook: Option<Arc<dyn ShouldStopAfterTurnHook>>,
+    pub session_id: String,
     pub event_tx: broadcast::Sender<AgentEvent>,
     tool_executors: Vec<Arc<dyn ToolExecutor>>,
     /// Compatibility slot for existing callers. New code should use
@@ -524,8 +519,7 @@ impl AgentLoop {
             allowed_tool_names: None,
             steering_queue: PendingMessageQueue::new(QueueMode::All),
             follow_up_queue: PendingMessageQueue::new(QueueMode::All),
-            before_tool_call_hook: None,
-            after_tool_call_hook: None,
+            hook_registry: HookRegistry::default(),
             tool_intent_recorder: None,
             tool_completion_recorder: None,
             provider_usage_recorder: None,
@@ -534,8 +528,7 @@ impl AgentLoop {
             provider_hook_recorder: None,
             assistant_message_recorder: None,
             tool_message_recorder: None,
-            transform_context_hook: None,
-            should_stop_hook: None,
+            session_id: String::new(),
             event_tx,
             tool_executors: Vec::new(),
             extension_manager: None,
@@ -880,17 +873,6 @@ impl AgentLoop {
             {
                 let _ = self.event_tx.send(AgentEvent::AgentError { error });
                 return;
-            }
-
-            // Apply context transformation hook if set
-            if let Some(ref hook) = self.transform_context_hook {
-                let msgs = {
-                    let state = self.state.lock().await;
-                    state.messages.clone()
-                };
-                let transformed = hook.transform_context(msgs).await;
-                let mut state = self.state.lock().await;
-                state.messages = transformed;
             }
 
             {
@@ -1280,16 +1262,6 @@ impl AgentLoop {
                 tool_results: tool_results.clone(),
             });
 
-            if let Some(ref hook) = self.should_stop_hook {
-                let state = self.state.lock().await.clone();
-                if hook
-                    .should_stop_after_turn(turn_number, &tool_results, &state)
-                    .await
-                {
-                    break;
-                }
-            }
-
             if should_terminate {
                 break;
             }
@@ -1366,15 +1338,14 @@ impl AgentLoop {
             let mut prepared = Vec::new();
             for (index, tc) in tool_calls.iter().enumerate() {
                 let context = ToolRunContext {
-                    before_hook: self.before_tool_call_hook.clone(),
-                    after_hook: self.after_tool_call_hook.clone(),
+                    hooks: self.hook_registry.clone(),
                     intent_recorder: intent_recorder.clone(),
                     event_tx: self.event_tx.clone(),
-                    state: self.state.clone(),
                     tool_routes: tool_routes.clone(),
                     allowed_tool_names: allowed_tool_names.clone(),
                     work_dir: self.work_dir.clone(),
                     skip_before_hook,
+                    session_id: self.session_id.clone(),
                 };
                 match Self::prepare_tool_call(tc.clone(), context).await {
                     Ok(call) => prepared.push((index, call)),
@@ -1445,15 +1416,14 @@ impl AgentLoop {
         let result = AssertUnwindSafe(Self::run_tool_with_hooks(
             tc.clone(),
             ToolRunContext {
-                before_hook: self.before_tool_call_hook.clone(),
-                after_hook: self.after_tool_call_hook.clone(),
+                hooks: self.hook_registry.clone(),
                 intent_recorder,
                 event_tx: self.event_tx.clone(),
-                state: self.state.clone(),
                 tool_routes,
                 allowed_tool_names,
                 work_dir: self.work_dir.clone(),
                 skip_before_hook,
+                session_id: self.session_id.clone(),
             },
         ))
         .catch_unwind()
@@ -1541,28 +1511,36 @@ impl AgentLoop {
         }
 
         if !context.skip_before_hook {
-            if let Some(ref hook) = context.before_hook {
-                let state_snapshot = context.state.lock().await.clone();
-                let check = hook
-                    .before_tool_call(&agent_tool_call, &state_snapshot)
-                    .await;
-                if check.block {
-                    let res = AgentToolResult {
-                        tool_call_id: tc.id.clone(),
-                        name: tc.function.name.clone(),
-                        content: check
-                            .reason
-                            .unwrap_or_else(|| "Tool execution blocked by hook".into()),
-                        is_error: true,
-                        terminate: false,
-                    };
-                    let _ = context.event_tx.send(AgentEvent::ToolExecutionEnd {
-                        tool_call_id: tc.id.clone(),
-                        name: tc.function.name.clone(),
-                        result: res.clone(),
-                    });
-                    return Err(res);
-                }
+            let hook_ctx = HookContext {
+                session_id: context.session_id.clone(),
+                lane: "main".into(),
+                run_id: None,
+                resume_data: None,
+                tool_call_id: Some(tc.id.clone()),
+                tool_name: Some(tc.function.name.clone()),
+                tool_arguments: Some(arguments.clone()),
+                tool_result_content: None,
+                tool_result_is_error: None,
+            };
+            if let Err(failures) = context.hooks.run_before_tool(&hook_ctx).await {
+                let reason = failures
+                    .into_iter()
+                    .map(|failure| format!("{}: {}", failure.id, failure.message))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                let res = AgentToolResult {
+                    tool_call_id: tc.id.clone(),
+                    name: tc.function.name.clone(),
+                    content: reason,
+                    is_error: true,
+                    terminate: false,
+                };
+                let _ = context.event_tx.send(AgentEvent::ToolExecutionEnd {
+                    tool_call_id: tc.id.clone(),
+                    name: tc.function.name.clone(),
+                    result: res.clone(),
+                });
+                return Err(res);
             }
         }
 
@@ -1637,20 +1615,29 @@ impl AgentLoop {
             terminate: false,
         };
 
-        if let Some(ref hook) = context.after_hook {
-            let state_snapshot = context.state.lock().await.clone();
-            let override_res = hook
-                .after_tool_call(&agent_tool_call, &final_result, &state_snapshot)
-                .await;
-            if let Some(c) = override_res.override_content {
-                final_result.content = c;
-            }
-            if let Some(err) = override_res.override_is_error {
-                final_result.is_error = err;
-            }
-            if let Some(term) = override_res.terminate {
-                final_result.terminate = term;
-            }
+        let hook_ctx = HookContext {
+            session_id: context.session_id.clone(),
+            lane: "main".into(),
+            run_id: None,
+            resume_data: None,
+            tool_call_id: Some(tc.id.clone()),
+            tool_name: Some(tc.function.name.clone()),
+            tool_arguments: Some(arguments.clone()),
+            tool_result_content: Some(final_result.content.clone()),
+            tool_result_is_error: Some(final_result.is_error),
+        };
+        let hook_run = context.hooks.run_after_tool(&hook_ctx).await;
+        for failure in hook_run.failures {
+            eprintln!("after-tool hook {} failed: {}", failure.id, failure.message);
+        }
+        if let Some(content) = hook_run.effect.override_content {
+            final_result.content = content;
+        }
+        if let Some(is_error) = hook_run.effect.override_is_error {
+            final_result.is_error = is_error;
+        }
+        if let Some(terminate) = hook_run.effect.terminate {
+            final_result.terminate = terminate;
         }
 
         final_result
@@ -1739,39 +1726,45 @@ fn normalize_tool_arguments(
 #[cfg(test)]
 mod normalize_tool_arguments_tests {
     use super::*;
-    use crate::types::{AfterToolCallResult, AgentState, AgentToolCall, BeforeToolCallResult};
-    use async_trait::async_trait;
+    use crate::harness::{HookEffect, HookKind};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex as StdMutex;
     use threadlane_provider::openai::{ToolCall, ToolCallFunction};
 
-    struct CountingBeforeHook(Arc<AtomicUsize>);
-
-    #[async_trait]
-    impl BeforeToolCallHook for CountingBeforeHook {
-        async fn before_tool_call(
-            &self,
-            _tool_call: &AgentToolCall,
-            _state: &AgentState,
-        ) -> BeforeToolCallResult {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            BeforeToolCallResult::default()
-        }
-    }
-
-    struct CountingAfterHook(Arc<AtomicUsize>);
-
-    #[async_trait]
-    impl AfterToolCallHook for CountingAfterHook {
-        async fn after_tool_call(
-            &self,
-            _tool_call: &AgentToolCall,
-            _result: &AgentToolResult,
-            _state: &AgentState,
-        ) -> AfterToolCallResult {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            AfterToolCallResult::default()
-        }
+    fn register_counting_hooks(
+        agent: &mut AgentLoop,
+        before_calls: Arc<AtomicUsize>,
+        after_calls: Arc<AtomicUsize>,
+    ) {
+        let before_calls_for_handler = before_calls;
+        agent
+            .hook_registry
+            .register(
+                HookKind::BeforeTool,
+                "test-before-tool",
+                Arc::new(move |_context| {
+                    let before_calls = before_calls_for_handler.clone();
+                    Box::pin(async move {
+                        before_calls.fetch_add(1, Ordering::SeqCst);
+                        Ok(HookEffect::default())
+                    })
+                }),
+            )
+            .unwrap();
+        agent
+            .hook_registry
+            .register(
+                HookKind::AfterTool,
+                "test-after-tool",
+                Arc::new(move |_context| {
+                    let after_calls = after_calls.clone();
+                    Box::pin(async move {
+                        after_calls.fetch_add(1, Ordering::SeqCst);
+                        Ok(HookEffect::default())
+                    })
+                }),
+            )
+            .unwrap();
     }
 
     #[test]
@@ -2007,8 +2000,7 @@ mod normalize_tool_arguments_tests {
         let mut agent = AgentLoop::new("", None, "test");
         let before_calls = Arc::new(AtomicUsize::new(0));
         let after_calls = Arc::new(AtomicUsize::new(0));
-        agent.before_tool_call_hook = Some(Arc::new(CountingBeforeHook(before_calls.clone())));
-        agent.after_tool_call_hook = Some(Arc::new(CountingAfterHook(after_calls.clone())));
+        register_counting_hooks(&mut agent, before_calls.clone(), after_calls.clone());
         let call = ToolCall {
             id: "call-1".into(),
             r#type: "function".into(),

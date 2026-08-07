@@ -24,16 +24,15 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use threadlane_agent::harness::{
     AgentHarness, DeferredResolution, Entry as HarnessEntry, EventError, HarnessEvent,
-    HarnessEventHub, HookContext, HookKind, JsonlStore, OperationIntent, OperationOutcome,
-    QueueKind, Record as HarnessRecord, Reducer, RetryPolicy, SessionIdGenerator, SessionStore,
-    Snapshot, Subscription, ToolRecovery, ToolReplaySafety as HarnessToolReplaySafety,
-    ToolResult as HarnessToolResult, ToolSpec,
+    HarnessEventHub, HookContext, HookEffect, HookHandler, HookKind, HookRegistry, JsonlStore,
+    OperationIntent, OperationOutcome, QueueKind, Record as HarnessRecord, Reducer, RetryPolicy,
+    SessionIdGenerator, SessionStore, Snapshot, Subscription, ToolRecovery,
+    ToolReplaySafety as HarnessToolReplaySafety, ToolResult as HarnessToolResult, ToolSpec,
 };
 use threadlane_agent::{
-    repair_interrupted_tool_turn, AfterToolCallHook, AfterToolCallResult, Agent, AgentEvent,
-    AgentMessage, AgentState, AgentToolCall, AgentToolDefinition, AgentToolResult,
-    BeforeToolCallHook, BeforeToolCallResult, ImageAttachment, OpOutcome, OpRecord,
-    ReasoningEffort, SessionTree, SubagentRecoveryStatus, TokenUsage, ToolExecutor,
+    repair_interrupted_tool_turn, Agent, AgentEvent, AgentMessage, AgentState, AgentToolCall,
+    AgentToolDefinition, AgentToolResult, ImageAttachment, OpOutcome, OpRecord, ReasoningEffort,
+    SessionTree, SubagentRecoveryStatus, TokenUsage, ToolExecutor,
 };
 use threadlane_provider::openai::fetch_available_models;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -1746,144 +1745,119 @@ pub struct CodingAgentOptions {
     pub system_prompt: SystemPromptConfig,
 }
 
-pub struct ExtensionBeforeToolHook {
-    pub tool_policy: Arc<tokio::sync::Mutex<ToolPolicy>>,
-    pub extensions: Arc<WasiExtensionManager>,
-    pub broker_dispatcher: Arc<CapabilityDispatcher>,
-}
-
-#[async_trait]
-impl BeforeToolCallHook for ExtensionBeforeToolHook {
-    async fn before_tool_call(
-        &self,
-        tool_call: &AgentToolCall,
-        _state: &AgentState,
-    ) -> BeforeToolCallResult {
-        let policy = *self.tool_policy.lock().await;
-        if policy == ToolPolicy::ReadOnly
-            && matches!(
-                tool_call.name.as_str(),
-                "write_file" | "edit_file" | "write" | "edit" | "run_command"
-            )
-        {
-            return BeforeToolCallResult {
-                block: true,
-                reason: Some(format!(
-                    "Tool `{}` is blocked because read-only tool policy is ACTIVE.",
-                    tool_call.name
-                )),
-            };
-        }
-
-        let arguments = serde_json::json!({
-            "tool_name": tool_call.name,
-            "tool_arguments": tool_call.arguments,
-        });
-        let hook_responses = self
-            .extensions
-            .execute_hook_with_broker_requests("before_tool_call", &arguments.to_string());
-        for resp in hook_responses {
-            let res = match resp {
-                Ok(res) => res,
-                Err(error) => {
-                    return BeforeToolCallResult {
-                        block: true,
-                        reason: Some(format!("Extension hook error: {error}")),
-                    };
-                }
-            };
-            if let Err(error) = dispatch_hook_requests(
-                &self.broker_dispatcher,
-                &self.extensions,
-                res.host_broker_requests,
-            )
-            .await
-            {
-                return BeforeToolCallResult {
-                    block: true,
-                    reason: Some(format!("Extension broker error: {}", error.message)),
-                };
-            }
-            let api_version = res.api_version;
-            let response = res.response;
-            if api_version == BROKER_API_VERSION {
-                if let Some(middleware) = response.middleware {
-                    if middleware.block == Some(true) {
-                        return BeforeToolCallResult {
-                            block: true,
-                            reason: middleware.reason,
-                        };
-                    }
-                }
-            } else if api_version == 1 {
-                if let Some(msg) = response.message {
-                    if msg.contains("blocked") {
-                        return BeforeToolCallResult {
-                            block: true,
-                            reason: Some(msg),
-                        };
-                    }
-                }
-            }
-        }
-
-        BeforeToolCallResult::default()
-    }
-}
-
-pub struct ExtensionAfterToolHook {
+pub fn extension_before_tool_hook_handler(
+    tool_policy: Arc<tokio::sync::Mutex<ToolPolicy>>,
     extensions: Arc<WasiExtensionManager>,
     broker_dispatcher: Arc<CapabilityDispatcher>,
-}
+) -> HookHandler {
+    Arc::new(move |context: HookContext| {
+        let tool_policy = tool_policy.clone();
+        let extensions = extensions.clone();
+        let broker_dispatcher = broker_dispatcher.clone();
+        Box::pin(async move {
+            let policy = *tool_policy.lock().await;
+            let tool_name = context.tool_name.as_deref().unwrap_or("");
+            if policy == ToolPolicy::ReadOnly
+                && matches!(
+                    tool_name,
+                    "write_file" | "edit_file" | "write" | "edit" | "run_command"
+                )
+            {
+                return Err(format!(
+                    "Tool `{tool_name}` is blocked because read-only tool policy is ACTIVE."
+                ));
+            }
 
-#[async_trait]
-impl AfterToolCallHook for ExtensionAfterToolHook {
-    async fn after_tool_call(
-        &self,
-        tool_call: &AgentToolCall,
-        result: &AgentToolResult,
-        _state: &AgentState,
-    ) -> AfterToolCallResult {
-        let arguments = serde_json::json!({
-            "tool_name": tool_call.name,
-            "tool_arguments": tool_call.arguments,
-            "result": result.content,
-            "is_error": result.is_error,
-        });
-        // Tool requests are queued by ToolExecutor; dispatch them first so the
-        // tool's effects precede the deterministic, name-sorted after hooks.
-        dispatch_hook_requests_isolated(
-            &self.broker_dispatcher,
-            &self.extensions,
-            self.extensions.take_pending_broker_requests(),
-            "WASI tool broker error",
-        )
-        .await;
-        for response in self
-            .extensions
-            .execute_hook_with_broker_requests("after_tool_call", &arguments.to_string())
-        {
-            match response {
-                Ok(response) => {
-                    match self
-                        .broker_dispatcher
-                        .dispatch_envelopes(response.host_broker_requests)
-                        .await
-                    {
-                        Ok(dispatch) => {
-                            self.extensions
-                                .enqueue_broker_results(dispatch.operation_results);
+            let arguments = serde_json::json!({
+                "tool_name": tool_name,
+                "tool_arguments": context.tool_arguments.as_deref().unwrap_or(""),
+            });
+            let hook_responses = extensions
+                .execute_hook_with_broker_requests("before_tool_call", &arguments.to_string());
+            for resp in hook_responses {
+                let res = match resp {
+                    Ok(res) => res,
+                    Err(error) => {
+                        return Err(format!("Extension hook error: {error}"));
+                    }
+                };
+                if let Err(error) = dispatch_hook_requests(
+                    &broker_dispatcher,
+                    &extensions,
+                    res.host_broker_requests,
+                )
+                .await
+                {
+                    return Err(format!("Extension broker error: {}", error.message));
+                }
+                let api_version = res.api_version;
+                let response = res.response;
+                if api_version == BROKER_API_VERSION {
+                    if let Some(middleware) = response.middleware {
+                        if middleware.block == Some(true) {
+                            return Err(middleware.reason.unwrap_or_else(|| "blocked".into()));
                         }
-                        Err(error) => {
-                            eprintln!("WASI after-tool hook broker error: {}", error.message)
+                    }
+                } else if api_version == 1 {
+                    if let Some(msg) = response.message {
+                        if msg.contains("blocked") {
+                            return Err(msg);
                         }
                     }
                 }
-                Err(error) => eprintln!("WASI after-tool hook error: {error}"),
             }
-        }
-        AfterToolCallResult::default()
-    }
+
+            Ok(HookEffect::default())
+        })
+    })
+}
+
+fn create_after_tool_hook_handler(
+    extensions: Arc<WasiExtensionManager>,
+    broker_dispatcher: Arc<CapabilityDispatcher>,
+) -> HookHandler {
+    Arc::new(move |context: HookContext| {
+        let extensions = extensions.clone();
+        let broker_dispatcher = broker_dispatcher.clone();
+        Box::pin(async move {
+            let arguments = serde_json::json!({
+                "tool_name": context.tool_name.as_deref().unwrap_or(""),
+                "tool_arguments": context.tool_arguments.as_deref().unwrap_or(""),
+                "result": context.tool_result_content.as_deref().unwrap_or(""),
+                "is_error": context.tool_result_is_error.unwrap_or(false),
+            });
+            // Tool requests are queued by ToolExecutor; dispatch them first so the
+            // tool's effects precede the deterministic, name-sorted after hooks.
+            dispatch_hook_requests_isolated(
+                &broker_dispatcher,
+                &extensions,
+                extensions.take_pending_broker_requests(),
+                "WASI tool broker error",
+            )
+            .await;
+            for response in extensions
+                .execute_hook_with_broker_requests("after_tool_call", &arguments.to_string())
+            {
+                match response {
+                    Ok(response) => {
+                        match broker_dispatcher
+                            .dispatch_envelopes(response.host_broker_requests)
+                            .await
+                        {
+                            Ok(dispatch) => {
+                                extensions.enqueue_broker_results(dispatch.operation_results);
+                            }
+                            Err(error) => {
+                                eprintln!("WASI after-tool hook broker error: {}", error.message)
+                            }
+                        }
+                    }
+                    Err(error) => eprintln!("WASI after-tool hook error: {error}"),
+                }
+            }
+            Ok(HookEffect::default())
+        })
+    })
 }
 
 struct BrokerAwareWasiToolExecutor {
@@ -2024,6 +1998,14 @@ fn harness_event_hub(path: &Path) -> HarnessEventHub {
         .clone()
 }
 
+fn harness_hook_registry(path: &Path) -> HookRegistry {
+    static REGISTRIES: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, HookRegistry>>> =
+        std::sync::OnceLock::new();
+    let registries = REGISTRIES.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut registries = registries.lock().unwrap_or_else(|error| error.into_inner());
+    registries.entry(path.to_path_buf()).or_default().clone()
+}
+
 fn harness_cancellation_state(path: &Path) -> Arc<AtomicBool> {
     static STATES: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, Arc<AtomicBool>>>> =
         std::sync::OnceLock::new();
@@ -2045,6 +2027,7 @@ impl HarnessJournal {
                 .map_err(|error| error.to_string())?;
         }
         let events = harness_event_hub(path);
+        let hooks = harness_hook_registry(path);
         let persist_path = path.to_path_buf();
         let persist_events = events.clone();
         let executor = move |action: threadlane_agent::harness::EffectAction| {
@@ -2077,7 +2060,7 @@ impl HarnessJournal {
         let cancellation = harness_cancellation_state(path);
         JsonlStore::open(path)
             .map(|store| Self {
-                store: AgentHarness::with_executor(store, events, executor),
+                store: AgentHarness::with_executor_and_hooks(store, events, executor, hooks),
                 cancellation,
             })
             .map_err(|error| error.to_string())
@@ -2088,7 +2071,7 @@ impl HarnessJournal {
         journal.append_message(message)
     }
 
-    fn append_tool_intent_to_path(
+    async fn append_tool_intent_to_path(
         path: &Path,
         run_id: &str,
         tool_call_id: &str,
@@ -2096,7 +2079,9 @@ impl HarnessJournal {
         effective_args: Value,
     ) -> Result<(), String> {
         let mut journal = Self::open(path)?;
-        journal.append_tool_intent(run_id, tool_call_id, tool_name, effective_args)
+        journal
+            .append_tool_intent_after_hook(run_id, tool_call_id, tool_name, effective_args)
+            .await
     }
 
     #[cfg(test)]
@@ -2120,7 +2105,8 @@ impl HarnessJournal {
             .map_err(|error| error.to_string())
     }
 
-    fn run_before_tool_hook(
+    #[cfg(test)]
+    async fn run_before_tool_hook(
         &self,
         run_id: &str,
         tool_call_id: &str,
@@ -2131,10 +2117,16 @@ impl HarnessJournal {
             lane: "main".into(),
             run_id: Some(run_id.into()),
             resume_data: None,
+            tool_call_id: Some(tool_call_id.into()),
+            tool_name: Some(tool_name.into()),
+            tool_arguments: None,
+            tool_result_content: None,
+            tool_result_is_error: None,
         };
         self.store
             .hooks()
             .run_before_tool(&context)
+            .await
             .map_err(|failures| {
                 failures
                     .into_iter()
@@ -2147,18 +2139,6 @@ impl HarnessJournal {
                     .collect::<Vec<_>>()
                     .join("; ")
             })
-    }
-
-    fn run_after_tool_hook(&self, run_id: &str) {
-        let context = HookContext {
-            session_id: self.store.session_id().to_owned(),
-            lane: "main".into(),
-            run_id: Some(run_id.into()),
-            resume_data: None,
-        };
-        for failure in self.store.hooks().run(HookKind::AfterTool, &context) {
-            eprintln!("after-tool hook {} failed: {}", failure.id, failure.message);
-        }
     }
 
     fn unique_run_id(&mut self, prefix: &str) -> Result<String, String> {
@@ -2447,7 +2427,34 @@ impl HarnessJournal {
             .map_err(|error| error.to_string())
     }
 
-    fn append_tool_intent(
+    #[cfg(test)]
+    async fn append_tool_intent(
+        &mut self,
+        run_id: &str,
+        tool_call_id: &str,
+        tool_name: &str,
+        effective_args: Value,
+    ) -> Result<(), String> {
+        self.refresh()?;
+        // Direct journal callers enter through the harness hook boundary. The
+        // live loop uses append_tool_intent_after_hook because it already ran
+        // the same registry before recording the durable intent.
+        if self.store.records().iter().any(|record| {
+            matches!(record, HarnessRecord::ToolStarted {
+                run_id: record_run_id,
+                tool_call_id: record_call_id,
+                ..
+            } if record_run_id == run_id && record_call_id == tool_call_id)
+        }) {
+            return Ok(());
+        }
+        self.run_before_tool_hook(run_id, tool_call_id, tool_name)
+            .await?;
+        self.append_tool_intent_after_hook(run_id, tool_call_id, tool_name, effective_args)
+            .await
+    }
+
+    async fn append_tool_intent_after_hook(
         &mut self,
         run_id: &str,
         tool_call_id: &str,
@@ -2466,7 +2473,6 @@ impl HarnessJournal {
         }) {
             return Ok(());
         }
-        self.run_before_tool_hook(run_id, tool_call_id, tool_name)?;
         let assistant = self
             .store
             .entries()
@@ -3697,7 +3703,7 @@ impl CodingAgent {
         self.agent.loop_engine.tool_completion_recorder = recorder;
     }
 
-    fn begin_harness_run(&mut self, prompt: AgentMessage) -> Result<Option<String>, String> {
+    async fn begin_harness_run(&mut self, prompt: AgentMessage) -> Result<Option<String>, String> {
         if let Some(run_id) = self
             .harness_run_id
             .lock()
@@ -3716,8 +3722,18 @@ impl CodingAgent {
             lane: "main".into(),
             run_id: Some(run_id.clone()),
             resume_data: None,
+            tool_call_id: None,
+            tool_name: None,
+            tool_arguments: None,
+            tool_result_content: None,
+            tool_result_is_error: None,
         };
-        for failure in journal.store.hooks().run(HookKind::BeforeRun, &context) {
+        for failure in journal
+            .store
+            .hooks()
+            .run(HookKind::BeforeRun, &context)
+            .await
+        {
             eprintln!("before-run hook {} failed: {}", failure.id, failure.message);
         }
         *self
@@ -3757,7 +3773,7 @@ impl CodingAgent {
         Ok(())
     }
 
-    fn finish_harness_run(
+    async fn finish_harness_run(
         &mut self,
         run_id: Option<&str>,
         outcome: OpOutcome,
@@ -3773,8 +3789,18 @@ impl CodingAgent {
                 lane: "main".into(),
                 run_id: Some(run_id.into()),
                 resume_data: None,
+                tool_call_id: None,
+                tool_name: None,
+                tool_arguments: None,
+                tool_result_content: None,
+                tool_result_is_error: None,
             };
-            for failure in journal.store.hooks().run(HookKind::AfterRun, &context) {
+            for failure in journal
+                .store
+                .hooks()
+                .run(HookKind::AfterRun, &context)
+                .await
+            {
                 eprintln!("after-run hook {} failed: {}", failure.id, failure.message);
             }
         }
@@ -4121,6 +4147,10 @@ impl CodingAgent {
         let plan_store =
             SessionPlanStore::new(session_tree.plan().clone(), session_tree.file_path.clone());
         let mut agent = Agent::new(&options.api_key, options.account_id, &effective_model);
+        agent.loop_engine.session_id = session_tree.session_id.clone();
+        if let Some(journal) = harness_journal.as_ref() {
+            agent.loop_engine.hook_registry = journal.store.hooks().clone();
+        }
         let harness_run_id: Arc<std::sync::Mutex<Option<String>>> =
             Arc::new(std::sync::Mutex::new(None));
         if let Some(path) = session_tree.file_path.clone() {
@@ -4152,7 +4182,6 @@ impl CodingAgent {
                         let mut journal = HarnessJournal::open(&path)?;
                         journal.append_message(message.clone())?;
                         journal.finish_tool_message(&run_id, &message)?;
-                        journal.run_after_tool_hook(&run_id);
                         Ok(())
                     } else {
                         Ok(())
@@ -4226,11 +4255,17 @@ impl CodingAgent {
                         lane: "main".into(),
                         run_id: Some(run_id),
                         resume_data: None,
+                        tool_call_id: None,
+                        tool_name: None,
+                        tool_arguments: None,
+                        tool_result_content: None,
+                        tool_result_is_error: None,
                     };
                     Ok(journal
                         .store
                         .hooks()
                         .run(kind, &context)
+                        .await
                         .into_iter()
                         .map(|failure| format!("{}: {}", failure.id, failure.message))
                         .collect())
@@ -4260,6 +4295,7 @@ impl CodingAgent {
                             &tool_name,
                             effective_args,
                         )
+                        .await
                     })
                 }));
         }
@@ -4420,15 +4456,28 @@ impl CodingAgent {
             loaded_extension_count: loaded_ext_count,
         });
 
-        agent.loop_engine.before_tool_call_hook = Some(Arc::new(ExtensionBeforeToolHook {
-            tool_policy: tool_policy.clone(),
-            extensions: wasi_extensions.clone(),
-            broker_dispatcher: broker_dispatcher.clone(),
-        }));
-        agent.loop_engine.after_tool_call_hook = Some(Arc::new(ExtensionAfterToolHook {
-            extensions: wasi_extensions.clone(),
-            broker_dispatcher: broker_dispatcher.clone(),
-        }));
+        agent
+            .loop_engine
+            .hook_registry
+            .replace(
+                HookKind::BeforeTool,
+                "extension-before-tool",
+                extension_before_tool_hook_handler(
+                    tool_policy.clone(),
+                    wasi_extensions.clone(),
+                    broker_dispatcher.clone(),
+                ),
+            )
+            .expect("extension before-tool hook must register");
+        agent
+            .loop_engine
+            .hook_registry
+            .replace(
+                HookKind::AfterTool,
+                "extension-after-tool",
+                create_after_tool_hook_handler(wasi_extensions.clone(), broker_dispatcher.clone()),
+            )
+            .expect("extension after-tool hook must register");
 
         {
             let mut state = agent
@@ -5469,7 +5518,6 @@ impl CodingAgent {
                     .ok_or_else(|| "harness journal is unavailable".to_string())?;
                 journal.append_replayed_tool_entry(run_id, &assistant_entry_id, &spec, &result)?;
                 journal.finish_replayed_tool(run_id, &result)?;
-                journal.run_after_tool_hook(run_id);
             }
             let terminate = result.terminates();
             messages.push(AgentMessage::Tool {
@@ -5524,8 +5572,13 @@ impl CodingAgent {
             lane: "main".into(),
             run_id: Some(run_id.clone()),
             resume_data: None,
+            tool_call_id: None,
+            tool_name: None,
+            tool_arguments: None,
+            tool_result_content: None,
+            tool_result_is_error: None,
         };
-        for failure in journal.store.hooks().run_before_resume(&context) {
+        for failure in journal.store.hooks().run_before_resume(&context).await {
             eprintln!(
                 "before-resume hook {} failed: {}",
                 failure.id, failure.message
@@ -5807,7 +5860,7 @@ impl CodingAgent {
                             skill_name, instructions
                         );
                         let visible_prompt = AgentMessage::user(input, images.clone());
-                        let harness_run_id = match self.begin_harness_run(visible_prompt) {
+                        let harness_run_id = match self.begin_harness_run(visible_prompt).await {
                             Ok(run_id) => run_id,
                             Err(error) => return Some(Err(format!("Harness Error: {error}"))),
                         };
@@ -5834,11 +5887,14 @@ impl CodingAgent {
                             return Some(Err(error));
                         }
                         *self.dispatch_parent_leaf.lock().unwrap() = None;
-                        if let Err(error) = self.finish_harness_run(
-                            harness_run_id.as_deref(),
-                            OpOutcome::Completed,
-                            None,
-                        ) {
+                        if let Err(error) = self
+                            .finish_harness_run(
+                                harness_run_id.as_deref(),
+                                OpOutcome::Completed,
+                                None,
+                            )
+                            .await
+                        {
                             return Some(Err(format!("Harness Error: {error}")));
                         }
                         return Some(Ok(format!("Loaded skill '{}'", skill_name)));
@@ -5860,7 +5916,7 @@ impl CodingAgent {
                     model: None,
                 };
                 let visible_prompt = AgentMessage::user(input, images.clone());
-                let harness_run_id = match self.begin_harness_run(visible_prompt) {
+                let harness_run_id = match self.begin_harness_run(visible_prompt).await {
                     Ok(run_id) => run_id,
                     Err(error) => return Some(Err(format!("Harness Error: {error}"))),
                 };
@@ -5935,8 +5991,9 @@ impl CodingAgent {
                     self.session_tree.add_message(assistant);
                 }
                 self.run_scheduled_agent_work().await;
-                if let Err(error) =
-                    self.finish_harness_run(harness_run_id.as_deref(), OpOutcome::Completed, None)
+                if let Err(error) = self
+                    .finish_harness_run(harness_run_id.as_deref(), OpOutcome::Completed, None)
+                    .await
                 {
                     return Some(Err(format!("Harness Error: {error}")));
                 }
@@ -5948,7 +6005,7 @@ impl CodingAgent {
                 .execute_command_with_effects(cmd_name, &cmd_args)
             {
                 let visible_prompt = AgentMessage::user(input, images.clone());
-                let harness_run_id = match self.begin_harness_run(visible_prompt) {
+                let harness_run_id = match self.begin_harness_run(visible_prompt).await {
                     Ok(run_id) => run_id,
                     Err(error) => return Some(Err(format!("Harness Error: {error}"))),
                 };
@@ -6065,11 +6122,14 @@ impl CodingAgent {
                             } else {
                                 OpOutcome::Failed
                             };
-                            if let Err(error) = self.finish_harness_run(
-                                harness_run_id.as_deref(),
-                                outcome,
-                                result.as_ref().err().cloned(),
-                            ) {
+                            if let Err(error) = self
+                                .finish_harness_run(
+                                    harness_run_id.as_deref(),
+                                    outcome,
+                                    result.as_ref().err().cloned(),
+                                )
+                                .await
+                            {
                                 return Some(Err(format!("Harness Error: {error}")));
                             }
                             return Some(result);
@@ -6080,8 +6140,9 @@ impl CodingAgent {
                         } else {
                             OpOutcome::Failed
                         };
-                        if let Err(error) =
-                            self.finish_harness_run(harness_run_id.as_deref(), outcome, None)
+                        if let Err(error) = self
+                            .finish_harness_run(harness_run_id.as_deref(), outcome, None)
+                            .await
                         {
                             return Some(Err(format!("Harness Error: {error}")));
                         }
@@ -6179,7 +6240,7 @@ impl CodingAgent {
         }
 
         let msg = AgentMessage::user(effective_input, images);
-        let harness_run_id = match self.begin_harness_run(msg.clone()) {
+        let harness_run_id = match self.begin_harness_run(msg.clone()).await {
             Ok(run_id) => run_id,
             Err(error) => {
                 let message = format!("Harness Error: {error}");
@@ -6298,8 +6359,9 @@ impl CodingAgent {
                         return Some(Err(error));
                     }
                 }
-                let _ =
-                    self.finish_harness_run(Some(run_id), OpOutcome::Failed, Some(error.clone()));
+                let _ = self
+                    .finish_harness_run(Some(run_id), OpOutcome::Failed, Some(error.clone()))
+                    .await;
             }
             return Some(Err(error));
         }
@@ -6310,13 +6372,15 @@ impl CodingAgent {
                     .and_then(|_| journal.record_assistant_attempt(run_id, usage))
             });
             if let Some(Err(error)) = attempt_result {
-                let _ =
-                    self.finish_harness_run(Some(run_id), OpOutcome::Failed, Some(error.clone()));
+                let _ = self
+                    .finish_harness_run(Some(run_id), OpOutcome::Failed, Some(error.clone()))
+                    .await;
                 return Some(Err(format!("Harness Error: {error}")));
             }
         }
-        if let Err(error) =
-            self.finish_harness_run(harness_run_id.as_deref(), OpOutcome::Completed, None)
+        if let Err(error) = self
+            .finish_harness_run(harness_run_id.as_deref(), OpOutcome::Completed, None)
+            .await
         {
             return Some(Err(format!("Harness Error: {error}")));
         }
@@ -6744,15 +6808,28 @@ async fn run_subagent_task(
         None,
     )
     .0;
-    agent.loop_engine.before_tool_call_hook = Some(Arc::new(ExtensionBeforeToolHook {
-        tool_policy: policy,
-        extensions: context.extensions.clone(),
-        broker_dispatcher: broker_dispatcher.clone(),
-    }));
-    agent.loop_engine.after_tool_call_hook = Some(Arc::new(ExtensionAfterToolHook {
-        extensions: context.extensions.clone(),
-        broker_dispatcher,
-    }));
+    agent
+        .loop_engine
+        .hook_registry
+        .register(
+            HookKind::BeforeTool,
+            "extension-before-tool",
+            extension_before_tool_hook_handler(
+                policy,
+                context.extensions.clone(),
+                broker_dispatcher.clone(),
+            ),
+        )
+        .expect("extension before-tool hook must register");
+    agent
+        .loop_engine
+        .hook_registry
+        .register(
+            HookKind::AfterTool,
+            "extension-after-tool",
+            create_after_tool_hook_handler(context.extensions.clone(), broker_dispatcher),
+        )
+        .expect("extension after-tool hook must register");
 
     #[cfg(test)]
     if let Some(observer) = context.scheduler_observer.as_ref() {
@@ -7349,8 +7426,8 @@ mod tests {
             .any(|entry| entry.id == result_id));
     }
 
-    #[test]
-    fn harness_journal_closes_a_tool_at_result_commit() {
+    #[tokio::test]
+    async fn harness_journal_closes_a_tool_at_result_commit() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
         let mut journal = HarnessJournal::open(&path).unwrap();
@@ -7376,6 +7453,7 @@ mod tests {
                 "read_file",
                 serde_json::json!({"path": "README.md"}),
             )
+            .await
             .unwrap();
         let result = AgentMessage::Tool {
             tool_call_id: "call-1".into(),
@@ -7397,8 +7475,8 @@ mod tests {
         )));
     }
 
-    #[test]
-    fn duplicate_tool_intent_does_not_rerun_before_tool_hook() {
+    #[tokio::test]
+    async fn duplicate_tool_intent_does_not_rerun_before_tool_hook() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
         let mut journal = HarnessJournal::open(&path).unwrap();
@@ -7412,7 +7490,7 @@ mod tests {
                 "count-before-tool",
                 Arc::new(move |_| {
                     hook_calls_for_handler.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
+                    Box::pin(async { Ok(HookEffect::default()) })
                 }),
             )
             .unwrap();
@@ -7438,6 +7516,7 @@ mod tests {
                 "read_file",
                 serde_json::json!({"path": "README.md"}),
             )
+            .await
             .unwrap();
         journal
             .append_tool_intent(
@@ -7446,6 +7525,7 @@ mod tests {
                 "read_file",
                 serde_json::json!({"path": "README.md"}),
             )
+            .await
             .unwrap();
 
         assert_eq!(hook_calls.load(Ordering::SeqCst), 1);
@@ -7478,6 +7558,7 @@ mod tests {
                 "read_file",
                 serde_json::json!({"path": "session.jsonl"}),
             )
+            .await
             .unwrap();
         drop(journal);
 
@@ -8215,10 +8296,16 @@ mod tests {
         options.session_file = Some(session_file.clone());
         let mut coding_agent = CodingAgent::new(options);
         let executor_count = Arc::new(AtomicU64::new(0));
-        coding_agent.agent.loop_engine.before_tool_call_hook =
-            Some(Arc::new(CountingBeforeToolHook {
-                count: executor_count.clone(),
-            }));
+        coding_agent
+            .agent
+            .loop_engine
+            .hook_registry
+            .register(
+                HookKind::BeforeTool,
+                "counting-before",
+                counting_before_tool_handler(executor_count.clone()),
+            )
+            .ok();
         coding_agent.set_subagent_work_observer(Arc::new(Mutex::new(Vec::new())));
         let parent = coding_agent.session_tree.add_message(AgentMessage::User {
             content: "parent".into(),
@@ -8415,10 +8502,16 @@ mod tests {
         let mut first_options = coding_agent_options(dir.path().to_path_buf());
         first_options.session_file = Some(session_file.clone());
         let mut first_agent = CodingAgent::new(first_options);
-        first_agent.agent.loop_engine.before_tool_call_hook =
-            Some(Arc::new(CountingBeforeToolHook {
-                count: executor_count.clone(),
-            }));
+        first_agent
+            .agent
+            .loop_engine
+            .hook_registry
+            .register(
+                HookKind::BeforeTool,
+                "counting-before",
+                counting_before_tool_handler(executor_count.clone()),
+            )
+            .ok();
         let safe_message = first_agent
             .replay_safe_tools(&[safe_tool])
             .await
@@ -8487,10 +8580,16 @@ mod tests {
         let mut resumed_options = coding_agent_options(dir.path().to_path_buf());
         resumed_options.session_file = Some(session_file.clone());
         let mut resumed_agent = CodingAgent::new(resumed_options);
-        resumed_agent.agent.loop_engine.before_tool_call_hook =
-            Some(Arc::new(CountingBeforeToolHook {
-                count: executor_count.clone(),
-            }));
+        resumed_agent
+            .agent
+            .loop_engine
+            .hook_registry
+            .replace(
+                HookKind::BeforeTool,
+                "counting-before",
+                counting_before_tool_handler(executor_count.clone()),
+            )
+            .unwrap();
         assert_eq!(
             resumed_agent
                 .recover_interrupted_subagent_lanes()
@@ -8559,10 +8658,16 @@ mod tests {
         options.session_file = Some(session_file.clone());
         let mut coding_agent = CodingAgent::new(options);
         let safe_executor_count = Arc::new(AtomicU64::new(0));
-        coding_agent.agent.loop_engine.before_tool_call_hook =
-            Some(Arc::new(CountingBeforeToolHook {
-                count: safe_executor_count.clone(),
-            }));
+        coding_agent
+            .agent
+            .loop_engine
+            .hook_registry
+            .register(
+                HookKind::BeforeTool,
+                "counting-before",
+                counting_before_tool_handler(safe_executor_count.clone()),
+            )
+            .unwrap();
         assert_eq!(
             coding_agent
                 .recover_interrupted_subagent_lanes()
@@ -9371,7 +9476,7 @@ mod tests {
         let session_file = dir.path().join("session.jsonl");
         let mut options = coding_agent_options(dir.path().to_path_buf());
         options.session_file = Some(session_file.clone());
-        let mut agent = CodingAgent::new(options);
+        let agent = CodingAgent::new(options);
         let mut journal = HarnessJournal::open(&session_file).unwrap();
         let mut events = agent.subscribe();
 
@@ -9451,20 +9556,14 @@ mod tests {
         }
     }
 
-    struct CountingBeforeToolHook {
-        count: Arc<AtomicU64>,
-    }
-
-    #[async_trait]
-    impl BeforeToolCallHook for CountingBeforeToolHook {
-        async fn before_tool_call(
-            &self,
-            _tool_call: &AgentToolCall,
-            _state: &AgentState,
-        ) -> BeforeToolCallResult {
-            self.count.fetch_add(1, Ordering::SeqCst);
-            BeforeToolCallResult::default()
-        }
+    fn counting_before_tool_handler(count: Arc<AtomicU64>) -> HookHandler {
+        Arc::new(move |_context: HookContext| {
+            let count = count.clone();
+            Box::pin(async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                Ok(HookEffect::default())
+            })
+        })
     }
 
     #[tokio::test]

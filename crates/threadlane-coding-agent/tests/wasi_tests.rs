@@ -1,15 +1,15 @@
 use serde_json::Value;
-use std::collections::HashMap;
+
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
-use threadlane_agent::{AgentState, AgentToolCall, BeforeToolCallHook};
+use threadlane_agent::harness::HookContext;
 use threadlane_coding_agent::{
-    BrokerError, BrokerOperationResult, BrokerRequest, CapabilityCatalog, CapabilityDispatcher,
-    CapabilityHandler, CapabilityPolicy, ExtensionBeforeToolHook, ExtensionManager, ExtensionScope,
-    HostBrokerRequest, HostCapabilityGrantPolicy, ToolPolicy, WasiExtension, WasiExtensionEvent,
-    WasiExtensionManager, WasiExtensionManifest, WasiToolDefinition,
+    extension_before_tool_hook_handler, BrokerError, BrokerOperationResult, BrokerRequest,
+    CapabilityCatalog, CapabilityDispatcher, CapabilityHandler, CapabilityPolicy, ExtensionManager,
+    ExtensionScope, HostBrokerRequest, HostCapabilityGrantPolicy, ToolPolicy, WasiExtension,
+    WasiExtensionEvent, WasiExtensionManager, WasiExtensionManifest, WasiToolDefinition,
 };
 
 fn build_broker_smoke_extension(agent_only: bool) -> PathBuf {
@@ -843,33 +843,21 @@ async fn structured_hook_middleware_blocks_without_message_matching() {
     let extension = WasiExtension::load_from_bytes(hook_wasm(2, response)).unwrap();
     let manager = WasiExtensionManager::new();
     manager.register_extension(extension).unwrap();
-    let hook = ExtensionBeforeToolHook {
-        tool_policy: Arc::new(tokio::sync::Mutex::new(ToolPolicy::FullAccess)),
-        extensions: Arc::new(manager),
-        broker_dispatcher: Arc::new(CapabilityDispatcher::new()),
-    };
-    let state = AgentState {
-        system_prompt: String::new(),
-        model: String::new(),
-        reasoning_effort: Default::default(),
-        tools: vec![],
-        messages: vec![],
-        is_streaming: false,
-        pending_tool_calls: vec![],
-        metadata: HashMap::new(),
-    };
-    let result = hook
-        .before_tool_call(
-            &AgentToolCall {
-                id: "call-1".into(),
-                name: "read_file".into(),
-                arguments: "{}".into(),
-            },
-            &state,
-        )
-        .await;
-    assert!(result.block);
-    assert_eq!(result.reason.as_deref(), Some("Protected path"));
+    let hook = extension_before_tool_hook_handler(
+        Arc::new(tokio::sync::Mutex::new(ToolPolicy::FullAccess)),
+        Arc::new(manager),
+        Arc::new(CapabilityDispatcher::new()),
+    );
+    let result = hook(HookContext {
+        session_id: "s".into(),
+        lane: "main".into(),
+        tool_call_id: Some("call-1".into()),
+        tool_name: Some("read_file".into()),
+        tool_arguments: Some("{}".into()),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(result.unwrap_err(), "Protected path");
 }
 
 #[tokio::test]
@@ -881,32 +869,21 @@ async fn structured_hook_v2_message_does_not_block() {
     .unwrap();
     let manager = WasiExtensionManager::new();
     manager.register_extension(extension).unwrap();
-    let hook = ExtensionBeforeToolHook {
-        tool_policy: Arc::new(tokio::sync::Mutex::new(ToolPolicy::FullAccess)),
-        extensions: Arc::new(manager),
-        broker_dispatcher: Arc::new(CapabilityDispatcher::new()),
-    };
-    let state = AgentState {
-        system_prompt: String::new(),
-        model: String::new(),
-        reasoning_effort: Default::default(),
-        tools: vec![],
-        messages: vec![],
-        is_streaming: false,
-        pending_tool_calls: vec![],
-        metadata: HashMap::new(),
-    };
-    let result = hook
-        .before_tool_call(
-            &AgentToolCall {
-                id: "call-1".into(),
-                name: "read_file".into(),
-                arguments: "{}".into(),
-            },
-            &state,
-        )
-        .await;
-    assert!(!result.block);
+    let hook = extension_before_tool_hook_handler(
+        Arc::new(tokio::sync::Mutex::new(ToolPolicy::FullAccess)),
+        Arc::new(manager),
+        Arc::new(CapabilityDispatcher::new()),
+    );
+    let result = hook(HookContext {
+        session_id: "s".into(),
+        lane: "main".into(),
+        tool_call_id: Some("call-1".into()),
+        tool_name: Some("read_file".into()),
+        tool_arguments: Some("{}".into()),
+        ..Default::default()
+    })
+    .await;
+    assert!(result.is_ok());
 }
 
 #[tokio::test]
@@ -916,33 +893,21 @@ async fn structured_hook_v1_message_behavior_is_preserved() {
             .unwrap();
     let manager = WasiExtensionManager::new();
     manager.register_extension(extension).unwrap();
-    let hook = ExtensionBeforeToolHook {
-        tool_policy: Arc::new(tokio::sync::Mutex::new(ToolPolicy::FullAccess)),
-        extensions: Arc::new(manager),
-        broker_dispatcher: Arc::new(CapabilityDispatcher::new()),
-    };
-    let state = AgentState {
-        system_prompt: String::new(),
-        model: String::new(),
-        reasoning_effort: Default::default(),
-        tools: vec![],
-        messages: vec![],
-        is_streaming: false,
-        pending_tool_calls: vec![],
-        metadata: HashMap::new(),
-    };
-    let result = hook
-        .before_tool_call(
-            &AgentToolCall {
-                id: "call-1".into(),
-                name: "read_file".into(),
-                arguments: "{}".into(),
-            },
-            &state,
-        )
-        .await;
-    assert!(result.block);
-    assert_eq!(result.reason.as_deref(), Some("blocked by v1"));
+    let hook = extension_before_tool_hook_handler(
+        Arc::new(tokio::sync::Mutex::new(ToolPolicy::FullAccess)),
+        Arc::new(manager),
+        Arc::new(CapabilityDispatcher::new()),
+    );
+    let result = hook(HookContext {
+        session_id: "s".into(),
+        lane: "main".into(),
+        tool_call_id: Some("call-1".into()),
+        tool_name: Some("read_file".into()),
+        tool_arguments: Some("{}".into()),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(result.unwrap_err(), "blocked by v1");
 }
 
 #[test]
