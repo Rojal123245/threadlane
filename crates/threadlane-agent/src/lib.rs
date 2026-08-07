@@ -10,6 +10,7 @@ pub mod provider;
 pub mod queue;
 pub mod rules;
 pub mod session_tree;
+pub mod tool_dispatcher;
 pub mod tool_executor;
 pub mod types;
 
@@ -34,5 +35,6 @@ pub use provider::{
 pub use queue::PendingMessageQueue;
 pub use rules::*;
 pub use session_tree::{SessionNode, SessionTree};
+pub use tool_dispatcher::ToolDispatcher;
 pub use tool_executor::ToolExecutor;
 pub use types::*;

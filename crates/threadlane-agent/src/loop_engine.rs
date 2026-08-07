@@ -4,41 +4,37 @@ use crate::compaction::{
 };
 use crate::config::AgentConfig;
 use crate::events::AgentEvent;
-use crate::harness::{HookContext, HookRegistry};
+use crate::harness::HookRegistry;
 use crate::provider::ProviderRouter;
 use crate::queue::PendingMessageQueue;
 use crate::tool_executor::ToolExecutor;
 use crate::types::{
-    AgentMessage, AgentState, AgentToolCall, AgentToolDefinition, AgentToolResult, QueueMode,
-    TokenUsage, ToolExecutionMode,
+    AgentMessage, AgentState, AgentToolDefinition, AgentToolResult, QueueMode, TokenUsage,
+    ToolExecutionMode,
 };
-use futures::FutureExt;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::future::Future;
-use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use threadlane_provider::openai::{clamp_prompt_cache_key, ProviderUsage, StreamEvent, ToolCall};
 use threadlane_provider::router::{PayloadFormat, PayloadSource, ProviderClient};
-use threadlane_tools::{
-    execute_tool, execute_tool_in_workspace, get_available_tools, get_codex_tools,
-};
+use threadlane_tools::{get_available_tools, get_codex_tools};
 use tokio::sync::{broadcast, mpsc, Mutex};
 
-struct AbortOnDrop<T> {
+pub(crate) struct AbortOnDrop<T> {
     handle: Option<tokio::task::JoinHandle<T>>,
 }
 
 impl<T> AbortOnDrop<T> {
-    fn new(handle: tokio::task::JoinHandle<T>) -> Self {
+    pub(crate) fn new(handle: tokio::task::JoinHandle<T>) -> Self {
         Self {
             handle: Some(handle),
         }
     }
 
-    async fn join(mut self) -> Result<T, tokio::task::JoinError> {
+    pub(crate) async fn join(mut self) -> Result<T, tokio::task::JoinError> {
         let result = self.handle.as_mut().expect("task handle missing").await;
         self.handle = None;
         result
@@ -394,12 +390,6 @@ fn normalize_tool_call_ids(messages: &[AgentMessage]) -> Vec<AgentMessage> {
         .collect()
 }
 
-#[derive(Clone)]
-struct ToolExecutorRoute {
-    executor: Arc<dyn ToolExecutor>,
-    tool_names: HashSet<String>,
-}
-
 pub type ToolIntentRecorder = Arc<
     dyn Fn(&str, &str, &str) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>
         + Send
@@ -450,24 +440,6 @@ async fn run_provider_hook(
 }
 
 #[derive(Clone)]
-struct ToolRunContext {
-    hooks: HookRegistry,
-    intent_recorder: Option<ToolIntentRecorder>,
-    event_tx: broadcast::Sender<AgentEvent>,
-    tool_routes: Vec<ToolExecutorRoute>,
-    allowed_tool_names: Option<HashSet<String>>,
-    work_dir: Option<PathBuf>,
-    skip_before_hook: bool,
-    session_id: String,
-}
-
-struct PreparedToolCall {
-    tc: ToolCall,
-    arguments: String,
-    agent_tool_call: AgentToolCall,
-    context: ToolRunContext,
-}
-
 pub struct AgentLoop {
     pub state: Arc<Mutex<AgentState>>,
     pub api_key: String,
@@ -497,6 +469,7 @@ pub struct AgentLoop {
     stream_rules: Vec<(crate::rules::StreamRule, regex::Regex)>,
     pub config: AgentConfig,
     pub provider_router: ProviderRouter,
+    pub tool_dispatcher: crate::tool_dispatcher::ToolDispatcher,
 }
 
 impl AgentLoop {
@@ -522,6 +495,7 @@ impl AgentLoop {
         )));
         let api_key = api_key.into();
         let provider_client = ProviderClient::new(api_key.clone(), account_id.clone());
+        let hooks = HookRegistry::default();
 
         Self {
             state,
@@ -533,7 +507,7 @@ impl AgentLoop {
             allowed_tool_names: None,
             steering_queue: PendingMessageQueue::new(QueueMode::All),
             follow_up_queue: PendingMessageQueue::new(QueueMode::All),
-            hook_registry: HookRegistry::default(),
+            hook_registry: hooks.clone(),
             tool_intent_recorder: None,
             tool_completion_recorder: None,
             provider_usage_recorder: None,
@@ -543,13 +517,14 @@ impl AgentLoop {
             assistant_message_recorder: None,
             tool_message_recorder: None,
             session_id: String::new(),
-            event_tx,
+            event_tx: event_tx.clone(),
             tool_executors: Vec::new(),
             extension_manager: None,
             work_dir: None,
             stream_rules: Vec::new(),
             config,
             provider_router: ProviderRouter::new(),
+            tool_dispatcher: crate::tool_dispatcher::ToolDispatcher::new(event_tx, hooks),
         }
     }
 
@@ -582,129 +557,32 @@ impl AgentLoop {
     /// Returns the core and registered executor schemas in provider order,
     /// after conflict deduplication and the active allowlist are applied.
     pub fn configured_tool_definitions(&self) -> Vec<AgentToolDefinition> {
-        let mut definitions = collect_tool_definitions(
-            &[],
-            &self.tool_executors,
-            self.compatibility_executor().as_ref(),
-        );
-        if let Some(allowed_tool_names) = &self.allowed_tool_names {
-            definitions.retain(|definition| allowed_tool_names.contains(&definition.name));
-        }
-        definitions
+        self.tool_dispatcher.configured_tool_definitions()
     }
 
     pub fn register_tool_executor(
         &mut self,
         executor: Arc<dyn ToolExecutor>,
     ) -> Result<(), String> {
-        let executor_id = executor.executor_id().trim();
-        if executor_id.is_empty() {
-            return Err("Tool executor id must not be empty".into());
-        }
-        if self
-            .ordered_tool_executors()
-            .iter()
-            .any(|registered| registered.executor_id() == executor_id)
-        {
-            return Err(format!(
-                "Tool executor '{executor_id}' is already registered"
-            ));
-        }
-
-        let mut known_names: HashSet<String> = core_tool_definitions()
-            .into_iter()
-            .map(|definition| definition.name)
-            .collect();
-        for registered in self.ordered_tool_executors() {
-            known_names.extend(
-                registered
-                    .tool_definitions()
-                    .into_iter()
-                    .map(|definition| definition.name),
-            );
-        }
-        for definition in executor.tool_definitions() {
-            if definition.name.trim().is_empty() {
-                return Err(format!(
-                    "Tool executor '{executor_id}' provided an empty tool name"
-                ));
-            }
-            if !known_names.insert(definition.name.clone()) {
-                return Err(format!(
-                    "Tool schema '{}' from executor '{executor_id}' conflicts with an existing schema",
-                    definition.name
-                ));
-            }
-        }
-
+        // Keep both registries in sync: ToolDispatcher for execution,
+        // self.tool_executors for payload building.
+        self.tool_dispatcher
+            .register_tool_executor(executor.clone())?;
         self.tool_executors.push(executor);
         Ok(())
     }
 
     pub fn tool_executor_count(&self) -> usize {
-        self.ordered_tool_executors().len()
+        self.tool_dispatcher.tool_executor_count()
     }
 
     fn compatibility_executor(&self) -> Option<Arc<dyn ToolExecutor>> {
-        self.extension_manager.clone().filter(|compatibility| {
+        self.extension_manager.clone().filter(|compat| {
             !self
                 .tool_executors
                 .iter()
-                .any(|registered| registered.executor_id() == compatibility.executor_id())
+                .any(|reg| reg.executor_id() == compat.executor_id())
         })
-    }
-
-    fn ordered_tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
-        self.tool_executors
-            .iter()
-            .cloned()
-            .chain(self.compatibility_executor())
-            .collect()
-    }
-
-    async fn tool_execution_routes(&self) -> Vec<ToolExecutorRoute> {
-        let state_tools = self.state.lock().await.tools.clone();
-        let mut claimed_names: HashSet<String> = core_tool_definitions()
-            .into_iter()
-            .map(|definition| definition.name)
-            .collect();
-        let mut routes = Vec::new();
-
-        for executor in &self.tool_executors {
-            let tool_names = executor
-                .tool_definitions()
-                .into_iter()
-                .filter_map(|definition| {
-                    claimed_names
-                        .insert(definition.name.clone())
-                        .then_some(definition.name)
-                })
-                .collect();
-            routes.push(ToolExecutorRoute {
-                executor: executor.clone(),
-                tool_names,
-            });
-        }
-
-        if let Some(executor) = self.compatibility_executor() {
-            let tool_names = executor
-                .tool_definitions()
-                .into_iter()
-                .map(|definition| definition.name)
-                .chain(state_tools.iter().filter_map(|schema| {
-                    AgentToolDefinition::from_provider_schema(schema)
-                        .ok()
-                        .map(|definition| definition.name)
-                }))
-                .filter(|name| claimed_names.insert(name.clone()))
-                .collect();
-            routes.push(ToolExecutorRoute {
-                executor,
-                tool_names,
-            });
-        }
-
-        routes
     }
 
     async fn build_payload_helper(
@@ -1314,359 +1192,39 @@ impl AgentLoop {
         self.provider_client.cancel_deferred(model, handle_id).await
     }
 
+    /// Returns a ToolDispatcher snapshot synced with this AgentLoop's current state.
+    fn synced_dispatcher(&self) -> crate::tool_dispatcher::ToolDispatcher {
+        let mut td = self.tool_dispatcher.clone();
+        td.tool_execution_mode = self.tool_execution_mode;
+        td.hook_registry = self.hook_registry.clone();
+        td.tool_intent_recorder = self.tool_intent_recorder.clone();
+        td.tool_completion_recorder = self.tool_completion_recorder.clone();
+        td.allowed_tool_names = self.allowed_tool_names.clone();
+        td.work_dir = self.work_dir.clone();
+        td.session_id = self.session_id.clone();
+        td.set_extension_manager(self.extension_manager.clone());
+        td
+    }
+
     pub async fn execute_tools(&self, tool_calls: &[ToolCall]) -> Vec<AgentToolResult> {
-        self.execute_tools_with_options(tool_calls, self.tool_intent_recorder.clone(), false)
-            .await
+        self.synced_dispatcher().execute_tools(tool_calls).await
     }
 
     pub async fn execute_tools_without_intent_recording(
         &self,
         tool_calls: &[ToolCall],
     ) -> Vec<AgentToolResult> {
-        self.execute_tools_with_options(tool_calls, None, false)
+        self.synced_dispatcher()
+            .execute_tools_without_intent_recording(tool_calls)
             .await
     }
 
     /// Replays already-intended safe tools. The before hook is intentionally
     /// not rerun: the durable ToolStarted record is the clearance boundary.
     pub async fn execute_tools_for_replay(&self, tool_calls: &[ToolCall]) -> Vec<AgentToolResult> {
-        self.execute_tools_with_options(tool_calls, None, true)
+        self.synced_dispatcher()
+            .execute_tools_for_replay(tool_calls)
             .await
-    }
-
-    async fn execute_tools_with_options(
-        &self,
-        tool_calls: &[ToolCall],
-        intent_recorder: Option<ToolIntentRecorder>,
-        skip_before_hook: bool,
-    ) -> Vec<AgentToolResult> {
-        let mut results = Vec::new();
-        let tool_routes = self.tool_execution_routes().await;
-        let allowed_tool_names = self.allowed_tool_names.clone();
-
-        if self.tool_execution_mode == ToolExecutionMode::Sequential {
-            for tc in tool_calls {
-                let res = self
-                    .execute_single_tool(
-                        tc,
-                        tool_routes.clone(),
-                        allowed_tool_names.clone(),
-                        intent_recorder.clone(),
-                        skip_before_hook,
-                    )
-                    .await;
-                results.push(res);
-            }
-        } else {
-            // Prepare and persist every intent in source order. Only the
-            // external execution phase is parallel.
-            let mut slots: Vec<Option<AgentToolResult>> = vec![None; tool_calls.len()];
-            let mut prepared = Vec::new();
-            for (index, tc) in tool_calls.iter().enumerate() {
-                let context = ToolRunContext {
-                    hooks: self.hook_registry.clone(),
-                    intent_recorder: intent_recorder.clone(),
-                    event_tx: self.event_tx.clone(),
-                    tool_routes: tool_routes.clone(),
-                    allowed_tool_names: allowed_tool_names.clone(),
-                    work_dir: self.work_dir.clone(),
-                    skip_before_hook,
-                    session_id: self.session_id.clone(),
-                };
-                match Self::prepare_tool_call(tc.clone(), context).await {
-                    Ok(call) => prepared.push((index, call)),
-                    Err(result) => slots[index] = Some(result),
-                }
-            }
-
-            let mut handles = Vec::new();
-            let mut executed_indices = Vec::new();
-            for (index, call) in prepared {
-                let fallback_call = call.tc.clone();
-                let handle = AbortOnDrop::new(tokio::spawn(async move {
-                    Self::execute_prepared_tool(call).await
-                }));
-                handles.push((index, fallback_call, handle));
-                executed_indices.push(index);
-            }
-
-            for (index, tool_call, handle) in handles {
-                match handle.join().await {
-                    Ok(result) => slots[index] = Some(result),
-                    Err(error) => {
-                        let result = AgentToolResult {
-                            tool_call_id: tool_call.id.clone(),
-                            name: tool_call.function.name.clone(),
-                            content: format!("Tool execution task failed: {error}"),
-                            is_error: true,
-                            terminate: false,
-                        };
-                        slots[index] = Some(result);
-                    }
-                }
-            }
-            if let Some(recorder) = &self.tool_completion_recorder {
-                for &index in &executed_indices {
-                    let Some(result) = slots[index].as_mut() else {
-                        continue;
-                    };
-                    if let Err(error) = recorder(&result.tool_call_id, result.terminate).await {
-                        result.content = error;
-                        result.is_error = true;
-                    }
-                }
-            }
-            for index in executed_indices {
-                if let Some(result) = &slots[index] {
-                    let _ = self.event_tx.send(AgentEvent::ToolExecutionEnd {
-                        tool_call_id: result.tool_call_id.clone(),
-                        name: result.name.clone(),
-                        result: result.clone(),
-                    });
-                }
-            }
-            results.extend(slots.into_iter().flatten());
-        }
-
-        results
-    }
-
-    async fn execute_single_tool(
-        &self,
-        tc: &ToolCall,
-        tool_routes: Vec<ToolExecutorRoute>,
-        allowed_tool_names: Option<HashSet<String>>,
-        intent_recorder: Option<ToolIntentRecorder>,
-        skip_before_hook: bool,
-    ) -> AgentToolResult {
-        let result = AssertUnwindSafe(Self::run_tool_with_hooks(
-            tc.clone(),
-            ToolRunContext {
-                hooks: self.hook_registry.clone(),
-                intent_recorder,
-                event_tx: self.event_tx.clone(),
-                tool_routes,
-                allowed_tool_names,
-                work_dir: self.work_dir.clone(),
-                skip_before_hook,
-                session_id: self.session_id.clone(),
-            },
-        ))
-        .catch_unwind()
-        .await;
-
-        match result {
-            Ok(mut result) => {
-                if let Some(recorder) = &self.tool_completion_recorder {
-                    if let Err(error) = recorder(&result.tool_call_id, result.terminate).await {
-                        result.content = error;
-                        result.is_error = true;
-                    }
-                }
-                let _ = self.event_tx.send(AgentEvent::ToolExecutionEnd {
-                    tool_call_id: result.tool_call_id.clone(),
-                    name: result.name.clone(),
-                    result: result.clone(),
-                });
-                result
-            }
-            Err(_) => {
-                // A tool is untrusted session work. A panic must become a tool
-                // result so the model can see the failure and retry or choose
-                // another approach; it must not abort the entire agent loop.
-                let result = AgentToolResult {
-                    tool_call_id: tc.id.clone(),
-                    name: tc.function.name.clone(),
-                    content: format!("Tool '{}' failed: the tool panicked during execution. Please retry the tool or use another approach.", tc.function.name),
-                    is_error: true,
-                    terminate: false,
-                };
-                let _ = self.event_tx.send(AgentEvent::ToolExecutionEnd {
-                    tool_call_id: tc.id.clone(),
-                    name: tc.function.name.clone(),
-                    result: result.clone(),
-                });
-                result
-            }
-        }
-    }
-
-    async fn run_tool_with_hooks(tc: ToolCall, context: ToolRunContext) -> AgentToolResult {
-        match Self::prepare_tool_call(tc, context).await {
-            Ok(call) => Self::execute_prepared_tool(call).await,
-            Err(result) => result,
-        }
-    }
-
-    async fn prepare_tool_call(
-        tc: ToolCall,
-        context: ToolRunContext,
-    ) -> Result<PreparedToolCall, AgentToolResult> {
-        let arguments = normalize_tool_arguments(
-            &tc.function.name,
-            &tc.function.arguments,
-            context.work_dir.as_deref(),
-        );
-        let agent_tool_call = AgentToolCall {
-            id: tc.id.clone(),
-            name: tc.function.name.clone(),
-            arguments: arguments.clone(),
-        };
-
-        if context
-            .allowed_tool_names
-            .as_ref()
-            .is_some_and(|allowed| !allowed.contains(&tc.function.name))
-        {
-            let result = AgentToolResult {
-                tool_call_id: tc.id.clone(),
-                name: tc.function.name.clone(),
-                content: format!(
-                    "Tool '{}' is not allowed by the current agent policy",
-                    tc.function.name
-                ),
-                is_error: true,
-                terminate: false,
-            };
-            let _ = context.event_tx.send(AgentEvent::ToolExecutionEnd {
-                tool_call_id: tc.id,
-                name: tc.function.name,
-                result: result.clone(),
-            });
-            return Err(result);
-        }
-
-        if !context.skip_before_hook {
-            let hook_ctx = HookContext {
-                session_id: context.session_id.clone(),
-                lane: "main".into(),
-                run_id: None,
-                resume_data: None,
-                tool_call_id: Some(tc.id.clone()),
-                tool_name: Some(tc.function.name.clone()),
-                tool_arguments: Some(arguments.clone()),
-                tool_result_content: None,
-                tool_result_is_error: None,
-            };
-            if let Err(failures) = context.hooks.run_before_tool(&hook_ctx).await {
-                let reason = failures
-                    .into_iter()
-                    .map(|failure| format!("{}: {}", failure.id, failure.message))
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                let res = AgentToolResult {
-                    tool_call_id: tc.id.clone(),
-                    name: tc.function.name.clone(),
-                    content: reason,
-                    is_error: true,
-                    terminate: false,
-                };
-                let _ = context.event_tx.send(AgentEvent::ToolExecutionEnd {
-                    tool_call_id: tc.id.clone(),
-                    name: tc.function.name.clone(),
-                    result: res.clone(),
-                });
-                return Err(res);
-            }
-        }
-
-        if let Some(recorder) = &context.intent_recorder {
-            if let Err(error) = recorder(&tc.id, &tc.function.name, &arguments).await {
-                let result = AgentToolResult {
-                    tool_call_id: tc.id.clone(),
-                    name: tc.function.name.clone(),
-                    content: error,
-                    is_error: true,
-                    terminate: false,
-                };
-                let _ = context.event_tx.send(AgentEvent::ToolExecutionEnd {
-                    tool_call_id: tc.id,
-                    name: tc.function.name,
-                    result: result.clone(),
-                });
-                return Err(result);
-            }
-        }
-
-        Ok(PreparedToolCall {
-            tc,
-            arguments,
-            agent_tool_call,
-            context,
-        })
-    }
-
-    async fn execute_prepared_tool(call: PreparedToolCall) -> AgentToolResult {
-        let PreparedToolCall {
-            tc,
-            arguments,
-            agent_tool_call,
-            context,
-        } = call;
-        let _ = context.event_tx.send(AgentEvent::ToolExecutionStart {
-            tool_call_id: tc.id.clone(),
-            name: tc.function.name.clone(),
-            arguments: arguments.clone(),
-        });
-
-        let mut execution_result = None;
-        for route in context.tool_routes {
-            if !route.tool_names.contains(&tc.function.name) {
-                continue;
-            }
-            if let Some(result) = route
-                .executor
-                .execute_tool_with_call(&agent_tool_call, &arguments)
-                .await
-            {
-                execution_result = Some(result);
-                break;
-            }
-        }
-        let execution_result = execution_result.unwrap_or_else(|| {
-            Ok(match context.work_dir.as_deref() {
-                Some(dir) => execute_tool_in_workspace(&tc.function.name, &arguments, dir),
-                None => execute_tool(&tc.function.name, &arguments),
-            })
-        });
-        let (content, is_error) = match execution_result {
-            Ok(content) => (content, false),
-            Err(error) => (format!("Tool executor error: {error}"), true),
-        };
-        let mut final_result = AgentToolResult {
-            tool_call_id: tc.id.clone(),
-            name: tc.function.name.clone(),
-            content,
-            is_error,
-            terminate: false,
-        };
-
-        let hook_ctx = HookContext {
-            session_id: context.session_id.clone(),
-            lane: "main".into(),
-            run_id: None,
-            resume_data: None,
-            tool_call_id: Some(tc.id.clone()),
-            tool_name: Some(tc.function.name.clone()),
-            tool_arguments: Some(arguments.clone()),
-            tool_result_content: Some(final_result.content.clone()),
-            tool_result_is_error: Some(final_result.is_error),
-        };
-        let hook_run = context.hooks.run_after_tool(&hook_ctx).await;
-        for failure in hook_run.failures {
-            eprintln!("after-tool hook {} failed: {}", failure.id, failure.message);
-        }
-        if let Some(content) = hook_run.effect.override_content {
-            final_result.content = content;
-        }
-        if let Some(is_error) = hook_run.effect.override_is_error {
-            final_result.is_error = is_error;
-        }
-        if let Some(terminate) = hook_run.effect.terminate {
-            final_result.terminate = terminate;
-        }
-
-        final_result
     }
 }
 
@@ -1714,7 +1272,7 @@ fn collect_tool_definitions(
     definitions
 }
 
-fn normalize_tool_arguments(
+pub(crate) fn normalize_tool_arguments_inner(
     name: &str,
     arguments: &str,
     work_dir: Option<&std::path::Path>,
@@ -1846,8 +1404,11 @@ mod normalize_tool_arguments_tests {
 
     #[test]
     fn fills_missing_file_paths_from_the_workspace() {
-        let arguments =
-            normalize_tool_arguments("read_file", "{}", Some(std::path::Path::new("/workspace")));
+        let arguments = normalize_tool_arguments_inner(
+            "read_file",
+            "{}",
+            Some(std::path::Path::new("/workspace")),
+        );
 
         assert_eq!(arguments, r#"{"path":"/workspace"}"#);
     }
