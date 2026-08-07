@@ -5,6 +5,7 @@
 //! message queue and the subagent-interruption recovery logic built on top of
 //! those harness types.
 
+#[allow(unused_imports)]
 use crate::harness::{OperationOutcome, ProvisionedEntry, QueueKind, Record, ToolReplaySafety};
 use crate::types::AgentMessage;
 use serde::{Deserialize, Serialize};

@@ -6,6 +6,7 @@ use crate::config::AgentConfig;
 use crate::error::AgentError;
 use crate::events::AgentEvent;
 use crate::harness::HookRegistry;
+use crate::journal::AgentJournal;
 use crate::provider::ProviderRouter;
 use crate::queue::PendingMessageQueue;
 use crate::tool_executor::ToolExecutor;
@@ -427,7 +428,7 @@ pub type AssistantMessageRecorder = Arc<
     dyn Fn(AgentMessage) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync,
 >;
 
-async fn run_provider_hook(
+pub(crate) async fn run_provider_hook(
     recorder: Option<&ProviderHookRecorder>,
     kind: crate::harness::HookKind,
 ) -> Result<(), String> {
@@ -471,6 +472,10 @@ pub struct AgentLoop {
     pub config: AgentConfig,
     pub provider_router: ProviderRouter,
     pub tool_dispatcher: crate::tool_dispatcher::ToolDispatcher,
+    /// Optional journal for durability. When set, the agent loop records
+    /// messages, tool intents, usage, and streaming state through this
+    /// instead of the individual recorder callbacks.
+    pub journal: Option<Arc<dyn AgentJournal>>,
 }
 
 impl AgentLoop {
@@ -526,6 +531,7 @@ impl AgentLoop {
             config,
             provider_router: ProviderRouter::new(),
             tool_dispatcher: crate::tool_dispatcher::ToolDispatcher::new(event_tx, hooks),
+            journal: None,
         }
     }
 
@@ -1229,7 +1235,7 @@ impl AgentLoop {
     }
 }
 
-fn core_tool_definitions() -> Vec<AgentToolDefinition> {
+pub(crate) fn core_tool_definitions() -> Vec<AgentToolDefinition> {
     let mut seen = HashSet::new();
     get_available_tools()
         .into_iter()
@@ -1239,7 +1245,7 @@ fn core_tool_definitions() -> Vec<AgentToolDefinition> {
         .collect()
 }
 
-fn collect_tool_definitions(
+pub(crate) fn collect_tool_definitions(
     state_tools: &[Value],
     registered_executors: &[Arc<dyn ToolExecutor>],
     compatibility_executor: Option<&Arc<dyn ToolExecutor>>,

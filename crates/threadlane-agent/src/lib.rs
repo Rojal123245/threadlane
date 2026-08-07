@@ -5,6 +5,7 @@ pub mod engine;
 pub mod error;
 pub mod events;
 pub mod harness;
+pub mod journal;
 pub mod loop_engine;
 pub mod op_log;
 pub mod provider;
@@ -14,6 +15,7 @@ pub mod session_tree;
 pub mod tool_dispatcher;
 pub mod tool_executor;
 pub mod types;
+pub mod unified;
 
 pub use agent::Agent;
 pub use compaction::{
@@ -44,3 +46,4 @@ pub use session_tree::{SessionNode, SessionTree};
 pub use tool_dispatcher::ToolDispatcher;
 pub use tool_executor::ToolExecutor;
 pub use types::*;
+pub use unified::{TurnState, UnifiedAgent};

@@ -75,13 +75,16 @@ impl CapabilityRegistry {
     /// Wires all capabilities into the given agent loop: registers tool
     /// executors and hooks. Returns the count of successfully registered
     /// items and any errors encountered.
-    pub fn wire_all(&self, agent: &mut threadlane_agent::Agent) -> (usize, Vec<CodingAgentError>) {
+    pub fn wire_all(
+        &self,
+        agent: &mut threadlane_agent::UnifiedAgent,
+    ) -> (usize, Vec<CodingAgentError>) {
         let mut tool_count = 0;
         let mut hook_count = 0;
         let mut errors = Vec::new();
 
         for executor in self.all_tool_executors() {
-            match agent.loop_engine.register_tool_executor(executor) {
+            match agent.register_tool_executor(executor) {
                 Ok(()) => tool_count += 1,
                 Err(error) => errors.push(CodingAgentError::Init(format!(
                     "tool registration failed: {error}"
@@ -90,7 +93,7 @@ impl CapabilityRegistry {
         }
 
         for (kind, id, handler) in self.all_hooks() {
-            match agent.loop_engine.hook_registry.replace(kind, id, handler) {
+            match agent.hook_registry.replace(kind, id, handler) {
                 Ok(()) => hook_count += 1,
                 Err(error) => errors.push(CodingAgentError::Init(format!(
                     "hook '{id}' registration failed: {error:?}"
