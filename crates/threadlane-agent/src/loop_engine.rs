@@ -5,6 +5,7 @@ use crate::compaction::{
 use crate::config::AgentConfig;
 use crate::events::AgentEvent;
 use crate::harness::{HookContext, HookRegistry};
+use crate::provider::ProviderRouter;
 use crate::queue::PendingMessageQueue;
 use crate::tool_executor::ToolExecutor;
 use crate::types::{
@@ -495,6 +496,7 @@ pub struct AgentLoop {
     pub work_dir: Option<PathBuf>,
     stream_rules: Vec<(crate::rules::StreamRule, regex::Regex)>,
     pub config: AgentConfig,
+    pub provider_router: ProviderRouter,
 }
 
 impl AgentLoop {
@@ -547,6 +549,7 @@ impl AgentLoop {
             work_dir: None,
             stream_rules: Vec::new(),
             config,
+            provider_router: ProviderRouter::new(),
         }
     }
 
@@ -911,6 +914,7 @@ impl AgentLoop {
             let compatibility_executor = self.compatibility_executor();
             let pc_key = self.prompt_cache_key.clone();
             let provider_hook_recorder = self.provider_hook_recorder.clone();
+            let router = self.provider_router.clone();
 
             let payload_source = PayloadSource::lazy(model, move |format| {
                 let state = state.clone();
@@ -919,6 +923,7 @@ impl AgentLoop {
                 let compatibility_executor = compatibility_executor.clone();
                 let pc_key = pc_key.clone();
                 let provider_hook_recorder = provider_hook_recorder.clone();
+                let router = router.clone();
                 Box::pin(async move {
                     if let Err(error) = run_provider_hook(
                         provider_hook_recorder.as_ref(),
@@ -928,15 +933,23 @@ impl AgentLoop {
                     {
                         eprintln!("provider payload hook failed: {error}");
                     }
-                    let payload = Self::build_payload_helper(
-                        &state,
+                    // Collect tools and build the payload through the provider router.
+                    let mut state_snapshot = state.lock().await.clone();
+                    repair_interrupted_tool_turn(&mut state_snapshot.messages);
+                    let mut definitions = collect_tool_definitions(
+                        &state_snapshot.tools,
                         &tool_executors,
-                        allowed_tool_names.as_ref(),
                         compatibility_executor.as_ref(),
-                        pc_key.as_deref(),
+                    );
+                    if let Some(ref allowed) = allowed_tool_names {
+                        definitions.retain(|d| allowed.contains(&d.name));
+                    }
+                    let payload = router.build_payload(
                         format,
-                    )
-                    .await;
+                        &state_snapshot,
+                        &definitions,
+                        pc_key.as_deref(),
+                    );
                     if let Err(error) = run_provider_hook(
                         provider_hook_recorder.as_ref(),
                         crate::harness::HookKind::AfterPayload,

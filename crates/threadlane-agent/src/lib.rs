@@ -6,6 +6,7 @@ pub mod events;
 pub mod harness;
 pub mod loop_engine;
 pub mod op_log;
+pub mod provider;
 pub mod queue;
 pub mod rules;
 pub mod session_tree;
@@ -26,6 +27,10 @@ pub use loop_engine::{
     ProviderUsageRecorder, ToolCompletionRecorder, ToolIntentRecorder,
 };
 pub use op_log::*;
+pub use provider::{
+    ChatCompletionsAdapter, CodexResponsesAdapter, ProviderAdapter, ProviderMessages,
+    ProviderRouter,
+};
 pub use queue::PendingMessageQueue;
 pub use rules::*;
 pub use session_tree::{SessionNode, SessionTree};
