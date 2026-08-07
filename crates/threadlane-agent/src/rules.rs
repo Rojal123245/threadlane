@@ -1,5 +1,5 @@
 use crate::config::AgentConfig;
-use crate::op_log::ToolReplaySafety;
+use crate::harness::ToolReplaySafety;
 use serde::{Deserialize, Serialize};
 
 pub fn classify_tool_replay_safety(tool_name: &str) -> ToolReplaySafety {
