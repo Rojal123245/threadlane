@@ -4,6 +4,7 @@ pub mod agents;
 pub mod capabilities;
 pub mod coding_agent;
 pub mod commands;
+pub mod config;
 pub mod context;
 pub mod extension_broker;
 pub mod frontmatter;
@@ -36,6 +37,7 @@ pub use coding_agent::{
     CodingAgentCancellation, CodingAgentOptions, CodingAgentWorkHandle, HarnessWatch,
 };
 pub use commands::{execute_slash_command, parse_slash_command, CommandAction};
+pub use config::{CodingAgentConfig, CodingAgentConfigBuilder};
 pub use context::{ProjectContext, ProjectInstruction};
 pub use policy::ToolPolicy;
 pub use prompt_templates::{

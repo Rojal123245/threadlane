@@ -111,6 +111,8 @@ impl App {
                 work_dir: work_dir.clone(),
                 session_file: None,
                 system_prompt: Default::default(),
+                agent_config: None,
+                coding_config: None,
             });
             self.session_runtimes
                 .insert(key.clone(), SessionRuntime::new(agent, model, effort));

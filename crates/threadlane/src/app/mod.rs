@@ -553,42 +553,36 @@ fn background_task_harness_activity(
         AgentEvent::AgentEnd { usage } => {
             let mut detail = "Task completed".to_string();
             if usage.total_tokens > 0 {
-                detail.push_str(&format!(" · {:.1}k tokens", usage.total_tokens as f32 / 1000.0));
+                detail.push_str(&format!(
+                    " · {:.1}k tokens",
+                    usage.total_tokens as f32 / 1000.0
+                ));
             }
             (HarnessActivityStatus::Recovered, detail)
         }
-        AgentEvent::AgentError { error } => (
-            HarnessActivityStatus::Aborted,
-            error.clone(),
-        ),
-        AgentEvent::TurnStart { .. } | AgentEvent::MessageStart { .. } => (
-            HarnessActivityStatus::Working,
-            "Generating response".into(),
-        ),
-        AgentEvent::ToolExecutionStart { name, .. } => {
-            (HarnessActivityStatus::Working, format!("Using tool: {name}"))
+        AgentEvent::AgentError { error } => (HarnessActivityStatus::Aborted, error.clone()),
+        AgentEvent::TurnStart { .. } | AgentEvent::MessageStart { .. } => {
+            (HarnessActivityStatus::Working, "Generating response".into())
         }
-        AgentEvent::SubagentQueued { .. } => (
+        AgentEvent::ToolExecutionStart { name, .. } => (
             HarnessActivityStatus::Working,
-            "Delegating subtask".into(),
+            format!("Using tool: {name}"),
         ),
-        AgentEvent::SubagentStarted { .. } => (
-            HarnessActivityStatus::Working,
-            "Subtasks running".into(),
-        ),
-        AgentEvent::SubagentFinished { succeeded, error, .. } => {
+        AgentEvent::SubagentQueued { .. } => {
+            (HarnessActivityStatus::Working, "Delegating subtask".into())
+        }
+        AgentEvent::SubagentStarted { .. } => {
+            (HarnessActivityStatus::Working, "Subtasks running".into())
+        }
+        AgentEvent::SubagentFinished {
+            succeeded, error, ..
+        } => {
             if *succeeded {
-                (
-                    HarnessActivityStatus::Working,
-                    "Subtasks completed".into(),
-                )
+                (HarnessActivityStatus::Working, "Subtasks completed".into())
             } else {
                 (
                     HarnessActivityStatus::Working,
-                    error
-                        .as_deref()
-                        .unwrap_or("Subtask issue")
-                        .into(),
+                    error.as_deref().unwrap_or("Subtask issue").into(),
                 )
             }
         }
@@ -3988,6 +3982,8 @@ impl MatchEvent for App {
                 .as_ref()
                 .map(|entry| entry.session_file.clone()),
             system_prompt: Default::default(),
+            agent_config: None,
+            coding_config: None,
         };
 
         let coding_agent = CodingAgent::new(agent_opts);
@@ -4715,10 +4711,7 @@ impl MatchEvent for App {
                     if let Some(supervisor) = &self.supervisor {
                         match supervisor.resume_task(&task_id) {
                             Ok(()) => {
-                                self.push_chat(
-                                    MsgRole::System,
-                                    format!("Resumed task {task_id}."),
-                                );
+                                self.push_chat(MsgRole::System, format!("Resumed task {task_id}."));
                             }
                             Err(error) => {
                                 self.push_chat(MsgRole::System, error);
@@ -6910,6 +6903,8 @@ impl App {
             work_dir,
             session_file,
             system_prompt: Default::default(),
+            agent_config: None,
+            coding_config: None,
         });
         self.session_runtimes
             .insert(key, SessionRuntime::new(agent, model, reasoning_effort));
@@ -7895,6 +7890,8 @@ impl App {
                 work_dir: canonical.clone(),
                 session_file: None,
                 system_prompt: Default::default(),
+                agent_config: None,
+                coding_config: None,
             },
         ) {
             Ok(task_id) => task_id,
@@ -7935,6 +7932,8 @@ impl App {
                 work_dir: canonical.clone(),
                 session_file: None,
                 system_prompt: Default::default(),
+                agent_config: None,
+                coding_config: None,
             });
             let skills = agent
                 .skills
@@ -8219,6 +8218,8 @@ impl App {
                 work_dir: entry.work_dir.clone(),
                 session_file: Some(entry.session_file.clone()),
                 system_prompt: Default::default(),
+                agent_config: None,
+                coding_config: None,
             });
             let startup_error = agent.harness_error().map(str::to_owned);
             let model = agent.session_tree.model.clone().unwrap_or(model);
@@ -8396,6 +8397,8 @@ impl App {
                 work_dir: entry.work_dir,
                 session_file: Some(entry.session_file),
                 system_prompt: Default::default(),
+                agent_config: None,
+                coding_config: None,
             });
             self.session_runtimes.insert(
                 key,
@@ -8415,6 +8418,8 @@ impl App {
                 work_dir: key.work_dir.clone(),
                 session_file,
                 system_prompt: Default::default(),
+                agent_config: None,
+                coding_config: None,
             });
             self.session_runtimes.insert(
                 key.clone(),
@@ -9122,9 +9127,7 @@ impl App {
                         if let Some(activity) = live_main {
                             activities.push(activity);
                         }
-                        if let EventPayload::Fault(error) =
-                            &event.payload
-                        {
+                        if let EventPayload::Fault(error) = &event.payload {
                             activities.push(HarnessActivity {
                                 key: format!("harness-fault-{}", event.id),
                                 task: "Harness storage".into(),
@@ -9523,13 +9526,11 @@ impl App {
                         .iter()
                         .find(|(_, pid)| *pid == &project_id)
                         .map(|(work_dir, _)| work_dir.clone());
-                    if let (Some(work_dir), Some(supervisor)) =
-                        (project_work_dir, &self.supervisor)
+                    if let (Some(work_dir), Some(supervisor)) = (project_work_dir, &self.supervisor)
                     {
                         if let Some(task) = supervisor.get_task(&task_id) {
-                            let activity = background_task_harness_activity(
-                                &task_id, &task, &agent_event,
-                            );
+                            let activity =
+                                background_task_harness_activity(&task_id, &task, &agent_event);
                             if let Some(activity) = activity {
                                 let keys: Vec<SessionKey> = self
                                     .workspace_state

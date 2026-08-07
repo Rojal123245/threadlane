@@ -1,7 +1,8 @@
 use crate::compaction::{
     compact_messages_to_token_budget, compaction_summary_text, is_context_overflow_error,
-    should_auto_compact, AUTO_COMPACTION_KEEP_RECENT_TOKENS,
+    should_auto_compact,
 };
+use crate::config::AgentConfig;
 use crate::events::AgentEvent;
 use crate::harness::{HookContext, HookRegistry};
 use crate::queue::PendingMessageQueue;
@@ -493,6 +494,7 @@ pub struct AgentLoop {
     extension_manager: Option<Arc<dyn ToolExecutor>>,
     pub work_dir: Option<PathBuf>,
     stream_rules: Vec<(crate::rules::StreamRule, regex::Regex)>,
+    pub config: AgentConfig,
 }
 
 impl AgentLoop {
@@ -501,10 +503,20 @@ impl AgentLoop {
         account_id: Option<String>,
         model: impl Into<String>,
     ) -> Self {
-        let (event_tx, _) = broadcast::channel(500);
+        Self::new_with_config(api_key, account_id, model, AgentConfig::default())
+    }
+
+    /// Creates an [`AgentLoop`] with a custom [`AgentConfig`].
+    pub fn new_with_config(
+        api_key: impl Into<String>,
+        account_id: Option<String>,
+        model: impl Into<String>,
+        config: AgentConfig,
+    ) -> Self {
+        let (event_tx, _) = broadcast::channel(config.event_channel_capacity);
         let state = Arc::new(Mutex::new(AgentState::new(
             model,
-            "You are threadlane AI coding agent.",
+            &config.default_system_prompt,
         )));
         let api_key = api_key.into();
         let provider_client = ProviderClient::new(api_key.clone(), account_id.clone());
@@ -534,6 +546,7 @@ impl AgentLoop {
             extension_manager: None,
             work_dir: None,
             stream_rules: Vec::new(),
+            config,
         }
     }
 
@@ -877,10 +890,10 @@ impl AgentLoop {
 
             {
                 let mut state = self.state.lock().await;
-                if should_auto_compact(&state.messages) {
+                if should_auto_compact(&state.messages, &self.config) {
                     state.messages = compact_messages_to_token_budget(
                         &state.messages,
-                        AUTO_COMPACTION_KEEP_RECENT_TOKENS,
+                        self.config.auto_compaction_keep_recent_tokens,
                     );
                 }
             }
@@ -983,7 +996,7 @@ impl AgentLoop {
             let mut provider_step = ProviderStepAccumulator::default();
 
             let mut stream_monitor =
-                crate::rules::StreamRuleMonitor::new(self.stream_rules.clone());
+                crate::rules::StreamRuleMonitor::new(self.stream_rules.clone(), &self.config);
             let mut rule_triggered = None;
 
             while let Some(evt) = stream_rx.recv().await {
@@ -1099,7 +1112,7 @@ impl AgentLoop {
                             let mut state = self.state.lock().await;
                             let compacted = compact_messages_to_token_budget(
                                 &state.messages,
-                                AUTO_COMPACTION_KEEP_RECENT_TOKENS,
+                                self.config.auto_compaction_keep_recent_tokens,
                             );
                             if compacted.len() < state.messages.len() {
                                 state.messages = compacted;

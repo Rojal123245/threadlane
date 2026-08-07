@@ -50,7 +50,6 @@ const MAX_MANAGED_STDOUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_BROKER_CONTINUATION_ROUNDS: usize = 4;
 const MAX_SUBAGENT_TASKS: usize = 8;
 const MAX_SUBAGENT_TASK_CHARS: usize = 32_000;
-const SUBAGENT_CONCURRENCY_LIMIT: usize = 4;
 const SUBAGENT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const SUBAGENT_RECOVERY_PROMPT: &str =
     "Continue from the recovered checkpoint and finish the assigned task.";
@@ -1743,6 +1742,10 @@ pub struct CodingAgentOptions {
     pub work_dir: PathBuf,
     pub session_file: Option<PathBuf>,
     pub system_prompt: SystemPromptConfig,
+    /// Agent-level configuration (compaction, stream rules, etc.).
+    pub agent_config: Option<threadlane_agent::AgentConfig>,
+    /// Coding-agent-specific configuration (subagents, WASI, etc.).
+    pub coding_config: Option<crate::config::CodingAgentConfig>,
 }
 
 pub fn extension_before_tool_hook_handler(
@@ -1962,6 +1965,7 @@ pub struct CodingAgent {
     harness_run_id: Arc<std::sync::Mutex<Option<String>>>,
     cancellation: CodingAgentCancellation,
     interrupted_subagent_recovery: InterruptedSubagentRecoveryState,
+    pub config: crate::config::CodingAgentConfig,
     #[cfg(test)]
     subagent_work_observer: SubagentObserverState,
     #[cfg(test)]
@@ -4053,6 +4057,8 @@ impl CodingAgent {
     }
 
     pub fn new(options: CodingAgentOptions) -> Self {
+        let coding_config = options.coding_config.unwrap_or_default();
+        let agent_config = options.agent_config.unwrap_or_default();
         let project_context = ProjectContext::discover(&options.work_dir);
         let mut skill_manager = SkillManager::new();
         skill_manager.discover_skills(Some(&options.work_dir));
@@ -4146,7 +4152,12 @@ impl CodingAgent {
         };
         let plan_store =
             SessionPlanStore::new(session_tree.plan().clone(), session_tree.file_path.clone());
-        let mut agent = Agent::new(&options.api_key, options.account_id, &effective_model);
+        let mut agent = Agent::new_with_config(
+            &options.api_key,
+            options.account_id,
+            &effective_model,
+            agent_config,
+        );
         agent.loop_engine.session_id = session_tree.session_id.clone();
         if let Some(journal) = harness_journal.as_ref() {
             agent.loop_engine.hook_registry = journal.store.hooks().clone();
@@ -4331,7 +4342,9 @@ impl CodingAgent {
         let runner_extensions = wasi_extensions.clone();
         let runner_event_tx = agent.loop_engine.event_tx.clone();
         let runner_session_file = session_tree.file_path.clone();
-        let runner_semaphore = Arc::new(tokio::sync::Semaphore::new(SUBAGENT_CONCURRENCY_LIMIT));
+        let runner_semaphore = Arc::new(tokio::sync::Semaphore::new(
+            coding_config.subagent_concurrency_limit,
+        ));
         let dispatch_parent_leaf = Arc::new(std::sync::Mutex::new(None));
         let completed_subagent_lanes = Arc::new(std::sync::Mutex::new(Vec::new()));
         let runner_parent_leaf = dispatch_parent_leaf.clone();
@@ -4518,6 +4531,7 @@ impl CodingAgent {
             harness_run_id,
             cancellation,
             interrupted_subagent_recovery,
+            config: coding_config,
             #[cfg(test)]
             subagent_work_observer,
             #[cfg(test)]
@@ -9453,6 +9467,8 @@ mod tests {
             work_dir,
             session_file: None,
             system_prompt: SystemPromptConfig::default(),
+            agent_config: None,
+            coding_config: None,
         }
     }
 

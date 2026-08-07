@@ -2169,6 +2169,8 @@ mod tests {
             work_dir: dir.path().to_path_buf(),
             session_file: Some(session_file.clone()),
             system_prompt: Default::default(),
+            agent_config: None,
+            coding_config: None,
         });
         let recorder_supervisor = supervisor.clone();
         let recorder_session_file = session_file.clone();
@@ -2231,6 +2233,8 @@ mod tests {
                     work_dir: project_dir.path().to_path_buf(),
                     session_file: None,
                     system_prompt: Default::default(),
+                    agent_config: None,
+                    coding_config: None,
                 },
             )
             .unwrap();
@@ -2441,6 +2445,8 @@ mod tests {
                     work_dir: project_dir.path().to_path_buf(),
                     session_file: None,
                     system_prompt: Default::default(),
+                    agent_config: None,
+                    coding_config: None,
                 },
             )
             .unwrap();

@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod compaction;
+pub mod config;
 pub mod engine;
 pub mod events;
 pub mod harness;
@@ -17,6 +18,7 @@ pub use compaction::{
     prepare_token_optimal_context, prune_historical_tool_outputs, CompactionOptions,
     CompactionStrategy,
 };
+pub use config::{AgentConfig, AgentConfigBuilder};
 pub use engine::get_runtime;
 pub use events::{AgentEvent, HarnessMetrics, SubagentRecoveryStatus};
 pub use loop_engine::{

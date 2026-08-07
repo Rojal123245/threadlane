@@ -1,7 +1,7 @@
 use crate::compaction::{
     compact_messages, compact_messages_to_token_budget, should_auto_compact, CompactionOptions,
-    AUTO_COMPACTION_KEEP_RECENT_TOKENS,
 };
+use crate::config::AgentConfig;
 use crate::events::AgentEvent;
 use crate::loop_engine::AgentLoop;
 use crate::types::{AgentMessage, AgentState, ReasoningEffort, ToolExecutionMode};
@@ -19,6 +19,18 @@ impl Agent {
     ) -> Self {
         Self {
             loop_engine: AgentLoop::new(api_key, account_id, model),
+        }
+    }
+
+    /// Creates an [`Agent`] with a custom [`AgentConfig`].
+    pub fn new_with_config(
+        api_key: impl Into<String>,
+        account_id: Option<String>,
+        model: impl Into<String>,
+        config: AgentConfig,
+    ) -> Self {
+        Self {
+            loop_engine: AgentLoop::new_with_config(api_key, account_id, model, config),
         }
     }
 
@@ -102,13 +114,14 @@ impl Agent {
     }
 
     pub async fn compact_history(&self, options: Option<CompactionOptions>) -> bool {
+        let config = self.loop_engine.config.clone();
         let mut st = self.loop_engine.state.lock().await;
         let compacted = match options {
             Some(options) => compact_messages(&st.messages, &options),
             None => {
                 let by_tokens = compact_messages_to_token_budget(
                     &st.messages,
-                    AUTO_COMPACTION_KEEP_RECENT_TOKENS,
+                    config.auto_compaction_keep_recent_tokens,
                 );
                 if by_tokens.len() == st.messages.len() {
                     compact_messages(&st.messages, &CompactionOptions::default())
@@ -123,12 +136,15 @@ impl Agent {
     }
 
     pub async fn auto_compact_history(&self) -> bool {
+        let config = self.loop_engine.config.clone();
         let mut st = self.loop_engine.state.lock().await;
-        if !should_auto_compact(&st.messages) {
+        if !should_auto_compact(&st.messages, &config) {
             return false;
         }
-        let compacted =
-            compact_messages_to_token_budget(&st.messages, AUTO_COMPACTION_KEEP_RECENT_TOKENS);
+        let compacted = compact_messages_to_token_budget(
+            &st.messages,
+            config.auto_compaction_keep_recent_tokens,
+        );
         let changed = compacted.len() != st.messages.len();
         st.messages = compacted;
         changed
