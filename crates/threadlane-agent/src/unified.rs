@@ -1,8 +1,7 @@
 //! Unified agent runtime backed by the harness.
 //!
-//! [`UnifiedAgent`] is the single agent runtime, replacing both
-//! [`crate::Agent`]/[`crate::AgentLoop`] and [`crate::harness::AgentHarness`].
-//! It combines harness durability with provider streaming and tool execution.
+//! [`UnifiedAgent`] is the single agent runtime combining harness durability
+//! with provider streaming and tool execution.
 
 use crate::compaction::{
     compact_messages_to_token_budget, is_context_overflow_error, should_auto_compact,

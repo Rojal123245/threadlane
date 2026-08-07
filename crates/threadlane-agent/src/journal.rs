@@ -1,7 +1,7 @@
-//! Journal bridge between the agent loop and the harness.
+//! Journal bridge between the agent runtime and the harness.
 //!
-//! [`AgentJournal`] replaces the 8 optional recorder callbacks on
-//! [`crate::AgentLoop`] with a single trait. Implementations persist
+//! [`AgentJournal`] replaces optional recorder callbacks on
+//! [`crate::UnifiedAgent`] with a single trait. Implementations persist
 //! agent operations to a durable store (typically a harness journal).
 
 use crate::harness::{HookKind, StreamingState};

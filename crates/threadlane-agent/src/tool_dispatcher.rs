@@ -1,7 +1,7 @@
 //! Tool execution dispatcher.
 //!
-//! Extracted from [`AgentLoop`] to own the executor registry, hook pipeline,
-//! and parallel/sequential dispatch logic. Independently testable.
+//! Owns the executor registry, hook pipeline, and parallel/sequential dispatch logic.
+//! Independently testable.
 
 use crate::error::AgentError;
 use crate::events::AgentEvent;
