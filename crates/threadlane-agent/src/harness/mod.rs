@@ -6,6 +6,7 @@ mod jsonl;
 mod memory;
 mod procedure;
 mod reducer;
+mod session;
 mod sqlite;
 mod store;
 mod telemetry;
@@ -14,7 +15,8 @@ mod types;
 pub use agent::AgentHarness;
 pub use effects::{EffectAction, EffectsError, GatedEffects};
 pub use events::{
-    EventError, EventPayload, HarnessEvent, HarnessEventHub, Snapshot, StreamingState, Subscription,
+    EventError, EventPayload, HarnessEvent, HarnessEventHub, ProjectedAgentEvent, Snapshot,
+    StreamingState, Subscription,
 };
 pub use hooks::{
     HookContext, HookEffect, HookFailure, HookHandler, HookKind, HookRegistry, HookRun,
@@ -35,3 +37,4 @@ pub use types::{
     QueuedEntry, Record, ReduceError, ReducedState, RetryState, ToolReplaySafety, ToolResult,
     ToolSpec, ToolState, UsageCause,
 };
+pub use session::{LaneHandle, SessionAgent};

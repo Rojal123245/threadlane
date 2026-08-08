@@ -76,7 +76,7 @@ impl RetryProcedure {
                 "retry attempt cap exhausted".into(),
             ));
         }
-        let seq = next_seq(store);
+        let seq = next_seq_with_effects(store, effects);
         let retry_at = seq.saturating_add(policy.delay_for(attempt));
         effects.park(EffectAction::AppendRecord {
             id: format!("retry-action-{run_id}-{attempt}"),
@@ -103,7 +103,7 @@ impl RetryProcedure {
         let retry = lane
             .retry
             .ok_or_else(|| ProcedureError::Invalid("no retry is scheduled".into()))?;
-        let seq = next_seq(store);
+        let seq = next_seq_with_effects(store, effects);
         effects.park(EffectAction::AppendRecord {
             id: format!("retry-consume-action-{run_id}-{}", retry.attempt),
             record: Record::RetryConsumed {
@@ -158,7 +158,7 @@ impl AssistantAttemptProcedure {
     ) -> Result<u32, ProcedureError> {
         let lane = open_lane(store, run_id)?;
         if !matches!(cause, UsageCause::Provider) {
-            let seq = next_seq(store);
+            let seq = next_seq_with_effects(store, effects);
             let attempt =
                 matches!(cause, UsageCause::Discarded).then(|| current_attempt(store, run_id));
             effects.park(EffectAction::AppendRecord {
@@ -179,7 +179,7 @@ impl AssistantAttemptProcedure {
             return Ok(current_attempt(store, run_id));
         }
         let attempt = current_attempt(store, run_id);
-        let seq = next_seq(store);
+        let seq = next_seq_with_effects(store, effects);
         effects.park(EffectAction::AppendRecord {
             id: format!("provider-usage-action-{run_id}-{seq}"),
             record: Record::Usage {
@@ -231,7 +231,7 @@ impl AssistantAttemptProcedure {
                 _ => None,
             })
             .unwrap_or_else(|| current_attempt(store, run_id));
-        let seq = next_seq(store);
+        let seq = next_seq_with_effects(store, effects);
         if !store.records().iter().any(|record| {
             matches!(record, Record::StepAttempt { run_id: record_run_id, result_entry_id: result, .. } if record_run_id == run_id && result == result_entry_id)
         }) {
@@ -323,7 +323,7 @@ impl OperationProcedure {
         {
             return Err(ProcedureError::Invalid(format!("lane {lane_name} is busy")));
         }
-        let seq = next_seq(store);
+        let seq = next_seq_with_effects(store, effects);
         effects.park(EffectAction::AppendRecord {
             id: format!("operation-start-action-{run_id}"),
             record: Record::OperationStarted {
@@ -361,7 +361,7 @@ impl OperationProcedure {
         }) {
             return Ok(());
         }
-        let seq = next_seq(store);
+        let seq = next_seq_with_effects(store, effects);
         effects.park(EffectAction::AppendRecord {
             id: format!("operation-finish-action-{run_id}"),
             record: Record::OperationFinished {
@@ -426,7 +426,7 @@ impl PromptProcedure {
                     .then(|| store.entries().last().map(|entry| entry.id.clone()))
                     .flatten()
             });
-        let first_seq = next_seq(store);
+        let first_seq = next_seq_with_effects(store, effects);
         let prompt_id = format!("entry-{run_id}-user");
         let result_entry_id = format!("entry-{run_id}-assistant-1");
         effects.park(EffectAction::AppendRecord {
@@ -516,14 +516,7 @@ impl NoToolRun {
                 .then(|| store.entries().last().map(|entry| entry.id.clone()))
                 .flatten()
         });
-        let first_seq = store
-            .entries()
-            .iter()
-            .map(|entry| entry.seq)
-            .chain(store.records().iter().map(Record::seq))
-            .max()
-            .unwrap_or(0)
-            + 1;
+        let first_seq = next_seq_with_effects(store, effects);
         let user_id = format!("entry-{run_id}-user");
         let assistant_id = format!("entry-{run_id}-assistant");
         let actions = [
@@ -632,7 +625,7 @@ impl NoToolRun {
             } if id == run_id => source_leaf_id.clone(),
             _ => None,
         });
-        let mut seq = next_seq(store);
+        let mut seq = next_seq_with_effects(store, effects);
         if !store.entries().iter().any(|entry| entry.id == user_id) {
             effects.park(EffectAction::AppendEntry {
                 entry: Entry {
@@ -735,7 +728,7 @@ impl NoToolRun {
         let moved = store.records().iter().any(|record| {
             matches!(record, Record::LaneMoved { run_id: record_run_id, target_leaf_id: target, .. } if record_run_id == run_id && target == target_leaf_id)
         });
-        let mut seq = next_seq(store);
+        let mut seq = next_seq_with_effects(store, effects);
         if !moved {
             effects.park(EffectAction::AppendRecord {
                 id: format!("navigation-move-action-{run_id}"),
@@ -876,7 +869,7 @@ impl NavigationProcedure {
         {
             return Err(ProcedureError::Invalid("target leaf does not exist".into()));
         }
-        let first_seq = next_seq(store);
+        let first_seq = next_seq_with_effects(store, effects);
         let source_leaf_id = lane.leaf_id.clone().or_else(|| {
             (lane_name == "main")
                 .then(|| store.entries().last().map(|entry| entry.id.clone()))
@@ -1007,7 +1000,7 @@ impl CompactionProcedure {
         if lane.open_operation.is_some() {
             return Err(ProcedureError::Invalid(format!("lane {lane_name} is busy")));
         }
-        let first_seq = next_seq(store);
+        let first_seq = next_seq_with_effects(store, effects);
         let source_leaf_id = lane.leaf_id.clone().or_else(|| {
             (lane_name == "main")
                 .then(|| store.entries().last().map(|entry| entry.id.clone()))
@@ -1131,7 +1124,7 @@ impl QueueProcedure {
                 "queued entry already exists".into(),
             ));
         }
-        let seq = next_seq(store);
+        let seq = next_seq_with_effects(store, effects);
         effects.park(EffectAction::AppendRecord {
             id: format!("queue-action-{}", target.id),
             record: Record::QueueEnqueued {
@@ -1186,7 +1179,7 @@ impl QueueProcedure {
                 "queued entry already exists".into(),
             ));
         }
-        let seq = next_seq(store);
+        let seq = next_seq_with_effects(store, effects);
         effects.park(EffectAction::AppendRecord {
             id: format!("queue-action-{}", target.id),
             record: Record::QueueEnqueued {
@@ -1240,7 +1233,7 @@ impl QueueProcedure {
                 "queued entry does not exist".into(),
             ));
         }
-        let seq = next_seq(store);
+        let seq = next_seq_with_effects(store, effects);
         effects.park(EffectAction::AppendRecord {
             id: format!("cancel-action-{entry_id}-{seq}"),
             record: Record::QueueCancelled {
@@ -1285,7 +1278,7 @@ impl QueueProcedure {
             .lane(lane_name)
             .and_then(|lane| lane.queued.iter().find(|entry| entry.target.id == entry_id))
             .ok_or_else(|| ProcedureError::Invalid("queued entry does not exist".into()))?;
-        let seq = next_seq(store);
+        let seq = next_seq_with_effects(store, effects);
         effects.park(EffectAction::AppendRecord {
             id: format!("cancel-action-{entry_id}-{seq}"),
             record: Record::QueueCancelled {
@@ -1337,7 +1330,7 @@ impl QueueProcedure {
                 "queued entry does not exist".into(),
             ));
         }
-        let seq = next_seq(store);
+        let seq = next_seq_with_effects(store, effects);
         effects.park(EffectAction::AppendRecord {
             id: format!("consume-action-{entry_id}-{seq}"),
             record: Record::QueueConsumed {
@@ -1382,7 +1375,7 @@ impl QueueProcedure {
             .lane(lane_name)
             .and_then(|lane| lane.queued.iter().find(|entry| entry.target.id == entry_id))
             .ok_or_else(|| ProcedureError::Invalid("queued entry does not exist".into()))?;
-        let seq = next_seq(store);
+        let seq = next_seq_with_effects(store, effects);
         effects.park(EffectAction::AppendRecord {
             id: format!("consume-action-{entry_id}-{seq}"),
             record: Record::QueueConsumed {
@@ -1422,7 +1415,7 @@ impl AbortProcedure {
         if lane.abort_requested {
             return Err(ProcedureError::Invalid("abort is already requested".into()));
         }
-        let seq = next_seq(store);
+        let seq = next_seq_with_effects(store, effects);
         effects.park(EffectAction::AppendRecord {
             id: format!("abort-action-{run_id}-{seq}"),
             record: Record::AbortRequested {
@@ -1463,7 +1456,7 @@ impl AbortProcedure {
                 "assistant result identity is empty".into(),
             ));
         }
-        let mut seq = next_seq(store);
+        let mut seq = next_seq_with_effects(store, effects);
         let mut parent_id = lane
             .leaf_id
             .clone()
@@ -1630,7 +1623,7 @@ impl DeferredProcedure {
             ));
         }
         let mut entry = entry;
-        entry.seq = next_seq(store);
+        entry.seq = next_seq_with_effects(store, effects);
         effects.park(EffectAction::AppendEntry { entry })?;
         Ok(())
     }
@@ -1647,7 +1640,7 @@ impl DeferredProcedure {
             ));
         }
         let lane = open_lane(store, run_id)?;
-        let seq = next_seq(store);
+        let seq = next_seq_with_effects(store, effects);
         effects.park(EffectAction::AppendRecord {
             id: format!("deferred-action-{}", target.id),
             record: Record::WriteDeferred {
@@ -1668,7 +1661,7 @@ impl DeferredProcedure {
         effects: &mut GatedEffects,
     ) -> Result<(), ProcedureError> {
         let lane = open_lane(store, run_id)?;
-        let mut seq = next_seq(store);
+        let mut seq = next_seq_with_effects(store, effects);
         let mut parent_id = lane.leaf_id.clone().or_else(|| {
             (lane.name == "main")
                 .then(|| store.entries().last().map(|entry| entry.id.clone()))
@@ -1748,7 +1741,7 @@ impl DeferredProcedure {
                     "deferred handle changed while suspended".into(),
                 ));
             }
-            let seq = next_seq(store);
+            let seq = next_seq_with_effects(store, effects);
             effects.park(EffectAction::AppendRecord {
                 id: format!("deferred-pending-usage-action-{run_id}-{seq}"),
                 record: Record::Usage {
@@ -1795,13 +1788,14 @@ impl DeferredProcedure {
         }
         let usage_entry_id = entry_id.clone();
         let attempt = lane.attempts.saturating_add(1);
+        let base = next_seq_with_effects(store, effects);
         effects.park(EffectAction::AppendEntry {
             entry: Entry {
                 id: entry_id.clone(),
                 parent_id: Some(deferred.0),
                 lane: lane.name.clone(),
-                seq: next_seq(store),
-                timestamp: next_seq(store),
+                seq: base,
+                timestamp: base + 1,
                 message,
                 terminate: false,
             },
@@ -1810,16 +1804,16 @@ impl DeferredProcedure {
             id: format!("deferred-attempt-{run_id}"),
             record: Record::StepAttempt {
                 id: format!("deferred-attempt-record-{run_id}"),
-                seq: next_seq(store) + 1,
+                seq: base + 3,
                 lane: lane.name.clone(),
-                timestamp: next_seq(store) + 1,
+                timestamp: base + 4,
                 run_id: run_id.into(),
                 attempt,
                 result_entry_id: entry_id,
                 compaction_reason: None,
             },
         })?;
-        let usage_seq = next_seq(store) + 2;
+        let usage_seq = base + 6;
         effects.park(EffectAction::AppendRecord {
             id: format!("deferred-usage-action-{run_id}-{usage_seq}"),
             record: Record::Usage {
@@ -1871,7 +1865,7 @@ impl ToolBatchProcedure {
                 "assistant entry does not exist".into(),
             ));
         }
-        let mut seq = next_seq(store);
+        let mut seq = next_seq_with_effects(store, effects);
         for spec in specs {
             if spec.call_id.trim().is_empty()
                 || spec.name.trim().is_empty()
@@ -2148,7 +2142,7 @@ impl ToolBatchProcedure {
                 "assistant entry does not exist".into(),
             ));
         }
-        let mut seq = next_seq(store);
+        let mut seq = next_seq_with_effects(store, effects);
         let mut recoveries = Vec::new();
         for spec in current_specs {
             let tool = lane
@@ -2251,9 +2245,6 @@ fn open_lane<S: SessionStore>(
     Ok(lane.clone())
 }
 
-fn next_seq<S: SessionStore>(store: &S) -> u64 {
-    store.next_sequence()
-}
 
 fn current_attempt<S: SessionStore>(store: &S, run_id: &str) -> u32 {
     highest_attempt(store, run_id).max(1)
