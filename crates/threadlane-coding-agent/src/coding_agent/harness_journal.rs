@@ -492,12 +492,83 @@ impl HarnessJournal {
         message: AgentMessage,
     ) -> Result<String, String> {
         self.refresh()?;
-        let state = Reducer::reduce(&self.store).map_err(|error| error.to_string())?;
-        let lane_state = state
-            .lane(lane)
-            .ok_or_else(|| format!("harness lane {lane} is unavailable"))?;
-        let parent_id = lane_state.leaf_id.clone();
-        let seq = self.next_seq();
+        let prefix = format!("subagent-entry-{run_id}-");
+        if matches!(
+            message,
+            AgentMessage::User { .. } | AgentMessage::Assistant { .. }
+        ) {
+            if let Some(entry) = self.store.entries().iter().rev().find(|entry| {
+                entry.lane == lane && entry.id.starts_with(&prefix) && entry.message == message
+            }) {
+                return Ok(entry.id.clone());
+            }
+        }
+        let ordinal = self
+            .store
+            .entries()
+            .iter()
+            .filter(|entry| entry.id.starts_with(&prefix))
+            .count();
+        let id = match &message {
+            AgentMessage::Tool { tool_call_id, .. } => {
+                format!("subagent-result-{run_id}-{tool_call_id}")
+            }
+            AgentMessage::Assistant { .. } => self
+                .store
+                .records()
+                .iter()
+                .filter_map(|record| match record {
+                    HarnessRecord::StepAttempt {
+                        run_id: record_run,
+                        result_entry_id,
+                        ..
+                    } if record_run == run_id => Some(result_entry_id.clone()),
+                    _ => None,
+                })
+                .next()
+                .unwrap_or_else(|| format!("{prefix}{ordinal}")),
+            _ => format!("{prefix}{ordinal}"),
+        };
+        if let Some(entry) = self
+            .store
+            .entries()
+            .iter()
+            .find(|entry| entry.lane == lane && entry.id == id)
+        {
+            return Ok(entry.id.clone());
+        }
+        let parent_id = match &message {
+            AgentMessage::Tool { tool_call_id, .. } => self
+                .store
+                .records()
+                .iter()
+                .rev()
+                .find_map(|record| match record {
+                    HarnessRecord::ToolStarted {
+                        tool_call_id: id,
+                        assistant_entry_id,
+                        ..
+                    } if id == tool_call_id => Some(assistant_entry_id.clone()),
+                    _ => None,
+                })
+                .or_else(|| {
+                    Reducer::reduce(self.store.store())
+                        .ok()
+                        .and_then(|state| state.lane(lane).and_then(|l| l.leaf_id.clone()))
+                }),
+            _ => Reducer::reduce(self.store.store())
+                .ok()
+                .and_then(|state| state.lane(lane).and_then(|l| l.leaf_id.clone()))
+                .or_else(|| {
+                    self.store
+                        .entries()
+                        .iter()
+                        .rev()
+                        .find(|e| e.lane == lane)
+                        .map(|e| e.id.clone())
+                }),
+        };
+        let seq = harness_next_seq(self.store.store());
         let terminate = matches!(
             &message,
             AgentMessage::Tool {
@@ -505,49 +576,23 @@ impl HarnessJournal {
                 ..
             }
         );
-        let entry_id = match &message {
-            AgentMessage::Assistant { .. } => self
-                .store
-                .records()
-                .iter()
-                .rev()
-                .find_map(|record| match record {
-                    HarnessRecord::StepAttempt {
-                        run_id: record_run_id,
-                        result_entry_id,
-                        ..
-                    } if record_run_id == run_id
-                        && !self
-                            .store
-                            .entries()
-                            .iter()
-                            .any(|entry| entry.id == result_entry_id.as_str()) =>
-                    {
-                        Some(result_entry_id.clone())
-                    }
-                    _ => None,
-                })
-                .unwrap_or_else(|| format!("v2-entry-{seq}")),
-            AgentMessage::Tool { tool_call_id, .. } => format!("v2-tool-result-{tool_call_id}"),
-            _ => format!("v2-entry-{seq}"),
+        let entry = HarnessEntry {
+            id: id.clone(),
+            seq,
+            lane: lane.into(),
+            parent_id,
+            timestamp: timestamp(),
+            message,
+            terminate,
         };
         self.store
-            .append_entry_gated(HarnessEntry {
-                id: entry_id.clone(),
-                parent_id,
-                lane: lane.into(),
-                seq,
-                timestamp: timestamp(),
-                message,
-                terminate,
-            })
+            .append_entry_gated(entry)
             .map_err(|error| error.to_string())?;
         self.store
             .drive_to_completion()
             .map_err(|error| error.to_string())?;
-        Ok(entry_id)
+        Ok(id)
     }
-
     pub(crate) fn prepare_assistant_attempt(&mut self, run_id: &str) -> Result<String, String> {
         self.refresh()?;
         let state = Reducer::reduce(&self.store).map_err(|error| error.to_string())?;
@@ -698,62 +743,65 @@ impl HarnessJournal {
         effective_args: Value,
     ) -> Result<(), String> {
         self.refresh()?;
-        if self.store.records().iter().any(|record| {
-            matches!(record, HarnessRecord::ToolStarted {
-                run_id: record_run_id,
-                tool_call_id: record_call_id,
-                ..
-            } if record_run_id == run_id && record_call_id == tool_call_id)
-        }) {
-            return Ok(());
-        }
-        let assistant = self
+        let result_entry_id = format!("subagent-result-{run_id}-{tool_call_id}");
+        let assistant_entry_id = match self
             .store
             .entries()
             .iter()
             .rev()
             .find(|entry| {
-                entry.lane == lane
-                    && matches!(
-                        &entry.message,
-                        AgentMessage::Assistant { tool_calls: Some(calls), .. }
-                            if calls.iter().any(|call| call.id == tool_call_id)
-                    )
+                entry.lane == lane && matches!(entry.message, AgentMessage::Assistant { .. })
             })
-            .ok_or_else(|| format!("missing assistant entry for tool {tool_call_id} on lane {lane}"))?;
-        let assistant_id = assistant.id.clone();
-        let tool_index = match &assistant.message {
-            AgentMessage::Assistant {
-                tool_calls: Some(calls),
-                ..
-            } => calls
-                .iter()
-                .position(|call| call.id == tool_call_id)
-                .ok_or_else(|| format!("tool {tool_call_id} is absent from assistant entry"))?,
-            _ => return Err("assistant entry has no tool calls".into()),
+            .map(|entry| entry.id.clone())
+        {
+            Some(id) => id,
+            None => {
+                let assistant_msg = AgentMessage::Assistant {
+                    content: None,
+                    tool_calls: None,
+                    stop_reason: None,
+                    deferred_handle: None,
+                };
+                self.append_message_to_lane(lane, run_id, assistant_msg)?
+            }
+        };
+        let tool_index = self
+            .store
+            .records()
+            .iter()
+            .filter(|record| match record {
+                HarnessRecord::ToolStarted {
+                    run_id: r_id,
+                    lane: r_lane,
+                    ..
+                } => r_id == run_id && r_lane == lane,
+                _ => false,
+            })
+            .count();
+        let record = HarnessRecord::ToolStarted {
+            id: format!("tool-started-{run_id}-{tool_call_id}"),
+            seq: harness_next_seq(self.store.store()),
+            lane: lane.into(),
+            timestamp: timestamp(),
+            run_id: run_id.into(),
+            assistant_entry_id,
+            tool_index,
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+            effective_args,
+            result_entry_id,
+            replay: match threadlane_agent::classify_tool_replay_safety(tool_name) {
+                threadlane_agent::ToolReplaySafety::Safe => HarnessToolReplaySafety::Safe,
+                threadlane_agent::ToolReplaySafety::Never => HarnessToolReplaySafety::Never,
+            },
         };
         self.store
-            .start_tool_batch(
-                run_id,
-                &assistant_id,
-                &[ToolSpec {
-                    index: tool_index,
-                    call_id: tool_call_id.into(),
-                    name: tool_name.into(),
-                    effective_args,
-                    result_entry_id: format!("v2-tool-result-{tool_call_id}"),
-                    replay: match threadlane_agent::classify_tool_replay_safety(tool_name) {
-                        threadlane_agent::ToolReplaySafety::Safe => HarnessToolReplaySafety::Safe,
-                        threadlane_agent::ToolReplaySafety::Never => HarnessToolReplaySafety::Never,
-                    },
-                }],
-            )
+            .append_record_gated(record)
             .map_err(|error| error.to_string())?;
         self.store
             .drive_to_completion()
             .map_err(|error| error.to_string())
     }
-
     pub(crate) fn record_provider_usage(&mut self, run_id: &str, usage: TokenUsage) -> Result<(), String> {
         self.refresh()?;
         self.store
