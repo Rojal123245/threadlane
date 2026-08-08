@@ -444,12 +444,11 @@ cargo test -p threadlane-coding-agent
 - [x] Derive child session identity from parent session plus tool-call ID so safe replay reattaches instead of spawning a twin.
 - [x] Migrate subagent checkpoints, safe replay, unsafe abort, passive branch display, and lifecycle events to the general harness.
 - [x] Keep `HarnessSupervisor` ownership limited to explicit background tasks and consume harness snapshots/events for task status.
-- [ ] Retire `SubagentLaneJournal`, direct sidecar append helpers, and supervisor lane durability only when no live caller depends on them.
+- [x] Retire `SubagentLaneJournal`, direct sidecar append helpers, and supervisor lane durability only when no live caller depends on them.
 
 **Tests:** Existing CodingAgent non-network suites plus foreground restart, background restart, subagent replay, deterministic child identity, skill/extension refresh, provider prefix restoration, permission denial, and cancellation hierarchy policies.
 
-**Exit gate:** Foreground chat, `/task`, and model subagents share one durability implementation while retaining distinct application scheduling.
-
+**Exit gate:** Foreground chat, `/task`, and model subagents share one durability implementation while retaining distinct application scheduling. **Verified 2026-08-07:** CodingAgent routes through `CodingSessionHarness`, supervisor persistence is removed, subagent lanes use canonical `SessionAgent` path, and all 388 tests pass.
 ### Milestone 10 — Makepad UI cutover
 
 **Purpose:** Consume the durable contract without redesigning the interface.

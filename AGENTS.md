@@ -306,10 +306,10 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 
 ## Background Tasks and Capabilities
 
-- `HarnessSupervisor` owns only explicit background tasks (currently `/task <prompt>`). Ordinary chat sessions continue to use the existing `SessionRuntime` path and must not be mirrored into supervisor tasks.
-- Harness side effects are intent-first: persist `OperationStarted`, `TaskAttempt`, `ToolStarted`, and `QueueEnqueued` under the lane lock before starting the corresponding model/tool work or mutating the in-memory queue. `ToolExecutionStart` is observational only.
-- Child intent is durable before model/tool work; checkpoints use `WriteDeferred`; safe replay is automatic and unsafe interruption aborts.
-- Model subagents execute with short-lived child `Agent`s but persist as passive sibling branches on the parent `SessionTree`; only the formatted final tool result enters the parent active branch.
+- `HarnessSupervisor` owns only explicit background tasks (currently `/task <prompt>`). Ordinary chat sessions continue to use the existing `SessionRuntime` path and must not be mirrored into supervisor tasks. Supervisor task status is derived from canonical harness snapshots and events; it does not own a second operation log or lane-recovery authority.
+- `CodingSessionHarness` (`coding_agent/harness.rs`) is the canonical session adapter. Production code must route foreground, `/task`, and model subagent durable operations through it. No production caller may directly append session or operation-log records outside this harness path.
+- Durable operations are intent-first: persist `OperationStarted`, `StepAttempt`, `ToolStarted`, and `QueueEnqueued` through `CodingSessionHarness`/`SessionAgent` before starting provider/tool work. `ToolExecutionStart` is observational only.
+- Child intent is durable before model/tool work; checkpoints use `WriteDeferred`; safe replay is automatic and unsafe interruption aborts. Child subagent lanes use the canonical `SessionAgent` path with deterministic identity derived from parent session + tool-call ID.
 - Forward supervisor events through `GuiAgentEvent`; update `BackgroundTaskState` and widgets only on the Makepad event thread.
 - Threadlane extensions are compiled WASI modules with an exported
   `extension_info` manifest. The settings picker installs a `.wasm` into either
