@@ -1,9 +1,11 @@
 pub mod harness;
 pub mod harness_journal;
 pub mod subagent;
+pub mod subagents;
 pub mod wasi_process;
 pub use harness_journal::*;
 pub use subagent::*;
+pub use subagents::*;
 pub use wasi_process::*;
 
 use crate::agents::{discover_agents, AgentConfig, AgentScope};

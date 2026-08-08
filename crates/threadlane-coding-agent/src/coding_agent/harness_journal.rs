@@ -12,75 +12,7 @@ use threadlane_agent::harness::{
     SessionStore, Snapshot, StreamingState, Subscription, ToolRecovery,
     ToolReplaySafety as HarnessToolReplaySafety, ToolResult as HarnessToolResult, ToolSpec,
 };
-use threadlane_agent::{
-    AgentMessage, AgentToolResult, SubagentRecoveryStatus, TokenUsage,
-};
-
-pub(crate) struct SubagentJournalAdapter {
-    pub(crate) session_file: PathBuf,
-    pub(crate) lane: String,
-    pub(crate) run_id: String,
-}
-
-#[async_trait]
-impl threadlane_agent::journal::AgentJournal for SubagentJournalAdapter {
-    async fn record_assistant_message(&self, message: AgentMessage) -> Result<(), String> {
-        let mut journal = HarnessJournal::open(&self.session_file)?;
-        journal
-            .append_message_to_lane(&self.lane, &self.run_id, message)
-            .map(|_| ())
-    }
-
-    async fn record_tool_message(&self, message: AgentMessage) -> Result<(), String> {
-        let mut journal = HarnessJournal::open(&self.session_file)?;
-        journal.append_message_to_lane(&self.lane, &self.run_id, message.clone())?;
-        journal.finish_tool_message(&self.run_id, &message)
-    }
-
-    async fn record_tool_intent(
-        &self,
-        tool_call_id: &str,
-        tool_name: &str,
-        arguments: &str,
-    ) -> Result<(), String> {
-        let effective_args =
-            serde_json::from_str(arguments).map_err(|e| format!("invalid tool arguments: {e}"))?;
-        let mut journal = HarnessJournal::open(&self.session_file)?;
-        journal.tool_started_on_lane(
-            &self.lane,
-            &self.run_id,
-            tool_call_id,
-            tool_name,
-            effective_args,
-        )
-    }
-
-    async fn record_tool_completion(
-        &self,
-        _tool_call_id: &str,
-        _terminate: bool,
-    ) -> Result<(), String> {
-        Ok(())
-    }
-
-    async fn record_provider_usage(&self, usage: TokenUsage) -> Result<(), String> {
-        let mut journal = HarnessJournal::open(&self.session_file)?;
-        journal.record_provider_usage(&self.run_id, usage)
-    }
-
-    async fn record_discarded_usage(&self, usage: TokenUsage) -> Result<(), String> {
-        let mut journal = HarnessJournal::open(&self.session_file)?;
-        journal.record_discarded_usage(&self.run_id, usage)
-    }
-
-    async fn record_streaming_state(&self, _state: StreamingState) -> Result<(), String> {
-        Ok(())
-    }
-
-    async fn run_provider_hook(&self, _kind: HookKind) -> Result<(), String> {
-        Ok(())
-    }
-}
+use threadlane_agent::{AgentMessage, AgentToolResult, TokenUsage};
 
 pub(crate) struct HarnessJournalAdapter {
     pub(crate) session_file: PathBuf,
