@@ -85,7 +85,9 @@ pub enum OperationOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum UsageCause {
+    #[default]
     Provider,
     Discarded,
     Tool,
@@ -101,11 +103,6 @@ pub struct RetryState {
     pub reason: String,
 }
 
-impl Default for UsageCause {
-    fn default() -> Self {
-        Self::Provider
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Record {

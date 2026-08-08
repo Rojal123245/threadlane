@@ -4,8 +4,7 @@
 use super::ManagedProcessRegistry;
 use super::HarnessJournal;
 use super::capabilities::{
-    build_broker_dispatcher, create_after_tool_hook_handler, dispatch_hook_requests,
-    dispatch_hook_requests_isolated, extension_before_tool_hook_handler, McpCapability,
+    build_broker_dispatcher, create_after_tool_hook_handler, dispatch_hook_requests, extension_before_tool_hook_handler, McpCapability,
     PlanCapability, render_agent_catalog, restored_tool_policy, SkillCapability,
     SubagentCapability, WasiCapability,
 };
@@ -13,19 +12,18 @@ use crate::agents::{discover_agents, AgentConfig, AgentScope};
 use crate::commands::{execute_slash_command, parse_slash_command, CommandAction};
 use crate::context::ProjectContext;
 use crate::extension_broker::{
-    BrokerError, BrokerRequest, CapabilityDispatcher, CapabilityHandler, BROKER_API_VERSION,
+    CapabilityDispatcher,
 };
-use crate::mcp::{McpManager, McpToolExecutor};
+use crate::mcp::McpManager;
 use crate::packages::default_global_threadlane_dir;
-use crate::plan::{SessionPlanStore, UpdatePlanToolExecutor};
-use crate::skills::{LoadSkillToolExecutor, SkillManager, SkillRegistry};
+use crate::plan::SessionPlanStore;
+use crate::skills::{SkillManager, SkillRegistry};
 use crate::system_prompt::{build_system_prompt, SystemPromptBuildOptions, SystemPromptConfig};
 use crate::wasi_extension::{WasiExtensionManager, WasiLegacyEffect};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -33,17 +31,17 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use threadlane_agent::harness::{
-    AgentHarness, DeferredResolution, Entry as HarnessEntry, EventError, HarnessEvent,
-    HarnessEventHub, HookContext, HookEffect, HookHandler, HookKind, HookRegistry, JsonlStore,
+    DeferredResolution, Entry as HarnessEntry, EventError, HarnessEvent,
+    HarnessEventHub, HookContext, HookKind, HookRegistry, JsonlStore,
     OperationIntent, OperationOutcome, ProvisionedEntry, QueueKind, Record as HarnessRecord,
-    Reducer, RetryPolicy, SessionIdGenerator, SessionStore, Snapshot, StreamingState, Subscription,
+    Reducer, SessionIdGenerator, SessionStore, Snapshot, StreamingState, Subscription,
     ToolRecovery, ToolReplaySafety as HarnessToolReplaySafety, ToolResult as HarnessToolResult,
     ToolSpec,
 };
 use threadlane_agent::{
-    repair_interrupted_tool_turn, AgentEvent, AgentMessage, AgentToolCall, AgentToolDefinition,
+    repair_interrupted_tool_turn, AgentEvent, AgentMessage,
     AgentToolResult, ImageAttachment, ReasoningEffort, SessionTree, SubagentRecoveryStatus,
-    TokenUsage, ToolExecutor, TurnState, UnifiedAgent,
+    TokenUsage, TurnState, UnifiedAgent,
 };
 use threadlane_provider::openai::fetch_available_models;
 use tokio::sync::broadcast;
@@ -214,7 +212,7 @@ enum SubagentLaneStatus {
 }
 
 #[derive(Clone, Debug)]
-struct CompletedSubagentLane {
+pub(crate) struct CompletedSubagentLane {
     lane_name: String,
     run_id: String,
     parent_leaf_id: Option<String>,
@@ -745,7 +743,7 @@ impl threadlane_agent::journal::AgentJournal for HarnessJournalAdapter {
         Ok(())
     }
 
-    async fn record_tool_message(&self, message: AgentMessage) -> Result<(), String> {
+    async fn record_tool_message(&self, _message: AgentMessage) -> Result<(), String> {
         if self.active_run.lock().ok().and_then(|r| r.clone()).is_some() {
             eprintln!(
                 "HarnessJournalAdapter: record_tool_message called (read-only); \
@@ -883,6 +881,7 @@ fn harness_cancellation_state(path: &Path) -> Arc<AtomicBool> {
         .clone()
 }
 
+#[allow(dead_code)]
 impl HarnessJournal {
     #[cfg(test)]
     pub(crate) fn start(&mut self, run_id: &str, source_leaf_id: Option<String>) -> Result<(), String> {
@@ -1085,13 +1084,11 @@ impl HarnessJournal {
             .entries()
             .iter()
             .filter(|entry| entry.seq > start_seq)
-            .filter_map(|entry| match &entry.message {
+            .filter(|entry| matches!(&entry.message,
                 AgentMessage::Assistant {
                     tool_calls: Some(tool_calls),
                     ..
-                } if !tool_calls.is_empty() => Some(entry),
-                _ => None,
-            })
+                } if !tool_calls.is_empty()))
             .max_by_key(|entry| entry.seq)
         else {
             return Ok(());
@@ -1514,8 +1511,8 @@ impl HarnessJournal {
                     .find(|l| l.open_operation.as_deref() == Some(run_id))
                 {
                     for tool in &l.tools {
-                        if !tool.completed && tool.run_id == run_id {
-                            if !self
+                        if !tool.completed && tool.run_id == run_id
+                            && !self
                                 .store
                                 .entries()
                                 .iter()
@@ -1536,7 +1533,6 @@ impl HarnessJournal {
                                 )?;
                                 any_provisioned = true;
                             }
-                        }
                     }
                 }
             }
@@ -1555,12 +1551,6 @@ impl HarnessJournal {
             }
         }
 
-        let outcome = match outcome {
-            OperationOutcome::Completed => OperationOutcome::Completed,
-            OperationOutcome::Aborted => OperationOutcome::Aborted,
-            OperationOutcome::Failed => OperationOutcome::Failed,
-            OperationOutcome::Declined => OperationOutcome::Declined,
-        };
         self.store
             .finish_operation(run_id, outcome, error)
             .map_err(|error| error.to_string())?;
@@ -3711,7 +3701,7 @@ impl CodingAgent {
                                 harness_run_id.as_deref(),
                                 OperationOutcome::Failed,
                                 Some(error.clone()),
-                            );
+                            ).await;
                             return Some(Err(error));
                         }
                         *self.dispatch_parent_leaf.lock().unwrap() = None;
@@ -3755,7 +3745,7 @@ impl CodingAgent {
                                 Some(run_id),
                                 OperationOutcome::Failed,
                                 Some(error.clone()),
-                            );
+                            ).await;
                             return Some(Err(format!("Harness Error: {error}")));
                         }
                     }
@@ -3776,7 +3766,7 @@ impl CodingAgent {
                             harness_run_id.as_deref(),
                             OperationOutcome::Failed,
                             Some(err.clone()),
-                        );
+                        ).await;
                         return Some(Err(format!("Subagent Error: {err}")));
                     }
                 };
@@ -3787,7 +3777,7 @@ impl CodingAgent {
                         harness_run_id.as_deref(),
                         OperationOutcome::Failed,
                         Some(error.clone()),
-                    );
+                    ).await;
                     return Some(Err(error));
                 }
                 *self.dispatch_parent_leaf.lock().unwrap() = None;
@@ -3808,7 +3798,7 @@ impl CodingAgent {
                                 Some(run_id),
                                 OperationOutcome::Failed,
                                 Some(error.clone()),
-                            );
+                            ).await;
                             return Some(Err(format!("Harness Error: {error}")));
                         }
                     }
@@ -3867,7 +3857,7 @@ impl CodingAgent {
                                     harness_run_id.as_deref(),
                                     OperationOutcome::Failed,
                                     Some(error.message.clone()),
-                                );
+                                ).await;
                                 return Some(Err(format!("WASI Broker Error: {}", error.message)));
                             }
                         };
@@ -3943,7 +3933,7 @@ impl CodingAgent {
                                 harness_run_id.as_deref(),
                                 OperationOutcome::Failed,
                                 Some(error.clone()),
-                            );
+                            ).await;
                             return Some(Err(error));
                         }
                         *self.dispatch_parent_leaf.lock().unwrap() = None;
@@ -3986,7 +3976,7 @@ impl CodingAgent {
                             harness_run_id.as_deref(),
                             OperationOutcome::Failed,
                             Some(message.clone()),
-                        );
+                        ).await;
                         Some(Err(message))
                     }
                 };
@@ -4104,7 +4094,7 @@ impl CodingAgent {
                     Some(run_id),
                     OperationOutcome::Failed,
                     Some(error.clone()),
-                );
+                ).await;
                 return Some(Err(format!("Harness Error: {error}")));
             }
         }
@@ -4117,7 +4107,7 @@ impl CodingAgent {
                 harness_run_id.as_deref(),
                 OperationOutcome::Failed,
                 Some(error.clone()),
-            );
+            ).await;
             return Some(Err(format!("Harness Error: {error}")));
         }
         self.run_scheduled_agent_work().await;
@@ -4127,7 +4117,7 @@ impl CodingAgent {
                 harness_run_id.as_deref(),
                 OperationOutcome::Failed,
                 Some(error.clone()),
-            );
+            ).await;
             return Some(Err(format!("Harness Error: {error}")));
         }
         if let Err(error) = self.commit_completed_subagent_lanes() {
@@ -4136,7 +4126,7 @@ impl CodingAgent {
                 harness_run_id.as_deref(),
                 OperationOutcome::Failed,
                 Some(error.clone()),
-            );
+            ).await;
             let _ = self.agent.event_tx.send(AgentEvent::AgentError {
                 error: error.clone(),
             });
@@ -4173,7 +4163,7 @@ impl CodingAgent {
                         Some(run_id),
                         OperationOutcome::Failed,
                         Some(completion_error.clone()),
-                    );
+                    ).await;
                     return Some(Err(format!("Harness Error: {completion_error}")));
                 }
                 if is_retryable_generation_error(&error) {
@@ -4727,8 +4717,8 @@ async fn run_subagent_task(
             error = Some(message);
         }
     }
-    if error.is_some() {
-        if config.model.is_some() && model != context.parent_model {
+    if error.is_some()
+        && config.model.is_some() && model != context.parent_model {
             let mut fallback_config = config.clone();
             fallback_config.model = None;
             return Box::pin(run_subagent_task(
@@ -4742,7 +4732,6 @@ async fn run_subagent_task(
             ))
             .await;
         }
-    }
 
     let state = agent.get_state().await;
     let output = state

@@ -43,6 +43,7 @@ fn writer_claim(path: &Path) -> Result<Arc<WriterClaim>, ReduceError> {
     }
     let file = fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(path)
@@ -251,41 +252,47 @@ impl SqliteStore {
             .unwrap_or(0)
             + 1
     }
+}
 
+struct PayloadParams<'a> {
+    sql: &'a str,
+    id: &'a str,
+    seq: u64,
+    lane: Option<&'a str>,
+    parent_id: Option<&'a str>,
+    timestamp: Option<u64>,
+    terminate: Option<bool>,
+}
+
+impl SqliteStore {
     fn append_payload<T: Serialize>(
         &self,
-        sql: &str,
-        id: &str,
-        seq: u64,
-        lane: Option<&str>,
+        params: &PayloadParams<'_>,
         payload: &T,
-        parent_id: Option<&str>,
-        timestamp: Option<u64>,
-        terminate: Option<bool>,
     ) -> Result<(), ReduceError> {
         exec(self.db, "BEGIN IMMEDIATE")?;
         let result = (|| {
-            let statement = prepare(self.db, sql)?;
-            bind_text(statement, 1, id)?;
-            bind_int(statement, 2, seq)?;
+            let statement = prepare(self.db, params.sql)?;
+            bind_text(statement, 1, params.id)?;
+            bind_int(statement, 2, params.seq)?;
             let mut index = 3;
-            if let Some(lane) = lane {
+            if let Some(lane) = params.lane {
                 bind_text(statement, index, lane)?;
                 index += 1;
             }
-            if let Some(parent_id) = parent_id {
+            if let Some(parent_id) = params.parent_id {
                 bind_text(statement, index, parent_id)?;
-            } else if timestamp.is_some() {
+            } else if params.timestamp.is_some() {
                 let rc = unsafe { sqlite::sqlite3_bind_null(statement, index) };
                 if rc != sqlite::SQLITE_OK {
                     return Err(ReduceError::Storage(format!("sqlite bind null: {rc}")));
                 }
             }
-            if let Some(timestamp) = timestamp {
+            if let Some(timestamp) = params.timestamp {
                 index += 1;
                 bind_int(statement, index, timestamp)?;
                 index += 1;
-                bind_int(statement, index, terminate.unwrap_or(false) as u64)?;
+                bind_int(statement, index, params.terminate.unwrap_or(false) as u64)?;
                 index += 1;
             }
             bind_text(
@@ -333,8 +340,16 @@ impl SessionStore for SqliteStore {
             validate_entry(&self.entries, &self.records, &entry, entry.seq)?;
             validate_candidate_entry(self, &entry)?;
             match self.append_payload(
-                "INSERT INTO harness_entries(id, seq, parent_id, timestamp, terminate, payload) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-                &entry.id, entry.seq, None, &entry, entry.parent_id.as_deref(), Some(entry.timestamp), Some(entry.terminate),
+                &PayloadParams {
+                    sql: "INSERT INTO harness_entries(id, seq, parent_id, timestamp, terminate, payload) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                    id: &entry.id,
+                    seq: entry.seq,
+                    lane: None,
+                    parent_id: entry.parent_id.as_deref(),
+                    timestamp: Some(entry.timestamp),
+                    terminate: Some(entry.terminate),
+                },
+                &entry,
             ) {
                 Ok(()) => return self.reload(),
                 Err(error) if is_sequence_conflict(&error) => continue,
@@ -356,14 +371,16 @@ impl SessionStore for SqliteStore {
             validate_record(&self.entries, &self.records, &record, record.seq())?;
             validate_candidate_record(self, &record)?;
             match self.append_payload(
-                "INSERT INTO harness_records(id, seq, lane, payload) VALUES(?1, ?2, ?3, ?4)",
-                record.id(),
-                record.seq(),
-                Some(record.lane()),
+                &PayloadParams {
+                    sql: "INSERT INTO harness_records(id, seq, lane, payload) VALUES(?1, ?2, ?3, ?4)",
+                    id: record.id(),
+                    seq: record.seq(),
+                    lane: Some(record.lane()),
+                    parent_id: None,
+                    timestamp: None,
+                    terminate: None,
+                },
                 &record,
-                None,
-                None,
-                None,
             ) {
                 Ok(()) => return self.reload(),
                 Err(error) if is_sequence_conflict(&error) => continue,

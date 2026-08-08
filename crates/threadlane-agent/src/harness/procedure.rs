@@ -2287,6 +2287,6 @@ fn next_seq_with_effects<S: SessionStore>(store: &S, effects: &GatedEffects) -> 
     store
         .next_sequence()
         .saturating_sub(1)
-        .max(effects.pending_sequences().into_iter().max().unwrap_or(0))
+        .max(effects.pending_sequences().max().unwrap_or(0))
         + 1
 }

@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::HashMap;
 use threadlane_provider::openai::ToolCall;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

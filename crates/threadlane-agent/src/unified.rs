@@ -208,13 +208,13 @@ impl UnifiedAgent {
         let tools: Vec<_> = self.configured_tool_definitions();
         let chat = self.provider_router.build_payload(
             PayloadFormat::ChatCompletions,
-            &*turn,
+            &turn,
             &tools,
             self.prompt_cache_key.as_deref(),
         );
         let codex = self.provider_router.build_payload(
             PayloadFormat::Codex,
-            &*turn,
+            &turn,
             &tools,
             self.prompt_cache_key.as_deref(),
         );
@@ -304,7 +304,7 @@ impl UnifiedAgent {
     pub fn drive_harness(&mut self) -> Result<(), ProcedureError> {
         self.harness
             .drive_to_completion()
-            .map_err(|e| ProcedureError::Effects(e))
+            .map_err(ProcedureError::Effects)
     }
 
     /// Enqueues a message into the harness durability queue for the main lane.

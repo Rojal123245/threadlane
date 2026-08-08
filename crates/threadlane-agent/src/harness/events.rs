@@ -393,7 +393,7 @@ impl HarnessEventHub {
             .iter()
             .filter(|event| event.id >= subscription.next_id)
             .map(|event| event.id)
-            .last()
+            .next_back()
         {
             subscription.next_id = last_seen + 1;
         }

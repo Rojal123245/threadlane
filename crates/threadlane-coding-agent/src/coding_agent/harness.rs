@@ -10,9 +10,8 @@ use serde_json::Value;
 use threadlane_agent::harness::{
     AgentHarness, DeferredResolution, EffectAction, Entry as HarnessEntry,
     EventPayload, HarnessEventHub, HookContext, HookKind, HookRegistry,
-    JsonlStore, OperationOutcome, ProvisionedEntry,
-    QueueKind, Record as HarnessRecord, Reducer, ReduceError, RetryPolicy,
-    SessionIdGenerator, SessionStore, Snapshot, Subscription,
+    JsonlStore, OperationOutcome, Record as HarnessRecord, Reducer, ReduceError, RetryPolicy,
+    SessionIdGenerator, SessionStore, Snapshot,
     ToolReplaySafety as HarnessToolReplaySafety, ToolResult as HarnessToolResult,
     ToolSpec,
 };
@@ -29,6 +28,7 @@ use super::harness_journal::{
 /// registry, cancellation state, and a subscription for event projection.
 /// Every foreground operation enters the harness through this adapter;
 /// there is no second persistence path.
+#[allow(dead_code)]
 pub(crate) struct CodingSessionHarness {
     pub(crate) store: AgentHarness<JsonlStore>,
     pub(crate) session_path: PathBuf,
@@ -38,6 +38,7 @@ pub(crate) struct CodingSessionHarness {
     pub(crate) cancellation: Arc<AtomicBool>,
 }
 
+#[allow(dead_code)]
 impl CodingSessionHarness {
     // ── Construction ──────────────────────────────────────────────────
 
@@ -808,13 +809,11 @@ impl CodingSessionHarness {
             .entries()
             .iter()
             .filter(|entry| entry.seq > start_seq)
-            .filter_map(|entry| match &entry.message {
+            .filter(|entry| matches!(&entry.message,
                 AgentMessage::Assistant {
                     tool_calls: Some(tool_calls),
                     ..
-                } if !tool_calls.is_empty() => Some(entry),
-                _ => None,
-            })
+                } if !tool_calls.is_empty()))
             .max_by_key(|entry| entry.seq)
         else {
             return Ok(());

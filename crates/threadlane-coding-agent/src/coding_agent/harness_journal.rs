@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
@@ -6,130 +5,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use threadlane_agent::harness::{
-    AgentHarness, DeferredResolution, Entry as HarnessEntry, EventError, HarnessEvent,
-    HarnessEventHub, HookContext, HookKind, HookRegistry, JsonlStore, OperationIntent,
+    AgentHarness, Entry as HarnessEntry, EventError, HarnessEvent,
+    HarnessEventHub, HookRegistry, JsonlStore,
     OperationOutcome, Record as HarnessRecord, Reducer, RetryPolicy, SessionIdGenerator,
-    SessionStore, Snapshot, StreamingState, Subscription, ToolRecovery,
-    ToolReplaySafety as HarnessToolReplaySafety, ToolResult as HarnessToolResult, ToolSpec,
+    SessionStore, Snapshot, Subscription,
+    ToolReplaySafety as HarnessToolReplaySafety, ToolSpec,
 };
-use threadlane_agent::{AgentMessage, AgentToolResult, TokenUsage};
+use threadlane_agent::{AgentMessage, TokenUsage};
 
-pub(crate) struct HarnessJournalAdapter {
-    pub(crate) session_file: PathBuf,
-    pub(crate) active_run: Arc<std::sync::Mutex<Option<String>>>,
-}
-
-#[async_trait]
-impl threadlane_agent::journal::AgentJournal for HarnessJournalAdapter {
-    async fn record_assistant_message(&self, message: AgentMessage) -> Result<(), String> {
-        let active = self.active_run.lock().ok().is_some_and(|r| r.is_some());
-        if active {
-            HarnessJournal::append_message_to_path(&self.session_file, message)
-        } else {
-            Ok(())
-        }
-    }
-
-    async fn record_tool_message(&self, message: AgentMessage) -> Result<(), String> {
-        if let Some(run_id) = self.active_run.lock().ok().and_then(|r| r.clone()) {
-            let mut journal = HarnessJournal::open(&self.session_file)?;
-            journal.append_message(message.clone())?;
-            journal.finish_tool_message(&run_id, &message)
-        } else {
-            Ok(())
-        }
-    }
-
-    async fn record_tool_intent(
-        &self,
-        tool_call_id: &str,
-        tool_name: &str,
-        arguments: &str,
-    ) -> Result<(), String> {
-        if let Some(run_id) = self.active_run.lock().ok().and_then(|r| r.clone()) {
-            let effective_args = serde_json::from_str(arguments)
-                .map_err(|e| format!("invalid tool arguments: {e}"))?;
-            HarnessJournal::append_tool_intent_to_path(
-                &self.session_file,
-                &run_id,
-                tool_call_id,
-                tool_name,
-                effective_args,
-            )
-            .await
-        } else {
-            Ok(())
-        }
-    }
-
-    async fn record_tool_completion(
-        &self,
-        _tool_call_id: &str,
-        _terminate: bool,
-    ) -> Result<(), String> {
-        Ok(())
-    }
-
-    async fn record_provider_usage(&self, usage: TokenUsage) -> Result<(), String> {
-        if let Some(run_id) = self.active_run.lock().ok().and_then(|r| r.clone()) {
-            let mut journal = HarnessJournal::open(&self.session_file)?;
-            journal.record_provider_usage(&run_id, usage)
-        } else {
-            Ok(())
-        }
-    }
-
-    async fn record_discarded_usage(&self, usage: TokenUsage) -> Result<(), String> {
-        if let Some(run_id) = self.active_run.lock().ok().and_then(|r| r.clone()) {
-            let mut journal = HarnessJournal::open(&self.session_file)?;
-            journal.record_discarded_usage(&run_id, usage)
-        } else {
-            Ok(())
-        }
-    }
-
-    async fn record_streaming_state(&self, mut state: StreamingState) -> Result<(), String> {
-        let run_id = self.active_run.lock().ok().and_then(|r| r.clone());
-        let empty = state.assistant_text.is_empty()
-            && state.reasoning.is_empty()
-            && state.tool_call_ids.is_empty();
-        if empty {
-            harness_event_hub(&self.session_file).publish_streaming(None);
-        } else {
-            state.lane = "main".into();
-            state.run_id = run_id;
-            harness_event_hub(&self.session_file).publish_streaming(Some(state));
-        }
-        Ok(())
-    }
-
-    async fn run_provider_hook(&self, kind: HookKind) -> Result<(), String> {
-        if let Some(run_id) = self.active_run.lock().ok().and_then(|r| r.clone()) {
-            let mut journal = HarnessJournal::open(&self.session_file)?;
-            if kind == HookKind::BeforeRequest {
-                journal.prepare_assistant_attempt(&run_id)?;
-            }
-            let context = HookContext {
-                session_id: String::new(),
-                lane: "main".into(),
-                run_id: Some(run_id),
-                resume_data: None,
-                tool_call_id: None,
-                tool_name: None,
-                tool_arguments: None,
-                tool_result_content: None,
-                tool_result_is_error: None,
-            };
-            let failures = journal.store.hooks().run(kind, &context).await;
-            for failure in &failures {
-                eprintln!("provider hook {} failed: {}", failure.id, failure.message);
-            }
-            Ok(())
-        } else {
-            Ok(())
-        }
-    }
-}
 
 pub struct HarnessWatch {
     pub(crate) hub: HarnessEventHub,
@@ -198,6 +81,7 @@ pub(crate) struct HarnessJournal {
     pub(crate) cancellation: Arc<AtomicBool>,
 }
 
+#[allow(dead_code)]
 impl HarnessJournal {
     pub(crate) fn open(path: &Path) -> Result<Self, String> {
         if !path.exists() {

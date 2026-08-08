@@ -723,15 +723,13 @@ impl<S: SessionStore> AgentHarness<S> {
 
     pub fn drive_to_completion(&mut self) -> Result<(), EffectsError> {
         self.effects
-            .run_to_completion_with_events(&mut self.store, &mut self.events)
-            .map_err(EffectsError::from)?;
+            .run_to_completion_with_events(&mut self.store, &mut self.events)?;
         self.store.refresh().map_err(EffectsError::Store)
     }
 
     pub fn drive_to_completion_on_lane(&mut self, lane: &str) -> Result<(), EffectsError> {
         self.effects
-            .run_to_completion_on_lane_with_events(&mut self.store, &mut self.events, lane)
-            .map_err(EffectsError::from)?;
+            .run_to_completion_on_lane_with_events(&mut self.store, &mut self.events, lane)?;
         self.store.refresh().map_err(EffectsError::Store)
     }
 

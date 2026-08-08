@@ -1,81 +1,27 @@
 pub mod harness;
 pub mod harness_journal;
-pub mod subagent;
-pub mod subagents;
-pub mod wasi_process;
 pub mod broker;
 pub mod capabilities;
 pub use capabilities::*;
 pub mod runtime;
 // Re-export public runtime items (explicit list to avoid conflicts with
-// harness_journal, subagent, and subagents modules).
+// harness_journal module).
 pub use runtime::{
     AgentRunTask, CodingAgent, CodingAgentCancellation, CodingAgentOptions,
     CodingAgentWorkHandle, cancel_open_subagent_operations, SubagentCancellationGuard,
     SubagentSessionData, SubagentInnerTool, SubagentInnerToolData, SubagentResult,
 };
 pub(crate) use runtime::{
-    abort_open_subagent_operations, AgentRunner, AgentWork, AgentWorkScheduler,
-    generation_event_drain_error, InterruptedSubagentRecoveryState,
-    is_retryable_generation_error, MAX_SUBAGENT_TASK_CHARS, MAX_SUBAGENT_TASKS,
-    recover_v2_subagent_records, subagent_ui_event, SubagentRunContext,
+    abort_open_subagent_operations, AgentRunner, AgentWork, AgentWorkScheduler, MAX_SUBAGENT_TASK_CHARS, MAX_SUBAGENT_TASKS,
 };
 // Re-export test-only types.
 #[cfg(test)]
 pub(crate) use runtime::{
     AgentWorkObserver, SubagentBoundaryObserver, SubagentObserverState,
 };
-pub(crate) use capabilities::{
-    BrokerAwareWasiToolExecutor, build_broker_dispatcher, create_after_tool_hook_handler,
-    dispatch_hook_requests, dispatch_hook_requests_isolated, render_agent_catalog,
-    restored_tool_policy, SkillCapability, SubagentCapability, PlanCapability, WasiCapability,
-    McpCapability,
-};
 pub use harness_journal::*;
-pub use subagent::*;
-pub use subagents::*;
 pub(crate) use broker::*;
-use crate::policy::ToolPolicy;
 
-use crate::agents::{discover_agents, AgentConfig, AgentScope};
-use crate::commands::{execute_slash_command, parse_slash_command, CommandAction};
-use crate::context::ProjectContext;
-use crate::extension_broker::{
-    BrokerError, BrokerRequest, CapabilityDispatcher, CapabilityHandler, BROKER_API_VERSION,
-};
-use crate::mcp::{McpManager, McpToolExecutor};
-use crate::packages::default_global_threadlane_dir;
-use crate::plan::{SessionPlanStore, UpdatePlanToolExecutor};
-use crate::skills::{LoadSkillToolExecutor, SkillManager, SkillRegistry};
-use crate::system_prompt::{build_system_prompt, SystemPromptBuildOptions, SystemPromptConfig};
-use crate::wasi_extension::{WasiExtensionManager, WasiLegacyEffect};
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::future::Future;
-use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
-use threadlane_agent::harness::{
-    AgentHarness, DeferredResolution, Entry as HarnessEntry, EventError, HarnessEvent,
-    HarnessEventHub, HookContext, HookEffect, HookHandler, HookKind, HookRegistry, JsonlStore,
-    OperationIntent, OperationOutcome, ProvisionedEntry, QueueKind, Record as HarnessRecord,
-    Reducer, RetryPolicy, SessionIdGenerator, SessionStore, Snapshot, StreamingState, Subscription,
-    ToolRecovery, ToolReplaySafety as HarnessToolReplaySafety, ToolResult as HarnessToolResult,
-    ToolSpec,
-};
-use threadlane_agent::{
-    repair_interrupted_tool_turn, AgentEvent, AgentMessage, AgentToolCall, AgentToolDefinition,
-    AgentToolResult, ImageAttachment, ReasoningEffort, SessionTree, SubagentRecoveryStatus,
-    TokenUsage, ToolExecutor, TurnState, UnifiedAgent,
-};
-use threadlane_provider::openai::fetch_available_models;
-use tokio::sync::broadcast;
-use tokio::time::{timeout, Duration};
 
 
 #[cfg(test)]

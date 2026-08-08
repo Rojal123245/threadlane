@@ -85,7 +85,7 @@ impl<'a> TurnDriver<'a> {
                     let router = router.clone();
                     Box::pin(async move {
                         let turn = turn.lock().await;
-                        router.build_payload(format, &*turn, &[], None)
+                        router.build_payload(format, &turn, &[], None)
                     })
                 }
             });

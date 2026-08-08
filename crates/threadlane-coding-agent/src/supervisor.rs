@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use threadlane_agent::{AgentEvent, AgentMessage, LaneQueue, QueueKind, Record, TokenUsage};
+use threadlane_agent::{AgentEvent, AgentMessage, LaneQueue, QueueKind, TokenUsage};
 use tokio::sync::broadcast;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -468,8 +468,8 @@ impl HarnessSupervisor {
         _session_tree: &mut threadlane_agent::SessionTree,
     ) -> Result<threadlane_agent::RecoveryResult, String> {
         let mut harness =
-            CodingSessionHarness::open(session_file).map_err(|error| error)?;
-        let snapshot = harness.snapshot().map_err(|error| error)?;
+            CodingSessionHarness::open(session_file)?;
+        let snapshot = harness.snapshot()?;
         let mut open_operation_ids = Vec::new();
         let mut abort_requested_operation_ids = Vec::new();
         let mut lock = self.lanes.lock().unwrap();
@@ -530,7 +530,7 @@ impl HarnessSupervisor {
         outcome: threadlane_agent::OperationOutcome,
     ) -> Result<(), String> {
         let mut harness =
-            CodingSessionHarness::open(session_file).map_err(|error| error)?;
+            CodingSessionHarness::open(session_file)?;
         for run_id in run_ids {
             harness
                 .finish_run(
@@ -550,8 +550,7 @@ impl HarnessSupervisor {
                         }
                     },
                     None,
-                )
-                .map_err(|error| error)?;
+                )?;
         }
         let mut lanes = self.lanes.lock().unwrap();
         if let Some(lane) = lanes.get_mut(&format!("{session_id}:main")) {
@@ -854,7 +853,7 @@ impl HarnessSupervisor {
         // ── Begin run through CodingSessionHarness ────────────────────
         let (run_id, leaf_id) = {
             let mut harness =
-                CodingSessionHarness::open(session_file_for_log).map_err(|error| error)?;
+                CodingSessionHarness::open(session_file_for_log)?;
             let leaf_id = harness
                 .snapshot()
                 .ok()
@@ -865,10 +864,9 @@ impl HarnessSupervisor {
                         .find(|l| l.name == "main")
                         .and_then(|l| l.leaf_id.clone())
                 });
-            let run_id = harness.unique_run_id("run").map_err(|error| error)?;
+            let run_id = harness.unique_run_id("run")?;
             harness
-                .begin_run(&run_id, AgentMessage::user(&prompt, Vec::new()))
-                .map_err(|error| error)?;
+                .begin_run(&run_id, AgentMessage::user(&prompt, Vec::new()))?;
             (run_id, leaf_id)
         };
 
@@ -900,20 +898,19 @@ impl HarnessSupervisor {
 
         let handle = tokio::spawn(async move {
             let _guard = prompt_lock.lock().await;
-            let cancellation_guard = runtimes_map
+            let _cancellation_guard = runtimes_map
                 .lock()
                 .unwrap()
                 .get_mut(&tid)
                 .and_then(|runtime| runtime.cancellation_guard.take());
-            drop(cancellation_guard);
             let mut agent = agent_arc.lock().await;
             let should_restore = {
                 let mut runtimes = runtimes_map.lock().unwrap();
                 runtimes
                     .get_mut(&tid)
                     .map(|runtime| {
-                        let restore = !runtime.recovery_loaded;
-                        restore
+                        
+                        !runtime.recovery_loaded
                     })
                     .unwrap_or(false)
             };
@@ -962,11 +959,11 @@ impl HarnessSupervisor {
                                 .cloned()
                                 .collect();
                             if !recovered_run_ids.is_empty() {
-                                let recovery_outcome = if recovery.unreplayable_tools > 0 {
-                                    threadlane_agent::OperationOutcome::Aborted
-                                } else if recovered_run_ids.iter().any(|run_id| {
-                                    recovery.abort_requested_operation_ids.contains(run_id)
-                                }) {
+                                let recovery_outcome = if recovery.unreplayable_tools > 0
+                                    || recovered_run_ids.iter().any(|run_id| {
+                                        recovery.abort_requested_operation_ids.contains(run_id)
+                                    })
+                                {
                                     threadlane_agent::OperationOutcome::Aborted
                                 } else if replay_failed {
                                     threadlane_agent::OperationOutcome::Failed
@@ -985,7 +982,7 @@ impl HarnessSupervisor {
                             }
                         }
                         Err(_error) => {
-                            let _ = supervisor.update_task_status(&tid, TaskStatus::Failed);
+                            supervisor.update_task_status(&tid, TaskStatus::Failed);
                             return;
                         }
                     }
@@ -1050,7 +1047,7 @@ impl HarnessSupervisor {
                 )));
             }
             if let Err(error) = agent.adopt_harness_run(&run_id_for_run) {
-                let _ = supervisor.update_task_status(&tid, TaskStatus::Failed);
+                supervisor.update_task_status(&tid, TaskStatus::Failed);
                 eprintln!("failed to adopt supervisor harness run {run_id_for_run}: {error}");
                 return;
             }
@@ -1146,7 +1143,7 @@ impl HarnessSupervisor {
             })
         };
         let cancellation_guard = if let Some((session_id, session_file, run_id)) = active_run {
-            if let Some(run_id) = run_id.as_deref() {
+            if let Some(_run_id) = run_id.as_deref() {
                 if let Ok(mut harness) = CodingSessionHarness::open(&session_file) {
                     let _ = harness.request_abort();
                 }
@@ -1170,7 +1167,6 @@ impl HarnessSupervisor {
                 runtime.cancellation_guard = cancellation_guard;
                 runtime.run_handle.take()
             } else {
-                drop(cancellation_guard);
                 None
             }
         };

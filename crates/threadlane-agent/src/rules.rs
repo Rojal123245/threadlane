@@ -19,6 +19,7 @@ pub struct StreamRule {
     pub(crate) reminder: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct RuleMatch {
     pub(crate) rule_id: String,

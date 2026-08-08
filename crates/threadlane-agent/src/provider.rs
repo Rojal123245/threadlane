@@ -155,6 +155,7 @@ impl ProviderAdapter for CodexResponsesAdapter {
 /// let adapter = router.select_for_model("gpt-5.6-luna");
 /// let payload = adapter.build_payload(&state, &tools, None);
 /// ```
+#[derive(Default)]
 pub struct ProviderRouter {
     adapters: Vec<Arc<dyn ProviderAdapter>>,
 }
@@ -175,13 +176,6 @@ impl Clone for ProviderRouter {
     }
 }
 
-impl Default for ProviderRouter {
-    fn default() -> Self {
-        Self {
-            adapters: Vec::new(),
-        }
-    }
-}
 
 impl ProviderRouter {
     /// Creates a router with the default adapters (Chat Completions + Codex).

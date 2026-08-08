@@ -56,6 +56,7 @@ fn writer_claim(path: &Path) -> io::Result<Arc<WriterClaim>> {
     }
     let file = fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&lock_path)?;

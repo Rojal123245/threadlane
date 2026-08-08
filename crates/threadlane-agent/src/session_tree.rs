@@ -824,7 +824,7 @@ impl SessionTree {
                 continue;
             }
             let torn_tail = line_number + 1 == line_count && !data.ends_with('\n');
-            let value = match serde_json::from_str::<serde_json::Value>(&l) {
+            let value = match serde_json::from_str::<serde_json::Value>(l) {
                 Ok(value) => value,
                 Err(_error) if torn_tail => break,
                 Err(error) => {
@@ -839,30 +839,27 @@ impl SessionTree {
                 continue;
             }
             if value.get("lane").is_some() {
-                match serde_json::from_value::<crate::harness::Entry>(value.clone()) {
-                    Ok(entry) => {
-                        if entry.lane == "main" {
-                            v2_main_leaf = Some(entry.id.clone());
-                        }
-                        tree.node_order.push(entry.id.clone());
-                        tree.v2_entry_ids.insert(entry.id.clone());
-                        tree.nodes.insert(
-                            entry.id.clone(),
-                            SessionNode {
-                                id: entry.id,
-                                parent_id: entry.parent_id,
-                                timestamp: entry.timestamp,
-                                seq: Some(entry.seq),
-                                message: entry.message,
-                            },
-                        );
-                        tree.v2_lines.push(l.to_owned());
-                        continue;
+                if let Ok(entry) = serde_json::from_value::<crate::harness::Entry>(value.clone()) {
+                    if entry.lane == "main" {
+                        v2_main_leaf = Some(entry.id.clone());
                     }
-                    Err(_) => {}
+                    tree.node_order.push(entry.id.clone());
+                    tree.v2_entry_ids.insert(entry.id.clone());
+                    tree.nodes.insert(
+                        entry.id.clone(),
+                        SessionNode {
+                            id: entry.id,
+                            parent_id: entry.parent_id,
+                            timestamp: entry.timestamp,
+                            seq: Some(entry.seq),
+                            message: entry.message,
+                        },
+                    );
+                    tree.v2_lines.push(l.to_owned());
+                    continue;
                 }
             }
-            match serde_json::from_str::<SessionLine>(&l) {
+            match serde_json::from_str::<SessionLine>(l) {
                 Ok(SessionLine::Record(record)) => match record {
                     SessionRecord::Metadata {
                         session_id,
