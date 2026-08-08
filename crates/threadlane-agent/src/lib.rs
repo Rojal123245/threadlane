@@ -12,6 +12,7 @@ pub mod rules;
 pub mod session_tree;
 pub mod tool_dispatcher;
 pub mod tool_executor;
+pub mod turn_driver;
 pub mod types;
 pub mod unified;
 
@@ -41,5 +42,6 @@ pub use rules::*;
 pub use session_tree::{SessionNode, SessionTree};
 pub use tool_dispatcher::ToolDispatcher;
 pub use tool_executor::ToolExecutor;
+pub use turn_driver::TurnDriver;
 pub use types::*;
 pub use unified::{TurnState, UnifiedAgent};

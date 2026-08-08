@@ -1,3 +1,11 @@
+pub mod harness_journal;
+pub mod subagent;
+pub mod wasi_process;
+
+pub use harness_journal::*;
+pub use subagent::*;
+pub use wasi_process::*;
+
 use crate::agents::{discover_agents, AgentConfig, AgentScope};
 use crate::commands::{execute_slash_command, parse_slash_command, CommandAction};
 use crate::context::ProjectContext;
@@ -163,29 +171,15 @@ fn enqueue_harness_queue(
     content: String,
     images: Vec<ImageAttachment>,
 ) -> Result<String, String> {
-    let store = JsonlStore::open(session_file).map_err(|error| error.to_string())?;
-    let mut harness = AgentHarness::new(store);
-    let state = Reducer::reduce(harness.store()).map_err(|error| error.to_string())?;
-    let lane = state
-        .lane("main")
-        .ok_or_else(|| "main harness lane is unavailable".to_string())?;
-    let parent_id = lane.leaf_id.clone();
-    let seq = harness_next_seq(harness.store());
-    let entry_id = format!("queued-{seq}");
-    harness
-        .enqueue_unbound(
-            queue,
-            threadlane_agent::harness::ProvisionedEntry {
-                id: entry_id.clone(),
-                parent_id,
-                message: AgentMessage::user(content, images),
-            },
-        )
-        .map_err(|error| error.to_string())?;
-    harness
-        .drive_to_completion()
-        .map_err(|error| error.to_string())?;
-    Ok(entry_id)
+    let mut agent = UnifiedAgent::new(
+        "dummy",
+        None,
+        "dummy",
+        session_file,
+        threadlane_agent::AgentConfig::default(),
+    )
+    .map_err(|e| e.to_string())?;
+    agent.enqueue_harness_queue(queue, content, images)
 }
 
 fn enqueue_harness_follow_up(
@@ -197,28 +191,15 @@ fn enqueue_harness_follow_up(
 }
 
 fn consume_harness_queue(session_file: &Path, queue: QueueKind) -> Result<(), String> {
-    let store = JsonlStore::open(session_file).map_err(|error| error.to_string())?;
-    let mut harness = AgentHarness::new(store);
-    let state = Reducer::reduce(harness.store()).map_err(|error| error.to_string())?;
-    let queued = state
-        .lane("main")
-        .map(|lane| {
-            lane.queued
-                .iter()
-                .filter(|entry| entry.queue == queue)
-                .cloned()
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    for entry in queued {
-        harness
-            .consume_unbound(&entry.target.id)
-            .map_err(|error| error.to_string())?;
-    }
-    harness
-        .drive_to_completion()
-        .map_err(|error| error.to_string())?;
-    Ok(())
+    let mut agent = UnifiedAgent::new(
+        "dummy",
+        None,
+        "dummy",
+        session_file,
+        threadlane_agent::AgentConfig::default(),
+    )
+    .map_err(|e| e.to_string())?;
+    agent.consume_harness_queue(queue)
 }
 
 fn consume_harness_follow_ups(session_file: &Path) -> Result<(), String> {
@@ -622,14 +603,15 @@ impl CodingAgentWorkHandle {
         let Some(path) = self.session_file.as_deref() else {
             return Err("session persistence is unavailable".into());
         };
-        let mut harness =
-            AgentHarness::new(JsonlStore::open(path).map_err(|error| error.to_string())?);
-        harness
-            .cancel_unbound(entry_id)
-            .map_err(|error| error.to_string())?;
-        harness
-            .drive_to_completion()
-            .map_err(|error| error.to_string())
+        let mut agent = UnifiedAgent::new(
+            "dummy",
+            None,
+            "dummy",
+            path,
+            threadlane_agent::AgentConfig::default(),
+        )
+        .map_err(|e| e.to_string())?;
+        agent.cancel_harness_queue_entry(entry_id)
     }
 }
 

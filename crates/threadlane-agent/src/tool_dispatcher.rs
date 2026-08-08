@@ -737,7 +737,7 @@ mod tests {
     #[tokio::test]
     async fn before_tool_hook_can_block_execution() {
         let (event_tx, _) = broadcast::channel(8);
-        let mut hooks = HookRegistry::default();
+        let hooks = HookRegistry::default();
         hooks
             .replace(
                 HookKind::BeforeTool,

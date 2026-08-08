@@ -3,38 +3,29 @@
 //! [`UnifiedAgent`] is the single agent runtime combining harness durability
 //! with provider streaming and tool execution.
 
-use crate::compaction::{
-    compact_messages_to_token_budget, is_context_overflow_error, should_auto_compact,
-};
+use crate::compaction::{compact_messages_to_token_budget, should_auto_compact};
 use crate::config::AgentConfig;
 use crate::error::AgentError;
 use crate::events::AgentEvent;
-use crate::harness::{AgentHarness, HarnessEventHub, HookRegistry, JsonlStore, ProcedureError};
+use crate::harness::{
+    AgentHarness, HarnessEventHub, HookRegistry, JsonlStore, ProcedureError, ProvisionedEntry,
+    QueueKind, Reducer,
+};
 use crate::journal::AgentJournal;
-use crate::loop_engine::{AbortOnDrop, ProviderStepAccumulator};
 use crate::provider::ProviderRouter;
-use crate::rules::StreamRuleMonitor;
 use crate::tool_dispatcher::ToolDispatcher;
 use crate::types::{
-    AgentMessage, AgentToolDefinition, AgentToolResult, TokenUsage, ToolExecutionMode,
+    AgentMessage, AgentToolDefinition, AgentToolResult, ImageAttachment, TokenUsage,
+    ToolExecutionMode,
 };
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use threadlane_provider::openai::{StreamEvent, ToolCall};
-use threadlane_provider::router::{PayloadFormat, PayloadSource, ProviderClient};
-use tokio::sync::{broadcast, mpsc, Mutex};
+use threadlane_provider::openai::ToolCall;
+use threadlane_provider::router::{PayloadFormat, ProviderClient};
+use tokio::sync::{broadcast, Mutex};
 
-/// Messages and metadata for the current turn, held in memory alongside the
-/// durable harness journal.
-#[derive(Debug, Clone)]
-pub struct TurnState {
-    pub system_prompt: String,
-    pub messages: Vec<AgentMessage>,
-    pub model: String,
-    pub reasoning_effort: crate::types::ReasoningEffort,
-    pub tools: Vec<serde_json::Value>,
-}
+pub use crate::types::TurnState;
 
 /// The single, unified agent runtime.
 pub struct UnifiedAgent {
@@ -169,16 +160,28 @@ impl UnifiedAgent {
         self.turn.lock().await.clone()
     }
 
-    /// Compacts the turn history, keeping recent messages.
     pub async fn compact_history(
         &self,
-        _options: Option<crate::compaction::CompactionOptions>,
+        options: Option<crate::compaction::CompactionOptions>,
     ) -> bool {
         let mut turn = self.turn.lock().await;
-        let compacted = compact_messages_to_token_budget(
-            &turn.messages,
-            self.config.auto_compaction_keep_recent_tokens,
-        );
+        let compacted = match options {
+            Some(opts) => crate::compaction::compact_messages(&turn.messages, &opts),
+            None => {
+                let by_tokens = compact_messages_to_token_budget(
+                    &turn.messages,
+                    self.config.auto_compaction_keep_recent_tokens,
+                );
+                if by_tokens.len() == turn.messages.len() {
+                    crate::compaction::compact_messages(
+                        &turn.messages,
+                        &crate::compaction::CompactionOptions::default(),
+                    )
+                } else {
+                    by_tokens
+                }
+            }
+        };
         let changed = compacted.len() != turn.messages.len();
         turn.messages = compacted;
         changed
@@ -202,26 +205,16 @@ impl UnifiedAgent {
     /// Builds provider payloads for testing (delegates to the router).
     pub async fn build_api_payloads(&self) -> (serde_json::Value, serde_json::Value) {
         let turn = self.turn.lock().await;
-        let state = crate::types::AgentState {
-            system_prompt: String::new(),
-            model: turn.model.clone(),
-            reasoning_effort: Default::default(),
-            tools: turn.tools.clone(),
-            messages: turn.messages.clone(),
-            is_streaming: false,
-            pending_tool_calls: Vec::new(),
-            metadata: Default::default(),
-        };
         let tools: Vec<_> = self.configured_tool_definitions();
         let chat = self.provider_router.build_payload(
             PayloadFormat::ChatCompletions,
-            &state,
+            &*turn,
             &tools,
             self.prompt_cache_key.as_deref(),
         );
         let codex = self.provider_router.build_payload(
             PayloadFormat::Codex,
-            &state,
+            &*turn,
             &tools,
             self.prompt_cache_key.as_deref(),
         );
@@ -268,223 +261,22 @@ impl UnifiedAgent {
     // ── Turn loop ─────────────────────────────────────────────────────
 
     async fn run_turns(&mut self) {
-        let mut turn_number = 0;
-        let mut overflow_recovery_attempted = false;
-
-        loop {
-            turn_number += 1;
-
-            // Drain steering queue into turn state.
-            if !self.steering_queue.is_empty() {
-                let items: Vec<_> = self.steering_queue.drain(..).collect();
-                let mut turn = self.turn.lock().await;
-                turn.messages.extend(items);
-            }
-
-            // Auto-compaction.
-            {
-                let mut turn = self.turn.lock().await;
-                if should_auto_compact(&turn.messages, &self.config) {
-                    turn.messages = compact_messages_to_token_budget(
-                        &turn.messages,
-                        self.config.auto_compaction_keep_recent_tokens,
-                    );
-                }
-            }
-
-            let _ = self.event_tx.send(AgentEvent::TurnStart { turn_number });
-
-            // --- Provider streaming ---
-            let model = {
-                let turn = self.turn.lock().await;
-                turn.model.clone()
-            };
-            let (stream_tx, mut stream_rx) = mpsc::channel(100);
-            let client = self.provider_client.clone();
-            let pc_key = self.prompt_cache_key.clone();
-            let tool_executors: Vec<_> = self
-                .tool_dispatcher
-                .configured_tool_definitions()
-                .into_iter()
-                .map(|_| ())
-                .collect();
-            let _dummy = tool_executors; // suppress unused warning
-
-            let payload_source = PayloadSource::lazy(model, {
-                let turn_clone = self.turn.clone();
-                let router = self.provider_router.clone();
-                move |format| {
-                    let turn = turn_clone.clone();
-                    let router = router.clone();
-                    Box::pin(async move {
-                        let state = {
-                            let turn = turn.lock().await;
-                            crate::types::AgentState {
-                                system_prompt: String::new(),
-                                model: turn.model.clone(),
-                                reasoning_effort: Default::default(),
-                                tools: turn.tools.clone(),
-                                messages: turn.messages.clone(),
-                                is_streaming: false,
-                                pending_tool_calls: Vec::new(),
-                                metadata: Default::default(),
-                            }
-                        };
-                        router.build_payload(format, &state, &[], None)
-                    })
-                }
-            });
-
-            let _stream_task = AbortOnDrop::new(tokio::spawn(async move {
-                client
-                    .stream_chat_completion(payload_source, pc_key, stream_tx)
-                    .await;
-            }));
-
-            let _ = self.event_tx.send(AgentEvent::MessageStart {
-                role: "assistant".into(),
-            });
-
-            let mut current_text = String::new();
-            let mut current_reasoning = String::new();
-            let mut captured_tool_calls: Vec<ToolCall> = Vec::new();
-            let mut provider_step = ProviderStepAccumulator::default();
-            let mut monitor = StreamRuleMonitor::new(self.stream_rules.clone(), &self.config);
-
-            while let Some(evt) = stream_rx.recv().await {
-                let _ = provider_step.push(&evt);
-                match evt {
-                    StreamEvent::ContentToken(token) => {
-                        current_text.push_str(&token);
-                        if monitor.push_chunk(&token).is_some() {
-                            break;
-                        }
-                        let _ = self.event_tx.send(AgentEvent::MessageUpdate {
-                            text_delta: Some(token),
-                            reasoning_delta: None,
-                            tool_call_name: None,
-                        });
-                    }
-                    StreamEvent::ReasoningToken(token) => {
-                        current_reasoning.push_str(&token);
-                        let _ = self.event_tx.send(AgentEvent::MessageUpdate {
-                            text_delta: None,
-                            reasoning_delta: Some(token),
-                            tool_call_name: None,
-                        });
-                    }
-                    StreamEvent::ToolCallStart { name, .. } => {
-                        let _ = self.event_tx.send(AgentEvent::MessageUpdate {
-                            text_delta: None,
-                            reasoning_delta: None,
-                            tool_call_name: Some(name),
-                        });
-                    }
-                    StreamEvent::ToolCallArgsDelta { .. } => {}
-                    StreamEvent::Finished { tool_calls, .. } => {
-                        captured_tool_calls = tool_calls;
-                        break;
-                    }
-                    StreamEvent::Error(err) => {
-                        if !overflow_recovery_attempted && is_context_overflow_error(&err) {
-                            let mut turn = self.turn.lock().await;
-                            turn.messages = compact_messages_to_token_budget(
-                                &turn.messages,
-                                self.config.auto_compaction_keep_recent_tokens,
-                            );
-                            overflow_recovery_attempted = true;
-                            continue;
-                        }
-                        let _ = self.event_tx.send(AgentEvent::AgentError { error: err });
-                        return;
-                    }
-                }
-            }
-
-            // Record assistant message in turn state.
-            let assistant_msg = AgentMessage::Assistant {
-                content: if current_text.is_empty() {
-                    None
-                } else {
-                    Some(current_text)
-                },
-                tool_calls: if captured_tool_calls.is_empty() {
-                    None
-                } else {
-                    Some(captured_tool_calls.clone())
-                },
-                stop_reason: None,
-                deferred_handle: None,
-            };
-
-            if !current_reasoning.trim().is_empty() {
-                let thinking = AgentMessage::Custom {
-                    custom_type: "thinking".into(),
-                    payload: serde_json::json!({ "text": current_reasoning }),
-                };
-                if let Some(journal) = &self.journal {
-                    let _ = journal.record_assistant_message(thinking.clone()).await;
-                }
-                self.turn.lock().await.messages.push(thinking);
-            }
-
-            if let Some(journal) = &self.journal {
-                let _ = journal
-                    .record_assistant_message(assistant_msg.clone())
-                    .await;
-            }
-            self.turn.lock().await.messages.push(assistant_msg.clone());
-
-            let _ = self.event_tx.send(AgentEvent::MessageEnd {
-                message: assistant_msg,
-            });
-
-            if captured_tool_calls.is_empty() {
-                let _ = self.event_tx.send(AgentEvent::TurnEnd {
-                    turn_number,
-                    tool_results: Vec::new(),
-                });
-                if !self.follow_up_queue.is_empty() {
-                    let items: Vec<_> = self.follow_up_queue.drain(..).collect();
-                    self.turn.lock().await.messages.extend(items);
-                    continue;
-                }
-                break;
-            }
-
-            // Execute tools.
-            let tool_results = self
-                .synced_dispatcher()
-                .execute_tools(&captured_tool_calls)
-                .await;
-
-            // Append tool results to turn state.
-            {
-                let mut turn = self.turn.lock().await;
-                for r in &tool_results {
-                    let msg = AgentMessage::Tool {
-                        tool_call_id: r.tool_call_id.clone(),
-                        name: r.name.clone(),
-                        content: r.content.clone(),
-                        is_error: r.is_error,
-                        terminate: r.terminate,
-                    };
-                    if let Some(journal) = &self.journal {
-                        let _ = journal.record_tool_message(msg.clone()).await;
-                    }
-                    turn.messages.push(msg);
-                }
-            }
-
-            let _ = self.event_tx.send(AgentEvent::TurnEnd {
-                turn_number,
-                tool_results: tool_results.clone(),
-            });
-
-            if tool_results.iter().any(|r| r.terminate) {
-                break;
-            }
-        }
+        let tool_dispatcher = self.synced_dispatcher();
+        let mut driver = crate::turn_driver::TurnDriver {
+            turn: self.turn.clone(),
+            provider_client: self.provider_client.clone(),
+            provider_router: self.provider_router.clone(),
+            prompt_cache_key: self.prompt_cache_key.clone(),
+            tool_dispatcher,
+            config: self.config.clone(),
+            journal: self.journal.clone(),
+            event_tx: self.event_tx.clone(),
+            harness_event_hub: self.harness.events().clone(),
+            stream_rules: self.stream_rules.clone(),
+            steering_queue: &mut self.steering_queue,
+            follow_up_queue: &mut self.follow_up_queue,
+        };
+        driver.run_turns().await;
     }
 
     // ── Harness accessors ─────────────────────────────────────────────
@@ -513,6 +305,71 @@ impl UnifiedAgent {
         self.harness
             .drive_to_completion()
             .map_err(|e| ProcedureError::Effects(e))
+    }
+
+    /// Enqueues a message into the harness durability queue for the main lane.
+    pub fn enqueue_harness_queue(
+        &mut self,
+        queue: QueueKind,
+        content: String,
+        images: Vec<ImageAttachment>,
+    ) -> Result<String, String> {
+        let state = Reducer::reduce(self.harness.store()).map_err(|error| error.to_string())?;
+        let lane = state
+            .lane("main")
+            .ok_or_else(|| "main harness lane is unavailable".to_string())?;
+        let parent_id = lane.leaf_id.clone();
+        let seq = self.harness.store().entries().len() as u64 + 1;
+        let entry_id = format!("queued-{seq}");
+        self.harness
+            .enqueue_unbound(
+                queue,
+                ProvisionedEntry {
+                    id: entry_id.clone(),
+                    parent_id,
+                    message: AgentMessage::user(content, images),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        self.harness
+            .drive_to_completion()
+            .map_err(|error| error.to_string())?;
+        Ok(entry_id)
+    }
+
+    /// Consumes queued entries of the specified kind from the harness main lane.
+    pub fn consume_harness_queue(&mut self, queue: QueueKind) -> Result<(), String> {
+        let state = Reducer::reduce(self.harness.store()).map_err(|error| error.to_string())?;
+        let queued = state
+            .lane("main")
+            .map(|lane| {
+                lane.queued
+                    .iter()
+                    .filter(|entry| entry.queue == queue)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for entry in queued {
+            self.harness
+                .consume_unbound(&entry.target.id)
+                .map_err(|error| error.to_string())?;
+        }
+        self.harness
+            .drive_to_completion()
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    /// Cancels a queued entry in the harness by entry ID.
+    pub fn cancel_harness_queue_entry(&mut self, entry_id: &str) -> Result<(), String> {
+        self.harness
+            .cancel_unbound(entry_id)
+            .map_err(|error| error.to_string())?;
+        self.harness
+            .drive_to_completion()
+            .map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     /// Replays already-intended safe tools.

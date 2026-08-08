@@ -41,6 +41,7 @@ pub enum EventPayload {
     RecordCommitted(Record),
     Fault(String),
     Streaming(Option<StreamingState>),
+    Agent(crate::events::AgentEvent),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -96,6 +97,10 @@ impl HarnessEventHub {
 
     pub fn publish(&self, payload: EventPayload) -> HarnessEvent {
         self.publish_identified(payload, None, None, None)
+    }
+
+    pub fn publish_agent_event(&self, event: crate::events::AgentEvent) -> HarnessEvent {
+        self.publish(EventPayload::Agent(event))
     }
 
     pub fn publish_identified(

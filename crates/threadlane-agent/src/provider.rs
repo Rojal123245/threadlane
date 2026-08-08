@@ -2,13 +2,13 @@
 //!
 //! Each LLM provider (OpenAI Chat Completions, OpenAI Codex Responses, etc.)
 //! has its own message format and API payload shape. The [`ProviderAdapter`]
-//! trait encapsulates these differences so the agent loop can remain
+//! trait encapsulates these differences so the agent runtime can remain
 //! provider-agnostic.
 //!
 //! The existing free functions `convert_to_llm` and `convert_to_codex_llm`
 //! are re-exported for backward compatibility.
 
-use crate::types::{AgentMessage, AgentState, AgentToolDefinition};
+use crate::types::{AgentMessage, AgentToolDefinition, TurnState};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::fmt;
@@ -48,7 +48,7 @@ pub trait ProviderAdapter: fmt::Debug + Send + Sync {
     /// but must not hold the lock across `.await`.
     fn build_payload(
         &self,
-        state: &AgentState,
+        state: &TurnState,
         tools: &[AgentToolDefinition],
         prompt_cache_key: Option<&str>,
     ) -> Value;
@@ -70,7 +70,7 @@ impl ProviderAdapter for ChatCompletionsAdapter {
 
     fn build_payload(
         &self,
-        state: &AgentState,
+        state: &TurnState,
         tools: &[AgentToolDefinition],
         prompt_cache_key: Option<&str>,
     ) -> Value {
@@ -116,7 +116,7 @@ impl ProviderAdapter for CodexResponsesAdapter {
 
     fn build_payload(
         &self,
-        state: &AgentState,
+        state: &TurnState,
         tools: &[AgentToolDefinition],
         prompt_cache_key: Option<&str>,
     ) -> Value {
@@ -209,7 +209,7 @@ impl ProviderRouter {
     pub fn build_payload(
         &self,
         format: PayloadFormat,
-        state: &AgentState,
+        state: &TurnState,
         tools: &[AgentToolDefinition],
         prompt_cache_key: Option<&str>,
     ) -> Value {
@@ -248,7 +248,7 @@ mod tests {
     #[test]
     fn chat_adapter_builds_payload_with_reasoning() {
         let adapter = ChatCompletionsAdapter;
-        let mut state = AgentState::new("gpt-4o", "system");
+        let mut state = TurnState::new("gpt-4o", "system");
         state.reasoning_effort = ReasoningEffort::High;
         let payload = adapter.build_payload(&state, &[], None);
         assert_eq!(payload["model"], "gpt-4o");
@@ -259,7 +259,7 @@ mod tests {
     #[test]
     fn codex_adapter_builds_payload_with_reasoning() {
         let adapter = CodexResponsesAdapter;
-        let mut state = AgentState::new("gpt-5.6-luna", "system");
+        let mut state = TurnState::new("gpt-5.6-luna", "system");
         state.reasoning_effort = ReasoningEffort::Low;
         let payload = adapter.build_payload(&state, &[], None);
         assert_eq!(payload["model"], "gpt-5.6-luna");
@@ -270,7 +270,7 @@ mod tests {
     #[test]
     fn router_builds_correct_payload_per_format() {
         let router = ProviderRouter::default();
-        let state = AgentState::new("test-model", "instructions");
+        let state = TurnState::new("test-model", "instructions");
 
         let chat = router.build_payload(PayloadFormat::ChatCompletions, &state, &[], None);
         assert!(chat.get("messages").is_some());
