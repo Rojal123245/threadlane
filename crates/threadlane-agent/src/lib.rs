@@ -25,15 +25,14 @@ pub use config::{AgentConfig, AgentConfigBuilder};
 pub use engine::get_runtime;
 pub use error::AgentError;
 pub use events::{AgentEvent, HarnessMetrics, SubagentRecoveryStatus};
-pub use harness::{OperationOutcome, QueueKind, Record, ToolReplaySafety};
+pub use harness::{
+    LaneQueue, OperationOutcome, QueueKind, Record, SteerItem, SteerPriority, ToolReplaySafety,
+};
 pub use loop_engine::{
     repair_interrupted_tool_turn, AssistantMessageRecorder, ProviderHookRecorder,
     ProviderUsageRecorder, ToolCompletionRecorder, ToolIntentRecorder,
 };
-pub use op_log::{
-    interrupted_subagent_lanes, InterruptedSubagentLane, LaneQueue, RecoveryResult, SteerItem,
-    SteerPriority,
-};
+pub use op_log::{interrupted_subagent_lanes, InterruptedSubagentLane, RecoveryResult};
 pub use provider::{
     ChatCompletionsAdapter, CodexResponsesAdapter, ProviderAdapter, ProviderMessages,
     ProviderRouter,

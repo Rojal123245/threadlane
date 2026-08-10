@@ -5,6 +5,7 @@ mod hooks;
 mod jsonl;
 mod memory;
 mod procedure;
+mod queue;
 mod reducer;
 mod session;
 mod sqlite;
@@ -28,7 +29,9 @@ pub use procedure::{
     DeferredResolution, NavigationProcedure, NoToolRun, OperationProcedure, ProcedureError,
     PromptProcedure, QueueProcedure, RetryPolicy, RetryProcedure, ToolBatchProcedure, ToolRecovery,
 };
+pub use queue::{LaneQueue, SteerItem, SteerPriority};
 pub use reducer::Reducer;
+pub use session::{LaneHandle, SessionAgent};
 pub use sqlite::SqliteStore;
 pub use store::{SessionIdGenerator, SessionStore};
 pub use telemetry::{ExecutionContext, NoopTelemetry, TelemetrySink};
@@ -37,4 +40,3 @@ pub use types::{
     QueuedEntry, Record, ReduceError, ReducedState, RetryState, ToolReplaySafety, ToolResult,
     ToolSpec, ToolState, UsageCause,
 };
-pub use session::{LaneHandle, SessionAgent};

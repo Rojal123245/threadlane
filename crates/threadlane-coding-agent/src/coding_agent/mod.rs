@@ -1,36 +1,63 @@
-pub mod harness;
-pub mod harness_journal;
 pub mod broker;
 pub mod capabilities;
+pub mod harness;
+pub mod harness_journal;
 pub use capabilities::*;
 pub mod runtime;
 // Re-export public runtime items (explicit list to avoid conflicts with
 // harness_journal module).
-pub use runtime::{
-    AgentRunTask, CodingAgent, CodingAgentCancellation, CodingAgentOptions,
-    CodingAgentWorkHandle, cancel_open_subagent_operations, SubagentCancellationGuard,
-    SubagentSessionData, SubagentInnerTool, SubagentInnerToolData, SubagentResult,
-};
 pub(crate) use runtime::{
-    abort_open_subagent_operations, AgentRunner, AgentWork, AgentWorkScheduler, MAX_SUBAGENT_TASK_CHARS, MAX_SUBAGENT_TASKS,
+    abort_open_subagent_operations, generation_event_drain_error, is_retryable_generation_error,
+    recover_v2_subagent_records, subagent_ui_event, AgentRunner, AgentWork, AgentWorkScheduler,
+    CompletedSubagentLane, SubagentLaneStatus, SubagentRunContext, MAX_SUBAGENT_TASKS,
+    MAX_SUBAGENT_TASK_CHARS,
+};
+pub use runtime::{
+    cancel_open_subagent_operations, AgentRunTask, CodingAgent, CodingAgentCancellation,
+    CodingAgentOptions, CodingAgentWorkHandle, SubagentCancellationGuard, SubagentInnerTool,
+    SubagentInnerToolData, SubagentResult, SubagentSessionData,
 };
 // Re-export test-only types.
+pub(crate) use broker::*;
+pub use harness_journal::*;
 #[cfg(test)]
 pub(crate) use runtime::{
-    AgentWorkObserver, SubagentBoundaryObserver, SubagentObserverState,
+    AgentWorkObserver, DeterministicSubagentToolExecutor, SubagentBoundaryObserver,
+    SubagentObserverState,
 };
-pub use harness_journal::*;
-pub(crate) use broker::*;
-
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extension_broker::CapabilityHandler;
-    use crate::wasi_extension::{WasiExtension, WasiExtensionInvocation, WasiExtensionResponse};
-    use std::sync::Mutex;
+    use crate::extension_broker::{
+        BrokerError, BrokerRequest, CapabilityDispatcher, CapabilityHandler, BROKER_API_VERSION,
+    };
+    use crate::policy::ToolPolicy;
+    use crate::system_prompt::SystemPromptConfig;
+    use crate::wasi_extension::{
+        WasiExtension, WasiExtensionInvocation, WasiExtensionManager, WasiExtensionResponse,
+    };
+    use serde_json::Value;
+    use std::collections::{HashMap, HashSet};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration as StdDuration, Instant};
+    use std::{fs, path::Path};
+    use threadlane_agent::harness::{
+        AgentHarness, HookContext, HookEffect, HookHandler, HookKind, JsonlStore, OperationIntent,
+        OperationOutcome, QueueKind, Record, Reducer, SessionStore, Snapshot, ToolReplaySafety,
+        ToolResult as HarnessToolResult,
+    };
+    // Alias for test compatibility — production code uses Record, but many
+    // tests were written against the HarnessRecord name previously in scope.
+    type HarnessRecord = Record;
+    use threadlane_agent::{
+        AgentEvent, AgentMessage, AgentToolDefinition, ImageAttachment, SessionTree, TokenUsage,
+        ToolExecutor,
+    };
+    use tokio::sync::broadcast;
+    use tokio::time::Duration;
 
     #[test]
     fn lagged_generation_event_drain_is_recoverable() {

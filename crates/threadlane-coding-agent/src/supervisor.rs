@@ -1,7 +1,7 @@
+use crate::coding_agent::harness::CodingSessionHarness;
 use crate::coding_agent::{
     abort_open_subagent_operations, CodingAgent, CodingAgentOptions, SubagentCancellationGuard,
 };
-use crate::coding_agent::harness::CodingSessionHarness;
 use crate::packages::ExtensionScope;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -394,7 +394,10 @@ impl HarnessSupervisor {
                     let mut current = Some(target_node_id.to_string());
                     while let Some(id) = current {
                         path_ids.push(id.clone());
-                        current = session_tree.nodes.get(&id).and_then(|n| n.parent_id.clone());
+                        current = session_tree
+                            .nodes
+                            .get(&id)
+                            .and_then(|n| n.parent_id.clone());
                     }
                     path_ids.reverse();
                     harness
@@ -467,8 +470,7 @@ impl HarnessSupervisor {
         session_file: &Path,
         _session_tree: &mut threadlane_agent::SessionTree,
     ) -> Result<threadlane_agent::RecoveryResult, String> {
-        let mut harness =
-            CodingSessionHarness::open(session_file)?;
+        let mut harness = CodingSessionHarness::open(session_file)?;
         let snapshot = harness.snapshot()?;
         let mut open_operation_ids = Vec::new();
         let mut abort_requested_operation_ids = Vec::new();
@@ -492,12 +494,14 @@ impl HarnessSupervisor {
             lane.queue = LaneQueue::default();
             for queued in &lane_snap.queued {
                 match queued.queue {
-                    threadlane_agent::harness::QueueKind::Steer => lane.queue.enqueue_steer_with_priority(
-                        queued.target.message.clone(),
-                        queued
-                            .priority
-                            .unwrap_or(threadlane_agent::SteerPriority::Normal),
-                    ),
+                    threadlane_agent::harness::QueueKind::Steer => {
+                        lane.queue.enqueue_steer_with_priority(
+                            queued.target.message.clone(),
+                            queued
+                                .priority
+                                .unwrap_or(threadlane_agent::SteerPriority::Normal),
+                        )
+                    }
                     threadlane_agent::harness::QueueKind::FollowUp => lane
                         .queue
                         .enqueue(QueueKind::FollowUp, queued.target.message.clone()),
@@ -529,28 +533,26 @@ impl HarnessSupervisor {
         run_ids: &[String],
         outcome: threadlane_agent::OperationOutcome,
     ) -> Result<(), String> {
-        let mut harness =
-            CodingSessionHarness::open(session_file)?;
+        let mut harness = CodingSessionHarness::open(session_file)?;
         for run_id in run_ids {
-            harness
-                .finish_run(
-                    run_id,
-                    match outcome {
-                        threadlane_agent::OperationOutcome::Completed => {
-                            threadlane_agent::harness::OperationOutcome::Completed
-                        }
-                        threadlane_agent::OperationOutcome::Aborted => {
-                            threadlane_agent::harness::OperationOutcome::Aborted
-                        }
-                        threadlane_agent::OperationOutcome::Failed => {
-                            threadlane_agent::harness::OperationOutcome::Failed
-                        }
-                        threadlane_agent::OperationOutcome::Declined => {
-                            threadlane_agent::harness::OperationOutcome::Declined
-                        }
-                    },
-                    None,
-                )?;
+            harness.finish_run(
+                run_id,
+                match outcome {
+                    threadlane_agent::OperationOutcome::Completed => {
+                        threadlane_agent::harness::OperationOutcome::Completed
+                    }
+                    threadlane_agent::OperationOutcome::Aborted => {
+                        threadlane_agent::harness::OperationOutcome::Aborted
+                    }
+                    threadlane_agent::OperationOutcome::Failed => {
+                        threadlane_agent::harness::OperationOutcome::Failed
+                    }
+                    threadlane_agent::OperationOutcome::Declined => {
+                        threadlane_agent::harness::OperationOutcome::Declined
+                    }
+                },
+                None,
+            )?;
         }
         let mut lanes = self.lanes.lock().unwrap();
         if let Some(lane) = lanes.get_mut(&format!("{session_id}:main")) {
@@ -852,21 +854,16 @@ impl HarnessSupervisor {
 
         // ── Begin run through CodingSessionHarness ────────────────────
         let (run_id, leaf_id) = {
-            let mut harness =
-                CodingSessionHarness::open(session_file_for_log)?;
-            let leaf_id = harness
-                .snapshot()
-                .ok()
-                .and_then(|snap| {
-                    snap.state
-                        .lanes
-                        .iter()
-                        .find(|l| l.name == "main")
-                        .and_then(|l| l.leaf_id.clone())
-                });
+            let mut harness = CodingSessionHarness::open(session_file_for_log)?;
+            let leaf_id = harness.snapshot().ok().and_then(|snap| {
+                snap.state
+                    .lanes
+                    .iter()
+                    .find(|l| l.name == "main")
+                    .and_then(|l| l.leaf_id.clone())
+            });
             let run_id = harness.unique_run_id("run")?;
-            harness
-                .begin_run(&run_id, AgentMessage::user(&prompt, Vec::new()))?;
+            harness.begin_run(&run_id, AgentMessage::user(&prompt, Vec::new()))?;
             (run_id, leaf_id)
         };
 
@@ -908,10 +905,7 @@ impl HarnessSupervisor {
                 let mut runtimes = runtimes_map.lock().unwrap();
                 runtimes
                     .get_mut(&tid)
-                    .map(|runtime| {
-                        
-                        !runtime.recovery_loaded
-                    })
+                    .map(|runtime| !runtime.recovery_loaded)
                     .unwrap_or(false)
             };
             if should_restore {
@@ -931,12 +925,8 @@ impl HarnessSupervisor {
                                 .replay_safe_tools(&recovery.safe_tools_to_replay)
                                 .await;
                             let replay_failed = replayed.iter().any(|result| result.is_error);
-                            if let Ok(mut harness) =
-                                CodingSessionHarness::open(session_file)
-                            {
-                                let _ = harness.claim_safe_replays(
-                                    &recovery.safe_tools_to_replay,
-                                );
+                            if let Ok(mut harness) = CodingSessionHarness::open(session_file) {
+                                let _ = harness.claim_safe_replays(&recovery.safe_tools_to_replay);
                             }
                             for (record, result) in
                                 recovery.safe_tools_to_replay.iter().zip(replayed.iter())
@@ -962,8 +952,7 @@ impl HarnessSupervisor {
                                 let recovery_outcome = if recovery.unreplayable_tools > 0
                                     || recovered_run_ids.iter().any(|run_id| {
                                         recovery.abort_requested_operation_ids.contains(run_id)
-                                    })
-                                {
+                                    }) {
                                     threadlane_agent::OperationOutcome::Aborted
                                 } else if replay_failed {
                                     threadlane_agent::OperationOutcome::Failed
@@ -1005,9 +994,8 @@ impl HarnessSupervisor {
                         }
                         let effective_args = serde_json::from_str(&arguments)
                             .unwrap_or_else(|_| serde_json::Value::String(arguments.clone()));
-                        let mut harness =
-                            CodingSessionHarness::open(&recorder_session_file)
-                                .map_err(|e| e.to_string())?;
+                        let mut harness = CodingSessionHarness::open(&recorder_session_file)
+                            .map_err(|e| e.to_string())?;
                         harness
                             .append_tool_intent_after_hook(
                                 &harness_run_id,
@@ -1027,9 +1015,8 @@ impl HarnessSupervisor {
                         let completion_run_id = completion_run_id.clone();
                         let tool_call_id = tool_call_id.to_owned();
                         Box::pin(async move {
-                            let mut harness =
-                                CodingSessionHarness::open(&completion_session_file)
-                                    .map_err(|e| e.to_string())?;
+                            let mut harness = CodingSessionHarness::open(&completion_session_file)
+                                .map_err(|e| e.to_string())?;
                             harness
                                 .finish_tool_message(
                                     &completion_run_id,
@@ -1473,8 +1460,11 @@ fn md5_hash(input: &str) -> String {
 mod tests {
     use super::*;
     use std::time::Duration;
-    use threadlane_agent::harness::{OperationIntent, OperationOutcome, QueueKind as HarnessQueueKind, Record as HarnessRecord, SessionStore};
     use threadlane_agent::harness::{AgentHarness, JsonlStore};
+    use threadlane_agent::harness::{
+        OperationIntent, OperationOutcome, QueueKind as HarnessQueueKind, Record as HarnessRecord,
+        SessionStore,
+    };
     use threadlane_agent::TokenUsage;
 
     // ── Helper: open a CodingSessionHarness for test setup ────────────
@@ -1578,7 +1568,7 @@ mod tests {
         });
 
         let results = agent
-            .replay_safe_tools(&[Record::ToolStarted {
+            .replay_safe_tools(&[HarnessRecord::ToolStarted {
                 id: "existing-intent".into(),
                 seq: 2,
                 lane: "main".into(),
@@ -1744,11 +1734,7 @@ mod tests {
         ] {
             harness
                 .store
-                .accept_prompt_on_lane(
-                    lane_name,
-                    run_id,
-                    AgentMessage::user("sub", Vec::new()),
-                )
+                .accept_prompt_on_lane(lane_name, run_id, AgentMessage::user("sub", Vec::new()))
                 .unwrap();
         }
         drop(harness);
@@ -2214,8 +2200,15 @@ mod tests {
         // Restored has: 1 follow_up, and steers (from harness + high-priority record)
         assert_eq!(restored.queue.follow_up.len(), 1);
         assert_eq!(restored.queue.steer.len(), 2);
-        let has_high_priority = restored.queue.steer.iter().any(|s| s.priority == threadlane_agent::SteerPriority::High);
-        assert!(has_high_priority, "expected at least one High-priority steer in restored queue");
+        let has_high_priority = restored
+            .queue
+            .steer
+            .iter()
+            .any(|s| s.priority == threadlane_agent::SteerPriority::High);
+        assert!(
+            has_high_priority,
+            "expected at least one High-priority steer in restored queue"
+        );
         supervisor
             .lanes
             .lock()

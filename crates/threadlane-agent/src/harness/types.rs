@@ -1,4 +1,4 @@
-use crate::op_log::SteerPriority;
+use super::queue::SteerPriority;
 use crate::types::{AgentMessage, TokenUsage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -84,8 +84,7 @@ pub enum OperationOutcome {
     Declined,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum UsageCause {
     #[default]
     Provider,
@@ -102,7 +101,6 @@ pub struct RetryState {
     pub retry_at: u64,
     pub reason: String,
 }
-
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Record {
