@@ -5,7 +5,6 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use threadlane_provider::openai::{ProviderUsage, StreamEvent, ToolCall};
 
 pub(crate) use crate::utils::AbortOnDrop;
 
@@ -65,16 +64,6 @@ pub fn repair_interrupted_tool_turn(messages: &mut Vec<AgentMessage>) -> bool {
         return true;
     }
     false
-}
-
-fn token_usage_from_provider(usage: ProviderUsage) -> TokenUsage {
-    TokenUsage {
-        input_tokens: usage.input_tokens,
-        output_tokens: usage.output_tokens,
-        cache_read_tokens: usage.cache_read_tokens,
-        cache_write_tokens: usage.cache_write_tokens,
-        total_tokens: usage.total_tokens,
-    }
 }
 
 pub use crate::turn_driver::{ProviderStepAccumulator, ProviderStepResult};
@@ -348,7 +337,8 @@ pub type AssistantMessageRecorder = Arc<
 #[cfg(test)]
 mod normalize_tool_arguments_tests {
     use super::*;
-    use threadlane_provider::openai::ToolCallFunction;
+    use crate::types::TokenUsage;
+    use threadlane_provider::openai::{ProviderUsage, StreamEvent, ToolCall, ToolCallFunction};
 
     #[test]
     fn provider_step_accumulator_returns_one_stateless_result() {

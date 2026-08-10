@@ -524,7 +524,6 @@ fn apply_harness_record(
                     HarnessActivityStatus::Aborted,
                     error.clone().unwrap_or_else(|| "Aborted".into()),
                 ),
-                _ => return,
             };
             reduce_harness_activity(
                 activities,
@@ -5386,8 +5385,10 @@ impl App {
             if self.finish_session_tasks(&key.work_dir, &key.session_id) {
                 self.sync_task_sidebar(cx);
             }
-            self.set_session_status(cx, &key, UiStatus::Ready, "Stopped");
-            self.push_chat(MsgRole::System, "Generation stopped.");
+            // Show "Stopping…" while the harness abort completes async.
+            // HarnessResumeFinished will set the final status.
+            self.set_session_status(cx, &key, UiStatus::Working, "Stopping…");
+            self.push_chat(MsgRole::System, "Stopping generation…");
             self.ui.widget(cx, ids!(chat_list)).redraw(cx);
         }
     }
@@ -8330,6 +8331,31 @@ impl App {
                 .chat
                 .harness_activities = activities;
             set_session_health(&entry.work_dir, &entry.id, health);
+            let recovering_count = self
+                .workspace_state
+                .workspace(&key)
+                .map(|workspace| {
+                    workspace
+                        .chat
+                        .harness_activities
+                        .iter()
+                        .filter(|a| {
+                            matches!(
+                                a.status,
+                                crate::panels::chat::state::HarnessActivityStatus::Recovering
+                            )
+                        })
+                        .count()
+                })
+                .unwrap_or(0);
+            if recovering_count > 0 {
+                let msg = if recovering_count == 1 {
+                    "This session has 1 suspended operation. Click **Resume** in the activity panel to recover it, or **Abort** to discard it.".into()
+                } else {
+                    format!("This session has {recovering_count} suspended operations. Click **Resume** in the activity panel to recover them, or **Abort** to discard them.")
+                };
+                self.push_chat_to(key.clone(), MsgRole::System, msg);
+            }
         }
 
         if let Some((model, reasoning_effort)) = self
@@ -9268,21 +9294,36 @@ impl App {
                     if let Some(runtime) = self.session_runtimes.get(&key) {
                         if let Some(path) = runtime.session_file.as_deref() {
                             let activities = restore_harness_activities(path);
+                            let health = session_health(&activities);
                             self.workspace_state
                                 .workspace_mut(key.clone())
                                 .chat
                                 .harness_activities = activities;
+                            set_session_health(&key.work_dir, &key.session_id, health);
                         }
                     }
-                    if let Err(error) = result {
-                        self.push_chat_to(
-                            key.clone(),
-                            MsgRole::System,
-                            format!("Harness resume failed: {error}"),
-                        );
+                    let msg = match result {
+                        Ok(true) => {
+                            self.set_session_status(cx, &key, UiStatus::Ready, "Ready");
+                            "Generation stopped."
+                        }
+                        Ok(false) => {
+                            self.set_session_status(cx, &key, UiStatus::Ready, "Ready");
+                            ""
+                        }
+                        Err(error) => {
+                            self.set_session_status(cx, &key, UiStatus::Error, "Stop failed");
+                            return self.push_chat_to(
+                                key,
+                                MsgRole::System,
+                                format!("Harness resume failed: {error}"),
+                            );
+                        }
+                    };
+                    if !msg.is_empty() {
+                        self.push_chat_to(key, MsgRole::System, msg);
                     }
                     self.ui.widget(cx, ids!(chat_list)).redraw(cx);
-                    self.set_session_status(cx, &key, UiStatus::Ready, "Ready");
                 }
 
                 GuiAgentEvent::SessionTitleGenerated => {

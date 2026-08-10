@@ -15,7 +15,7 @@ use crate::types::{AgentMessage, TokenUsage, ToolExecutionMode, TurnState};
 use crate::utils::AbortOnDrop;
 use regex::Regex;
 use std::sync::Arc;
-use threadlane_provider::openai::{ProviderUsage, StreamEvent, ToolCall};
+use threadlane_provider::openai::{StreamEvent, ToolCall};
 use threadlane_provider::router::{PayloadSource, ProviderClient};
 use tokio::sync::{broadcast, mpsc, Mutex};
 

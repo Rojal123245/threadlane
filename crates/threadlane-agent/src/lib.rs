@@ -32,7 +32,9 @@ pub use loop_engine::{
     repair_interrupted_tool_turn, AssistantMessageRecorder, ProviderHookRecorder,
     ProviderUsageRecorder, ToolCompletionRecorder, ToolIntentRecorder,
 };
-pub use op_log::{interrupted_subagent_lanes, InterruptedSubagentLane, RecoveryResult};
+pub use op_log::{
+    has_open_subagent_lanes, interrupted_subagent_lanes, InterruptedSubagentLane, RecoveryResult,
+};
 pub use provider::{
     ChatCompletionsAdapter, CodexResponsesAdapter, ProviderAdapter, ProviderMessages,
     ProviderRouter,

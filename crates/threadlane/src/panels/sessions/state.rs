@@ -271,11 +271,6 @@ pub fn begin_title_generation(work_dir: &Path, session_id: &str) -> bool {
     TITLE_ATTEMPTED.write().unwrap().insert(key)
 }
 
-pub fn reset_title_attempt(work_dir: &Path, session_id: &str) {
-    let key = (canonicalize_path(work_dir), session_id.to_string());
-    TITLE_ATTEMPTED.write().unwrap().remove(&key);
-}
-
 pub fn end_title_generation(_work_dir: &Path, _session_id: &str) {
     // Kept as a no-op for completed title runs.
 }

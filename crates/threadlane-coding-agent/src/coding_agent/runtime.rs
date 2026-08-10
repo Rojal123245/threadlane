@@ -22,6 +22,7 @@ use crate::plan::SessionPlanStore;
 use crate::skills::{SkillManager, SkillRegistry};
 use crate::system_prompt::{build_system_prompt, SystemPromptBuildOptions, SystemPromptConfig};
 use crate::wasi_extension::{WasiExtensionManager, WasiLegacyEffect};
+#[cfg(test)]
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -29,7 +30,9 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use threadlane_agent::harness::{
@@ -38,10 +41,11 @@ use threadlane_agent::harness::{
     ToolRecovery, ToolSpec,
 };
 use threadlane_agent::{
-    repair_interrupted_tool_turn, AgentEvent, AgentMessage, AgentToolDefinition, AgentToolResult,
-    ImageAttachment, ReasoningEffort, SessionTree, SubagentRecoveryStatus, TokenUsage,
-    ToolExecutor, TurnState, UnifiedAgent,
+    repair_interrupted_tool_turn, AgentEvent, AgentMessage, AgentToolResult, ImageAttachment,
+    ReasoningEffort, SessionTree, SubagentRecoveryStatus, TokenUsage, TurnState, UnifiedAgent,
 };
+#[cfg(test)]
+use threadlane_agent::{AgentToolDefinition, ToolExecutor};
 use threadlane_provider::openai::fetch_available_models;
 use tokio::sync::broadcast;
 use tokio::time::{timeout, Duration};
@@ -1070,14 +1074,15 @@ impl CodingAgent {
             .model
             .get_or_insert_with(|| effective_model.clone());
         let has_interrupted_subagents = match harness.as_ref() {
-            Some(_h) => {
-                let records = session_tree
-                    .file_path
-                    .as_deref()
-                    .map(|path| recover_v2_subagent_records(path).unwrap_or_default())
-                    .unwrap_or_default();
-                !threadlane_agent::interrupted_subagent_lanes(&records).is_empty()
-            }
+            Some(_h) => session_tree
+                .file_path
+                .as_deref()
+                .map(|path| {
+                    recover_v2_subagent_records(path)
+                        .map(|records| threadlane_agent::has_open_subagent_lanes(&records))
+                        .unwrap_or(true)
+                })
+                .unwrap_or(false),
             None => session_tree.file_path.is_some(),
         };
         let interrupted_subagent_recovery = if has_interrupted_subagents {

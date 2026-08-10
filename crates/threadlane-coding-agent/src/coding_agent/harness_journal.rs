@@ -6,11 +6,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use threadlane_agent::harness::{
     AgentHarness, DeferredResolution, Entry as HarnessEntry, EventError, HarnessEvent,
-    HarnessEventHub, HookContext, HookKind, HookRegistry, JsonlStore, OperationIntent,
-    OperationOutcome, Record as HarnessRecord, Reducer, RetryPolicy, SessionIdGenerator,
-    SessionStore, Snapshot, StreamingState, Subscription,
-    ToolReplaySafety as HarnessToolReplaySafety, ToolResult as HarnessToolResult, ToolSpec,
+    HarnessEventHub, HookRegistry, JsonlStore, OperationIntent, OperationOutcome,
+    Record as HarnessRecord, Reducer, RetryPolicy, SessionIdGenerator, SessionStore, Snapshot,
+    Subscription, ToolReplaySafety as HarnessToolReplaySafety, ToolResult as HarnessToolResult,
+    ToolSpec,
 };
+#[cfg(test)]
+use threadlane_agent::harness::{HookContext, HookKind, StreamingState};
 use threadlane_agent::{AgentMessage, AgentToolResult, TokenUsage};
 
 pub struct HarnessWatch {

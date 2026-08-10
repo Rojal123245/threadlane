@@ -7,15 +7,18 @@ pub mod runtime;
 // Re-export public runtime items (explicit list to avoid conflicts with
 // harness_journal module).
 pub(crate) use runtime::{
-    abort_open_subagent_operations, generation_event_drain_error, is_retryable_generation_error,
-    recover_v2_subagent_records, subagent_ui_event, AgentRunner, AgentWork, AgentWorkScheduler,
-    CompletedSubagentLane, SubagentLaneStatus, SubagentRunContext, MAX_SUBAGENT_TASKS,
+    abort_open_subagent_operations, AgentRunner, AgentWork, AgentWorkScheduler, MAX_SUBAGENT_TASKS,
     MAX_SUBAGENT_TASK_CHARS,
 };
 pub use runtime::{
     cancel_open_subagent_operations, AgentRunTask, CodingAgent, CodingAgentCancellation,
     CodingAgentOptions, CodingAgentWorkHandle, SubagentCancellationGuard, SubagentInnerTool,
     SubagentInnerToolData, SubagentResult, SubagentSessionData,
+};
+#[cfg(test)]
+pub(crate) use runtime::{
+    generation_event_drain_error, is_retryable_generation_error, recover_v2_subagent_records,
+    subagent_ui_event,
 };
 // Re-export test-only types.
 pub(crate) use broker::*;

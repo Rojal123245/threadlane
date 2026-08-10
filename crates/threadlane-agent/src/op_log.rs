@@ -1,12 +1,30 @@
 //! Subagent-interruption recovery logic.
 //!
 //! The in-memory queue types (`SteerPriority`, `SteerItem`, `LaneQueue`)
-//! are now canonical in [`crate::harness`]. This module provides only
-//! the subagent-interruption recovery logic built on top of harness types.
+//! are now canonical in [`crate::harness`]. This module provides
+//! subagent-interruption recovery utilities on top of harness types.
 
 use crate::harness::{Record, ToolReplaySafety};
 use crate::types::AgentMessage;
 use std::collections::{HashMap, HashSet};
+
+/// Returns `true` when non-main-lane records contain at least one
+/// operation that has started but not yet finished.
+pub fn has_open_subagent_lanes(records: &[Record]) -> bool {
+    let finished: HashSet<&str> = records
+        .iter()
+        .filter_map(|r| match r {
+            Record::OperationFinished { run_id, .. } => Some(run_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    records.iter().any(|r| match r {
+        Record::OperationStarted { id, lane, .. } => {
+            lane != "main" && !finished.contains(id.as_str())
+        }
+        _ => false,
+    })
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct RecoveryResult {
