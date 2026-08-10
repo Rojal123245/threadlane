@@ -7,9 +7,8 @@ use super::capabilities::{
     PlanCapability, SkillCapability, SubagentCapability, WasiCapability,
 };
 use super::harness_journal::{
-    harness_cancellation_state, HarnessJournalAdapter, HarnessWatch,
-    InterruptedSubagentRecoveryState, SubagentJournalAdapter, SubagentLaneIdentity,
-    SubagentStartError,
+    harness_cancellation_state, HarnessWatch, InterruptedSubagentRecoveryState,
+    SubagentLaneIdentity, SubagentStartError,
 };
 use super::HarnessJournal;
 use super::ManagedProcessRegistry;
@@ -1128,12 +1127,6 @@ impl CodingAgent {
         }
         let harness_run_id: Arc<std::sync::Mutex<Option<String>>> =
             Arc::new(std::sync::Mutex::new(None));
-        if let Some(path) = session_tree.file_path.clone() {
-            agent.journal = Some(Arc::new(HarnessJournalAdapter {
-                session_file: path,
-                active_run: harness_run_id.clone(),
-            }));
-        }
         let cancellation = CodingAgentCancellation {
             state: Arc::default(),
             harness_session_file: session_tree.file_path.clone(),
@@ -3547,15 +3540,8 @@ async fn run_subagent_task(
     }
     agent.work_dir = Some(context.work_dir.clone());
 
-    // Wire the subagent's journal to the parent's session file on its lane.
+    // Session file used by checkpoint persistence below.
     let session_file_for_checkpoint = context.session_file.clone();
-    if let Some(ref session_file) = session_file_for_checkpoint {
-        agent.journal = Some(Arc::new(SubagentJournalAdapter {
-            session_file: session_file.clone(),
-            lane: lane_name.clone(),
-            run_id: journal_run_id.clone(),
-        }));
-    }
 
     let policy = Arc::new(tokio::sync::Mutex::new(
         if config.tools.as_ref().is_some_and(|tools| {

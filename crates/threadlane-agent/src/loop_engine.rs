@@ -7,31 +7,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use threadlane_provider::openai::{ProviderUsage, StreamEvent, ToolCall};
 
-pub(crate) struct AbortOnDrop<T> {
-    handle: Option<tokio::task::JoinHandle<T>>,
-}
-
-impl<T> AbortOnDrop<T> {
-    pub(crate) fn new(handle: tokio::task::JoinHandle<T>) -> Self {
-        Self {
-            handle: Some(handle),
-        }
-    }
-
-    pub(crate) async fn join(mut self) -> Result<T, tokio::task::JoinError> {
-        let result = self.handle.as_mut().expect("task handle missing").await;
-        self.handle = None;
-        result
-    }
-}
-
-impl<T> Drop for AbortOnDrop<T> {
-    fn drop(&mut self) {
-        if let Some(handle) = &self.handle {
-            handle.abort();
-        }
-    }
-}
+pub(crate) use crate::utils::AbortOnDrop;
 
 fn normalized_tool_call_id(id: &str, empty_index: usize) -> String {
     if id.is_empty() {
@@ -101,48 +77,7 @@ fn token_usage_from_provider(usage: ProviderUsage) -> TokenUsage {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct ProviderStepResult {
-    pub text: String,
-    pub reasoning: String,
-    pub tool_calls: Vec<ToolCall>,
-    pub usage: TokenUsage,
-}
-
-#[derive(Default)]
-pub struct ProviderStepAccumulator {
-    text: String,
-    reasoning: String,
-    result: Option<ProviderStepResult>,
-}
-
-impl ProviderStepAccumulator {
-    pub fn push(&mut self, event: &StreamEvent) -> Result<Option<ProviderStepResult>, String> {
-        match event {
-            StreamEvent::ContentToken(token) => self.text.push_str(token),
-            StreamEvent::ReasoningToken(token) => self.reasoning.push_str(token),
-            StreamEvent::ToolCallStart { .. } | StreamEvent::ToolCallArgsDelta { .. } => {}
-            StreamEvent::Finished { tool_calls, usage } => {
-                let result = ProviderStepResult {
-                    text: self.text.clone(),
-                    reasoning: self.reasoning.clone(),
-                    tool_calls: tool_calls.clone(),
-                    usage: token_usage_from_provider(*usage),
-                };
-                self.result = Some(result.clone());
-                return Ok(Some(result));
-            }
-            StreamEvent::Error(error) => return Err(error.clone()),
-        }
-        Ok(None)
-    }
-
-    pub fn finish(&self) -> Result<ProviderStepResult, String> {
-        self.result
-            .clone()
-            .ok_or_else(|| "provider stream ended without a final response".into())
-    }
-}
+pub use crate::turn_driver::{ProviderStepAccumulator, ProviderStepResult};
 
 pub fn convert_to_llm(messages: &[AgentMessage]) -> Vec<Value> {
     let messages = normalize_tool_call_ids(messages);
@@ -410,41 +345,6 @@ pub type AssistantMessageRecorder = Arc<
     dyn Fn(AgentMessage) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync,
 >;
 
-pub(crate) fn normalize_tool_arguments_inner(
-    name: &str,
-    arguments: &str,
-    work_dir: Option<&std::path::Path>,
-) -> String {
-    let Some(work_dir) = work_dir else {
-        return arguments.to_string();
-    };
-    let Ok(mut value) = serde_json::from_str::<Value>(arguments) else {
-        return arguments.to_string();
-    };
-    let workspace = work_dir.to_string_lossy().to_string();
-    match (name, value.as_object_mut()) {
-        ("read_file" | "write_file" | "edit_file" | "list_dir", Some(object))
-            if object
-                .get("path")
-                .and_then(Value::as_str)
-                .is_none_or(str::is_empty) =>
-        {
-            object.insert("path".into(), Value::String(workspace));
-        }
-        ("run_command", Some(object))
-            if object
-                .get("cwd")
-                .and_then(Value::as_str)
-                .is_none_or(str::is_empty) =>
-        {
-            object.insert("cwd".into(), Value::String(workspace));
-        }
-        _ => {}
-    }
-
-    serde_json::to_string(&value).unwrap_or_else(|_| arguments.to_string())
-}
-
 #[cfg(test)]
 mod normalize_tool_arguments_tests {
     use super::*;
@@ -499,17 +399,6 @@ mod normalize_tool_arguments_tests {
             step.finish().unwrap_err(),
             "provider stream ended without a final response"
         );
-    }
-
-    #[test]
-    fn fills_missing_file_paths_from_the_workspace() {
-        let arguments = normalize_tool_arguments_inner(
-            "read_file",
-            "{}",
-            Some(std::path::Path::new("/workspace")),
-        );
-
-        assert_eq!(arguments, r#"{"path":"/workspace"}"#);
     }
 
     #[test]
@@ -612,5 +501,4 @@ mod normalize_tool_arguments_tests {
         let chat = convert_to_llm(&messages);
         assert_eq!(chat[2]["tool_call_id"], "call_1");
     }
-
 }

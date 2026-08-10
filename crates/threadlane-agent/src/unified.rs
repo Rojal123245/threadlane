@@ -11,7 +11,6 @@ use crate::harness::{
     AgentHarness, HarnessEventHub, HookRegistry, JsonlStore, ProcedureError, ProvisionedEntry,
     QueueKind, Reducer,
 };
-use crate::journal::AgentJournal;
 use crate::provider::ProviderRouter;
 use crate::tool_dispatcher::ToolDispatcher;
 use crate::types::{
@@ -48,8 +47,6 @@ pub struct UnifiedAgent {
     stream_rules: Vec<(crate::rules::StreamRule, regex::Regex)>,
     prompt_cache_key: Option<String>,
     allowed_tool_names: Option<HashSet<String>>,
-    /// Journal for durability. Set by CodingAgent after construction.
-    pub journal: Option<Arc<dyn AgentJournal>>,
 }
 
 impl UnifiedAgent {
@@ -103,7 +100,6 @@ impl UnifiedAgent {
             stream_rules: Vec::new(),
             prompt_cache_key: None,
             allowed_tool_names: None,
-            journal: None,
         })
     }
 
@@ -269,7 +265,6 @@ impl UnifiedAgent {
             prompt_cache_key: self.prompt_cache_key.clone(),
             tool_dispatcher,
             config: self.config.clone(),
-            journal: self.journal.clone(),
             event_tx: self.event_tx.clone(),
             harness_event_hub: self.harness.events().clone(),
             stream_rules: self.stream_rules.clone(),

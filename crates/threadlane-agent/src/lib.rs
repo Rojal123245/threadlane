@@ -4,7 +4,6 @@ pub mod engine;
 pub mod error;
 pub mod events;
 pub mod harness;
-pub mod journal;
 pub mod loop_engine;
 pub mod op_log;
 pub mod provider;
@@ -15,6 +14,7 @@ pub mod tool_executor;
 pub mod turn_driver;
 pub mod types;
 pub mod unified;
+pub(crate) mod utils;
 
 pub use compaction::{
     compact_messages, compact_messages_with_strategy, compaction_summary_text,

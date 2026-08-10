@@ -22,7 +22,7 @@ use crate::components::task_sidebar::{
 };
 use crate::components::terminal_panel::ProjectTerminalWidgetRefExt;
 use crate::git::GitStatus;
-use crate::panels::chat::state::{reduce_harness_event, HarnessActivity};
+use crate::panels::chat::state::{reduce_harness_activity, reduce_harness_event, HarnessActivity};
 use crate::panels::chat::{
     accepts_generation_event, concise_status, draft_for_cancellation, submitted_draft, ChatList,
     ChatListWidgetRefExt, ComposerState, ComposerStatus, GenerationEvent, StarterPromptAction,
@@ -469,6 +469,88 @@ fn harness_lane_activity(
         ));
     }
     detail
+}
+
+/// Translates a harness [`HarnessRecord`] from a [`RecordCommitted`] event into
+/// a [`HarnessActivity`] update.  Returns `None` when the record does not
+/// change the visible activity list (e.g. internal step attempts, usage records).
+fn apply_harness_record(
+    record: &HarnessRecord,
+    activities: &mut Vec<HarnessActivity>,
+    entries: &[threadlane_agent::harness::Entry],
+) {
+    use crate::panels::chat::state::{reduce_harness_activity, HarnessActivityStatus};
+    match record {
+        HarnessRecord::OperationStarted { id, lane, .. } if lane != "main" => {
+            let task = entries
+                .iter()
+                .filter(|e| e.lane == *lane)
+                .find_map(|e| match &e.message {
+                    threadlane_agent::AgentMessage::User { content }
+                    | threadlane_agent::AgentMessage::UserWithImages { content, .. } => {
+                        Some(content.clone())
+                    }
+                    _ => None,
+                })
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or_else(|| format!("Subagent task ({lane})"));
+            reduce_harness_activity(
+                activities,
+                HarnessActivity {
+                    key: id.clone(),
+                    task,
+                    agent: "subagent".into(),
+                    status: HarnessActivityStatus::Working,
+                    detail: "Working".into(),
+                },
+            );
+        }
+        HarnessRecord::OperationFinished {
+            run_id,
+            outcome,
+            error,
+            ..
+        } => {
+            let (status, detail) = match outcome {
+                OperationOutcome::Completed => (
+                    HarnessActivityStatus::Recovered,
+                    error.clone().unwrap_or_else(|| "Completed".into()),
+                ),
+                OperationOutcome::Aborted => (
+                    HarnessActivityStatus::Cancelled,
+                    error.clone().unwrap_or_else(|| "Cancelled".into()),
+                ),
+                OperationOutcome::Failed | OperationOutcome::Declined => (
+                    HarnessActivityStatus::Aborted,
+                    error.clone().unwrap_or_else(|| "Aborted".into()),
+                ),
+                _ => return,
+            };
+            reduce_harness_activity(
+                activities,
+                HarnessActivity {
+                    key: run_id.clone(),
+                    task: String::new(),
+                    agent: String::new(),
+                    status,
+                    detail,
+                },
+            );
+        }
+        HarnessRecord::AbortRequested { run_id, .. } => {
+            reduce_harness_activity(
+                activities,
+                HarnessActivity {
+                    key: format!("main-{run_id}"),
+                    task: "Foreground operation".into(),
+                    agent: "main".into(),
+                    status: HarnessActivityStatus::Aborted,
+                    detail: "Abort requested".into(),
+                },
+            );
+        }
+        _ => {}
+    }
 }
 
 fn format_token_count(tokens: u32) -> String {
@@ -9103,48 +9185,44 @@ impl App {
                         self.ui.widget(cx, ids!(chat_list)).redraw(cx);
                         continue;
                     }
-                    if let Some(path) = self
-                        .session_runtimes
-                        .get(&key)
-                        .and_then(|runtime| runtime.session_file.as_deref())
-                    {
-                        let live_main = self
-                            .workspace_state
-                            .workspace(&key)
-                            .and_then(|workspace| {
-                                workspace
-                                    .chat
-                                    .harness_activities
-                                    .iter()
-                                    .find(|activity| {
-                                        activity.agent == "main"
-                                            && activity.status
-                                                == crate::panels::chat::state::HarnessActivityStatus::Working
-                                    })
-                                    .cloned()
-                            });
-                        let mut activities = restore_harness_activities(path);
-                        if let Some(activity) = live_main {
-                            activities.push(activity);
+                    let workspace = self.workspace_state.workspace_mut(key.clone());
+                    match &event.payload {
+                        EventPayload::RecordCommitted(record) => {
+                            let path_for_entries = self
+                                .session_runtimes
+                                .get(&key)
+                                .and_then(|runtime| runtime.session_file.as_deref());
+                            if let Some(path) = path_for_entries {
+                                if let Ok(store) = JsonlStore::open_read_only(path) {
+                                    apply_harness_record(
+                                        record,
+                                        &mut workspace.chat.harness_activities,
+                                        store.entries(),
+                                    );
+                                }
+                            }
                         }
-                        if let EventPayload::Fault(error) = &event.payload {
-                            activities.push(HarnessActivity {
-                                key: format!("harness-fault-{}", event.id),
-                                task: "Harness storage".into(),
-                                agent: "main".into(),
-                                status: crate::panels::chat::state::HarnessActivityStatus::Faulted,
-                                detail: format!("Harness storage fault: {error}"),
-                            });
+                        EventPayload::Fault(error) => {
+                            reduce_harness_activity(
+                                &mut workspace.chat.harness_activities,
+                                HarnessActivity {
+                                    key: format!("harness-fault-{}", event.id),
+                                    task: "Harness storage".into(),
+                                    agent: "main".into(),
+                                    status:
+                                        crate::panels::chat::state::HarnessActivityStatus::Faulted,
+                                    detail: format!("Harness storage fault: {error}"),
+                                },
+                            );
                         }
-                        suppress_live_main_recovery(&mut activities, is_current);
-                        let health = session_health(&activities);
-                        self.workspace_state
-                            .workspace_mut(key.clone())
-                            .chat
-                            .harness_activities = activities;
-                        set_session_health(&key.work_dir, &key.session_id, health);
-                        self.ui.widget(cx, ids!(session_list)).redraw(cx);
+                        // EntryCommitted events are handled by the restore
+                        // path when the session is next loaded; we skip them
+                        // during live updates.
+                        _ => {}
                     }
+                    let health = session_health(&workspace.chat.harness_activities);
+                    set_session_health(&key.work_dir, &key.session_id, health);
+                    self.ui.widget(cx, ids!(session_list)).redraw(cx);
                 }
 
                 GuiAgentEvent::HarnessSnapshot {

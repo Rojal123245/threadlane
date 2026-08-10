@@ -640,7 +640,34 @@ fn normalize_tool_arguments(
     arguments: &str,
     work_dir: Option<&std::path::Path>,
 ) -> String {
-    crate::loop_engine::normalize_tool_arguments_inner(name, arguments, work_dir)
+    let Some(work_dir) = work_dir else {
+        return arguments.to_string();
+    };
+    let Ok(mut value) = serde_json::from_str::<Value>(arguments) else {
+        return arguments.to_string();
+    };
+    let workspace = work_dir.to_string_lossy().to_string();
+    match (name, value.as_object_mut()) {
+        ("read_file" | "write_file" | "edit_file" | "list_dir", Some(object))
+            if object
+                .get("path")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty) =>
+        {
+            object.insert("path".into(), Value::String(workspace));
+        }
+        ("run_command", Some(object))
+            if object
+                .get("cwd")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty) =>
+        {
+            object.insert("cwd".into(), Value::String(workspace));
+        }
+        _ => {}
+    }
+
+    serde_json::to_string(&value).unwrap_or_else(|_| arguments.to_string())
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────
@@ -682,6 +709,13 @@ mod tests {
                 None
             }
         }
+    }
+
+    #[test]
+    fn fills_missing_file_paths_from_the_workspace() {
+        let arguments =
+            normalize_tool_arguments("read_file", "{}", Some(std::path::Path::new("/workspace")));
+        assert_eq!(arguments, r#"{"path":"/workspace"}"#);
     }
 
     fn stub_tool(name: &str) -> AgentToolDefinition {

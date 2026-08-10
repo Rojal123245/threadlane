@@ -8,17 +8,67 @@ use crate::compaction::{
 };
 use crate::config::AgentConfig;
 use crate::events::AgentEvent;
-use crate::journal::AgentJournal;
-use crate::loop_engine::{AbortOnDrop, ProviderStepAccumulator};
 use crate::provider::ProviderRouter;
 use crate::rules::{StreamRule, StreamRuleMonitor};
 use crate::tool_dispatcher::ToolDispatcher;
-use crate::types::{AgentMessage, ToolExecutionMode, TurnState};
+use crate::types::{AgentMessage, TokenUsage, ToolExecutionMode, TurnState};
+use crate::utils::AbortOnDrop;
 use regex::Regex;
 use std::sync::Arc;
-use threadlane_provider::openai::{StreamEvent, ToolCall};
+use threadlane_provider::openai::{ProviderUsage, StreamEvent, ToolCall};
 use threadlane_provider::router::{PayloadSource, ProviderClient};
 use tokio::sync::{broadcast, mpsc, Mutex};
+
+/// Captured result from one provider stream.
+#[derive(Debug, Clone)]
+pub struct ProviderStepResult {
+    pub text: String,
+    pub reasoning: String,
+    pub tool_calls: Vec<ToolCall>,
+    pub usage: TokenUsage,
+}
+
+/// Accumulates streaming deltas into a single [`ProviderStepResult`].
+#[derive(Default)]
+pub struct ProviderStepAccumulator {
+    text: String,
+    reasoning: String,
+    result: Option<ProviderStepResult>,
+}
+
+impl ProviderStepAccumulator {
+    pub fn push(&mut self, event: &StreamEvent) -> Result<Option<ProviderStepResult>, String> {
+        match event {
+            StreamEvent::ContentToken(token) => self.text.push_str(token),
+            StreamEvent::ReasoningToken(token) => self.reasoning.push_str(token),
+            StreamEvent::ToolCallStart { .. } | StreamEvent::ToolCallArgsDelta { .. } => {}
+            StreamEvent::Finished { tool_calls, usage } => {
+                let result = ProviderStepResult {
+                    text: self.text.clone(),
+                    reasoning: self.reasoning.clone(),
+                    tool_calls: tool_calls.clone(),
+                    usage: TokenUsage {
+                        input_tokens: usage.input_tokens,
+                        output_tokens: usage.output_tokens,
+                        cache_read_tokens: usage.cache_read_tokens,
+                        cache_write_tokens: usage.cache_write_tokens,
+                        total_tokens: usage.total_tokens,
+                    },
+                };
+                self.result = Some(result.clone());
+                return Ok(Some(result));
+            }
+            StreamEvent::Error(error) => return Err(error.clone()),
+        }
+        Ok(None)
+    }
+
+    pub fn finish(&self) -> Result<ProviderStepResult, String> {
+        self.result
+            .clone()
+            .ok_or_else(|| "provider stream ended without a final response".into())
+    }
+}
 
 pub struct TurnDriver<'a> {
     pub turn: Arc<Mutex<TurnState>>,
@@ -27,7 +77,6 @@ pub struct TurnDriver<'a> {
     pub prompt_cache_key: Option<String>,
     pub tool_dispatcher: ToolDispatcher,
     pub config: AgentConfig,
-    pub journal: Option<Arc<dyn AgentJournal>>,
     pub event_tx: broadcast::Sender<AgentEvent>,
     pub harness_event_hub: crate::harness::HarnessEventHub,
     pub stream_rules: Vec<(StreamRule, Regex)>,
@@ -177,17 +226,9 @@ impl<'a> TurnDriver<'a> {
                     custom_type: "thinking".into(),
                     payload: serde_json::json!({ "text": current_reasoning }),
                 };
-                if let Some(journal) = &self.journal {
-                    let _ = journal.record_assistant_message(thinking.clone()).await;
-                }
                 self.turn.lock().await.messages.push(thinking);
             }
 
-            if let Some(journal) = &self.journal {
-                let _ = journal
-                    .record_assistant_message(assistant_msg.clone())
-                    .await;
-            }
             self.turn.lock().await.messages.push(assistant_msg.clone());
 
             self.emit_event(AgentEvent::MessageEnd {
@@ -224,9 +265,6 @@ impl<'a> TurnDriver<'a> {
                         is_error: r.is_error,
                         terminate: r.terminate,
                     };
-                    if let Some(journal) = &self.journal {
-                        let _ = journal.record_tool_message(msg.clone()).await;
-                    }
                     turn.messages.push(msg);
                 }
             }
