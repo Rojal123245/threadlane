@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use async_trait::async_trait;
+use log::warn;
 use serde_json::Value;
 use tokio::sync::broadcast;
 use threadlane_agent::{AgentEvent, AgentToolCall, AgentToolDefinition, ToolExecutor};
@@ -408,7 +409,7 @@ pub(crate) async fn dispatch_hook_requests_isolated(
 ) {
     for request in requests {
         if let Err(error) = dispatch_hook_requests(dispatcher, extensions, vec![request]).await {
-            eprintln!("{label}: {}", error.message);
+            warn!("{label}: {}", error.message);
         }
     }
 }
@@ -516,11 +517,11 @@ pub(crate) fn create_after_tool_hook_handler(
                                 extensions.enqueue_broker_results(dispatch.operation_results);
                             }
                             Err(error) => {
-                                eprintln!("WASI after-tool hook broker error: {}", error.message)
+                                warn!("WASI after-tool hook broker error: {}", error.message)
                             }
                         }
                     }
-                    Err(error) => eprintln!("WASI after-tool hook error: {error}"),
+                    Err(error) => warn!("WASI after-tool hook error: {error}"),
                 }
             }
             Ok(HookEffect::default())

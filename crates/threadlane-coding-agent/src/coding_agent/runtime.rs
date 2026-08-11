@@ -17,6 +17,7 @@ use crate::commands::{execute_slash_command, parse_slash_command, CommandAction}
 use crate::context::ProjectContext;
 use crate::extension_broker::CapabilityDispatcher;
 use threadlane_mcp::McpManager;
+use log::warn;
 use threadlane_wasi::packages::default_global_threadlane_dir;
 use crate::plan::SessionPlanStore;
 use threadlane_skills::{SkillManager, SkillRegistry};
@@ -526,7 +527,7 @@ impl CodingAgentWorkHandle {
         let content = content.into();
         if let Some(path) = self.session_file.as_deref() {
             if let Err(error) = enqueue_harness_follow_up(path, content.clone(), images.clone()) {
-                eprintln!("Failed to persist queued follow-up: {error}");
+                warn!("Failed to persist queued follow-up: {error}");
                 return;
             }
         }
@@ -680,7 +681,7 @@ impl CodingAgent {
             .run(HookKind::BeforeRun, &context)
             .await
         {
-            eprintln!("before-run hook {} failed: {}", failure.id, failure.message);
+            warn!("before-run hook {} failed: {}", failure.id, failure.message);
         }
         *self
             .harness_run_id
@@ -747,7 +748,7 @@ impl CodingAgent {
                 .run(HookKind::AfterRun, &context)
                 .await
             {
-                eprintln!("after-run hook {} failed: {}", failure.id, failure.message);
+                warn!("after-run hook {} failed: {}", failure.id, failure.message);
             }
         }
         if let Ok(mut active) = self.harness_run_id.lock() {
@@ -1328,13 +1329,13 @@ impl CodingAgent {
             self.sync_session_tree_and_dispatch_assistant_hooks().await;
             if let Some(path) = self.session_tree.file_path.as_deref() {
                 if let Err(error) = consume_harness_follow_ups(path) {
-                    eprintln!("Failed to consume queued follow-up: {error}");
+                    warn!("Failed to consume queued follow-up: {error}");
                 }
                 if let Err(error) = consume_harness_queue(path, QueueKind::Steer) {
-                    eprintln!("Failed to consume queued steer: {error}");
+                    warn!("Failed to consume queued steer: {error}");
                 }
                 if let Err(error) = consume_harness_queue(path, QueueKind::NextRun) {
-                    eprintln!("Failed to consume queued next-run input: {error}");
+                    warn!("Failed to consume queued next-run input: {error}");
                 }
             }
         }
@@ -1457,7 +1458,7 @@ impl CodingAgent {
             if let Some(path) = self.session_tree.file_path.clone() {
                 match SessionTree::load_from_file(&path) {
                     Ok(tree) => self.session_tree = tree,
-                    Err(error) => eprintln!("Failed to reload V2 session tree: {error}"),
+                    Err(error) => warn!("Failed to reload V2 session tree: {error}"),
                 }
             }
             return;
@@ -1510,12 +1511,12 @@ impl CodingAgent {
             }
             if harness_persists_messages {
                 let Some(path) = self.session_tree.file_path.clone() else {
-                    eprintln!("Failed to reload compacted session: no session path");
+                    warn!("Failed to reload compacted session: no session path");
                     return;
                 };
                 match SessionTree::load_from_file(&path) {
                     Ok(tree) => self.session_tree = tree,
-                    Err(error) => eprintln!("Failed to reload compacted session: {error}"),
+                    Err(error) => warn!("Failed to reload compacted session: {error}"),
                 }
             } else {
                 self.session_tree.replace_active_branch(state_messages);
@@ -2384,7 +2385,7 @@ impl CodingAgent {
             tool_result_is_error: None,
         };
         for failure in journal.store.hooks().run_before_resume(&context).await {
-            eprintln!(
+            warn!(
                 "before-resume hook {} failed: {}",
                 failure.id, failure.message
             );
@@ -2588,7 +2589,7 @@ impl CodingAgent {
             .cancel_deferred(&handle.model, &handle.handle_id)
             .await
             .or_else(|error| {
-                eprintln!("Deferred cancellation failed after durable abort: {error}");
+                warn!("Deferred cancellation failed after durable abort: {error}");
                 Ok(())
             })
     }

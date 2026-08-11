@@ -5381,7 +5381,7 @@ impl App {
                 .work_handle
                 .queue_steer_with_images(input_text.to_string(), attachments.clone())
             {
-                eprintln!("Failed to persist steer: {error}");
+                warn!("Failed to persist steer: {error}");
                 return;
             }
             let agent = runtime.agent.clone();
@@ -6777,7 +6777,7 @@ impl App {
                 error_dot.set_visible(cx, true);
                 title.set_text(cx, "Couldn’t update Threadlane");
                 detail.set_text(cx, &truncate_chars(&normalize_catalog_text(err), 100));
-                eprintln!("[Threadlane Updater] Error: {err}");
+                warn!("[Threadlane Updater] Error: {err}");
             }
         }
         cx.redraw_all();
@@ -7557,7 +7557,7 @@ impl App {
         } else {
             model
         };
-        eprintln!("[commit_message_gen] Selected model: `{model}`");
+        info!("[commit_message_gen] Selected model: `{model}`");
         let has_antigravity_credentials =
             threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some();
         let has_opencode_credentials =
@@ -8743,8 +8743,8 @@ impl App {
         let mut tree = match threadlane_agent::SessionTree::load_from_file(&path) {
             Ok(tree) => tree,
             Err(error) => {
-                eprintln!(
-                    "warning: unable to load session {} for automatic title generation ({}): {}",
+                warn!(
+                    "unable to load session {} for automatic title generation ({}): {}",
                     session_id,
                     path.display(),
                     error
@@ -8763,8 +8763,8 @@ impl App {
         let title_attempted = match tree.mark_title_attempted() {
             Ok(title_attempted) => title_attempted,
             Err(error) => {
-                eprintln!(
-                    "warning: unable to persist automatic title attempt for session {}: {}",
+                warn!(
+                    "unable to persist automatic title attempt for session {}: {}",
                     session_id, error
                 );
                 return;
@@ -8774,8 +8774,8 @@ impl App {
             return;
         }
         let Some(tx) = self.tx.clone() else {
-            eprintln!(
-                "warning: automatic session title generation unavailable: UI channel is closed"
+            warn!(
+                "automatic session title generation unavailable: UI channel is closed"
             );
             end_title_generation(&work_dir, &session_id);
             return;
@@ -8799,8 +8799,8 @@ impl App {
             }
             .await;
             if let Err(error) = &result {
-                eprintln!(
-                    "warning: automatic title generation failed for session {}: {}",
+                warn!(
+                    "automatic title generation failed for session {}: {}",
                     session_id, error
                 );
             }
@@ -9659,7 +9659,7 @@ impl App {
                             }
                         }
                         Err(error) => {
-                            eprintln!("[commit_message_gen] Error: {error}");
+                            warn!("[commit_message_gen] Error: {error}");
                             self.git_feedback = Some((
                                 false,
                                 format!("Could not generate commit message: {error}"),

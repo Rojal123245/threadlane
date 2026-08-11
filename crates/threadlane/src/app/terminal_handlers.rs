@@ -1,5 +1,6 @@
 use super::*;
 use makepad_terminal_core::{Pty, TermKeyCode as TerminalKeyCode, Terminal};
+use ::log::warn;
 use std::path::{Path, PathBuf};
 
 pub(super) fn canonical_terminal_work_dir(work_dir: &Path) -> PathBuf {
@@ -136,7 +137,7 @@ impl App {
                     continue;
                 }
                 if let Err(error) = session.pty.resize(cols as u16, rows as u16) {
-                    eprintln!("Terminal resize failed: {error}");
+                    warn!("Terminal resize failed: {error}");
                     continue;
                 }
                 session.emulator.resize(cols, rows);
@@ -193,7 +194,7 @@ impl App {
             return;
         };
         if let Err(error) = terminal.pty.write(&bytes) {
-            eprintln!("Terminal write failed: {error}");
+            warn!("Terminal write failed: {error}");
         }
         self.sync_terminal_project(cx);
     }
@@ -225,7 +226,7 @@ impl App {
         };
         if let Some(bytes) = terminal.emulator.encode_key(key, "", shift, control, alt) {
             if let Err(error) = terminal.pty.write(&bytes) {
-                eprintln!("Terminal write failed: {error}");
+                warn!("Terminal write failed: {error}");
             }
         }
         self.sync_terminal_project(cx);

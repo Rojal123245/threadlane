@@ -9,6 +9,7 @@ use crate::harness::{HookContext, HookRegistry};
 use crate::loop_engine::AbortOnDrop;
 use crate::tool_executor::ToolExecutor;
 use crate::types::{AgentToolCall, AgentToolDefinition, AgentToolResult, ToolExecutionMode};
+use log::{debug, warn};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
@@ -463,6 +464,11 @@ impl ToolDispatcher {
             agent_tool_call,
             context,
         } = call;
+        let start_time = std::time::Instant::now();
+        debug!(
+            "Tool execution started: '{}' (call_id: {})",
+            tc.function.name, tc.id
+        );
         let _ = context.event_tx.send(AgentEvent::ToolExecutionStart {
             tool_call_id: tc.id.clone(),
             name: tc.function.name.clone(),
@@ -493,6 +499,18 @@ impl ToolDispatcher {
             Ok(content) => (content, false),
             Err(error) => (format!("Tool executor error: {error}"), true),
         };
+        let duration_ms = start_time.elapsed().as_millis();
+        if is_error {
+            warn!(
+                "Tool execution failed: '{}' (call_id: {}) after {}ms: {}",
+                tc.function.name, tc.id, duration_ms, content
+            );
+        } else {
+            debug!(
+                "Tool execution completed: '{}' (call_id: {}) in {}ms",
+                tc.function.name, tc.id, duration_ms
+            );
+        }
         let mut final_result = AgentToolResult {
             tool_call_id: tc.id.clone(),
             name: tc.function.name.clone(),
@@ -514,7 +532,7 @@ impl ToolDispatcher {
         };
         let hook_run = context.hooks.run_after_tool(&hook_ctx).await;
         for failure in hook_run.failures {
-            eprintln!("after-tool hook {} failed: {}", failure.id, failure.message);
+            warn!("after-tool hook {} failed: {}", failure.id, failure.message);
         }
         if let Some(content) = hook_run.effect.override_content {
             final_result.content = content;

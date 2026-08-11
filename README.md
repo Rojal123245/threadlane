@@ -136,6 +136,9 @@ cargo run -p threadlane
 # Debug-level: harness event dispatch, revision bumps, chat row rebuilds.
 RUST_LOG=threadlane=debug cargo run -p threadlane
 
+# Combined debug & trace: app debug with core agent execution loop tracing.
+RUST_LOG=threadlane=debug,threadlane_agent=trace cargo run -p threadlane
+
 # Trace-level: every record, per-event lane/run_id, pre/post activity counts.
 RUST_LOG=threadlane=trace cargo run -p threadlane
 

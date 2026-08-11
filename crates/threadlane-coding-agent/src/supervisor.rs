@@ -4,6 +4,7 @@ use crate::coding_agent::{
 };
 use threadlane_wasi::packages::ExtensionScope;
 use serde::{Deserialize, Serialize};
+use log::error;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1079,7 +1080,7 @@ impl HarnessSupervisor {
             }
             if let Err(error) = agent.adopt_harness_run(&run_id_for_run) {
                 supervisor.update_task_status(&tid, TaskStatus::Failed);
-                eprintln!("failed to adopt supervisor harness run {run_id_for_run}: {error}");
+                error!("failed to adopt supervisor harness run {run_id_for_run}: {error}");
                 return;
             }
             let input_result = agent.handle_input(&prompt).await;

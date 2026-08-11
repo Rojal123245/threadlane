@@ -3273,6 +3273,7 @@ dependencies = [
  "directories",
  "futures",
  "libsqlite3-sys",
+ "log 0.4.33",
  "regex",
  "serde",
  "serde_json",
