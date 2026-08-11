@@ -140,6 +140,32 @@ mod tests {
             InterruptedSubagentRecoveryState::Complete
         ));
     }
+    #[test]
+    fn interrupted_subagent_sessions_report_has_interrupted_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("session.jsonl");
+        let mut journal = HarnessJournal::open(&session_file).unwrap();
+        let identity = journal
+            .start_subagent_lane("subagent-1:0", "inspect", None)
+            .unwrap();
+        journal
+            .tool_started_on_lane(
+                &identity.lane_name,
+                &identity.run_id,
+                "call-1",
+                "read_file",
+                serde_json::json!({"path": "README.md"}),
+            )
+            .unwrap();
+        drop(journal);
+
+        let mut options = coding_agent_options(dir.path().to_path_buf());
+        options.session_file = Some(session_file);
+
+        let agent = CodingAgent::new(options);
+
+        assert!(agent.has_interrupted_work());
+    }
 
     #[test]
     fn harness_journal_reuses_the_provisioned_assistant_result_id() {

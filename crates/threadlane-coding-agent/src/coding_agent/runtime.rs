@@ -1394,6 +1394,18 @@ impl CodingAgent {
     pub fn current_plan(&self) -> threadlane_agent::SessionPlan {
         self.plan_store.current()
     }
+    pub fn has_interrupted_work(&self) -> bool {
+        matches!(
+            self.interrupted_subagent_recovery,
+            InterruptedSubagentRecoveryState::Pending
+        )
+    }
+
+    pub async fn resume_interrupted_turn(&mut self) -> Result<usize, String> {
+        let count = self.recover_interrupted_subagent_lanes().await?;
+        self.repair_interrupted_history().await;
+        Ok(count)
+    }
 
     async fn dispatch_assistant_hook(&self, message: &AgentMessage) {
         let AgentMessage::Assistant {

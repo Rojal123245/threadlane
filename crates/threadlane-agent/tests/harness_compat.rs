@@ -197,6 +197,56 @@ fn jsonl_store_round_trips_v2_entries_and_records_without_rewriting_legacy_data(
 }
 
 #[test]
+fn jsonl_store_rebases_stale_sequence_inputs_from_concurrent_writers() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("chat.jsonl");
+    fs::write(
+        &path,
+        "{\"id\":\"root\",\"parent_id\":null,\"timestamp\":1,\"message\":{\"role\":\"user\",\"content\":\"root\"}}\n",
+    )
+    .unwrap();
+
+    let first_path = path.clone();
+    let first = std::thread::spawn(move || {
+        let mut store = JsonlStore::open(&first_path).unwrap();
+        store.append_record(Record::FactSet {
+            id: "fact-first".into(),
+            seq: 2,
+            lane: "main".into(),
+            timestamp: 2,
+            run_id: None,
+            key: "first".into(),
+            value: "one".into(),
+        })
+    });
+    let second_path = path.clone();
+    let second = std::thread::spawn(move || {
+        let mut store = JsonlStore::open(&second_path).unwrap();
+        store.append_record(Record::FactSet {
+            id: "fact-second".into(),
+            seq: 2,
+            lane: "main".into(),
+            timestamp: 2,
+            run_id: None,
+            key: "second".into(),
+            value: "two".into(),
+        })
+    });
+    first.join().unwrap().unwrap();
+    second.join().unwrap().unwrap();
+
+    let reopened = JsonlStore::open(&path).unwrap();
+    assert_eq!(
+        reopened
+            .records()
+            .iter()
+            .map(Record::seq)
+            .collect::<Vec<_>>(),
+        vec![2, 3]
+    );
+}
+
+#[test]
 fn jsonl_store_reads_v2_records_embedded_in_the_session_file() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("chat.jsonl");

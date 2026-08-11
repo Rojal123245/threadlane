@@ -235,7 +235,7 @@ impl SessionStore for JsonlStore {
         &self.records
     }
 
-    fn append_entry(&mut self, entry: Entry) -> Result<(), ReduceError> {
+    fn append_entry(&mut self, mut entry: Entry) -> Result<(), ReduceError> {
         if !self.writable {
             return Err(ReduceError::Storage("session store is read-only".into()));
         }
@@ -264,18 +264,17 @@ impl SessionStore for JsonlStore {
                 return Err(ReduceError::MissingParent(parent.clone()));
             }
         }
-        if entry.seq < self.next_seq() {
-            return Err(ReduceError::NonMonotonicSequence {
-                previous: self.next_seq() - 1,
-                current: entry.seq,
-            });
+        // Concurrent stores allocate optimistically; assign stale inputs while holding the gate.
+        let next_seq = self.next_seq();
+        if entry.seq < next_seq {
+            entry.seq = next_seq;
         }
         validate_candidate_entry(self, &entry)?;
         append_json_line(&self.path, &entry)?;
         self.reload_unlocked()
     }
 
-    fn append_record(&mut self, record: Record) -> Result<(), ReduceError> {
+    fn append_record(&mut self, mut record: Record) -> Result<(), ReduceError> {
         if !self.writable {
             return Err(ReduceError::Storage("session store is read-only".into()));
         }
@@ -297,11 +296,10 @@ impl SessionStore for JsonlStore {
         {
             return Err(ReduceError::DuplicateId(record.id().into()));
         }
-        if record.seq() < self.next_seq() {
-            return Err(ReduceError::NonMonotonicSequence {
-                previous: self.next_seq() - 1,
-                current: record.seq(),
-            });
+        // Concurrent stores allocate optimistically; assign stale inputs while holding the gate.
+        let next_seq = self.next_seq();
+        if record.seq() < next_seq {
+            record = record.with_seq(next_seq);
         }
         validate_candidate_record(self, &record)?;
         append_json_line(&self.path.with_extension("harness.jsonl"), &record)?;

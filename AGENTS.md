@@ -310,6 +310,7 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 - `CodingSessionHarness` (`coding_agent/harness.rs`) is the canonical session adapter. Production code must route foreground, `/task`, and model subagent durable operations through it. No production caller may directly append session or operation-log records outside this harness path.
 - Durable operations are intent-first: persist `OperationStarted`, `StepAttempt`, `ToolStarted`, and `QueueEnqueued` through `CodingSessionHarness`/`SessionAgent` before starting provider/tool work. `ToolExecutionStart` is observational only.
 - Child intent is durable before model/tool work; checkpoints use `WriteDeferred`; safe replay is automatic and unsafe interruption aborts. Child subagent lanes use the canonical `SessionAgent` path with deterministic identity derived from parent session + tool-call ID.
+- Concurrent child lanes can hold independently opened JSONL stores. Reload and rebase stale sequence inputs while holding the shared writer gate at the append boundary; sequence numbers allocated from an earlier snapshot are not authoritative.
 - Forward supervisor events through `GuiAgentEvent`; update `BackgroundTaskState` and widgets only on the Makepad event thread.
 - Threadlane extensions are compiled WASI modules with an exported
   `extension_info` manifest. The settings picker installs a `.wasm` into either

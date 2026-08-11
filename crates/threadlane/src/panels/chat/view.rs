@@ -378,7 +378,9 @@ fn display_rows_with_harness(
                     !matched[*index]
                         && item.task
                             == super::state::normalize_whitespace_bounded(&activity.task, 160)
-                        && item.agent == activity.agent
+                        && (activity.agent.is_empty()
+                            || activity.agent == "subagent"
+                            || item.agent == activity.agent)
                 })
             else {
                 continue;
@@ -1646,6 +1648,42 @@ mod tests {
         };
         assert_eq!(row.rail_items[0].status, "Cancelled");
         assert_eq!(row.preview, "Cancelled · 1 task");
+    }
+
+    #[test]
+    fn generic_harness_activity_is_merged_into_live_subagent_rail() {
+        let arguments = serde_json::json!({
+            "parallel": true,
+            "tasks": [{"agent": "scout", "task": "Inspect the repository"}]
+        })
+        .to_string();
+        let message = ChatMessage::Tool {
+            id: "delegate".into(),
+            name: "subagent".into(),
+            presentation: super::super::state::tool_presentation("subagent", "{}"),
+            arguments,
+            output: String::new(),
+            status: ToolStatus::Running,
+            result_preview: String::new(),
+            result_metadata: String::new(),
+            started_at: Instant::now(),
+        };
+        let activities = vec![super::super::state::HarnessActivity {
+            key: "subagent-0-0:0".into(),
+            task: "Inspect the repository".into(),
+            agent: "subagent".into(),
+            status: super::super::state::HarnessActivityStatus::Working,
+            detail: "Working".into(),
+        }];
+
+        let rows = display_rows_with_harness(&[message], None, "", &activities);
+
+        let [DisplayRow::SubagentTool(row)] = &rows[..] else {
+            panic!("expected one delegation row");
+        };
+        assert_eq!(row.rail_items.len(), 1);
+        assert_eq!(row.rail_items[0].key.as_deref(), Some("subagent-0-0:0"));
+        assert_eq!(row.rail_items[0].status, "Working");
     }
 
     #[test]

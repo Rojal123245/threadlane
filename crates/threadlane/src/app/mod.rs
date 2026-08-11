@@ -1053,8 +1053,10 @@ script_mod! {
                 flow: Down
                 body_walk: Walk{width: Fill, height: Fit}
                 margin: Inset{top: 4 bottom: 2 left: 20 right: 24}
-                opened: 0.0
-                animator +: { active: { default: @off } }
+                // Keep the active delegation rail visible; each child row remains
+                // independently collapsible.
+                opened: 1.0
+                animator +: { active: { default: @on } }
                 header := mod.components.ActivityHeader {
                     height: 26
                     title_lbl := Label { width: 92, text: "Agent tasks" }
@@ -2442,6 +2444,35 @@ script_mod! {
                                     }
                                 }
                             }
+                            chat_interrupted_banner := RoundedView {
+                                width: Fill
+                                height: Fit
+                                visible: false
+                                flow: Right
+                                spacing: 8
+                                padding: Inset{left: 12 right: 8 top: 8 bottom: 8}
+                                align: Align{y: 0.5}
+                                draw_bg +: {
+                                    color: theme.color_secondary
+                                    border_color: theme.color_warning
+                                    border_size: 1.0
+                                    border_radius: 8.0
+                                }
+
+                                chat_interrupted_text := mod.components.ClippedLabel {
+                                    width: Fill
+                                    height: Fit
+                                    text: "Turn interrupted mid-execution. Safe replay checkpoints available."
+                                    draw_text +: {
+                                        color: theme.color_warning
+                                        text_style +: { font_size: 10.0 }
+                                    }
+                                }
+
+                                btn_resume_turn := mod.components.ComposerChip {
+                                    text: "Resume Turn"
+                                }
+                            }
 
                             queued_message_preview := RoundedView {
                                 width: Fill
@@ -3517,6 +3548,7 @@ enum UiStatus {
     Ready,
     Working,
     Error,
+    Interrupted,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -3675,6 +3707,14 @@ impl SessionRuntime {
         let plan = agent.current_plan();
         let work_handle = agent.work_handle();
         let cancellation = agent.cancellation_handle();
+        let (status, status_text) = if agent.has_interrupted_work() {
+            (
+                UiStatus::Interrupted,
+                "Turn interrupted • Safe replay checkpoints available".to_string(),
+            )
+        } else {
+            (UiStatus::Ready, String::new())
+        };
         Self {
             agent: Arc::new(tokio::sync::Mutex::new(agent)),
             cancellation,
@@ -3685,8 +3725,8 @@ impl SessionRuntime {
             terminal_generation_id: None,
             submitted_draft: None,
             submitted_attachments: None,
-            status: UiStatus::Ready,
-            status_text: String::new(),
+            status,
+            status_text,
             model,
             reasoning_effort,
             plan,
@@ -5013,6 +5053,35 @@ impl MatchEvent for App {
                 self.stop_active_generation(cx);
                 // Dispatch the pending message as a fresh prompt.
                 self.dispatch_input(cx, text, InputOrigin::Composer);
+            }
+        }
+        if self.ui.button(cx, ids!(btn_resume_turn)).clicked(actions) {
+            if let Some(key) = self.workspace_state.active_key().cloned() {
+                if let Some(runtime) = self.session_runtimes.get(&key) {
+                    let agent_arc = runtime.agent.clone();
+                    let tx = self.tx.clone();
+                    self.set_session_status(cx, &key, UiStatus::Working, "Resuming turn...");
+                    let key_clone = key.clone();
+                    tokio::spawn(async move {
+                        let mut agent = agent_arc.lock().await;
+                        match agent.resume_interrupted_turn().await {
+                            Ok(recovered) => {
+                                eprintln!("Resumed turn: recovered {} subagent lanes", recovered);
+                                if let Some(tx) = &tx {
+                                    let _ = tx.send(GuiAgentEvent::GenerationFinished {
+                                        generation_id: 0,
+                                        work_dir: key_clone.work_dir.clone(),
+                                        session_id: key_clone.session_id.clone(),
+                                    });
+                                    SignalToUI::set_ui_signal();
+                                }
+                            }
+                            Err(error) => {
+                                eprintln!("Turn resumption error: {}", error);
+                            }
+                        }
+                    });
+                }
             }
         }
     }
@@ -8086,6 +8155,7 @@ impl App {
             UiStatus::Ready => ComposerStatus::Ready,
             UiStatus::Working => ComposerStatus::Working,
             UiStatus::Error => ComposerStatus::Error,
+            UiStatus::Interrupted => ComposerStatus::Interrupted,
         };
         self.composer_state.set_status(composer_status, text);
         self.ui
@@ -8098,6 +8168,13 @@ impl App {
             .widget(cx, ids!(chat_working_indicator))
             .set_visible(cx, working);
         self.ui.widget(cx, ids!(chat_working_indicator)).redraw(cx);
+
+        let interrupted = status == UiStatus::Interrupted;
+        self.ui
+            .widget(cx, ids!(chat_interrupted_banner))
+            .set_visible(cx, interrupted);
+        self.ui.widget(cx, ids!(chat_interrupted_banner)).redraw(cx);
+
         self.apply_composer_presentation(cx);
     }
 

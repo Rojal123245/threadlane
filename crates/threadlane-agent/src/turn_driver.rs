@@ -125,6 +125,8 @@ impl<'a> TurnDriver<'a> {
             let (stream_tx, mut stream_rx) = mpsc::channel(100);
             let client = self.provider_client.clone();
             let pc_key = self.prompt_cache_key.clone();
+            let tool_definitions = self.tool_dispatcher.configured_tool_definitions();
+            let payload_cache_key = pc_key.clone();
 
             let payload_source = PayloadSource::lazy(model, {
                 let turn_clone = self.turn.clone();
@@ -132,9 +134,16 @@ impl<'a> TurnDriver<'a> {
                 move |format| {
                     let turn = turn_clone.clone();
                     let router = router.clone();
+                    let tool_definitions = tool_definitions.clone();
+                    let prompt_cache_key = payload_cache_key.clone();
                     Box::pin(async move {
                         let turn = turn.lock().await;
-                        router.build_payload(format, &turn, &[], None)
+                        router.build_payload(
+                            format,
+                            &turn,
+                            &tool_definitions,
+                            prompt_cache_key.as_deref(),
+                        )
                     })
                 }
             });
@@ -203,6 +212,25 @@ impl<'a> TurnDriver<'a> {
                         return;
                     }
                 }
+            }
+
+            if current_text.trim().is_empty() && captured_tool_calls.is_empty() {
+                let error = match provider_step.finish() {
+                    Ok(_) => {
+                        let phase = if turn_number > 1 {
+                            " after tool execution"
+                        } else {
+                            ""
+                        };
+                        format!("Provider returned an empty response{phase} (turn {turn_number})")
+                    }
+                    Err(error) => format!(
+                        "Provider stream ended without a final response (turn {turn_number}): {error}"
+                    ),
+                };
+                log::warn!("{error}");
+                self.emit_event(AgentEvent::AgentError { error });
+                return;
             }
 
             // Record assistant message in turn state.
