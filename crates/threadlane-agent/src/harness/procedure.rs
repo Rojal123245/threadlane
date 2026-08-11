@@ -232,13 +232,19 @@ impl AssistantAttemptProcedure {
             })
             .unwrap_or_else(|| current_attempt(store, run_id));
         let seq = next_seq_with_effects(store, effects);
-        if !store.records().iter().any(|record| {
-            matches!(record, Record::StepAttempt { run_id: record_run_id, result_entry_id: result, .. } if record_run_id == run_id && result == result_entry_id)
-        }) {
+        let step_id = format!("attempt-{run_id}-{attempt}");
+        // Guard on the record id, not (run_id, result_entry_id): two
+        // different result entries that happen to share the same attempt
+        // number would otherwise produce colliding ids.
+        if !store
+            .records()
+            .iter()
+            .any(|record| matches!(record, Record::StepAttempt { id, .. } if id == &step_id))
+        {
             effects.park(EffectAction::AppendRecord {
                 id: format!("assistant-attempt-action-{run_id}-{attempt}"),
                 record: Record::StepAttempt {
-                    id: format!("attempt-{run_id}-{attempt}"),
+                    id: step_id,
                     seq,
                     lane: lane.name.clone(),
                     timestamp: seq,
@@ -641,7 +647,7 @@ impl NoToolRun {
             seq += 1;
         }
         if !store.records().iter().any(|record| {
-            matches!(record, Record::StepAttempt { run_id: id, result_entry_id, .. } if id == run_id && result_entry_id == &assistant_id)
+            matches!(record, Record::StepAttempt { id, .. } if id == &format!("attempt-{run_id}"))
         }) {
             effects.park(EffectAction::AppendRecord {
                 id: format!("record-{run_id}-attempt"),
@@ -745,14 +751,18 @@ impl NoToolRun {
         }
         let summary_id = format!("navigation-{run_id}-summary");
         if let Some(summary) = summary {
-            let attempt_exists = store.records().iter().any(|record| {
-                matches!(record, Record::StepAttempt { run_id: record_run_id, result_entry_id, .. } if record_run_id == run_id && result_entry_id == &summary_id)
-            });
+            let nav_attempt_id = format!("navigation-attempt-{run_id}");
+            // Guard on the record id, not (run_id, result_entry_id): a
+            // second navigation summary for the same run would otherwise
+            // collide.
+            let attempt_exists = store.records().iter().any(
+                |record| matches!(record, Record::StepAttempt { id, .. } if id == &nav_attempt_id),
+            );
             if !attempt_exists {
                 effects.park(EffectAction::AppendRecord {
                     id: format!("navigation-attempt-action-{run_id}"),
                     record: Record::StepAttempt {
-                        id: format!("navigation-attempt-{run_id}"),
+                        id: nav_attempt_id,
                         seq,
                         lane: lane_name.into(),
                         timestamp: seq,
@@ -2244,7 +2254,6 @@ fn open_lane<S: SessionStore>(
         .ok_or_else(|| ProcedureError::Invalid("operation is not open".into()))?;
     Ok(lane.clone())
 }
-
 
 fn current_attempt<S: SessionStore>(store: &S, run_id: &str) -> u32 {
     highest_attempt(store, run_id).max(1)

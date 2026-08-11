@@ -28,16 +28,14 @@ pub use events::{AgentEvent, HarnessMetrics, SubagentRecoveryStatus};
 pub use harness::{
     LaneQueue, OperationOutcome, QueueKind, Record, SteerItem, SteerPriority, ToolReplaySafety,
 };
-pub use loop_engine::{
-    repair_interrupted_tool_turn, AssistantMessageRecorder, ProviderHookRecorder,
-    ProviderUsageRecorder, ToolCompletionRecorder, ToolIntentRecorder,
-};
+pub use loop_engine::repair_interrupted_tool_turn;
 pub use op_log::{
     has_open_subagent_lanes, interrupted_subagent_lanes, InterruptedSubagentLane, RecoveryResult,
 };
 pub use provider::{
-    ChatCompletionsAdapter, CodexResponsesAdapter, ProviderAdapter, ProviderMessages,
-    ProviderRouter,
+    AssistantMessageRecorder, ChatCompletionsAdapter, CodexResponsesAdapter, ProviderAdapter,
+    ProviderDiscardedUsageRecorder, ProviderHookRecorder, ProviderMessages, ProviderRouter,
+    ProviderUsageRecorder, StreamingStateRecorder, ToolCompletionRecorder, ToolIntentRecorder,
 };
 pub use rules::*;
 pub use session_tree::{SessionNode, SessionTree};

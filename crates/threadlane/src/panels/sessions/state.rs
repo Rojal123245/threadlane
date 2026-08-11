@@ -500,9 +500,17 @@ pub fn is_session_working(work_dir: &Path, session_id: &str) -> bool {
         .is_some_and(|sessions| sessions.contains(session_id))
 }
 
-pub fn set_session_health(work_dir: &Path, session_id: &str, health: SessionHealth) {
+pub fn set_session_health(work_dir: &Path, session_id: &str, health: SessionHealth) -> bool {
     let mut data = SESSIONS_DATA.write().unwrap();
     let work_dir = canonicalize_path(work_dir);
+    let previous = data
+        .session_health
+        .get(&work_dir)
+        .and_then(|sessions| sessions.get(session_id))
+        .copied();
+    if previous == Some(health) {
+        return false;
+    }
     if health == SessionHealth::Healthy {
         let remove_project = data
             .session_health
@@ -520,6 +528,7 @@ pub fn set_session_health(work_dir: &Path, session_id: &str, health: SessionHeal
             .or_default()
             .insert(session_id.into(), health);
     }
+    true
 }
 
 pub fn set_session_context_target(entry: Option<&SessionEntry>) {

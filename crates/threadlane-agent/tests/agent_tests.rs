@@ -56,7 +56,7 @@ fn test_session_tree_persistence_and_branching() {
 
 #[test]
 fn test_multimodal_provider_payloads() {
-    use threadlane_agent::loop_engine::{convert_to_codex_llm, convert_to_llm};
+    use threadlane_agent::provider::{convert_to_codex_llm, convert_to_llm};
 
     let image = ImageAttachment {
         display_name: "img1".to_string(),
@@ -168,7 +168,7 @@ fn completed_tool_turn_is_preserved_for_provider_replay() {
 
 #[test]
 fn test_convert_to_codex_llm_structure() {
-    use threadlane_agent::loop_engine::convert_to_codex_llm;
+    use threadlane_agent::provider::convert_to_codex_llm;
 
     let messages = vec![
         AgentMessage::System {

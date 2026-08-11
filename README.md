@@ -122,6 +122,39 @@ Directories, non-UTF-8 files, and files over 2 MB are refused with a message
 rather than opened, so a stray click on a build artifact cannot stall the UI.
 Saving writes the buffer back to the file and refreshes the Git panel.
 
+### Structured logging
+
+Threadlane uses the [`log`](https://crates.io/crates/log) crate with
+[`env_logger`](https://crates.io/crates/env_logger) for structured console
+output. The logger initializes on first frame with a default filter of `info`;
+set `RUST_LOG` to control verbosity at runtime.
+
+```bash
+# Default (info-level lifecycle events).
+cargo run -p threadlane
+
+# Debug-level: harness event dispatch, revision bumps, chat row rebuilds.
+RUST_LOG=threadlane=debug cargo run -p threadlane
+
+# Trace-level: every record, per-event lane/run_id, pre/post activity counts.
+RUST_LOG=threadlane=trace cargo run -p threadlane
+
+# Focus on the app shell only.
+RUST_LOG=threadlane::app=debug cargo run -p threadlane
+
+# Focus on agent runtime (subagent lifecycle, harness starts).
+RUST_LOG=threadlane_coding_agent=debug cargo run -p threadlane
+```
+
+| Level | What you'll see |
+| --- | --- |
+| `info` | Session creation/load, harness watch setup, subagent batch starts/completions, logger init |
+| `debug` | `RecordCommitted` dispatch, `HarnessSnapshot` receipt, revision bumps + redraws, chat row rebuilds, dropped events |
+| `trace` | Per-record `apply_harness_record` calls, per-tick harness poll event counts, lane/run_id on every event |
+| `warn` | Missing session file, harness unavailable, subagent start failures |
+
+All log output goes to stderr and includes millisecond timestamps.
+
 ### Git and GitHub actions
 
 For an attached Git project, the composer shows the current branch with checkout and new-branch actions in its dropdown. The resizable right-side Git panel groups staged and unstaged files, supports per-file selection and scrollable diff previews, and exposes only applicable staging, commit, pull, push, and GitHub pull-request actions. The Generate action can use the relevant Git diff and the active model to suggest a commit subject without changing the chat or committing automatically. Commit messages can be submitted with Enter, and Git operation feedback appears inline in the panel. Local operations use the configured `git` executable and its credential helpers. The GitHub pull-request action opens a compare URL in the browser; complete the pull-request form interactively on GitHub, with no `GITHUB_TOKEN` required by Threadlane.

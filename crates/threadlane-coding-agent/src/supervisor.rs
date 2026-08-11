@@ -8,8 +8,11 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use threadlane_agent::harness::HarnessEvent;
 use threadlane_agent::{AgentEvent, AgentMessage, LaneQueue, QueueKind, TokenUsage};
 use tokio::sync::broadcast;
+use tokio::time::{interval, MissedTickBehavior};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskStatus {
@@ -115,6 +118,10 @@ pub struct TaskAgentEvent {
     project_id: String,
     lane: Option<String>,
     event: AgentEvent,
+    /// When set, this event carries a harness event instead of a legacy
+    /// AgentEvent. The `event` field is a sentinel (AgentStart) and the
+    /// UI should use `harness_event` for activity updates.
+    pub harness_event: Option<HarnessEvent>,
 }
 
 impl TaskAgentEvent {
@@ -132,6 +139,10 @@ impl TaskAgentEvent {
 
     pub fn into_parts(self) -> (String, String, AgentEvent) {
         (self.task_id, self.project_id, self.event)
+    }
+
+    pub fn harness_event(&self) -> Option<&HarnessEvent> {
+        self.harness_event.as_ref()
     }
 }
 
@@ -661,8 +672,9 @@ impl HarnessSupervisor {
         opts.work_dir = project.path.clone();
         opts.session_file = Some(final_session_file.clone());
 
-        let coding_agent = CodingAgent::new(opts);
+        let mut coding_agent = CodingAgent::new(opts);
         let rx = coding_agent.subscribe();
+        let harness_watch = coding_agent.watch_harness().ok().flatten();
 
         let agent_arc = Arc::new(tokio::sync::Mutex::new(coding_agent));
         let task_record = TaskRecord {
@@ -717,6 +729,11 @@ impl HarnessSupervisor {
             .map(|stem| stem.to_string_lossy().into_owned())
             .unwrap_or_else(|| tid.clone());
         let event_session_file = final_session_file.clone();
+
+        // Clones for the harness listener spawn below.
+        let harness_event_tx = event_tx.clone();
+        let harness_tid = tid.clone();
+        let harness_pid = pid.clone();
         tokio::spawn(async move {
             let mut sub_rx = rx;
             while let Ok(evt) = sub_rx.recv().await {
@@ -751,9 +768,36 @@ impl HarnessSupervisor {
                     project_id: pid.clone(),
                     lane: Some("main".into()),
                     event: evt,
+                    harness_event: None,
                 });
             }
         });
+
+        // Spawn a second listener for harness events, forwarding them to the UI
+        // so background task subagent operations update chat activities in real time.
+        if let Some(mut watch) = harness_watch {
+            tokio::spawn(async move {
+                let mut tick = interval(Duration::from_millis(50));
+                tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+                loop {
+                    tick.tick().await;
+                    match watch.poll() {
+                        Ok(events) => {
+                            for event in events {
+                                let _ = harness_event_tx.send(TaskAgentEvent {
+                                    task_id: harness_tid.clone(),
+                                    project_id: harness_pid.clone(),
+                                    lane: None,
+                                    event: AgentEvent::AgentStart,
+                                    harness_event: Some(event),
+                                });
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
 
         Ok(task_id)
     }

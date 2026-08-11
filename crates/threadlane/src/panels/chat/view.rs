@@ -910,6 +910,12 @@ impl Widget for ChatList {
                 self.cached_base_rows =
                     display_rows_with_harness(&data.messages, None, "", &data.harness_activities);
                 self.cached_base_revision = data.revision;
+                ::log::trace!(
+                    "chat view: rebuilt base rows: {} msgs + {} activities → {} rows",
+                    data.messages.len(),
+                    data.harness_activities.len(),
+                    self.cached_base_rows.len()
+                );
             }
 
             if data.streaming_kind == Some(StreamingKind::Assistant) {

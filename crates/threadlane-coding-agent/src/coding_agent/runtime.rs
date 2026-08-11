@@ -3237,7 +3237,17 @@ async fn run_subagents_with_context(
     context: SubagentRunContext,
 ) -> Result<(String, Vec<AgentMessage>, Vec<CompletedSubagentLane>), String> {
     let run_id = NEXT_SUBAGENT_UI_RUN_ID.fetch_add(1, Ordering::Relaxed);
+    log::info!(
+        "subagent batch run_id={}: {} task(s), parallel={parallel}",
+        run_id,
+        tasks.len()
+    );
     for (task_index, task) in tasks.iter().enumerate() {
+        log::debug!(
+            "subagent queued run_id={run_id} task_index={task_index} agent={} task={}",
+            task.agent,
+            task.task
+        );
         let _ = context.parent_event_tx.send(AgentEvent::SubagentQueued {
             run_id,
             task_index,
@@ -3305,14 +3315,35 @@ async fn run_subagents_with_context(
             let start = match context.session_file.as_deref() {
                 Some(path) => {
                     let mut journal = HarnessJournal::open(path)?;
-                    journal.start_subagent_lane(&lane_hint, &task.task, parent_leaf_id.as_deref())
+                    let result = journal.start_subagent_lane(
+                        &lane_hint,
+                        &task.task,
+                        parent_leaf_id.as_deref(),
+                    );
+                    match &result {
+                        Ok(identity) => log::info!(
+                            "subagent lane started: run_id={} lane={}",
+                            identity.run_id,
+                            identity.lane_name
+                        ),
+                        Err(e) => log::warn!(
+                            "subagent lane start failed: hint={lane_hint} error={}",
+                            e.error
+                        ),
+                    }
+                    result
                 }
-                None => Ok(SubagentLaneIdentity {
-                    lane_name: lane_hint.clone(),
-                    run_id: lane_hint.clone(),
-                    source_leaf_id: parent_leaf_id.clone(),
-                    started_seq: 0,
-                }),
+                None => {
+                    log::warn!(
+                        "subagent lane={lane_hint}: no session_file, running without harness"
+                    );
+                    Ok(SubagentLaneIdentity {
+                        lane_name: lane_hint.clone(),
+                        run_id: lane_hint.clone(),
+                        source_leaf_id: parent_leaf_id.clone(),
+                        started_seq: 0,
+                    })
+                }
             };
             let result = match start {
                 Ok(identity) => {
@@ -3357,6 +3388,11 @@ async fn run_subagents_with_context(
                 Ok(result) => (false, result.error.clone()),
                 Err(error) => (false, Some(error.clone())),
             };
+            log::info!(
+                "subagent finished run_id={} journal_run_id={} succeeded={succeeded}",
+                run_id,
+                identity.run_id
+            );
             let _ = event_tx.send(AgentEvent::SubagentFinished {
                 run_id,
                 task_index,

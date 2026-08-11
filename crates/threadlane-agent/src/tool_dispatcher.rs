@@ -23,9 +23,9 @@ use tokio::sync::broadcast;
 use futures::FutureExt;
 
 /// Callback invoked after a tool intent is recorded and before execution.
-pub type ToolIntentRecorder = crate::loop_engine::ToolIntentRecorder;
+pub type ToolIntentRecorder = crate::provider::ToolIntentRecorder;
 /// Callback invoked after tool execution completes.
-pub type ToolCompletionRecorder = crate::loop_engine::ToolCompletionRecorder;
+pub type ToolCompletionRecorder = crate::provider::ToolCompletionRecorder;
 
 #[derive(Clone)]
 struct ToolExecutorRoute {

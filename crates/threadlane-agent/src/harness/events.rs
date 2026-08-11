@@ -154,6 +154,25 @@ impl HarnessEvent {
             event,
         })
     }
+
+    /// Short label for logging the payload variant.
+    pub fn payload_variant(&self) -> &'static str {
+        match &self.payload {
+            EventPayload::EntryCommitted(_) => "EntryCommitted",
+            EventPayload::RecordCommitted(r) => match r {
+                Record::OperationStarted { .. } => "OperationStarted",
+                Record::OperationFinished { .. } => "OperationFinished",
+                Record::StepAttempt { .. } => "StepAttempt",
+                Record::ToolStarted { .. } => "ToolStarted",
+                Record::AbortRequested { .. } => "AbortRequested",
+                Record::LaneMoved { .. } => "LaneMoved",
+                _ => "Record(…)",
+            },
+            EventPayload::Fault(_) => "Fault",
+            EventPayload::Streaming(_) => "Streaming",
+            EventPayload::Agent(_) => "Agent",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

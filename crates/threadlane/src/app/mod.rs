@@ -22,13 +22,16 @@ use crate::components::task_sidebar::{
 };
 use crate::components::terminal_panel::ProjectTerminalWidgetRefExt;
 use crate::git::GitStatus;
-use crate::panels::chat::state::{reduce_harness_activity, reduce_harness_event, HarnessActivity};
+use crate::panels::chat::state::{
+    apply_harness_record, reduce_harness_activity, reduce_harness_event, HarnessActivity,
+};
 use crate::panels::chat::{
     accepts_generation_event, concise_status, draft_for_cancellation, submitted_draft, ChatList,
     ChatListWidgetRefExt, ComposerState, ComposerStatus, GenerationEvent, StarterPromptAction,
     SubagentRail, SubagentRailAction, ToolFoldHeader,
 };
 use crate::panels::command_palette::*;
+use ::log::{debug, info, trace, warn};
 use terminal_handlers::canonical_terminal_work_dir;
 #[cfg(test)]
 use terminal_handlers::truncate_terminal_output;
@@ -99,7 +102,6 @@ const RIGHT_SIDEBAR_MAX_WIDTH: f64 = 520.0;
 const RIGHT_SIDEBAR_MIN_MAIN_WIDTH: f64 = 360.0;
 const LEFT_SIDEBAR_WIDTH: f64 = 250.0;
 const DEFAULT_CONTEXT_WINDOW: u32 = 258_000;
-const CONTEXT_USAGE_FACT: &str = "context_window_usage";
 
 fn left_sidebar_splitter_align(open: bool) -> SplitterAlign {
     SplitterAlign::FromA(if open { LEFT_SIDEBAR_WIDTH } else { 0.0 })
@@ -123,6 +125,18 @@ fn normalize_generated_commit_message(raw: &str) -> String {
 
 fn context_window_limit(_model: &str) -> u32 {
     DEFAULT_CONTEXT_WINDOW
+}
+
+/// Reads the total accumulated token usage from harness `Usage` records.
+fn harness_total_usage(session_file: &Path) -> Option<TokenUsage> {
+    let store = JsonlStore::open_read_only(session_file).ok()?;
+    let mut total = TokenUsage::default();
+    for record in store.records() {
+        if let HarnessRecord::Usage { usage, .. } = record {
+            total.accumulate(usage);
+        }
+    }
+    (total.total_tokens > 0).then_some(total)
 }
 
 fn restore_harness_activities(session_file: &Path) -> Vec<HarnessActivity> {
@@ -471,87 +485,6 @@ fn harness_lane_activity(
     detail
 }
 
-/// Translates a harness [`HarnessRecord`] from a [`RecordCommitted`] event into
-/// a [`HarnessActivity`] update.  Returns `None` when the record does not
-/// change the visible activity list (e.g. internal step attempts, usage records).
-fn apply_harness_record(
-    record: &HarnessRecord,
-    activities: &mut Vec<HarnessActivity>,
-    entries: &[threadlane_agent::harness::Entry],
-) {
-    use crate::panels::chat::state::{reduce_harness_activity, HarnessActivityStatus};
-    match record {
-        HarnessRecord::OperationStarted { id, lane, .. } if lane != "main" => {
-            let task = entries
-                .iter()
-                .filter(|e| e.lane == *lane)
-                .find_map(|e| match &e.message {
-                    threadlane_agent::AgentMessage::User { content }
-                    | threadlane_agent::AgentMessage::UserWithImages { content, .. } => {
-                        Some(content.clone())
-                    }
-                    _ => None,
-                })
-                .filter(|t| !t.trim().is_empty())
-                .unwrap_or_else(|| format!("Subagent task ({lane})"));
-            reduce_harness_activity(
-                activities,
-                HarnessActivity {
-                    key: id.clone(),
-                    task,
-                    agent: "subagent".into(),
-                    status: HarnessActivityStatus::Working,
-                    detail: "Working".into(),
-                },
-            );
-        }
-        HarnessRecord::OperationFinished {
-            run_id,
-            outcome,
-            error,
-            ..
-        } => {
-            let (status, detail) = match outcome {
-                OperationOutcome::Completed => (
-                    HarnessActivityStatus::Recovered,
-                    error.clone().unwrap_or_else(|| "Completed".into()),
-                ),
-                OperationOutcome::Aborted => (
-                    HarnessActivityStatus::Cancelled,
-                    error.clone().unwrap_or_else(|| "Cancelled".into()),
-                ),
-                OperationOutcome::Failed | OperationOutcome::Declined => (
-                    HarnessActivityStatus::Aborted,
-                    error.clone().unwrap_or_else(|| "Aborted".into()),
-                ),
-            };
-            reduce_harness_activity(
-                activities,
-                HarnessActivity {
-                    key: run_id.clone(),
-                    task: String::new(),
-                    agent: String::new(),
-                    status,
-                    detail,
-                },
-            );
-        }
-        HarnessRecord::AbortRequested { run_id, .. } => {
-            reduce_harness_activity(
-                activities,
-                HarnessActivity {
-                    key: format!("main-{run_id}"),
-                    task: "Foreground operation".into(),
-                    agent: "main".into(),
-                    status: HarnessActivityStatus::Aborted,
-                    detail: "Abort requested".into(),
-                },
-            );
-        }
-        _ => {}
-    }
-}
-
 fn format_token_count(tokens: u32) -> String {
     if tokens >= 1_000_000 {
         format!("{:.1}m", tokens as f32 / 1_000_000.0)
@@ -602,11 +535,28 @@ fn set_live_main_activity(
     chat: &mut crate::panels::chat::state::ChatData,
     detail: impl Into<String>,
 ) {
+    let detail = detail.into();
+    // Only bump revision when the detail actually changes — streaming
+    // events fire every ~50ms and would otherwise trigger a full chat
+    // rebuild on every frame.
+    let prev_detail = chat
+        .harness_activities
+        .iter()
+        .find(|a| a.key == "main-live")
+        .map(|a| a.detail.clone());
     crate::panels::chat::state::reduce_harness_activity(
         &mut chat.harness_activities,
         live_main_activity(detail),
     );
-    chat.revision = chat.revision.wrapping_add(1);
+    if prev_detail.as_deref()
+        != chat
+            .harness_activities
+            .iter()
+            .find(|a| a.key == "main-live")
+            .map(|a| a.detail.as_str())
+    {
+        chat.revision = chat.revision.wrapping_add(1);
+    }
 }
 
 fn clear_live_main_activity(chat: &mut crate::panels::chat::state::ChatData) {
@@ -624,6 +574,9 @@ fn background_task_harness_activity(
     event: &AgentEvent,
 ) -> Option<HarnessActivity> {
     use crate::panels::chat::state::HarnessActivityStatus;
+    // Subagent lifecycle (SubagentQueued/Started/Finished/Recovery) is
+    // now handled by harness RecordCommitted events forwarded from the
+    // supervisor; this function only maps the task's own progress events.
     let (status, detail) = match event {
         AgentEvent::AgentStart => (
             HarnessActivityStatus::Working,
@@ -649,30 +602,11 @@ fn background_task_harness_activity(
             HarnessActivityStatus::Working,
             format!("Using tool: {name}"),
         ),
-        AgentEvent::SubagentQueued { .. } => {
-            (HarnessActivityStatus::Working, "Delegating subtask".into())
-        }
-        AgentEvent::SubagentStarted { .. } => {
-            (HarnessActivityStatus::Working, "Subtasks running".into())
-        }
-        AgentEvent::SubagentFinished {
-            succeeded, error, ..
-        } => {
-            if *succeeded {
-                (HarnessActivityStatus::Working, "Subtasks completed".into())
-            } else {
-                (
-                    HarnessActivityStatus::Working,
-                    error.as_deref().unwrap_or("Subtask issue").into(),
-                )
-            }
-        }
-        AgentEvent::SubagentRecovery { detail, .. } => {
-            let detail_text = detail
-                .clone()
-                .unwrap_or_else(|| "Recovery in progress".into());
-            (HarnessActivityStatus::Working, detail_text)
-        }
+        // Subagent events handled by harness RecordCommitted.
+        AgentEvent::SubagentQueued { .. }
+        | AgentEvent::SubagentStarted { .. }
+        | AgentEvent::SubagentFinished { .. }
+        | AgentEvent::SubagentRecovery { .. } => return None,
         _ => return None,
     };
     Some(HarnessActivity {
@@ -4126,10 +4060,9 @@ impl MatchEvent for App {
             .active_key()
             .cloned()
             .unwrap_or_else(|| SessionKey::project_draft(work_dir));
-        let latest_usage = coding_agent
-            .session_tree
-            .get_fact(CONTEXT_USAGE_FACT)
-            .and_then(|value| serde_json::from_str::<TokenUsage>(value).ok());
+        let latest_usage = initial_entry
+            .as_ref()
+            .and_then(|entry| harness_total_usage(&entry.session_file));
         if let Some(entry) = initial_entry {
             let messages = coding_agent.session_tree.get_active_branch_messages();
             let session_file = entry.session_file.clone();
@@ -4138,6 +4071,12 @@ impl MatchEvent for App {
                 .workspace_mut(SessionKey::new(entry.work_dir.clone(), entry.id.clone()));
             workspace.chat.replace_from_agent_messages(&messages);
             workspace.chat.harness_activities = restore_harness_activities(&session_file);
+            info!(
+                "loaded session {}: {} messages, {} harness activities",
+                entry.id,
+                messages.len(),
+                workspace.chat.harness_activities.len()
+            );
             set_session_health(
                 &entry.work_dir,
                 &entry.id,
@@ -5090,6 +5029,16 @@ impl AppMain for App {
         self::script_mod(vm)
     }
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        // Initialize structured logging once. Set RUST_LOG for verbosity:
+        //   RUST_LOG=threadlane=debug cargo run -p threadlane
+        //   RUST_LOG=threadlane=trace cargo run -p threadlane
+        static INIT_LOGGER: std::sync::Once = std::sync::Once::new();
+        INIT_LOGGER.call_once(|| {
+            env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+                .format_timestamp_millis()
+                .init();
+            ::log::info!("Threadlane logging initialized");
+        });
         // Times the whole pass, including the early return below. No-op unless
         // THREADLANE_PERF=1.
         let _frame = crate::perf::frame();
@@ -5262,6 +5211,27 @@ fn format_capabilities_summary(skills: &[SkillMetadata], agents: &[AgentConfig])
         }
     }
     summary
+}
+
+fn agent_event_label(event: &AgentEvent) -> &'static str {
+    match event {
+        AgentEvent::AgentStart => "AgentStart",
+        AgentEvent::AgentEnd { .. } => "AgentEnd",
+        AgentEvent::AgentError { .. } => "AgentError",
+        AgentEvent::MessageStart { .. } => "MessageStart",
+        AgentEvent::MessageUpdate { .. } => "MessageUpdate",
+        AgentEvent::MessageEnd { .. } => "MessageEnd",
+        AgentEvent::ToolExecutionStart { .. } => "ToolExecutionStart",
+        AgentEvent::ToolExecutionUpdate { .. } => "ToolExecutionUpdate",
+        AgentEvent::ToolExecutionEnd { .. } => "ToolExecutionEnd",
+        AgentEvent::TurnStart { .. } => "TurnStart",
+        AgentEvent::TurnEnd { .. } => "TurnEnd",
+        AgentEvent::SubagentQueued { .. } => "SubagentQueued",
+        AgentEvent::SubagentStarted { .. } => "SubagentStarted",
+        AgentEvent::SubagentFinished { .. } => "SubagentFinished",
+        AgentEvent::SubagentRecovery { .. } => "SubagentRecovery",
+        _ => "AgentEvent(…)",
+    }
 }
 
 impl App {
@@ -8306,10 +8276,7 @@ impl App {
             });
             let startup_error = agent.harness_error().map(str::to_owned);
             let model = agent.session_tree.model.clone().unwrap_or(model);
-            let latest_usage = agent
-                .session_tree
-                .get_fact(CONTEXT_USAGE_FACT)
-                .and_then(|value| serde_json::from_str::<TokenUsage>(value).ok());
+            let latest_usage = harness_total_usage(&entry.session_file);
             let messages = agent.session_tree.get_active_branch_messages();
             let mut runtime = SessionRuntime::new(agent, model, reasoning_effort);
             runtime.latest_usage = latest_usage;
@@ -8491,6 +8458,11 @@ impl App {
                 cx.redraw_all();
                 return;
             };
+            info!(
+                "created session {} at {}",
+                entry.id,
+                entry.session_file.display()
+            );
             self.refresh_registered_sessions();
             set_active_session(&entry.work_dir, &entry.id);
             let key = SessionKey::new(entry.work_dir.clone(), entry.id);
@@ -8626,6 +8598,16 @@ impl App {
             // forwarding scoped to the generation and preserves terminal order.
             let mut event_rx = agent_lock.subscribe();
             let mut harness_watch = agent_lock.watch_harness().ok().flatten();
+            match &harness_watch {
+                Some(_) => info!(
+                    "[{generation_id}] harness watch created for session {}",
+                    event_session_id
+                ),
+                None => warn!(
+                    "[{generation_id}] no harness available for session {} (session_file missing?)",
+                    event_session_id
+                ),
+            }
             let mut harness_tick = tokio::time::interval(tokio::time::Duration::from_millis(50));
             harness_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             if let Some(watch) = harness_watch.as_ref() {
@@ -8659,7 +8641,18 @@ impl App {
                     _ = harness_tick.tick() => {
                         if let Some(watch) = harness_watch.as_mut() {
                             if let Ok(events) = watch.poll() {
+                                let count = events.len();
+                                if count > 0 {
+                                    trace!(
+                                        "[{generation_id}] harness poll: {count} event(s)"
+                                    );
+                                }
                                 for event in events {
+                                    trace!(
+                                        "[{generation_id}] harness event: {} (lane={})",
+                                        event.payload_variant(),
+                                        event.lane.as_deref().unwrap_or("-")
+                                    );
                                     let _ = tx.send(GuiAgentEvent::HarnessEvent {
                                         generation_id,
                                         work_dir: event_work_dir.clone(),
@@ -8844,6 +8837,8 @@ impl App {
             .map(|(key, _)| key.clone())
             .or_else(|| self.workspace_state.active_key().cloned());
 
+        trace!("agent event: {}", agent_event_label(&event));
+
         match event {
             AgentEvent::AgentStart => {
                 if let Some(key) = target_key {
@@ -8965,13 +8960,6 @@ impl App {
                 }
                 if let Some(runtime) = self.session_runtimes.get_mut(&key) {
                     runtime.latest_usage = Some(usage.clone());
-                    let agent = runtime.agent.clone();
-                    get_runtime().spawn(async move {
-                        let mut agent = agent.lock().await;
-                        if let Ok(value) = serde_json::to_string(&usage) {
-                            let _ = agent.set_fact(CONTEXT_USAGE_FACT, &value);
-                        }
-                    });
                 }
                 self.sync_context_window(cx);
                 self.workspace_state
@@ -9082,19 +9070,27 @@ impl App {
                     self.sync_task_sidebar(cx);
                 }
             }
-            event @ (AgentEvent::SubagentQueued { .. }
-            | AgentEvent::SubagentStarted { .. }
-            | AgentEvent::SubagentFinished { .. }
-            | AgentEvent::SubagentRecovery { .. }) => {
+            // SubagentQueued fires before the harness operation starts, so
+            // we handle it here for immediate feedback.  SubagentStarted,
+            // SubagentFinished, and SubagentRecovery are handled by
+            // HarnessEvent::RecordCommitted via apply_harness_record.
+            AgentEvent::SubagentQueued {
+                run_id: _,
+                task_index: _,
+                agent: _,
+                task: _,
+            } => {
                 let Some(key) = target_key else { return };
-                let health = {
-                    let chat = &mut self.workspace_state.workspace_mut(key.clone()).chat;
-                    reduce_harness_event(chat, event);
-                    session_health(&chat.harness_activities)
-                };
-                set_session_health(&key.work_dir, &key.session_id, health);
-                self.ui.widget(cx, ids!(session_list)).redraw(cx);
+                let chat = &mut self.workspace_state.workspace_mut(key.clone()).chat;
+                reduce_harness_event(chat, event);
+                let health = session_health(&chat.harness_activities);
+                if set_session_health(&key.work_dir, &key.session_id, health) {
+                    self.ui.widget(cx, ids!(session_list)).redraw(cx);
+                }
             }
+            AgentEvent::SubagentStarted { .. }
+            | AgentEvent::SubagentFinished { .. }
+            | AgentEvent::SubagentRecovery { .. } => { /* harness events */ }
             AgentEvent::TurnStart { .. } | AgentEvent::MessageStart { .. } => {}
         }
     }
@@ -9181,6 +9177,13 @@ impl App {
                         .is_some_and(|active| active == work_dir)
                     {
                         self.request_git_status();
+                        // Refresh the file tree after generation — tools may
+                        // have created, modified, or deleted files.
+                        if let Some(mut tree) =
+                            self.ui.widget(cx, ids!(file_tree)).borrow_mut::<FileTree>()
+                        {
+                            tree.refresh(cx);
+                        }
                     }
                 }
 
@@ -9190,14 +9193,24 @@ impl App {
                     session_id,
                     event,
                 } => {
-                    let _ = event.id;
+                    let work_dir_display = work_dir.display().to_string();
                     let key = SessionKey::new(work_dir, session_id);
                     let is_current = self
                         .session_runtimes
                         .get(&key)
                         .and_then(|runtime| runtime.generation.as_ref())
                         .is_some_and(|generation| generation.id == generation_id);
+                    trace!(
+                        "HarnessEvent {} lane={} is_current={is_current}",
+                        event.payload_variant(),
+                        event.lane.as_deref().unwrap_or("-")
+                    );
                     if !is_current {
+                        debug!(
+                            "HarnessEvent dropped: generation {generation_id} is not current for {}/{}",
+                            work_dir_display,
+                            key.session_id
+                        );
                         continue;
                     }
                     if let EventPayload::Streaming(state) = &event.payload {
@@ -9211,9 +9224,29 @@ impl App {
                         self.ui.widget(cx, ids!(chat_list)).redraw(cx);
                         continue;
                     }
+                    // TurnDriver publishes agent events through the harness
+                    // event hub.  Forward them before we borrow workspace.
+                    if let EventPayload::Agent(agent_event) = &event.payload {
+                        self.handle_agent_event(
+                            cx,
+                            agent_event.clone(),
+                            Some((key.clone(), generation_id)),
+                        );
+                        continue;
+                    }
                     let workspace = self.workspace_state.workspace_mut(key.clone());
+                    let prev_activities_count = if matches!(
+                        &event.payload,
+                        EventPayload::RecordCommitted(_) | EventPayload::Fault(_)
+                    ) {
+                        Some(workspace.chat.harness_activities.len())
+                    } else {
+                        None
+                    };
                     match &event.payload {
                         EventPayload::RecordCommitted(record) => {
+                            let record_id = record.id().to_owned();
+                            let record_lane = record.lane().to_owned();
                             let path_for_entries = self
                                 .session_runtimes
                                 .get(&key)
@@ -9226,9 +9259,21 @@ impl App {
                                         store.entries(),
                                     );
                                 }
+                            } else {
+                                debug!(
+                                    "RecordCommitted {record_id}: no session_file for {}/{}",
+                                    key.work_dir.display(),
+                                    key.session_id
+                                );
                             }
+                            trace!(
+                                "RecordCommitted {record_id} lane={record_lane}: activities {}→{}",
+                                prev_activities_count.unwrap_or(0),
+                                workspace.chat.harness_activities.len()
+                            );
                         }
                         EventPayload::Fault(error) => {
+                            error!("harness fault (event_id={}): {error}", event.id);
                             reduce_harness_activity(
                                 &mut workspace.chat.harness_activities,
                                 HarnessActivity {
@@ -9246,9 +9291,21 @@ impl App {
                         // during live updates.
                         _ => {}
                     }
+                    let activities_changed = prev_activities_count
+                        .is_some_and(|prev| workspace.chat.harness_activities.len() != prev);
+                    if activities_changed {
+                        let new_rev = workspace.chat.revision.wrapping_add(1);
+                        workspace.chat.revision = new_rev;
+                        debug!(
+                            "bumped chat revision to {new_rev}, redrawing chat_list ({} activities)",
+                            workspace.chat.harness_activities.len()
+                        );
+                        self.ui.widget(cx, ids!(chat_list)).redraw(cx);
+                    }
                     let health = session_health(&workspace.chat.harness_activities);
-                    set_session_health(&key.work_dir, &key.session_id, health);
-                    self.ui.widget(cx, ids!(session_list)).redraw(cx);
+                    if set_session_health(&key.work_dir, &key.session_id, health) {
+                        self.ui.widget(cx, ids!(session_list)).redraw(cx);
+                    }
                 }
 
                 GuiAgentEvent::HarnessSnapshot {
@@ -9276,13 +9333,19 @@ impl App {
                     }
                     let mut activities = harness_activities_from_snapshot(&snapshot);
                     suppress_live_main_recovery(&mut activities, is_current);
+                    debug!(
+                        "HarnessSnapshot: {} activities from snapshot",
+                        activities.len()
+                    );
                     let health = session_health(&activities);
-                    self.workspace_state
-                        .workspace_mut(key.clone())
-                        .chat
-                        .harness_activities = activities;
-                    set_session_health(&key.work_dir, &key.session_id, health);
-                    self.ui.widget(cx, ids!(session_list)).redraw(cx);
+                    let ws = self.workspace_state.workspace_mut(key.clone());
+                    ws.chat.harness_activities = activities;
+                    ws.chat.revision = ws.chat.revision.wrapping_add(1);
+                    if set_session_health(&key.work_dir, &key.session_id, health) {
+                        self.ui.widget(cx, ids!(session_list)).redraw(cx);
+                    }
+                    self.ui.widget(cx, ids!(chat_list)).redraw(cx);
+                    debug!("HarnessSnapshot: redrew chat_list");
                 }
 
                 GuiAgentEvent::HarnessResumeFinished {
@@ -9295,11 +9358,11 @@ impl App {
                         if let Some(path) = runtime.session_file.as_deref() {
                             let activities = restore_harness_activities(path);
                             let health = session_health(&activities);
-                            self.workspace_state
-                                .workspace_mut(key.clone())
-                                .chat
-                                .harness_activities = activities;
+                            let ws = self.workspace_state.workspace_mut(key.clone());
+                            ws.chat.harness_activities = activities;
+                            ws.chat.revision = ws.chat.revision.wrapping_add(1);
                             set_session_health(&key.work_dir, &key.session_id, health);
+                            self.ui.widget(cx, ids!(chat_list)).redraw(cx);
                         }
                     }
                     let msg = match result {
@@ -9639,6 +9702,7 @@ impl App {
                     }
                 }
                 GuiAgentEvent::BackgroundTask(event) => {
+                    let harness_evt = event.harness_event().cloned();
                     let (task_id, project_id, agent_event) = event.into_parts();
                     let project_work_dir = self
                         .supervisor_projects
@@ -9647,6 +9711,39 @@ impl App {
                         .map(|(work_dir, _)| work_dir.clone());
                     if let (Some(work_dir), Some(supervisor)) = (project_work_dir, &self.supervisor)
                     {
+                        // If this event carries a harness event, apply it
+                        // incrementally to all chat workspaces for this project.
+                        if let Some(harness_evt) = harness_evt {
+                            if let Some(task) = supervisor.get_task(&task_id) {
+                                if let Some(session_file) = task.session_file.as_deref() {
+                                    if let Ok(store) = JsonlStore::open_read_only(session_file) {
+                                        if let EventPayload::RecordCommitted(record) =
+                                            &harness_evt.payload
+                                        {
+                                            let keys: Vec<SessionKey> = self
+                                                .workspace_state
+                                                .keys_for_project(&work_dir)
+                                                .cloned()
+                                                .collect();
+                                            for key in keys {
+                                                let ws = self.workspace_state.workspace_mut(key);
+                                                apply_harness_record(
+                                                    record,
+                                                    &mut ws.chat.harness_activities,
+                                                    store.entries(),
+                                                );
+                                                ws.chat.revision = ws.chat.revision.wrapping_add(1);
+                                            }
+                                            self.ui.widget(cx, ids!(chat_list)).redraw(cx);
+                                        }
+                                    }
+                                }
+                            }
+                            self.refresh_registered_sessions();
+                            self.sync_task_sidebar(cx);
+                            continue;
+                        }
+                        // Legacy AgentEvent path for background tasks.
                         if let Some(task) = supervisor.get_task(&task_id) {
                             let activity =
                                 background_task_harness_activity(&task_id, &task, &agent_event);
@@ -9657,14 +9754,12 @@ impl App {
                                     .cloned()
                                     .collect();
                                 for key in keys {
+                                    let ws = self.workspace_state.workspace_mut(key);
                                     crate::panels::chat::state::reduce_harness_activity(
-                                        &mut self
-                                            .workspace_state
-                                            .workspace_mut(key)
-                                            .chat
-                                            .harness_activities,
+                                        &mut ws.chat.harness_activities,
                                         activity.clone(),
                                     );
+                                    ws.chat.revision = ws.chat.revision.wrapping_add(1);
                                 }
                                 self.ui.widget(cx, ids!(chat_list)).redraw(cx);
                             }
@@ -9685,6 +9780,10 @@ impl App {
                         .get(&key)
                         .and_then(|runtime| runtime.generation.as_ref())
                         .is_some_and(|generation| generation.id == generation_id);
+                    trace!(
+                        "GenerationAgent {} is_current={is_current}",
+                        agent_event_label(&agent_event)
+                    );
                     if !is_current {
                         continue;
                     }
@@ -9715,18 +9814,19 @@ mod workspace_header_tests {
         aggregate_extension_reload_results, append_antigravity_models, clear_composer_for_dispatch,
         compact_workspace_path, extension_reload_matches, extension_reload_status,
         left_sidebar_splitter_align, model_credential_error, normalize_generated_commit_message,
-        ordered_model_options, project_name, reduce_harness_event, restore_harness_activities,
-        session_reload_count, suppress_live_main_recovery, task_sidebar_items,
-        truncate_terminal_output, InputOrigin, ANTIGRAVITY_MODELS, LEFT_SIDEBAR_WIDTH,
-        MAX_TERMINAL_OUTPUT,
+        ordered_model_options, project_name, restore_harness_activities, session_reload_count,
+        suppress_live_main_recovery, task_sidebar_items, truncate_terminal_output, InputOrigin,
+        ANTIGRAVITY_MODELS, LEFT_SIDEBAR_WIDTH, MAX_TERMINAL_OUTPUT,
     };
-    use crate::panels::chat::state::HarnessActivityStatus;
+    use crate::panels::chat::state::{apply_harness_record, HarnessActivityStatus};
     use crate::workspace::WorkspaceUiState;
     use makepad_widgets::SplitterAlign;
     use std::path::{Path, PathBuf};
-    use threadlane_agent::harness::{Entry, JsonlStore, OperationIntent, Record, SessionStore};
+    use threadlane_agent::harness::{
+        Entry, JsonlStore, OperationIntent, OperationOutcome, Record, SessionStore,
+    };
     use threadlane_agent::AgentMessage;
-    use threadlane_agent::{AgentEvent, ImageAttachment, SubagentRecoveryStatus};
+    use threadlane_agent::ImageAttachment;
     use threadlane_coding_agent::{ExtensionScope, TaskKind, TaskRecord, TaskStatus};
 
     #[test]
@@ -9918,36 +10018,37 @@ mod workspace_header_tests {
 
     #[test]
     fn partial_journal_start_and_recovery_share_one_harness_activity() {
-        let mut chat = crate::panels::chat::ChatData::default();
-        for event in [
-            AgentEvent::SubagentQueued {
-                run_id: 7,
-                task_index: 0,
-                agent: "scout".into(),
-                task: "Inspect the repository".into(),
+        use threadlane_agent::harness::{OperationIntent, OperationOutcome, Record};
+        let mut activities = Vec::new();
+        // In V2, OperationStarted creates the activity, OperationFinished(Completed) marks it Recovered.
+        apply_harness_record(
+            &Record::OperationStarted {
+                id: "subagent-run-41".into(),
+                seq: 1,
+                lane: "subagent-7:0".into(),
+                timestamp: 1,
+                source_leaf_id: None,
+                intent: OperationIntent::Run,
             },
-            AgentEvent::SubagentFinished {
-                run_id: 7,
-                task_index: 0,
-                journal_run_id: "subagent-run-41".into(),
-                succeeded: false,
-                error: Some("Failed to append subagent lane journal".into()),
-            },
-            AgentEvent::SubagentRecovery {
-                run_id: "subagent-run-41".into(),
-                status: SubagentRecoveryStatus::Recovered,
-                detail: Some("Recovered prior work".into()),
-            },
-        ] {
-            reduce_harness_event(&mut chat, event);
-        }
-
-        assert_eq!(chat.harness_activities.len(), 1);
-        assert_eq!(chat.harness_activities[0].key, "subagent-run-41");
-        assert_eq!(
-            chat.harness_activities[0].status,
-            HarnessActivityStatus::Recovered
+            &mut activities,
+            &[],
         );
+        apply_harness_record(
+            &Record::OperationFinished {
+                id: "finish-41".into(),
+                seq: 2,
+                lane: "subagent-7:0".into(),
+                timestamp: 2,
+                run_id: "subagent-run-41".into(),
+                outcome: OperationOutcome::Completed,
+                error: Some("Recovered prior work".into()),
+            },
+            &mut activities,
+            &[],
+        );
+        assert_eq!(activities.len(), 1);
+        assert_eq!(activities[0].key, "subagent-run-41");
+        assert_eq!(activities[0].status, HarnessActivityStatus::Recovered);
     }
 
     #[test]
@@ -10229,5 +10330,166 @@ mod workspace_header_tests {
     #[test]
     fn workspace_header_preserves_root() {
         assert_eq!(compact_workspace_path(Path::new("/"), None), "/");
+    }
+
+    // ── apply_harness_record tests ───────────────────────────────────
+
+    #[test]
+    fn apply_harness_record_operation_started_creates_working_activity() {
+        let mut activities = Vec::new();
+        let entries = vec![];
+        apply_harness_record(
+            &Record::OperationStarted {
+                id: "subagent-run-1".into(),
+                seq: 1,
+                lane: "subagent-1@1".into(),
+                timestamp: 1,
+                source_leaf_id: None,
+                intent: OperationIntent::Run,
+            },
+            &mut activities,
+            &entries,
+        );
+        assert_eq!(activities.len(), 1);
+        assert_eq!(activities[0].key, "subagent-run-1");
+        assert_eq!(activities[0].status, HarnessActivityStatus::Working);
+        assert_eq!(activities[0].agent, "subagent");
+    }
+
+    #[test]
+    fn apply_harness_record_ignores_main_lane_operation_started() {
+        let mut activities = Vec::new();
+        apply_harness_record(
+            &Record::OperationStarted {
+                id: "main-run-1".into(),
+                seq: 1,
+                lane: "main".into(),
+                timestamp: 1,
+                source_leaf_id: None,
+                intent: OperationIntent::Run,
+            },
+            &mut activities,
+            &[],
+        );
+        assert!(activities.is_empty());
+    }
+
+    #[test]
+    fn apply_harness_record_operation_finished_completed() {
+        let mut activities = vec![crate::panels::chat::state::HarnessActivity {
+            key: "subagent-run-1".into(),
+            task: "Inspect".into(),
+            agent: "subagent".into(),
+            status: HarnessActivityStatus::Working,
+            detail: "Working".into(),
+        }];
+        apply_harness_record(
+            &Record::OperationFinished {
+                id: "finish-1".into(),
+                seq: 2,
+                lane: "subagent-1@1".into(),
+                timestamp: 2,
+                run_id: "subagent-run-1".into(),
+                outcome: OperationOutcome::Completed,
+                error: None,
+            },
+            &mut activities,
+            &[],
+        );
+        assert_eq!(activities[0].status, HarnessActivityStatus::Recovered);
+        assert_eq!(activities[0].detail, "Completed");
+    }
+
+    #[test]
+    fn apply_harness_record_operation_finished_aborted() {
+        let mut activities = vec![crate::panels::chat::state::HarnessActivity {
+            key: "subagent-run-1".into(),
+            task: "Inspect".into(),
+            agent: "subagent".into(),
+            status: HarnessActivityStatus::Working,
+            detail: "Working".into(),
+        }];
+        apply_harness_record(
+            &Record::OperationFinished {
+                id: "finish-1".into(),
+                seq: 2,
+                lane: "subagent-1@1".into(),
+                timestamp: 2,
+                run_id: "subagent-run-1".into(),
+                outcome: OperationOutcome::Aborted,
+                error: Some("Cancelled by user".into()),
+            },
+            &mut activities,
+            &[],
+        );
+        assert_eq!(activities[0].status, HarnessActivityStatus::Cancelled);
+        assert_eq!(activities[0].detail, "Cancelled by user");
+    }
+
+    #[test]
+    fn apply_harness_record_abort_requested_creates_main_aborted() {
+        let mut activities = Vec::new();
+        apply_harness_record(
+            &Record::AbortRequested {
+                id: "abort-1".into(),
+                seq: 1,
+                lane: "main".into(),
+                timestamp: 1,
+                run_id: "main-run-1".into(),
+            },
+            &mut activities,
+            &[],
+        );
+        assert_eq!(activities.len(), 1);
+        assert_eq!(activities[0].key, "main-main-run-1");
+        assert_eq!(activities[0].status, HarnessActivityStatus::Aborted);
+        assert_eq!(activities[0].agent, "main");
+    }
+
+    #[test]
+    fn apply_harness_record_skips_internal_records() {
+        let mut activities = Vec::new();
+        apply_harness_record(
+            &Record::StepAttempt {
+                id: "attempt-1".into(),
+                seq: 1,
+                lane: "main".into(),
+                timestamp: 1,
+                run_id: "run-1".into(),
+                attempt: 1,
+                result_entry_id: "result-1".into(),
+                compaction_reason: None,
+            },
+            &mut activities,
+            &[],
+        );
+        assert!(activities.is_empty());
+    }
+
+    #[test]
+    fn apply_harness_record_picks_task_from_lane_entries() {
+        let mut activities = Vec::new();
+        let entries = vec![Entry {
+            id: "task-msg".into(),
+            parent_id: None,
+            lane: "subagent-1@1".into(),
+            seq: 0,
+            timestamp: 0,
+            message: AgentMessage::user("Inspect the repo", vec![]),
+            terminate: false,
+        }];
+        apply_harness_record(
+            &Record::OperationStarted {
+                id: "subagent-run-1".into(),
+                seq: 1,
+                lane: "subagent-1@1".into(),
+                timestamp: 1,
+                source_leaf_id: None,
+                intent: OperationIntent::Run,
+            },
+            &mut activities,
+            &entries,
+        );
+        assert_eq!(activities[0].task, "Inspect the repo");
     }
 }
