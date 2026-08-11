@@ -8,21 +8,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 
 use threadlane_agent::harness::{
-    AgentHarness, DeferredResolution, EffectAction, Entry as HarnessEntry,
-    EventPayload, HarnessEventHub, HookContext, HookKind, HookRegistry,
-    JsonlStore, OperationOutcome, Record as HarnessRecord, Reducer, ReduceError, RetryPolicy,
-    SessionIdGenerator, SessionStore, Snapshot,
-    ToolReplaySafety as HarnessToolReplaySafety, ToolResult as HarnessToolResult,
+    AgentHarness, DeferredResolution, EffectAction, Entry as HarnessEntry, EventPayload,
+    HarnessEventHub, HookContext, HookKind, HookRegistry, JsonlStore, OperationOutcome,
+    Record as HarnessRecord, ReduceError, Reducer, RetryPolicy, SessionIdGenerator, SessionStore,
+    Snapshot, ToolReplaySafety as HarnessToolReplaySafety, ToolResult as HarnessToolResult,
     ToolSpec,
 };
-use threadlane_agent::{
-    AgentMessage, AgentToolResult, TokenUsage,
-};
 use threadlane_agent::session_tree::SessionTree;
+use threadlane_agent::{AgentMessage, AgentToolResult, TokenUsage};
 
 use super::harness_journal::{
-    harness_cancellation_state, harness_event_hub, harness_hook_registry,
-    HarnessWatch,
+    harness_cancellation_state, harness_event_hub, harness_hook_registry, HarnessWatch,
 };
 /// Owns the durable session store, the `main` lane handle, event hub, hook
 /// registry, cancellation state, and a subscription for event projection.
@@ -83,7 +79,12 @@ impl CodingSessionHarness {
         let cancellation = harness_cancellation_state(path);
         let store = JsonlStore::open(path)
             .map(|store| {
-                AgentHarness::with_executor_and_hooks(store, events.clone(), executor, hooks.clone())
+                AgentHarness::with_executor_and_hooks(
+                    store,
+                    events.clone(),
+                    executor,
+                    hooks.clone(),
+                )
             })
             .map_err(|error| error.to_string())?;
         Ok(Self {
@@ -102,11 +103,7 @@ impl CodingSessionHarness {
     ///
     /// Returns `Ok(())` after `accept_prompt` is driven to completion
     /// (committed to the JSONL store).
-    pub(crate) fn begin_run(
-        &mut self,
-        run_id: &str,
-        prompt: AgentMessage,
-    ) -> Result<(), String> {
+    pub(crate) fn begin_run(&mut self, run_id: &str, prompt: AgentMessage) -> Result<(), String> {
         self.refresh()?;
         self.store
             .accept_prompt(run_id, prompt)
@@ -227,8 +224,7 @@ impl CodingSessionHarness {
             .iter()
             .filter(|entry| entry.seq > start_seq)
             .find_map(|entry| {
-                matches!(&entry.message, AgentMessage::Assistant { .. })
-                    .then_some(entry.id.clone())
+                matches!(&entry.message, AgentMessage::Assistant { .. }).then_some(entry.id.clone())
             })
         {
             self.store
@@ -310,12 +306,31 @@ impl CodingSessionHarness {
     /// Append a user/assistant/tool message as a harness entry on the main
     /// lane.
     pub(crate) fn append_message(&mut self, message: AgentMessage) -> Result<(), String> {
+        self.append_message_inner(message, true)
+    }
+
+    /// Append a message discovered while reconciling the provider transcript.
+    ///
+    /// Transcript synchronization already determines whether this is a new
+    /// occurrence.  It must not apply the legacy last-entry content check,
+    /// because two consecutive provider messages can legitimately have the
+    /// same serialized value.
+    fn append_synced_message(&mut self, message: AgentMessage) -> Result<(), String> {
+        self.append_message_inner(message, false)
+    }
+
+    fn append_message_inner(
+        &mut self,
+        message: AgentMessage,
+        deduplicate_last_entry: bool,
+    ) -> Result<(), String> {
         self.refresh()?;
-        if self
-            .store
-            .entries()
-            .last()
-            .is_some_and(|entry| entry.message == message)
+        if deduplicate_last_entry
+            && self
+                .store
+                .entries()
+                .last()
+                .is_some_and(|entry| entry.message == message)
         {
             return Ok(());
         }
@@ -500,10 +515,7 @@ impl CodingSessionHarness {
 
     /// Prepare an assistant attempt record for the given run.  Returns
     /// the result entry id that the assistant message should carry.
-    pub(crate) fn prepare_assistant_attempt(
-        &mut self,
-        run_id: &str,
-    ) -> Result<String, String> {
+    pub(crate) fn prepare_assistant_attempt(&mut self, run_id: &str) -> Result<String, String> {
         self.refresh()?;
         let state = Reducer::reduce(&self.store).map_err(|error| error.to_string())?;
         let lane = state
@@ -574,8 +586,7 @@ impl CodingSessionHarness {
             .entries()
             .iter()
             .filter(|entry| {
-                entry.seq > start_seq
-                    && matches!(&entry.message, AgentMessage::Assistant { .. })
+                entry.seq > start_seq && matches!(&entry.message, AgentMessage::Assistant { .. })
             })
             .max_by_key(|entry| entry.seq)
             .map(|entry| entry.id.clone())
@@ -643,12 +654,8 @@ impl CodingSessionHarness {
                     effective_args,
                     result_entry_id: format!("v2-tool-result-{tool_call_id}"),
                     replay: match threadlane_agent::classify_tool_replay_safety(tool_name) {
-                        threadlane_agent::ToolReplaySafety::Safe => {
-                            HarnessToolReplaySafety::Safe
-                        }
-                        threadlane_agent::ToolReplaySafety::Never => {
-                            HarnessToolReplaySafety::Never
-                        }
+                        threadlane_agent::ToolReplaySafety::Safe => HarnessToolReplaySafety::Safe,
+                        threadlane_agent::ToolReplaySafety::Never => HarnessToolReplaySafety::Never,
                     },
                 }],
             )
@@ -715,12 +722,8 @@ impl CodingSessionHarness {
                     effective_args,
                     result_entry_id: format!("v2-tool-result-{tool_call_id}"),
                     replay: match threadlane_agent::classify_tool_replay_safety(tool_name) {
-                        threadlane_agent::ToolReplaySafety::Safe => {
-                            HarnessToolReplaySafety::Safe
-                        }
-                        threadlane_agent::ToolReplaySafety::Never => {
-                            HarnessToolReplaySafety::Never
-                        }
+                        threadlane_agent::ToolReplaySafety::Safe => HarnessToolReplaySafety::Safe,
+                        threadlane_agent::ToolReplaySafety::Never => HarnessToolReplaySafety::Never,
                     },
                 }],
             )
@@ -809,11 +812,13 @@ impl CodingSessionHarness {
             .entries()
             .iter()
             .filter(|entry| entry.seq > start_seq)
-            .filter(|entry| matches!(&entry.message,
+            .filter(|entry| {
+                matches!(&entry.message,
                 AgentMessage::Assistant {
                     tool_calls: Some(tool_calls),
                     ..
-                } if !tool_calls.is_empty()))
+                } if !tool_calls.is_empty())
+            })
             .max_by_key(|entry| entry.seq)
         else {
             return Ok(());
@@ -949,11 +954,7 @@ impl CodingSessionHarness {
     // ── Retry ─────────────────────────────────────────────────────────
 
     /// Schedule a retry for a failed run.
-    pub(crate) fn schedule_retry(
-        &mut self,
-        run_id: &str,
-        reason: &str,
-    ) -> Result<u32, String> {
+    pub(crate) fn schedule_retry(&mut self, run_id: &str, reason: &str) -> Result<u32, String> {
         self.refresh()?;
         let attempt = self
             .store
@@ -1011,11 +1012,7 @@ impl CodingSessionHarness {
     // ── Compaction ────────────────────────────────────────────────────
 
     /// Accept a compaction summary.
-    pub(crate) fn accept_compaction(
-        &mut self,
-        run_id: &str,
-        summary: &str,
-    ) -> Result<(), String> {
+    pub(crate) fn accept_compaction(&mut self, run_id: &str, summary: &str) -> Result<(), String> {
         self.refresh()?;
         self.store
             .accept_compaction(run_id, summary)
@@ -1028,12 +1025,7 @@ impl CodingSessionHarness {
     // ── Facts ─────────────────────────────────────────────────────────
 
     /// Set a session-level fact.
-    pub(crate) fn set_fact(
-        &mut self,
-        lane: &str,
-        key: &str,
-        value: String,
-    ) -> Result<(), String> {
+    pub(crate) fn set_fact(&mut self, lane: &str, key: &str, value: String) -> Result<(), String> {
         self.refresh()?;
         self.store
             .set_fact(lane, key, value, None)
@@ -1053,8 +1045,7 @@ impl CodingSessionHarness {
         spec: &ToolSpec,
         result: &AgentToolResult,
     ) -> Result<(), String> {
-        let state =
-            Reducer::reduce(self.store.store()).map_err(|error| error.to_string())?;
+        let state = Reducer::reduce(self.store.store()).map_err(|error| error.to_string())?;
         let lane = state
             .lanes
             .iter()
@@ -1107,15 +1098,16 @@ impl CodingSessionHarness {
             else {
                 continue;
             };
-            let already_completed = records.iter().any(|record| {
-                matches!(
-                    record,
-                    HarnessRecord::ToolFinished {
-                        tool_call_id: finished_call,
-                        ..
-                    } if finished_call == tool_call_id
-                )
-            }) || entries.iter().any(|entry| entry.id.contains(tool_call_id));
+            let already_completed =
+                records.iter().any(|record| {
+                    matches!(
+                        record,
+                        HarnessRecord::ToolFinished {
+                            tool_call_id: finished_call,
+                            ..
+                        } if finished_call == tool_call_id
+                    )
+                }) || entries.iter().any(|entry| entry.id.contains(tool_call_id));
             if already_completed {
                 continue;
             }
@@ -1251,8 +1243,7 @@ impl CodingSessionHarness {
                     let mut store = JsonlStore::open(&persist_path)
                         .map_err(|error| ReduceError::Storage(error.to_string()))?;
                     if let Err(error) = action.apply(&mut store) {
-                        persist_events
-                            .publish(EventPayload::Fault(error.to_string()));
+                        persist_events.publish(EventPayload::Fault(error.to_string()));
                         return Err(error);
                     }
                     let (payload, lane, run_id, turn) = match &action {
@@ -1269,9 +1260,7 @@ impl CodingSessionHarness {
                             record.turn(),
                         ),
                     };
-                    persist_events.publish_identified_with_turn(
-                        payload, lane, run_id, turn, None,
-                    );
+                    persist_events.publish_identified_with_turn(payload, lane, run_id, turn, None);
                     Ok(())
                 };
                 *self.store.hooks_mut() = hooks;
@@ -1306,21 +1295,22 @@ impl CodingSessionHarness {
     /// in the harness store.  Called after each turn to ensure the
     /// canonical session path captures all assistant/tool entries.
     pub(crate) fn sync_messages(&mut self, messages: &[AgentMessage]) -> Result<(), String> {
-        // Collect the set of message hashes already in the store to avoid
-        // duplicates.
-        let existing: std::collections::HashSet<String> = self
+        // The provider gives us the complete conversation, not stable entry
+        // IDs.  Track occurrences rather than using a set: two turns can
+        // legitimately produce byte-for-byte identical assistant messages,
+        // including an empty assistant result.
+        let mut existing: HashMap<String, usize> = HashMap::new();
+        for entry in self
             .store
             .entries()
             .iter()
-            .filter(|e| e.lane == "main")
-            .map(|e| format!("{:?}", e.message))
-            .collect();
+            .filter(|entry| entry.lane == "main")
+        {
+            *existing.entry(format!("{:?}", entry.message)).or_default() += 1;
+        }
+
         for msg in messages {
             if matches!(msg, AgentMessage::System { .. }) {
-                continue;
-            }
-            let key = format!("{:?}", msg);
-            if existing.contains(&key) {
                 continue;
             }
             // Only persist non-user messages; user prompts are handled by
@@ -1328,21 +1318,23 @@ impl CodingSessionHarness {
             if msg.is_user() {
                 continue;
             }
-            self.append_message(msg.clone())?;
+            let key = format!("{:?}", msg);
+            if let Some(count) = existing.get_mut(&key) {
+                if *count > 0 {
+                    *count -= 1;
+                    continue;
+                }
+            }
+            self.append_synced_message(msg.clone())?;
         }
         Ok(())
     }
     /// Run hooks of the given kind for the main lane.
-    pub(crate) async fn run_hooks(
-        &self,
-        kind: HookKind,
-        context: &HookContext,
-    ) {
+    pub(crate) async fn run_hooks(&self, kind: HookKind, context: &HookContext) {
         for failure in self.store.hooks().run(kind, context).await {
             eprintln!(
                 "hook {} ({:?}) failed: {}",
-                failure.id, kind,
-                failure.message
+                failure.id, kind, failure.message
             );
         }
     }
@@ -1457,9 +1449,7 @@ mod tests {
             harness
                 .begin_run(&id, AgentMessage::user("hello", vec![]))
                 .unwrap();
-            harness
-                .prepare_assistant_attempt(&id)
-                .unwrap();
+            harness.prepare_assistant_attempt(&id).unwrap();
             harness
                 .append_message(AgentMessage::Assistant {
                     content: Some("Hi there".into()),
@@ -1511,17 +1501,15 @@ mod tests {
         // Verify entries exist
         let entries = reopened.store.entries();
         assert!(
-            entries.iter().any(|e| matches!(
-                &e.message,
-                AgentMessage::User { .. }
-            )),
+            entries
+                .iter()
+                .any(|e| matches!(&e.message, AgentMessage::User { .. })),
             "user prompt entry should be present"
         );
         assert!(
-            entries.iter().any(|e| matches!(
-                &e.message,
-                AgentMessage::Assistant { .. }
-            )),
+            entries
+                .iter()
+                .any(|e| matches!(&e.message, AgentMessage::Assistant { .. })),
             "assistant entry should be present"
         );
     }
@@ -1536,9 +1524,7 @@ mod tests {
         harness
             .begin_run(&run_id, AgentMessage::user("hello", vec![]))
             .unwrap();
-        harness
-            .prepare_assistant_attempt(&run_id)
-            .unwrap();
+        harness.prepare_assistant_attempt(&run_id).unwrap();
         harness
             .append_message(AgentMessage::Assistant {
                 content: Some("error occurred".into()),
@@ -1578,9 +1564,7 @@ mod tests {
         harness
             .begin_run(&run_id, AgentMessage::user("hello", vec![]))
             .unwrap();
-        harness
-            .prepare_assistant_attempt(&run_id)
-            .unwrap();
+        harness.prepare_assistant_attempt(&run_id).unwrap();
         harness
             .append_message(AgentMessage::Assistant {
                 content: Some("response".into()),
@@ -1594,20 +1578,68 @@ mod tests {
 
         // Syncing the same messages again should not create duplicates
         harness
-            .sync_messages(&[
-                AgentMessage::Assistant {
-                    content: Some("response".into()),
-                    tool_calls: None,
-                    stop_reason: Some("end_turn".into()),
-                    deferred_handle: None,
-                },
-            ])
+            .sync_messages(&[AgentMessage::Assistant {
+                content: Some("response".into()),
+                tool_calls: None,
+                stop_reason: Some("end_turn".into()),
+                deferred_handle: None,
+            }])
             .unwrap();
 
         assert_eq!(
             harness.store.entries().len(),
             entry_count_before,
             "sync_messages should not create duplicate entries"
+        );
+    }
+
+    #[test]
+    fn sync_messages_persists_identical_empty_assistant_results_for_each_run() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        let empty_assistant = AgentMessage::Assistant {
+            content: None,
+            tool_calls: None,
+            stop_reason: None,
+            deferred_handle: None,
+        };
+        let mut provider_messages = Vec::new();
+
+        for prompt_text in ["first prompt", "second prompt"] {
+            let run_id = harness.unique_run_id("test").unwrap();
+            let prompt = AgentMessage::user(prompt_text, vec![]);
+            harness.begin_run(&run_id, prompt.clone()).unwrap();
+            provider_messages.push(prompt);
+            provider_messages.push(empty_assistant.clone());
+
+            // This mirrors CodingAgent's full provider-state synchronization
+            // after each prompt. The second empty assistant must be a new
+            // durable entry even though its content matches the first one.
+            harness.sync_messages(&provider_messages).unwrap();
+            harness
+                .record_assistant_attempt(&run_id, TokenUsage::default())
+                .unwrap();
+            harness
+                .finish_run(&run_id, OperationOutcome::Completed, None)
+                .unwrap();
+        }
+
+        let assistant_entries: Vec<_> = harness
+            .store
+            .entries()
+            .iter()
+            .filter(|entry| matches!(entry.message, AgentMessage::Assistant { .. }))
+            .collect();
+        assert_eq!(assistant_entries.len(), 2);
+        assert_ne!(assistant_entries[0].id, assistant_entries[1].id);
+        assert_eq!(
+            harness
+                .store
+                .records()
+                .iter()
+                .filter(|record| matches!(record, HarnessRecord::OperationFinished { .. }))
+                .count(),
+            2
         );
     }
 }
