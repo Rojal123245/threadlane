@@ -104,9 +104,8 @@ pub(crate) struct CodingSessionHarness {
     pub(crate) cancellation: Arc<AtomicBool>,
 }
 
+#[allow(dead_code)]
 pub(crate) type HarnessJournal = CodingSessionHarness;
-
-
 
 #[allow(dead_code)]
 impl CodingSessionHarness {
@@ -1672,7 +1671,6 @@ impl CodingSessionHarness {
     // ── Internal ──────────────────────────────────────────────────────
 
     /// Re-read the store from disk to pick up external writes.
-    /// During the migration window, some callers still write directly.
     pub(crate) fn refresh(&mut self) -> Result<(), String> {
         let path = self.store.store().path().to_path_buf();
         let hooks = std::mem::take(self.store.hooks_mut());

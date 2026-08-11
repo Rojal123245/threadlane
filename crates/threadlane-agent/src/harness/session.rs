@@ -65,15 +65,9 @@ impl<S: SessionStore> SessionAgent<S> {
         }
     }
 
-    /// Access the inner harness directly (migration window for the
-    /// coding-agent adapter).
+    /// Access the inner harness directly for introspection and testing.
     pub fn harness(&self) -> &AgentHarness<S> {
         &self.harness
-    }
-
-    /// Mutable access to the inner harness (migration window).
-    pub fn harness_mut(&mut self) -> &mut AgentHarness<S> {
-        &mut self.harness
     }
 }
 

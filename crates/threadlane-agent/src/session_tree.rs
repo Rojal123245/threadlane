@@ -149,7 +149,7 @@ impl SessionTree {
             .max()
             .unwrap_or(0);
         if let Some(path) = &self.file_path {
-            for suffix in ["harness.jsonl", "oplog.jsonl"] {
+            for suffix in ["harness.jsonl"] {
                 let sidecar = path.with_extension(suffix);
                 if let Ok(contents) = std::fs::read_to_string(sidecar) {
                     for line in contents.lines() {
