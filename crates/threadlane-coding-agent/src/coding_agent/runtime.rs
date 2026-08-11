@@ -1035,7 +1035,7 @@ impl CodingAgent {
             .model
             .clone()
             .unwrap_or_else(|| options.model.clone());
-        let (harness, harness_journal_error) = match session_tree.file_path.as_deref() {
+        let (mut harness, harness_journal_error) = match session_tree.file_path.as_deref() {
             Some(path) => match crate::coding_agent::harness::CodingSessionHarness::open(path) {
                 Ok(h) => (Some(h), None),
                 Err(error) => (None, Some(error)),
@@ -1073,15 +1073,10 @@ impl CodingAgent {
         session_tree
             .model
             .get_or_insert_with(|| effective_model.clone());
-        let has_interrupted_subagents = match harness.as_ref() {
-            Some(_h) => session_tree
-                .file_path
-                .as_deref()
-                .map(|path| {
-                    recover_v2_subagent_records(path)
-                        .map(|records| threadlane_agent::has_open_subagent_lanes(&records))
-                        .unwrap_or(true)
-                })
+        let has_interrupted_subagents = match harness.as_mut() {
+            Some(h) => h
+                .snapshot()
+                .map(|snapshot| snapshot.has_open_subagent_lanes())
                 .unwrap_or(false),
             None => session_tree.file_path.is_some(),
         };

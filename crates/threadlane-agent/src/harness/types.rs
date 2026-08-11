@@ -738,3 +738,26 @@ impl std::fmt::Display for ReduceError {
 }
 
 impl std::error::Error for ReduceError {}
+
+#[derive(Debug, Clone, Default)]
+pub struct RecoveryResult {
+    pub recovered_open_operations: usize,
+    pub open_operation_ids: Vec<String>,
+    pub abort_requested_operation_ids: Vec<String>,
+    pub unreplayable_tools: usize,
+    pub safe_tools_to_replay: Vec<Record>,
+}
+
+#[derive(Debug, Clone)]
+pub struct InterruptedSubagentLane {
+    pub lane: String,
+    pub run_id: String,
+    pub source_leaf_id: Option<String>,
+    pub started_seq: u64,
+    pub task: String,
+    pub task_attempted: bool,
+    pub messages: Vec<AgentMessage>,
+    pub safe_tools: Vec<Record>,
+    pub unsafe_tools: Vec<Record>,
+}
+

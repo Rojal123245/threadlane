@@ -35,6 +35,255 @@ impl Snapshot {
             streaming: None,
         })
     }
+
+    /// Returns `true` when non-main lanes contain at least one operation
+    /// that has started but not yet finished.
+    pub fn has_open_subagent_lanes(&self) -> bool {
+        self.state
+            .lanes
+            .iter()
+            .any(|lane| lane.name != "main" && lane.open_operation.is_some())
+    }
+
+    /// Reconstructs open/interrupted subagent lanes from raw records.
+    pub fn interrupted_subagent_lanes(&self) -> Vec<super::types::InterruptedSubagentLane> {
+        interrupted_subagent_lanes(&self.records)
+    }
+}
+
+/// Returns `true` when non-main-lane records contain at least one
+/// operation that has started but not yet finished.
+pub fn has_open_subagent_lanes(records: &[Record]) -> bool {
+    let finished: std::collections::HashSet<&str> = records
+        .iter()
+        .filter_map(|r| match r {
+            Record::OperationFinished { run_id, .. } => Some(run_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    records.iter().any(|r| match r {
+        Record::OperationStarted { id, lane, .. } => {
+            lane != "main" && !finished.contains(id.as_str())
+        }
+        _ => false,
+    })
+}
+
+/// Reconstructs open/interrupted subagent lanes from raw records.
+pub fn interrupted_subagent_lanes(records: &[Record]) -> Vec<super::types::InterruptedSubagentLane> {
+    use crate::harness::ToolReplaySafety;
+    use crate::types::AgentMessage;
+
+    struct Occurrence {
+        lane: String,
+        run_id: String,
+        started_seq: u64,
+        source_leaf_id: Option<String>,
+        task: String,
+        task_attempted: bool,
+        messages: Vec<(u64, AgentMessage)>,
+        tools: Vec<Record>,
+        completed_tools: std::collections::HashSet<String>,
+        active: bool,
+    }
+
+    let mut ordered: Vec<_> = records.iter().enumerate().collect();
+    ordered.sort_by_key(|(index, record)| (record.seq(), *index));
+    let mut occurrences = Vec::new();
+    let mut active: HashMap<(String, String), Vec<usize>> = HashMap::new();
+
+    for (_, record) in ordered {
+        match record {
+            Record::OperationStarted {
+                id,
+                lane,
+                seq,
+                source_leaf_id,
+                intent: OperationIntent::Run,
+                ..
+            } => {
+                let index = occurrences.len();
+                occurrences.push(Occurrence {
+                    lane: lane.clone(),
+                    run_id: id.clone(),
+                    started_seq: *seq,
+                    source_leaf_id: source_leaf_id.clone(),
+                    task: String::new(),
+                    task_attempted: false,
+                    messages: Vec::new(),
+                    tools: Vec::new(),
+                    completed_tools: std::collections::HashSet::new(),
+                    active: true,
+                });
+                active
+                    .entry((lane.clone(), id.clone()))
+                    .or_default()
+                    .push(index);
+            }
+            Record::StepAttempt { lane, run_id, .. } => {
+                if let Some(index) = active
+                    .get(&(lane.clone(), run_id.clone()))
+                    .and_then(|occurrences| occurrences.last())
+                {
+                    occurrences[*index].task_attempted = true;
+                }
+            }
+            Record::WriteDeferred {
+                lane,
+                run_id,
+                seq,
+                target,
+                ..
+            } => {
+                if let Some(index) = active
+                    .get(&(lane.clone(), run_id.clone()))
+                    .and_then(|occurrences| occurrences.last())
+                {
+                    occurrences[*index]
+                        .messages
+                        .push((*seq, target.message.clone()));
+                }
+            }
+            Record::ToolStarted { lane, run_id, .. } => {
+                if let Some(index) = active
+                    .get(&(lane.clone(), run_id.clone()))
+                    .and_then(|occurrences| occurrences.last())
+                {
+                    occurrences[*index].tools.push(record.clone());
+                }
+            }
+            Record::ToolFinished {
+                lane,
+                run_id,
+                tool_call_id,
+                ..
+            } => {
+                if let Some(index) = active
+                    .get(&(lane.clone(), run_id.clone()))
+                    .and_then(|occurrences| occurrences.last())
+                {
+                    occurrences[*index]
+                        .completed_tools
+                        .insert(tool_call_id.clone());
+                }
+            }
+            Record::OperationFinished { lane, run_id, .. } => {
+                let key = (lane.clone(), run_id.clone());
+                let remove_key = if let Some(occurrences_for_run) = active.get_mut(&key) {
+                    if let Some(index) = occurrences_for_run.pop() {
+                        occurrences[index].active = false;
+                    }
+                    occurrences_for_run.is_empty()
+                } else {
+                    false
+                };
+                if remove_key {
+                    active.remove(&key);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut lanes = Vec::new();
+    for occurrence in occurrences
+        .into_iter()
+        .filter(|occurrence| occurrence.active)
+    {
+        let mut messages = occurrence.messages;
+        let mut completed_tool_calls: std::collections::HashSet<String> = messages
+            .iter()
+            .filter_map(|(_, message)| match message {
+                AgentMessage::Tool { tool_call_id, .. } => Some(tool_call_id.clone()),
+                _ => None,
+            })
+            .collect();
+        completed_tool_calls.extend(occurrence.completed_tools);
+        let mut tools: HashMap<String, (Option<Record>, Option<Record>)> = HashMap::new();
+
+        for record in occurrence.tools {
+            let Record::ToolStarted {
+                tool_call_id,
+                replay,
+                ..
+            } = &record
+            else {
+                continue;
+            };
+            if completed_tool_calls.contains(tool_call_id) {
+                continue;
+            }
+            let entry = tools.entry(tool_call_id.clone()).or_default();
+            match replay {
+                ToolReplaySafety::Safe if entry.0.is_none() => entry.0 = Some(record.clone()),
+                ToolReplaySafety::Never if entry.1.is_none() => entry.1 = Some(record.clone()),
+                _ => {}
+            }
+        }
+
+        let mut safe_tools = Vec::new();
+        let mut unsafe_tools = Vec::new();
+        for (_, (safe, never)) in tools {
+            if let Some(record) = never {
+                if let Record::ToolStarted {
+                    seq,
+                    tool_call_id,
+                    tool_name,
+                    ..
+                } = &record
+                {
+                    messages.push((
+                        *seq,
+                        AgentMessage::Tool {
+                            tool_call_id: tool_call_id.clone(),
+                            name: tool_name.clone(),
+                            content: format!(
+                                "[Interrupted tool execution for '{tool_name}' automatically recovered]"
+                            ),
+                            is_error: true,
+                            terminate: false,
+                        },
+                    ));
+                }
+                unsafe_tools.push(record);
+            } else if let Some(record) = safe {
+                safe_tools.push(record);
+            }
+        }
+        messages.sort_by_key(|(seq, _)| *seq);
+        safe_tools.sort_by_key(Record::seq);
+        unsafe_tools.sort_by_key(Record::seq);
+
+        let task = if occurrence.task.is_empty() {
+            messages
+                .iter()
+                .find_map(|(_, msg)| match msg {
+                    AgentMessage::User { content } => Some(content.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default()
+        } else {
+            occurrence.task
+        };
+
+        lanes.push((
+            occurrence.started_seq,
+            super::types::InterruptedSubagentLane {
+                lane: occurrence.lane,
+                run_id: occurrence.run_id,
+                source_leaf_id: occurrence.source_leaf_id,
+                started_seq: occurrence.started_seq,
+                task,
+                task_attempted: occurrence.task_attempted,
+                messages: messages.into_iter().map(|(_, message)| message).collect(),
+                safe_tools,
+                unsafe_tools,
+            },
+        ));
+    }
+
+    lanes.sort_by_key(|(started_seq, _)| *started_seq);
+    lanes.into_iter().map(|(_, lane)| lane).collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

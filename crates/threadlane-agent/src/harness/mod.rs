@@ -16,8 +16,8 @@ mod types;
 pub use agent::AgentHarness;
 pub use effects::{EffectAction, EffectsError, GatedEffects};
 pub use events::{
-    EventError, EventPayload, HarnessEvent, HarnessEventHub, ProjectedAgentEvent, Snapshot,
-    StreamingState, Subscription,
+    has_open_subagent_lanes, interrupted_subagent_lanes, EventError, EventPayload, HarnessEvent,
+    HarnessEventHub, ProjectedAgentEvent, Snapshot, StreamingState, Subscription,
 };
 pub use hooks::{
     HookContext, HookEffect, HookFailure, HookHandler, HookKind, HookRegistry, HookRun,
@@ -36,7 +36,7 @@ pub use sqlite::SqliteStore;
 pub use store::{SessionIdGenerator, SessionStore};
 pub use telemetry::{ExecutionContext, NoopTelemetry, TelemetrySink};
 pub use types::{
-    Entry, LaneState, LaneStatus, OperationIntent, OperationOutcome, ProvisionedEntry, QueueKind,
-    QueuedEntry, Record, ReduceError, ReducedState, RetryState, ToolReplaySafety, ToolResult,
-    ToolSpec, ToolState, UsageCause,
+    Entry, InterruptedSubagentLane, LaneState, LaneStatus, OperationIntent, OperationOutcome,
+    ProvisionedEntry, QueueKind, QueuedEntry, Record, RecoveryResult, ReduceError, ReducedState,
+    RetryState, ToolReplaySafety, ToolResult, ToolSpec, ToolState, UsageCause,
 };
