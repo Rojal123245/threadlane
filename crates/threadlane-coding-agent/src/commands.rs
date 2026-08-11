@@ -1,6 +1,38 @@
 use threadlane_agent::{SessionTree, UnifiedAgent};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlashCommandInfo {
+    pub name: String,
+    pub description: String,
+}
+
+/// Built-in slash commands handled by the coding agent.
+pub fn builtin_commands() -> Vec<SlashCommandInfo> {
+    [
+        ("model", "Switch model, or show the current one"),
+        ("compact", "Compact the conversation context"),
+        ("session", "Show session info"),
+        ("name", "Name this session"),
+        ("tree", "Switch session tree branch"),
+        ("fork", "Fork a session tree branch"),
+        ("clone", "Clone the active session tree"),
+        ("skill", "Load a discovered skill by ID"),
+        (
+            "subagent",
+            "Delegate tasks to subagents in parallel or sequentially",
+        ),
+        ("task", "Run a prompt as a background task"),
+        ("quit", "Quit threadlane agent"),
+    ]
+    .into_iter()
+    .map(|(name, description)| SlashCommandInfo {
+        name: name.to_string(),
+        description: description.to_string(),
+    })
+    .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandAction {
     SwitchModel(String),
     Compact,

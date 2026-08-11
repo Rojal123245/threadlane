@@ -17,9 +17,79 @@ use threadlane_agent::harness::{
 use threadlane_agent::session_tree::SessionTree;
 use threadlane_agent::{AgentMessage, AgentToolResult, TokenUsage};
 
-use super::harness_journal::{
-    harness_cancellation_state, harness_event_hub, harness_hook_registry, HarnessWatch,
+use threadlane_agent::harness::{
+    EventError, HarnessEvent, OperationIntent, Subscription,
 };
+
+pub struct HarnessWatch {
+    pub(crate) hub: HarnessEventHub,
+    pub(crate) subscription: Subscription,
+}
+
+impl HarnessWatch {
+    pub fn snapshot(&self) -> &Snapshot {
+        &self.subscription.snapshot
+    }
+
+    pub fn poll(&mut self) -> Result<Vec<HarnessEvent>, EventError> {
+        self.hub.poll(&mut self.subscription)
+    }
+}
+
+#[derive(Clone)]
+struct HarnessSessionEntry {
+    hub: HarnessEventHub,
+    hooks: HookRegistry,
+    cancellation: Arc<AtomicBool>,
+}
+
+fn harness_session_entry(path: &Path) -> HarnessSessionEntry {
+    static SESSIONS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, HarnessSessionEntry>>> =
+        std::sync::OnceLock::new();
+    let sessions = SESSIONS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut sessions = sessions.lock().unwrap_or_else(|error| error.into_inner());
+    sessions
+        .entry(path.to_path_buf())
+        .or_insert_with(|| HarnessSessionEntry {
+            hub: HarnessEventHub::new(256),
+            hooks: HookRegistry::default(),
+            cancellation: Arc::new(AtomicBool::new(false)),
+        })
+        .clone()
+}
+
+pub(crate) fn harness_event_hub(path: &Path) -> HarnessEventHub {
+    harness_session_entry(path).hub
+}
+
+pub(crate) fn harness_hook_registry(path: &Path) -> HookRegistry {
+    harness_session_entry(path).hooks
+}
+
+pub(crate) fn harness_cancellation_state(path: &Path) -> Arc<AtomicBool> {
+    harness_session_entry(path).cancellation
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SubagentLaneIdentity {
+    pub(crate) lane_name: String,
+    pub(crate) run_id: String,
+    pub(crate) source_leaf_id: Option<String>,
+    pub(crate) started_seq: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct SubagentStartError {
+    pub(crate) identity: Option<SubagentLaneIdentity>,
+    pub(crate) error: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum InterruptedSubagentRecoveryState {
+    Pending,
+    Complete,
+}
+
 /// Owns the durable session store, the `main` lane handle, event hub, hook
 /// registry, cancellation state, and a subscription for event projection.
 /// Every foreground operation enters the harness through this adapter;
@@ -33,6 +103,10 @@ pub(crate) struct CodingSessionHarness {
     pub(crate) hooks: HookRegistry,
     pub(crate) cancellation: Arc<AtomicBool>,
 }
+
+pub(crate) type HarnessJournal = CodingSessionHarness;
+
+
 
 #[allow(dead_code)]
 impl CodingSessionHarness {
@@ -97,6 +171,266 @@ impl CodingSessionHarness {
         })
     }
 
+    pub(crate) fn append_message_to_path(path: &Path, message: AgentMessage) -> Result<(), String> {
+        let mut journal = Self::open(path)?;
+        journal.append_message(message)
+    }
+
+    pub(crate) async fn append_tool_intent_to_path(
+        path: &Path,
+        run_id: &str,
+        tool_call_id: &str,
+        tool_name: &str,
+        effective_args: Value,
+    ) -> Result<(), String> {
+        let mut journal = Self::open(path)?;
+        journal
+            .append_tool_intent_after_hook(run_id, tool_call_id, tool_name, effective_args)
+            .await
+    }
+
+    pub(crate) fn start_subagent_lane(
+        &mut self,
+        lane_hint: &str,
+        task: &str,
+        source_leaf_id: Option<&str>,
+    ) -> Result<SubagentLaneIdentity, SubagentStartError> {
+        if self.cancellation.load(Ordering::SeqCst) {
+            return Err(SubagentStartError {
+                identity: None,
+                error: "Subagent start rejected because the parent is cancelling".into(),
+            });
+        }
+        static START_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        let _start_lock = START_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .map_err(|error| SubagentStartError {
+                identity: None,
+                error: error.to_string(),
+            })?;
+        let mut attempt_idx = 0;
+        let identity = loop {
+            self.refresh().map_err(|error| SubagentStartError {
+                identity: None,
+                error: error.to_string(),
+            })?;
+            let used_ids = self
+                .store
+                .entries()
+                .iter()
+                .map(|entry| entry.id.clone())
+                .chain(
+                    self.store
+                        .records()
+                        .iter()
+                        .flat_map(|record| [record.id().to_owned(), record.lane().to_owned()]),
+                )
+                .collect::<Vec<_>>();
+            let generator = SessionIdGenerator::new(self.store.session_id());
+            let base_run_id = generator.next("subagent-run", &used_ids);
+            let run_id = if attempt_idx == 0 {
+                base_run_id
+            } else {
+                format!("{base_run_id}-{attempt_idx}")
+            };
+            let mut lane_ids = used_ids.clone();
+            lane_ids.push(run_id.clone());
+            let base_lane = generator.next(lane_hint, &lane_ids);
+            let lane_name = if attempt_idx == 0 {
+                base_lane
+            } else {
+                format!("{base_lane}-{attempt_idx}")
+            };
+            let identity = SubagentLaneIdentity {
+                lane_name: lane_name.clone(),
+                run_id: run_id.clone(),
+                source_leaf_id: source_leaf_id.map(str::to_owned),
+                started_seq: 0,
+            };
+            if let Err(error) = self.store.start_operation_on_lane(
+                &lane_name,
+                &run_id,
+                source_leaf_id.map(str::to_owned),
+                OperationIntent::Run,
+            ) {
+                let err_str = error.to_string();
+                if err_str.contains("DuplicateId") {
+                    attempt_idx += 1;
+                    continue;
+                }
+                if source_leaf_id.is_some()
+                    && (err_str.contains("source leaf does not exist")
+                        || err_str.contains("MissingParent"))
+                {
+                    if let Err(retry_err) = self.store.start_operation_on_lane(
+                        &lane_name,
+                        &run_id,
+                        None,
+                        OperationIntent::Run,
+                    ) {
+                        if retry_err.to_string().contains("DuplicateId") {
+                            attempt_idx += 1;
+                            continue;
+                        }
+                        return Err(SubagentStartError {
+                            identity: None,
+                            error: retry_err.to_string(),
+                        });
+                    }
+                } else {
+                    return Err(SubagentStartError {
+                        identity: None,
+                        error: err_str,
+                    });
+                }
+            }
+            break identity;
+        };
+        self.store
+            .drive_to_completion()
+            .map_err(|error| SubagentStartError {
+                identity: Some(identity.clone()),
+                error: error.to_string(),
+            })?;
+        let prompt_message = AgentMessage::user(task.to_owned(), Vec::new());
+        let prompt_entry_id = format!("subagent-entry-{}-0", identity.run_id);
+        let effective_parent_id = source_leaf_id
+            .filter(|id| self.store.entries().iter().any(|e| e.id == *id))
+            .map(str::to_owned);
+        self.store
+            .append_entry_gated(HarnessEntry {
+                id: prompt_entry_id,
+                parent_id: effective_parent_id,
+                lane: identity.lane_name.clone(),
+                seq: harness_next_seq(self.store.store()),
+                timestamp: timestamp(),
+                message: prompt_message,
+                terminate: false,
+            })
+            .map_err(|error| SubagentStartError {
+                identity: Some(identity.clone()),
+                error: error.to_string(),
+            })?;
+        self.store
+            .drive_to_completion()
+            .map_err(|error| SubagentStartError {
+                identity: Some(identity.clone()),
+                error: error.to_string(),
+            })?;
+        self.store
+            .append_record_gated(HarnessRecord::StepAttempt {
+                id: format!("assistant-attempt-action-{}-1", identity.run_id),
+                seq: harness_next_seq(self.store.store()),
+                lane: identity.lane_name.clone(),
+                timestamp: timestamp(),
+                run_id: identity.run_id.clone(),
+                attempt: 1,
+                result_entry_id: format!("entry-{}-assistant-1", identity.run_id),
+                compaction_reason: None,
+            })
+            .map_err(|error| SubagentStartError {
+                identity: Some(identity.clone()),
+                error: error.to_string(),
+            })?;
+        self.store
+            .drive_to_completion()
+            .map_err(|error| SubagentStartError {
+                identity: Some(identity.clone()),
+                error: error.to_string(),
+            })?;
+        Ok(identity)
+    }
+
+    pub(crate) fn finish_subagent_lane(
+        &mut self,
+        _lane: &str,
+        run_id: &str,
+        outcome: OperationOutcome,
+        error: Option<String>,
+    ) -> Result<(), String> {
+        self.refresh()?;
+        let is_open = Reducer::reduce(self.store.store()).ok().map(|state| {
+            state
+                .lanes
+                .iter()
+                .any(|l| l.open_operation.as_deref() == Some(run_id))
+        }) == Some(true);
+        if !is_open {
+            return Ok(());
+        }
+
+        if outcome == OperationOutcome::Aborted {
+            let mut any_provisioned = false;
+            if let Ok(state) = Reducer::reduce(self.store.store()) {
+                if let Some(l) = state
+                    .lanes
+                    .iter()
+                    .find(|l| l.open_operation.as_deref() == Some(run_id))
+                {
+                    for tool in &l.tools {
+                        if !tool.completed
+                            && tool.run_id == run_id
+                            && !self
+                                .store
+                                .entries()
+                                .iter()
+                                .any(|entry| entry.id == tool.result_entry_id)
+                        {
+                            self.append_message_to_lane(
+                                &l.name,
+                                run_id,
+                                AgentMessage::Tool {
+                                    tool_call_id: tool.tool_call_id.clone(),
+                                    name: tool.tool_name.clone(),
+                                    content: error
+                                        .clone()
+                                        .unwrap_or_else(|| "Tool execution cancelled.".into()),
+                                    is_error: true,
+                                    terminate: false,
+                                },
+                            )?;
+                            any_provisioned = true;
+                        }
+                    }
+                }
+            }
+            if any_provisioned {
+                let _ = self.refresh();
+            }
+            let _ = self.store.request_abort(run_id);
+            let _ = self.store.drive_to_completion();
+            let _ = self.refresh();
+            if self.store.reconcile_abort_run(run_id).is_ok() {
+                let _ = self.store.drive_to_completion();
+                return Ok(());
+            }
+        }
+
+        self.store
+            .finish_operation(run_id, outcome, error)
+            .map_err(|error| error.to_string())?;
+        self.store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn checkpoint(
+        &mut self,
+        lane: &str,
+        run_id: &str,
+        messages: &[AgentMessage],
+    ) -> Result<(), String> {
+        if messages.is_empty() {
+            return Ok(());
+        }
+        self.refresh()?;
+        for message in messages {
+            self.append_message_to_lane(lane, run_id, message.clone())?;
+        }
+        Ok(())
+    }
+
     // ── Run lifecycle ─────────────────────────────────────────────────
 
     /// Start a foreground operation and accept the user prompt.
@@ -126,6 +460,104 @@ impl CodingSessionHarness {
         self.store
             .drive_to_completion()
             .map_err(|error| error.to_string())
+    }
+
+    /// Start a foreground operation with an explicit prompt.
+    pub(crate) fn start_with_prompt(
+        &mut self,
+        run_id: &str,
+        prompt: AgentMessage,
+    ) -> Result<(), String> {
+        self.begin_run(run_id, prompt)
+    }
+
+    /// Append a tool intent.
+    pub(crate) async fn append_tool_intent(
+        &mut self,
+        run_id: &str,
+        tool_call_id: &str,
+        tool_name: &str,
+        effective_args: Value,
+    ) -> Result<(), String> {
+        self.refresh()?;
+        if self.store.records().iter().any(|record| {
+            matches!(record, HarnessRecord::ToolStarted {
+                run_id: record_run_id,
+                tool_call_id: record_call_id,
+                ..
+            } if record_run_id == run_id && record_call_id == tool_call_id)
+        }) {
+            return Ok(());
+        }
+        self.run_before_tool_hook(run_id, tool_call_id, tool_name)
+            .await?;
+        self.append_tool_intent_after_hook(run_id, tool_call_id, tool_name, effective_args)
+            .await
+    }
+
+    pub(crate) async fn run_before_tool_hook(
+        &self,
+        run_id: &str,
+        tool_call_id: &str,
+        tool_name: &str,
+    ) -> Result<(), String> {
+        let context = HookContext {
+            session_id: self.store.session_id().to_owned(),
+            lane: "main".into(),
+            run_id: Some(run_id.into()),
+            resume_data: None,
+            tool_call_id: Some(tool_call_id.into()),
+            tool_name: Some(tool_name.into()),
+            tool_arguments: None,
+            tool_result_content: None,
+            tool_result_is_error: None,
+        };
+        self.store
+            .hooks()
+            .run_before_tool(&context)
+            .await
+            .map_err(|failures| {
+                failures
+                    .into_iter()
+                    .map(|failure| {
+                        format!(
+                            "{} ({tool_call_id}/{tool_name}): {}",
+                            failure.id, failure.message
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
+    }
+
+    /// Start a foreground operation with an optional prompt.
+    pub(crate) fn start(
+        &mut self,
+        run_id: &str,
+        prompt: Option<AgentMessage>,
+    ) -> Result<(), String> {
+        self.refresh()?;
+        self.store
+            .start_operation(run_id, None, OperationIntent::Run)
+            .map_err(|error| error.to_string())?;
+        if let Some(msg) = prompt {
+            self.store
+                .accept_prompt(run_id, msg)
+                .map_err(|error| error.to_string())?;
+        }
+        self.store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())
+    }
+
+    /// Finish an operation with the given outcome and optional error.
+    pub(crate) fn finish(
+        &mut self,
+        run_id: &str,
+        outcome: OperationOutcome,
+        error: Option<String>,
+    ) -> Result<(), String> {
+        self.finish_run(run_id, outcome, error)
     }
 
     /// Finish an operation with the given outcome and optional error.
@@ -684,49 +1116,60 @@ impl CodingSessionHarness {
         }) {
             return Ok(());
         }
-        let assistant = self
+        let result_entry_id = format!("subagent-result-{run_id}-{tool_call_id}");
+        let assistant_entry_id = match self
             .store
             .entries()
             .iter()
             .rev()
             .find(|entry| {
-                entry.lane == lane
-                    && matches!(
-                        &entry.message,
-                        AgentMessage::Assistant { tool_calls: Some(calls), .. }
-                            if calls.iter().any(|call| call.id == tool_call_id)
-                    )
+                entry.lane == lane && matches!(entry.message, AgentMessage::Assistant { .. })
             })
-            .ok_or_else(|| {
-                format!("missing assistant entry for tool {tool_call_id} on lane {lane}")
-            })?;
-        let assistant_id = assistant.id.clone();
-        let tool_index = match &assistant.message {
-            AgentMessage::Assistant {
-                tool_calls: Some(calls),
-                ..
-            } => calls
-                .iter()
-                .position(|call| call.id == tool_call_id)
-                .ok_or_else(|| format!("tool {tool_call_id} is absent from assistant entry"))?,
-            _ => return Err("assistant entry has no tool calls".into()),
+            .map(|entry| entry.id.clone())
+        {
+            Some(id) => id,
+            None => {
+                let assistant_msg = AgentMessage::Assistant {
+                    content: None,
+                    tool_calls: None,
+                    stop_reason: None,
+                    deferred_handle: None,
+                };
+                self.append_message_to_lane(lane, run_id, assistant_msg)?
+            }
+        };
+        let tool_index = self
+            .store
+            .records()
+            .iter()
+            .filter(|record| match record {
+                HarnessRecord::ToolStarted {
+                    run_id: r_id,
+                    lane: r_lane,
+                    ..
+                } => r_id == run_id && r_lane == lane,
+                _ => false,
+            })
+            .count();
+        let record = HarnessRecord::ToolStarted {
+            id: format!("tool-started-{run_id}-{tool_call_id}"),
+            seq: harness_next_seq(self.store.store()),
+            lane: lane.into(),
+            timestamp: timestamp(),
+            run_id: run_id.into(),
+            assistant_entry_id,
+            tool_index,
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+            effective_args,
+            result_entry_id,
+            replay: match threadlane_agent::classify_tool_replay_safety(tool_name) {
+                threadlane_agent::ToolReplaySafety::Safe => HarnessToolReplaySafety::Safe,
+                threadlane_agent::ToolReplaySafety::Never => HarnessToolReplaySafety::Never,
+            },
         };
         self.store
-            .start_tool_batch(
-                run_id,
-                &assistant_id,
-                &[ToolSpec {
-                    index: tool_index,
-                    call_id: tool_call_id.into(),
-                    name: tool_name.into(),
-                    effective_args,
-                    result_entry_id: format!("v2-tool-result-{tool_call_id}"),
-                    replay: match threadlane_agent::classify_tool_replay_safety(tool_name) {
-                        threadlane_agent::ToolReplaySafety::Safe => HarnessToolReplaySafety::Safe,
-                        threadlane_agent::ToolReplaySafety::Never => HarnessToolReplaySafety::Never,
-                    },
-                }],
-            )
+            .append_record_gated(record)
             .map_err(|error| error.to_string())?;
         self.store
             .drive_to_completion()

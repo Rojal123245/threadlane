@@ -7,7 +7,7 @@ use tokio::sync::broadcast;
 use threadlane_agent::{AgentEvent, AgentToolCall, AgentToolDefinition, ToolExecutor};
 use threadlane_agent::harness::{HookContext, HookEffect, HookHandler, HookKind};
 use crate::agents::{discover_agents, AgentScope};
-use crate::capability_registry::Capability;
+use threadlane_agent::Capability;
 use crate::extension_broker::{
     BrokerError, CapabilityDispatcher, HostBrokerRequest, BROKER_API_VERSION,
 };

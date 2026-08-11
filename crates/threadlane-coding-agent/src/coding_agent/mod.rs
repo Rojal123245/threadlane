@@ -1,7 +1,6 @@
 pub mod broker;
 pub mod capabilities;
 pub mod harness;
-pub mod harness_journal;
 pub use capabilities::*;
 pub mod runtime;
 // Re-export public runtime items (explicit list to avoid conflicts with
@@ -22,7 +21,7 @@ pub(crate) use runtime::{
 };
 // Re-export test-only types.
 pub(crate) use broker::*;
-pub use harness_journal::*;
+pub use harness::*;
 #[cfg(test)]
 pub(crate) use runtime::{
     AgentWorkObserver, DeterministicSubagentToolExecutor, SubagentBoundaryObserver,

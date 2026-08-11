@@ -1,3 +1,4 @@
+pub mod capability;
 pub mod compaction;
 pub mod config;
 pub mod engine;
@@ -17,6 +18,7 @@ pub mod utils;
 
 pub use utils::{dirs_home, now_timestamp_ms, now_timestamp_secs, AbortOnDrop};
 
+pub use capability::{Capability, CapabilityRegistry};
 pub use compaction::{
     compact_messages, compact_messages_with_strategy, compaction_summary_text,
     prepare_token_optimal_context, prune_historical_tool_outputs, CompactionOptions,

@@ -6,11 +6,11 @@ use super::capabilities::{
     extension_before_tool_hook_handler, render_agent_catalog, restored_tool_policy, McpCapability,
     PlanCapability, SkillCapability, SubagentCapability, WasiCapability,
 };
-use super::harness_journal::{
+use super::harness::{
     harness_cancellation_state, HarnessWatch, InterruptedSubagentRecoveryState,
     SubagentLaneIdentity, SubagentStartError,
 };
-use super::HarnessJournal;
+use super::CodingSessionHarness as HarnessJournal;
 use super::ManagedProcessRegistry;
 use crate::agents::{discover_agents, AgentDefinition, AgentScope};
 use crate::commands::{execute_slash_command, parse_slash_command, CommandAction};
@@ -1232,7 +1232,7 @@ impl CodingAgent {
             default_global_threadlane_dir(),
             Some(options.work_dir.clone()),
         ));
-        let mut registry = crate::capability_registry::CapabilityRegistry::new();
+        let mut registry = threadlane_agent::CapabilityRegistry::new();
         registry.register(Box::new(SkillCapability {
             skills: skills.clone(),
         }));
