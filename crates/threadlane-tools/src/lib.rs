@@ -747,6 +747,27 @@ fn walk_repo_skeleton(dir: &Path, root: &Path, depth: usize, out: &mut Vec<Strin
     }
 }
 
+fn path_matches(file_name: &str, target_path: &str) -> bool {
+    let file_clean = file_name.replace('\\', "/");
+    let file_trimmed = file_clean.strip_prefix("./").unwrap_or(&file_clean);
+    let target_clean = target_path.replace('\\', "/");
+    let target_trimmed = target_clean.strip_prefix("./").unwrap_or(&target_clean);
+
+    if file_trimmed == target_trimmed {
+        return true;
+    }
+
+    if target_trimmed.ends_with(&format!("/{file_trimmed}")) {
+        return true;
+    }
+
+    if file_trimmed.ends_with(&format!("/{target_trimmed}")) {
+        return true;
+    }
+
+    false
+}
+
 fn run_post_edit_diagnostics(workspace_root: &Path, raw_path: &str) -> String {
     if !raw_path.ends_with(".rs") {
         return String::new();
@@ -765,7 +786,6 @@ fn run_post_edit_diagnostics(workspace_root: &Path, raw_path: &str) -> String {
     };
 
     let stdout_str = String::from_utf8_lossy(&output.stdout);
-    let target_clean = raw_path.replace('\\', "/");
 
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
@@ -794,8 +814,7 @@ fn run_post_edit_diagnostics(workspace_root: &Path, raw_path: &str) -> String {
         if let Some(spans) = spans {
             for span in spans {
                 if let Some(file_name) = span.get("file_name").and_then(|v| v.as_str()) {
-                    let file_clean = file_name.replace('\\', "/");
-                    if file_clean.ends_with(&target_clean) || target_clean.ends_with(&file_clean) {
+                    if path_matches(file_name, raw_path) {
                         matched = true;
                         line_no = span.get("line_start").and_then(|v| v.as_u64()).unwrap_or(0);
                         col_no = span
@@ -897,6 +916,15 @@ mod tests {
         let dir = tempdir().unwrap();
         let res = run_post_edit_diagnostics(dir.path(), "readme.txt");
         assert_eq!(res, "");
+    }
+
+    #[test]
+    fn test_path_matches_normalization() {
+        assert!(path_matches("src/main.rs", "./src/main.rs"));
+        assert!(path_matches("./src/main.rs", "src/main.rs"));
+        assert!(path_matches("crates/threadlane/src/main.rs", "src/main.rs"));
+        assert!(path_matches("src/main.rs", "/Users/foo/project/src/main.rs"));
+        assert!(!path_matches("src/other_main.rs", "main.rs"));
     }
 
     #[test]
