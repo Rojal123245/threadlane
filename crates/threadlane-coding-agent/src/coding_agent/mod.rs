@@ -37,7 +37,7 @@ mod tests {
     };
     use crate::policy::ToolPolicy;
     use crate::system_prompt::SystemPromptConfig;
-    use crate::wasi_extension::{
+    use threadlane_wasi::{
         WasiExtension, WasiExtensionInvocation, WasiExtensionManager, WasiExtensionResponse,
     };
     use serde_json::Value;
@@ -2454,12 +2454,12 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .any(|tool| { tool["function"]["name"] == crate::skills::LOAD_SKILL_TOOL_NAME }));
+            .any(|tool| { tool["function"]["name"] == threadlane_skills::LOAD_SKILL_TOOL_NAME }));
         assert!(codex["tools"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|tool| { tool["name"] == crate::skills::LOAD_SKILL_TOOL_NAME }));
+            .any(|tool| { tool["name"] == threadlane_skills::LOAD_SKILL_TOOL_NAME }));
         assert!(codex["tools"]
             .as_array()
             .unwrap()
@@ -2470,7 +2470,7 @@ mod tests {
             .agent
             .execute_tools(&[provider_tool_call(
                 "skill-call",
-                crate::skills::LOAD_SKILL_TOOL_NAME,
+                threadlane_skills::LOAD_SKILL_TOOL_NAME,
                 serde_json::json!({"name": "test-workflow"}),
             )])
             .await;

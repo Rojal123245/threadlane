@@ -2,7 +2,7 @@ use crate::coding_agent::harness::CodingSessionHarness;
 use crate::coding_agent::{
     abort_open_subagent_operations, CodingAgent, CodingAgentOptions, SubagentCancellationGuard,
 };
-use crate::packages::ExtensionScope;
+use threadlane_wasi::packages::ExtensionScope;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;

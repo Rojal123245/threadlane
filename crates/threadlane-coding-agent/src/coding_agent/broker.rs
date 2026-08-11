@@ -1,6 +1,6 @@
 use crate::extension_broker::{BrokerError, BrokerRequest, CapabilityHandler};
 use crate::policy::ToolPolicy;
-use crate::wasi_extension::WasiExtensionManager;
+use threadlane_wasi::WasiExtensionManager;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;

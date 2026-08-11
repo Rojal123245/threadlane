@@ -63,7 +63,7 @@ use threadlane_agent::{
     get_runtime, AgentEvent, ImageAttachment, ReasoningEffort, SessionPlan, TokenUsage,
 };
 use threadlane_coding_agent::{
-    cancel_open_subagent_operations, default_global_threadlane_dir, discover_agents, AgentConfig,
+    cancel_open_subagent_operations, default_global_threadlane_dir, discover_agents, AgentDefinition,
     AgentScope, CapabilityCatalog, CodingAgent, CodingAgentCancellation, CodingAgentOptions,
     CodingAgentWorkHandle, ExtensionManager, ExtensionScope, HarnessSupervisor, ProjectContext,
     SkillMetadata, SkillSettings, TaskKind, TaskRecord,
@@ -757,9 +757,7 @@ fn model_credential_error(
 }
 
 fn user_home_dir() -> Option<PathBuf> {
-    directories::UserDirs::new()
-        .map(|u| u.home_dir().to_path_buf())
-        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+    threadlane_agent::utils::dirs_home()
 }
 
 fn global_threadlane_dir() -> PathBuf {
@@ -5158,7 +5156,7 @@ fn format_capabilities_button_text(skills_count: usize, agents_count: usize) -> 
     }
 }
 
-fn format_capabilities_summary(skills: &[SkillMetadata], agents: &[AgentConfig]) -> String {
+fn format_capabilities_summary(skills: &[SkillMetadata], agents: &[AgentDefinition]) -> String {
     let mut summary = format!(
         "Capabilities\n\nSkills ({}) — use /skill <id> or let the model load one automatically.",
         skills.len()

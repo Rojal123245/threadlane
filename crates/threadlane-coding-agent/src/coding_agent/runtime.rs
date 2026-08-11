@@ -12,16 +12,16 @@ use super::harness_journal::{
 };
 use super::HarnessJournal;
 use super::ManagedProcessRegistry;
-use crate::agents::{discover_agents, AgentConfig, AgentScope};
+use crate::agents::{discover_agents, AgentDefinition, AgentScope};
 use crate::commands::{execute_slash_command, parse_slash_command, CommandAction};
 use crate::context::ProjectContext;
 use crate::extension_broker::CapabilityDispatcher;
-use crate::mcp::McpManager;
-use crate::packages::default_global_threadlane_dir;
+use threadlane_mcp::McpManager;
+use threadlane_wasi::packages::default_global_threadlane_dir;
 use crate::plan::SessionPlanStore;
-use crate::skills::{SkillManager, SkillRegistry};
+use threadlane_skills::{SkillManager, SkillRegistry};
 use crate::system_prompt::{build_system_prompt, SystemPromptBuildOptions, SystemPromptConfig};
-use crate::wasi_extension::{WasiExtensionManager, WasiLegacyEffect};
+use threadlane_wasi::{WasiExtensionManager, WasiLegacyEffect};
 #[cfg(test)]
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -1935,7 +1935,7 @@ impl CodingAgent {
                     .ok()
                     .and_then(|observer| observer.clone());
                 let result = run_subagent_task(
-                    AgentConfig {
+                    AgentDefinition {
                         name: "recovered".into(),
                         description: "Recovered interrupted subagent".into(),
                         tools: None,
@@ -3274,7 +3274,7 @@ async fn run_subagents_with_context(
                         task.agent
                     )
                 });
-                AgentConfig {
+                AgentDefinition {
                     name: task.agent.clone(),
                     description: format!("Dynamic subagent for {}", task.agent),
                     tools: task.tools.clone(),
@@ -3532,7 +3532,7 @@ fn accept_completed_subagent_lanes(
 }
 
 async fn run_subagent_task(
-    config: AgentConfig,
+    config: AgentDefinition,
     task: String,
     context: SubagentRunContext,
     run_id: u64,

@@ -11,11 +11,11 @@ use crate::capability_registry::Capability;
 use crate::extension_broker::{
     BrokerError, CapabilityDispatcher, HostBrokerRequest, BROKER_API_VERSION,
 };
-use crate::mcp::{McpManager, McpToolExecutor};
+use threadlane_mcp::{McpManager, McpToolExecutor};
 use crate::plan::{SessionPlanStore, UpdatePlanToolExecutor};
 use crate::policy::ToolPolicy;
-use crate::skills::{LoadSkillToolExecutor, SkillRegistry};
-use crate::wasi_extension::WasiExtensionManager;
+use threadlane_skills::{LoadSkillToolExecutor, SkillRegistry};
+use threadlane_wasi::WasiExtensionManager;
 use super::{
     AgentRunner, AgentRunTask, AgentWorkScheduler, MAX_SUBAGENT_TASKS,
     HostCapabilityHandler, ManagedProcessRegistry, MAX_BROKER_CONTINUATION_ROUNDS,

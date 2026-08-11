@@ -14,7 +14,9 @@ pub mod tool_executor;
 pub mod turn_driver;
 pub mod types;
 pub mod unified;
-pub(crate) mod utils;
+pub mod utils;
+
+pub use utils::{dirs_home, now_timestamp_ms, now_timestamp_secs, AbortOnDrop};
 
 pub use compaction::{
     compact_messages, compact_messages_with_strategy, compaction_summary_text,

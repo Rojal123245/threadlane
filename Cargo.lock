@@ -3270,6 +3270,7 @@ name = "threadlane-agent"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "directories",
  "futures",
  "libsqlite3-sys",
  "regex",

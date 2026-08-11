@@ -30,40 +30,42 @@ impl HarnessWatch {
     }
 }
 
-pub(crate) fn harness_event_hub(path: &Path) -> HarnessEventHub {
-    static HUBS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, HarnessEventHub>>> =
+#[derive(Clone)]
+struct HarnessSessionEntry {
+    hub: HarnessEventHub,
+    hooks: HookRegistry,
+    cancellation: Arc<AtomicBool>,
+}
+
+fn harness_session_entry(path: &Path) -> HarnessSessionEntry {
+    static SESSIONS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, HarnessSessionEntry>>> =
         std::sync::OnceLock::new();
-    let hubs = HUBS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-    let mut hubs = hubs.lock().unwrap_or_else(|error| error.into_inner());
-    hubs.entry(path.to_path_buf())
-        .or_insert_with(|| HarnessEventHub::new(256))
+    let sessions = SESSIONS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut sessions = sessions.lock().unwrap_or_else(|error| error.into_inner());
+    sessions
+        .entry(path.to_path_buf())
+        .or_insert_with(|| HarnessSessionEntry {
+            hub: HarnessEventHub::new(256),
+            hooks: HookRegistry::default(),
+            cancellation: Arc::new(AtomicBool::new(false)),
+        })
         .clone()
+}
+
+pub(crate) fn harness_event_hub(path: &Path) -> HarnessEventHub {
+    harness_session_entry(path).hub
 }
 
 pub(crate) fn harness_hook_registry(path: &Path) -> HookRegistry {
-    static REGISTRIES: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, HookRegistry>>> =
-        std::sync::OnceLock::new();
-    let registries = REGISTRIES.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-    let mut registries = registries.lock().unwrap_or_else(|error| error.into_inner());
-    registries.entry(path.to_path_buf()).or_default().clone()
+    harness_session_entry(path).hooks
 }
 
 pub(crate) fn harness_cancellation_state(path: &Path) -> Arc<AtomicBool> {
-    static STATES: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, Arc<AtomicBool>>>> =
-        std::sync::OnceLock::new();
-    let states = STATES.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-    let mut states = states.lock().unwrap_or_else(|error| error.into_inner());
-    states
-        .entry(path.to_path_buf())
-        .or_insert_with(|| Arc::new(AtomicBool::new(false)))
-        .clone()
+    harness_session_entry(path).cancellation
 }
 
 fn timestamp() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+    threadlane_agent::utils::now_timestamp_ms()
 }
 
 fn harness_next_seq(store: &JsonlStore) -> u64 {

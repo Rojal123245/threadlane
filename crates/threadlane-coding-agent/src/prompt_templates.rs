@@ -161,9 +161,9 @@ fn eval_braced_expr(expr: &str, args: &[String], all_args: &str) -> String {
 
 /// Parse frontmatter metadata from markdown file content.
 pub fn parse_frontmatter(content: &str) -> (Option<String>, Option<String>, String) {
-    let parsed = crate::frontmatter::parse_frontmatter(content);
-    let description = parsed.get("description").map(ToString::to_string);
-    let argument_hint = parsed.get("argument-hint").map(ToString::to_string);
+    let parsed = threadlane_skills::frontmatter::parse_frontmatter(content);
+    let description = parsed.get_str("description").map(ToString::to_string);
+    let argument_hint = parsed.get_str("argument-hint").map(ToString::to_string);
     (description, argument_hint, parsed.body)
 }
 

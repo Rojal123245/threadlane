@@ -9,16 +9,12 @@ pub mod config;
 pub mod context;
 pub mod error;
 pub mod extension_broker;
-pub mod frontmatter;
-pub mod mcp;
-pub mod packages;
 mod plan;
 pub mod policy;
 pub mod prompt_templates;
-pub mod skills;
 pub mod supervisor;
 pub mod system_prompt;
-pub mod wasi_extension;
+
 
 pub use acp::{
     AcpAgentCapabilities, AcpAgentConfig, AcpAgentRecord, AcpAgentStatus, AcpAuthMethod,
@@ -32,7 +28,7 @@ pub use acp::{
 pub use acp_bridge::{
     acp_agent_id, acp_model_id, agent_events_for, is_acp_model, ACP_MODEL_PREFIX,
 };
-pub use agents::{discover_agents, AgentConfig, AgentDiscoveryResult, AgentScope, AgentSource};
+pub use agents::{discover_agents, AgentDefinition, AgentDiscoveryResult, AgentScope, AgentSource};
 pub use capabilities::CapabilityCatalog;
 pub use capability_registry::{Capability, CapabilityRegistry};
 pub use coding_agent::{

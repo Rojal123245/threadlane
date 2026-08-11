@@ -1,4 +1,4 @@
-use crate::packages::{default_global_threadlane_dir, ExtensionManager, ExtensionRecord};
+use threadlane_wasi::packages::{default_global_threadlane_dir, ExtensionManager, ExtensionRecord};
 use std::path::Path;
 
 #[derive(Debug, Clone)]
