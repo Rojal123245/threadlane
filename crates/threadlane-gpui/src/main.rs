@@ -1,5 +1,6 @@
 mod app;
 mod chat_list;
+mod settings_modal;
 mod sidebar;
 mod state;
 

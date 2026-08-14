@@ -56,6 +56,7 @@ impl ChatListView {
             .map(|s| s.title.as_str())
             .unwrap_or("No active session");
 
+        let selected_model = state.selected_model.clone();
         let model = self.model.clone();
 
         div()
@@ -110,10 +111,13 @@ impl ChatListView {
                             .text_xs()
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(0xe4e4e7))
-                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                model.update(cx, |state, _cx| {
-                                    let _ = state.create_new_session();
-                                });
+                            .on_mouse_down(MouseButton::Left, {
+                                let model = model.clone();
+                                move |_event, _window, cx| {
+                                    model.update(cx, |state, _cx| {
+                                        let _ = state.create_new_session();
+                                    });
+                                }
                             })
                             .child("+ New Session"),
                     )
@@ -123,9 +127,20 @@ impl ChatListView {
                             .py_1()
                             .rounded_md()
                             .bg(rgb(0x27272a))
+                            .hover(|style| style.bg(rgb(0x3f3f46)))
+                            .cursor_pointer()
                             .text_xs()
-                            .text_color(rgb(0xa1a1aa))
-                            .child("Claude 3.5 Sonnet"),
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(0x60a5fa))
+                            .on_mouse_down(MouseButton::Left, {
+                                let model = model.clone();
+                                move |_event, _window, cx| {
+                                    model.update(cx, |state, _cx| {
+                                        state.toggle_settings_modal();
+                                    });
+                                }
+                            })
+                            .child(format!("⚙ {selected_model}")),
                     ),
             )
     }
@@ -237,6 +252,35 @@ impl ChatListView {
                     .text_color(rgb(0x71717a))
                     .child(msg.content.clone()),
             ),
+            MessageRole::Error => div().flex().justify_center().my_2().px_4().child(
+                div()
+                    .max_w(px(720.0))
+                    .w_full()
+                    .p_3()
+                    .rounded_lg()
+                    .bg(rgb(0x450a0a))
+                    .border_1()
+                    .border_color(rgb(0xef4444))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(0xf87171))
+                                    .child("ERROR"),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(0xfecaca))
+                                    .child(msg.content.clone()),
+                            ),
+                    ),
+            ),
         }
     }
 
@@ -293,11 +337,13 @@ impl Render for ChatListView {
             .flex_col()
             .flex_1()
             .h_full()
+            .min_h_0()
             .bg(rgb(0x09090b))
             .child(self.render_header(cx))
             .child(if messages.is_empty() {
                 div()
                     .flex_1()
+                    .min_h_0()
                     .flex()
                     .items_center()
                     .justify_center()
@@ -311,6 +357,7 @@ impl Render for ChatListView {
             } else {
                 div()
                     .flex_1()
+                    .min_h_0()
                     .overflow_y_scrollbar()
                     .py_3()
                     .children(messages.iter().map(|m| self.render_message(m, cx)))

@@ -44,6 +44,7 @@ pub enum MessageRole {
     User,
     Assistant,
     System,
+    Error,
 }
 
 #[derive(Clone, Debug)]
@@ -73,6 +74,13 @@ pub struct AppState {
     pub messages: Vec<ChatMessageInfo>,
     pub is_generating: bool,
     pub composer_text: String,
+
+    pub selected_model: String,
+    pub is_settings_open: bool,
+    pub openai_key: String,
+    pub opencode_key: String,
+    pub antigravity_connected: bool,
+    pub auth_status_msg: Option<String>,
 }
 
 pub fn global_threadlane_dir() -> PathBuf {
@@ -125,7 +133,15 @@ fn extract_session_title(tree: &SessionTree, fallback_id: &str) -> String {
             return name.clone();
         }
     }
-    let messages = tree.get_active_branch_messages();
+    let messages = {
+        let active = tree.get_active_branch_messages();
+        if active.is_empty() {
+            tree.get_persisted_messages()
+        } else {
+            active
+        }
+    };
+
     for msg in &messages {
         match msg {
             AgentMessage::User { content } | AgentMessage::UserWithImages { content, .. } => {
@@ -209,7 +225,15 @@ pub fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
         return Vec::new();
     };
 
-    let agent_messages = tree.get_active_branch_messages();
+    let agent_messages = {
+        let branch = tree.get_active_branch_messages();
+        if branch.is_empty() {
+            tree.get_persisted_messages()
+        } else {
+            branch
+        }
+    };
+
     let mut result = Vec::new();
     let mut msg_counter = 0;
 
@@ -296,15 +320,34 @@ pub fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
                 });
             }
             AgentMessage::System { content } => {
+                let role = if content.to_lowercase().contains("error") || content.to_lowercase().contains("failed") {
+                    MessageRole::Error
+                } else {
+                    MessageRole::System
+                };
                 result.push(ChatMessageInfo {
                     id: format!("msg_{msg_counter}"),
-                    role: MessageRole::System,
+                    role,
                     content,
                     timestamp: String::new(),
                     tool_activities: Vec::new(),
                 });
             }
-            _ => {}
+            AgentMessage::Custom { custom_type, payload } => {
+                let is_error_type = custom_type == "error" || custom_type == "agent_error";
+                let err_msg = payload
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| payload.to_string());
+                result.push(ChatMessageInfo {
+                    id: format!("msg_{msg_counter}"),
+                    role: if is_error_type { MessageRole::Error } else { MessageRole::System },
+                    content: err_msg,
+                    timestamp: String::new(),
+                    tool_activities: Vec::new(),
+                });
+            }
         }
     }
     result
@@ -378,6 +421,22 @@ impl AppState {
             Vec::new()
         };
 
+        let openai_key = threadlane_auth::openai_auth::load_openai_api_key()
+            .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+            .unwrap_or_default();
+        let opencode_key = threadlane_auth::opencode_auth::load_opencode_api_key().unwrap_or_default();
+        let antigravity_connected = threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some();
+
+        let selected_model = if !openai_key.is_empty() {
+            "gpt-4o".to_string()
+        } else if antigravity_connected {
+            "antigravity/gemini-3.6-flash".to_string()
+        } else if !opencode_key.is_empty() {
+            "opencode-go/claude-3-5-sonnet".to_string()
+        } else {
+            "gpt-4o".to_string()
+        };
+
         Self {
             projects: project_infos,
             active_work_dir,
@@ -386,6 +445,60 @@ impl AppState {
             messages,
             is_generating: false,
             composer_text: String::new(),
+            selected_model,
+            is_settings_open: false,
+            openai_key,
+            opencode_key,
+            antigravity_connected,
+            auth_status_msg: None,
+        }
+    }
+
+    pub fn save_openai_key(&mut self, key: String) -> Result<(), String> {
+        let key = key.trim().to_string();
+        if !key.is_empty() {
+            threadlane_auth::openai_auth::save_openai_api_key(&key)?;
+            self.openai_key = key;
+            self.auth_status_msg = Some("OpenAI API key saved successfully!".into());
+        } else {
+            let _ = threadlane_auth::openai_auth::remove_credentials();
+            self.openai_key.clear();
+            self.auth_status_msg = Some("OpenAI API key removed.".into());
+        }
+        Ok(())
+    }
+
+    pub fn save_opencode_key(&mut self, key: String) -> Result<(), String> {
+        let key = key.trim().to_string();
+        if !key.is_empty() {
+            threadlane_auth::opencode_auth::save_opencode_api_key(&key)?;
+            self.opencode_key = key;
+            self.auth_status_msg = Some("Opencode API key saved successfully!".into());
+        } else {
+            let _ = threadlane_auth::opencode_auth::clear_opencode_api_key();
+            self.opencode_key.clear();
+            self.auth_status_msg = Some("Opencode API key removed.".into());
+        }
+        Ok(())
+    }
+
+    pub fn set_selected_model(&mut self, model: String) {
+        self.selected_model = model.clone();
+        self.auth_status_msg = Some(format!("Model switched to {model}"));
+    }
+
+    pub fn toggle_settings_modal(&mut self) {
+        self.is_settings_open = !self.is_settings_open;
+        self.auth_status_msg = None;
+    }
+
+    pub fn refresh_active_session(&mut self) {
+        if let (Some(work_dir), Some(session_id)) = (&self.active_work_dir.clone(), &self.active_session_id.clone()) {
+            let session_file = work_dir.join(".threadlane/sessions").join(format!("{session_id}.jsonl"));
+            self.messages = load_session_messages(&session_file);
+            if let Some(proj) = self.projects.iter_mut().find(|p| &p.work_dir == work_dir) {
+                proj.sessions = discover_sessions_in_project(work_dir);
+            }
         }
     }
 
@@ -495,9 +608,12 @@ impl AppState {
 
         let session_file = work_dir.join(".threadlane/sessions").join(format!("{session_id}.jsonl"));
 
-        // 1. Load or create SessionTree
+        // 1. Load or create SessionTree with file_path bound
         let mut tree = match SessionTree::load_from_file(&session_file) {
-            Ok(t) => t,
+            Ok(mut t) => {
+                t.file_path = Some(session_file.clone());
+                t
+            }
             Err(_) => {
                 let mut t = SessionTree::new(&session_id);
                 t.file_path = Some(session_file.clone());
@@ -505,47 +621,87 @@ impl AppState {
             }
         };
 
-        // 2. Append User Message
+        // 2. Add User Message via add_message (updates active_node_id + appends node to file)
         let user_msg = AgentMessage::User { content: text.clone() };
-        let leaf_id = tree.active_node_id().map(str::to_owned);
-        let _ = tree.append_passive_branch(leaf_id.as_deref(), vec![user_msg]);
+        tree.add_message(user_msg);
 
         // Auto-set title if default
         if tree.name.is_none() {
             tree.name = Some(extract_session_title(&tree, &session_id));
         }
 
-        // 3. Resolve API credentials
-        let api_key = std::env::var("OPENAI_API_KEY")
-            .ok()
-            .or_else(|| {
-                threadlane_provider::antigravity_auth::load_antigravity_credentials()
-                    .map(|c| c.access_token)
-            })
-            .or_else(|| threadlane_provider::opencode_auth::load_opencode_api_key())
-            .unwrap_or_default();
+        // 3. Reload messages immediately to render user prompt bubble
+        self.messages = load_session_messages(&session_file);
 
-        let reply_content = if api_key.is_empty() {
-            format!(
-                "Received: \"{text}\"\n\nNote: No API key or provider credentials were found. Please set `OPENAI_API_KEY` or sign in with `/login antigravity` to enable live model responses."
-            )
+        // 4. Resolve API credentials for selected model
+        let model = self.selected_model.clone();
+        let api_key = if threadlane_provider::router::is_antigravity_model(&model) {
+            threadlane_provider::antigravity_auth::load_antigravity_credentials()
+                .map(|c| c.access_token)
+                .unwrap_or_default()
+        } else if threadlane_provider::router::is_opencode_model(&model) {
+            threadlane_auth::opencode_auth::load_opencode_api_key().unwrap_or_default()
         } else {
-            format!("Received prompt: \"{text}\"\n\nProcessed prompt successfully.")
+            threadlane_auth::openai_auth::load_openai_api_key()
+                .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+                .unwrap_or_default()
         };
 
-        // 4. Append Assistant Message
-        let assistant_msg = AgentMessage::Assistant {
-            content: Some(reply_content),
-            tool_calls: None,
-            stop_reason: None,
-            deferred_handle: None,
+        if api_key.is_empty() {
+            let err_msg = AgentMessage::Custom {
+                custom_type: "error".to_string(),
+                payload: serde_json::json!({
+                    "error": format!(
+                        "No API key configured for model `{model}`.\n\nPlease click the model badge in the top right to open Provider Settings and save your API key."
+                    )
+                }),
+            };
+            tree.add_message(err_msg);
+            self.messages = load_session_messages(&session_file);
+            return Ok(());
+        }
+
+        self.is_generating = true;
+
+        let options = threadlane_coding_agent::CodingAgentOptions {
+            api_key: api_key.clone(),
+            account_id: None,
+            model: model.clone(),
+            work_dir: work_dir.clone(),
+            session_file: Some(session_file.clone()),
+            system_prompt: Default::default(),
+            agent_config: None,
+            coding_config: None,
         };
 
-        let mut tree = SessionTree::load_from_file(&session_file).unwrap_or(tree);
-        let leaf_id = tree.active_node_id().map(str::to_owned);
-        let _ = tree.append_passive_branch(leaf_id.as_deref(), vec![assistant_msg]);
+        let text_to_agent = text.clone();
+        let session_file_bg = session_file.clone();
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    eprintln!("Failed to build tokio runtime: {e}");
+                    return;
+                }
+            };
 
-        // 5. Reload session messages & project list
+            rt.block_on(async move {
+                let mut agent = threadlane_coding_agent::CodingAgent::new(options);
+                if let Some(Err(err)) = agent.handle_input_with_images(&text_to_agent, Vec::new()).await {
+                    eprintln!("CodingAgent execution error: {err}");
+                    if let Ok(mut err_tree) = SessionTree::load_from_file(&session_file_bg) {
+                        err_tree.file_path = Some(session_file_bg.clone());
+                        let err_msg = AgentMessage::Custom {
+                            custom_type: "error".to_string(),
+                            payload: serde_json::json!({ "error": format!("Model execution error: {err}") }),
+                        };
+                        err_tree.add_message(err_msg);
+                    }
+                }
+            });
+        });
+
+        // Refresh project sessions & reload messages
         if let Some(proj) = self.projects.iter_mut().find(|p| p.work_dir == work_dir) {
             proj.sessions = discover_sessions_in_project(&work_dir);
         }

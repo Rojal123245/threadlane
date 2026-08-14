@@ -8037,6 +8037,7 @@ dependencies = [
  "serde",
  "serde_json",
  "threadlane-agent",
+ "threadlane-auth",
  "threadlane-coding-agent",
  "threadlane-provider",
  "threadlane-tools",
