@@ -57,6 +57,42 @@ const SUBAGENT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const SUBAGENT_RECOVERY_PROMPT: &str =
     "Continue from the recovered checkpoint and finish the assigned task.";
 
+fn active_branch_with_detached_tool_results(tree: &SessionTree) -> Vec<AgentMessage> {
+    let branch = tree.get_active_branch_messages();
+    let attached_tool_ids = branch
+        .iter()
+        .filter_map(|message| match message {
+            AgentMessage::Tool { tool_call_id, .. } => Some(tool_call_id.clone()),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    let mut messages = Vec::with_capacity(branch.len());
+    for message in branch {
+        let expected = match &message {
+            AgentMessage::Assistant {
+                tool_calls: Some(calls),
+                ..
+            } => calls.iter().map(|call| call.id.clone()).collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        messages.push(message);
+        for tool_call_id in expected {
+            if attached_tool_ids.contains(&tool_call_id) {
+                continue;
+            }
+            if let Some(tool) = tree.nodes.values().find_map(|node| match &node.message {
+                AgentMessage::Tool {
+                    tool_call_id: id, ..
+                } if id == &tool_call_id => Some(node.message.clone()),
+                _ => None,
+            }) {
+                messages.push(tool);
+            }
+        }
+    }
+    messages
+}
+
 pub(crate) fn is_retryable_generation_error(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     [
@@ -2050,7 +2086,7 @@ impl CodingAgent {
                 let Ok(tree) = SessionTree::load_from_file(&path) else {
                     return false;
                 };
-                let branch = tree.get_active_branch_messages();
+                let branch = active_branch_with_detached_tool_results(&tree);
                 let mut state = self.agent.turn.lock().await;
                 let mut messages = Vec::with_capacity(branch.len() + 1);
                 messages.push(AgentMessage::System {
@@ -2061,8 +2097,18 @@ impl CodingAgent {
                         .into_iter()
                         .filter(|message| !matches!(message, AgentMessage::System { .. })),
                 );
+                let repaired = repair_interrupted_tool_turn(&mut messages);
                 let changed = state.messages != messages;
                 self.session_tree = tree;
+                if repaired {
+                    self.session_tree.replace_active_branch_in_memory(
+                        messages
+                            .iter()
+                            .filter(|message| !matches!(message, AgentMessage::System { .. }))
+                            .cloned()
+                            .collect(),
+                    );
+                }
                 state.messages = messages;
                 return changed;
             }

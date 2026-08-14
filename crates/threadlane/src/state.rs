@@ -239,6 +239,11 @@ pub enum GuiAgentEvent {
         work_dir: PathBuf,
         session_id: String,
     },
+    InterruptedTurnResumeFinished {
+        work_dir: PathBuf,
+        session_id: String,
+        result: Result<usize, String>,
+    },
     HarnessEvent {
         generation_id: u64,
         work_dir: PathBuf,

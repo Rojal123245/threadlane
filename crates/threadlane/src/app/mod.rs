@@ -5019,23 +5019,16 @@ impl MatchEvent for App {
                     let tx = self.tx.clone();
                     self.set_session_status(cx, &key, UiStatus::Working, "Resuming turn...");
                     let key_clone = key.clone();
-                    tokio::spawn(async move {
+                    get_runtime().spawn(async move {
                         let mut agent = agent_arc.lock().await;
-                        match agent.resume_interrupted_turn().await {
-                            Ok(recovered) => {
-                                eprintln!("Resumed turn: recovered {} subagent lanes", recovered);
-                                if let Some(tx) = &tx {
-                                    let _ = tx.send(GuiAgentEvent::GenerationFinished {
-                                        generation_id: 0,
-                                        work_dir: key_clone.work_dir.clone(),
-                                        session_id: key_clone.session_id.clone(),
-                                    });
-                                    SignalToUI::set_ui_signal();
-                                }
-                            }
-                            Err(error) => {
-                                eprintln!("Turn resumption error: {}", error);
-                            }
+                        let result = agent.resume_interrupted_turn().await;
+                        if let Some(tx) = &tx {
+                            let _ = tx.send(GuiAgentEvent::InterruptedTurnResumeFinished {
+                                work_dir: key_clone.work_dir.clone(),
+                                session_id: key_clone.session_id.clone(),
+                                result,
+                            });
+                            SignalToUI::set_ui_signal();
                         }
                     });
                 }
@@ -9182,7 +9175,7 @@ impl App {
                     }
                     if let Some(runtime) = self.session_runtimes.get_mut(&key) {
                         runtime.generation = None;
-                        runtime.terminal_generation_id = None;
+                        runtime.terminal_generation_id = Some(generation_id);
                         runtime.submitted_draft = None;
                         runtime.submitted_attachments = None;
                     }
@@ -9219,6 +9212,39 @@ impl App {
                     }
                 }
 
+                GuiAgentEvent::InterruptedTurnResumeFinished {
+                    work_dir,
+                    session_id,
+                    result,
+                } => {
+                    let key = SessionKey::new(work_dir, session_id);
+                    if let Some(path) = self
+                        .session_runtimes
+                        .get(&key)
+                        .and_then(|runtime| runtime.session_file.as_deref())
+                    {
+                        let activities = restore_harness_activities(path);
+                        let health = session_health(&activities);
+                        let workspace = self.workspace_state.workspace_mut(key.clone());
+                        workspace.chat.harness_activities = activities;
+                        workspace.chat.revision = workspace.chat.revision.wrapping_add(1);
+                        set_session_health(&key.work_dir, &key.session_id, health);
+                    }
+                    match result {
+                        Ok(_) => self.set_session_status(cx, &key, UiStatus::Ready, "Ready"),
+                        Err(error) => {
+                            self.set_session_status(cx, &key, UiStatus::Error, "Resume failed");
+                            self.push_chat_to(
+                                key,
+                                MsgRole::System,
+                                format!("Turn resumption failed: {error}"),
+                            );
+                        }
+                    }
+                    self.ui.widget(cx, ids!(chat_list)).redraw(cx);
+                    self.ui.widget(cx, ids!(session_list)).redraw(cx);
+                }
+
                 GuiAgentEvent::HarnessEvent {
                     generation_id,
                     work_dir,
@@ -9230,8 +9256,13 @@ impl App {
                     let is_current = self
                         .session_runtimes
                         .get(&key)
-                        .and_then(|runtime| runtime.generation.as_ref())
-                        .is_some_and(|generation| generation.id == generation_id);
+                        .is_some_and(|runtime| {
+                            runtime
+                                .generation
+                                .as_ref()
+                                .is_some_and(|generation| generation.id == generation_id)
+                                || runtime.terminal_generation_id == Some(generation_id)
+                        });
                     trace!(
                         "HarnessEvent {} lane={} is_current={is_current}",
                         event.payload_variant(),
@@ -9350,8 +9381,13 @@ impl App {
                     let is_current = self
                         .session_runtimes
                         .get(&key)
-                        .and_then(|runtime| runtime.generation.as_ref())
-                        .is_some_and(|generation| generation.id == generation_id);
+                        .is_some_and(|runtime| {
+                            runtime
+                                .generation
+                                .as_ref()
+                                .is_some_and(|generation| generation.id == generation_id)
+                                || runtime.terminal_generation_id == Some(generation_id)
+                        });
                     if !is_current {
                         continue;
                     }
@@ -9376,6 +9412,10 @@ impl App {
                     if set_session_health(&key.work_dir, &key.session_id, health) {
                         self.ui.widget(cx, ids!(session_list)).redraw(cx);
                     }
+                    self.ui
+                        .widget(cx, ids!(chat_list))
+                        .portal_list(cx, ids!(list))
+                        .set_tail_range(true);
                     self.ui.widget(cx, ids!(chat_list)).redraw(cx);
                     debug!("HarnessSnapshot: redrew chat_list");
                 }
