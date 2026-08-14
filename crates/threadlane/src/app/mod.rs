@@ -495,14 +495,7 @@ fn format_token_count(tokens: u32) -> String {
     }
 }
 
-fn suppress_live_main_recovery(activities: &mut Vec<HarnessActivity>, live: bool) {
-    if live {
-        activities.retain(|activity| {
-            !(activity.agent == "main"
-                && activity.status == crate::panels::chat::state::HarnessActivityStatus::Recovering)
-        });
-    }
-}
+fn suppress_live_main_recovery(_activities: &mut Vec<HarnessActivity>, _live: bool) {}
 
 fn harness_live_streaming_detail(stream: &StreamingState) -> String {
     if !stream.tool_call_ids.is_empty() {
@@ -948,50 +941,6 @@ script_mod! {
                         color: theme.color_muted_foreground
                         text_style +: { font_size: 10.0 }
                     }
-                }
-            }
-
-            ActivityGroupMsg := #(ToolFoldHeader::register_widget(vm)) {
-                width: Fill
-                height: Fit
-                flow: Down
-                body_walk: Walk{width: Fill, height: Fit}
-                margin: Inset{top: 4 bottom: 2 left: 20 right: 24}
-                opened: 0.0
-                animator +: { active: { default: @off } }
-                header := mod.components.ActivityHeader {
-                    height: 28
-                    title_lbl := Label {
-                        width: 62
-                        height: Fit
-                        text: "Worked"
-                        draw_text +: {
-                            color: theme.color_muted_foreground
-                            text_style: theme.font_bold { font_size: 9.0 }
-                        }
-                    }
-                    summary := View {
-                        width: Fill
-                        height: 20
-                        flow: Right
-                        spacing: 7
-                        align: Align{y: 0.5}
-                        clip_x: true
-                        preview_lbl := mod.components.ClippedLabel {
-                            draw_text +: { color: theme.color_muted_foreground }
-                        }
-                        status_indicator := ActivityStatusIndicator {}
-                    }
-                }
-                body := RoundedView {
-                    width: Fill
-                    height: Fit
-                    padding: Inset{left: 30 top: 3 right: 18 bottom: 7}
-                    draw_bg +: {
-                        color: theme.color_transparent
-                        border_size: 0.0
-                    }
-                    md := mod.components.ChatMarkdown {}
                 }
             }
 
@@ -10007,7 +9956,7 @@ mod workspace_header_tests {
     }
 
     #[test]
-    fn live_foreground_runs_do_not_look_like_recovery() {
+    fn live_foreground_runs_preserve_recovering_activities_for_rail() {
         let mut activities = vec![crate::panels::chat::state::HarnessActivity {
             key: "main-run".into(),
             task: "Inspect the repo".into(),
@@ -10016,10 +9965,10 @@ mod workspace_header_tests {
             detail: "Suspended operation".into(),
         }];
         suppress_live_main_recovery(&mut activities, true);
-        assert!(activities.is_empty());
+        assert_eq!(activities.len(), 1);
         assert_eq!(
             crate::panels::sessions::state::session_health(&activities),
-            crate::panels::sessions::state::SessionHealth::Healthy
+            crate::panels::sessions::state::SessionHealth::Recovering
         );
     }
 

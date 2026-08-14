@@ -49,17 +49,6 @@ fn update_activity_status(
 }
 
 #[derive(Clone, Debug)]
-struct CachedActivityGroup {
-    detail: String,
-    preview: String,
-    title: &'static str,
-    tool_icon: ToolIcon,
-    running: bool,
-    has_error: bool,
-    has_cancelled: bool,
-}
-
-#[derive(Clone, Debug)]
 struct CachedSubagentTool {
     rail_items: Vec<SubagentRailItem>,
     preview: String,
@@ -76,68 +65,15 @@ enum DisplayRow {
     Message(usize),
     SubagentTool(CachedSubagentTool),
     Tool(CachedTool),
-    ActivityGroup(CachedActivityGroup),
+    StreamingThinking,
     StreamingAssistant,
 }
 
 #[derive(Clone, Copy)]
 enum InterimRow {
     Message(usize),
-    ActivityGroup {
-        start: usize,
-        end: usize,
-        streaming_thinking: bool,
-    },
+    StreamingThinking,
     StreamingAssistant,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ActivityKind {
-    ExploredFile,
-    ExploredFolder,
-    Search,
-    Edited,
-    Command,
-    Skill,
-    Delegated,
-    Other,
-}
-
-#[derive(Default)]
-struct ActivityCounts {
-    explored_files: usize,
-    explored_folders: usize,
-    searches: usize,
-    edited: usize,
-    commands: usize,
-    skills: usize,
-    delegated: usize,
-    other: usize,
-}
-
-impl ActivityCounts {
-    fn add(&mut self, kind: ActivityKind) {
-        match kind {
-            ActivityKind::ExploredFile => self.explored_files += 1,
-            ActivityKind::ExploredFolder => self.explored_folders += 1,
-            ActivityKind::Search => self.searches += 1,
-            ActivityKind::Edited => self.edited += 1,
-            ActivityKind::Command => self.commands += 1,
-            ActivityKind::Skill => self.skills += 1,
-            ActivityKind::Delegated => self.delegated += 1,
-            ActivityKind::Other => self.other += 1,
-        }
-    }
-}
-
-fn is_activity(message: &ChatMessage) -> bool {
-    match message {
-        ChatMessage::Thinking { .. } => true,
-        ChatMessage::Tool {
-            name, presentation, ..
-        } => name != "subagent" && presentation.icon != ToolIcon::Subagent,
-        _ => false,
-    }
 }
 
 #[cfg(test)]
@@ -163,49 +99,12 @@ fn display_rows_with_harness(
         if super::state::is_owned_subagent_child_tool(message, &owned_runs) {
             continue;
         }
-        if is_activity(message) {
-            if let Some(InterimRow::ActivityGroup { end, .. }) = interim.last_mut() {
-                if *end == message_index {
-                    *end = message_index + 1;
-                    continue;
-                }
-            }
-            interim.push(InterimRow::ActivityGroup {
-                start: message_index,
-                end: message_index + 1,
-                streaming_thinking: false,
-            });
-        } else {
-            interim.push(InterimRow::Message(message_index));
-        }
+        interim.push(InterimRow::Message(message_index));
     }
 
     if !streaming_text.is_empty() {
         match streaming_kind {
-            Some(StreamingKind::Thinking) => {
-                if let Some(InterimRow::ActivityGroup {
-                    end,
-                    streaming_thinking,
-                    ..
-                }) = interim.last_mut()
-                {
-                    if *end == messages.len() {
-                        *streaming_thinking = true;
-                    } else {
-                        interim.push(InterimRow::ActivityGroup {
-                            start: messages.len(),
-                            end: messages.len(),
-                            streaming_thinking: true,
-                        });
-                    }
-                } else {
-                    interim.push(InterimRow::ActivityGroup {
-                        start: messages.len(),
-                        end: messages.len(),
-                        streaming_thinking: true,
-                    });
-                }
-            }
+            Some(StreamingKind::Thinking) => interim.push(InterimRow::StreamingThinking),
             _ => interim.push(InterimRow::StreamingAssistant),
         }
     }
@@ -213,82 +112,8 @@ fn display_rows_with_harness(
     let mut rows = interim
         .into_iter()
         .map(|row| match row {
+            InterimRow::StreamingThinking => DisplayRow::StreamingThinking,
             InterimRow::StreamingAssistant => DisplayRow::StreamingAssistant,
-            InterimRow::ActivityGroup {
-                start,
-                end,
-                streaming_thinking,
-            } => {
-                let mut counts = ActivityCounts::default();
-                let mut has_thinking = streaming_thinking;
-                let mut running = streaming_thinking;
-                let mut has_error = false;
-                let mut has_cancelled = false;
-                let mut first_icon = None;
-                let mut mixed_icons = false;
-
-                if start < messages.len() {
-                    let group_end = end.min(messages.len());
-                    for message in &messages[start..group_end] {
-                        match message {
-                            ChatMessage::Thinking { .. } => has_thinking = true,
-                            ChatMessage::Tool {
-                                name,
-                                status,
-                                presentation,
-                                ..
-                            } => {
-                                let kind = activity_kind(name, presentation.icon);
-                                counts.add(kind);
-                                running |= *status == ToolStatus::Running;
-                                has_error |= *status == ToolStatus::Error;
-                                has_cancelled |= *status == ToolStatus::Cancelled;
-                                if let Some(icon) = first_icon {
-                                    mixed_icons |= icon != presentation.icon;
-                                } else {
-                                    first_icon = Some(presentation.icon);
-                                }
-                            }
-                            ChatMessage::Text { .. } => {}
-                        }
-                    }
-                }
-
-                let detail = activity_detail(
-                    if start < messages.len() {
-                        &messages[start..end.min(messages.len())]
-                    } else {
-                        &[]
-                    },
-                    streaming_thinking.then_some(streaming_text),
-                );
-
-                let title = if running {
-                    "Working"
-                } else if has_cancelled {
-                    "Stopped"
-                } else {
-                    "Worked"
-                };
-
-                let preview = activity_preview(&counts, has_thinking);
-
-                let tool_icon = if mixed_icons {
-                    ToolIcon::Generic
-                } else {
-                    first_icon.unwrap_or(ToolIcon::Generic)
-                };
-
-                DisplayRow::ActivityGroup(CachedActivityGroup {
-                    detail,
-                    preview,
-                    title,
-                    tool_icon,
-                    running,
-                    has_error,
-                    has_cancelled,
-                })
-            }
             InterimRow::Message(message_index) => {
                 let Some(message) = messages.get(message_index) else {
                     return DisplayRow::Message(message_index);
@@ -398,12 +223,16 @@ fn display_rows_with_harness(
     let unmatched = activities
         .iter()
         .enumerate()
-        .filter_map(|(index, activity)| (!matched[index]).then_some(activity))
+        .filter_map(|(index, activity)| (!matched[index]).then_some(activity.clone()))
         .collect::<Vec<_>>();
     if !unmatched.is_empty() {
-        rows.push(DisplayRow::ActivityGroup(harness_activity_group(
-            &unmatched,
-        )));
+        let mut rail_items = Vec::new();
+        super::state::merge_harness_activities(&mut rail_items, &unmatched);
+        let preview = harness_activity_preview(&unmatched);
+        rows.push(DisplayRow::SubagentTool(CachedSubagentTool {
+            rail_items,
+            preview,
+        }));
     }
 
     rows
@@ -434,287 +263,6 @@ fn harness_activity_preview(activities: &[HarnessActivity]) -> String {
         "{label} · {count} {}",
         if count == 1 { "task" } else { "tasks" }
     )
-}
-
-fn harness_activity_group(activities: &[&HarnessActivity]) -> CachedActivityGroup {
-    let running = activities.iter().any(|activity| {
-        matches!(
-            activity.status,
-            HarnessActivityStatus::Queued
-                | HarnessActivityStatus::Working
-                | HarnessActivityStatus::Recovering
-                | HarnessActivityStatus::Retrying
-        )
-    });
-    let has_error = activities.iter().any(|activity| {
-        matches!(
-            activity.status,
-            HarnessActivityStatus::Aborted
-                | HarnessActivityStatus::Faulted
-                | HarnessActivityStatus::Retrying
-        )
-    });
-    let has_cancelled = activities
-        .iter()
-        .any(|activity| activity.status == HarnessActivityStatus::Cancelled);
-    let detail = activities
-        .iter()
-        .map(|activity| {
-            format!(
-                "- {} — {}",
-                super::state::normalize_whitespace_bounded(&activity.task, 240),
-                super::state::harness_activity_detail(activity)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    CachedActivityGroup {
-        detail,
-        preview: harness_activity_preview(
-            &activities
-                .iter()
-                .map(|activity| (*activity).clone())
-                .collect::<Vec<_>>(),
-        ),
-        title: if running { "Working" } else { "Worked" },
-        tool_icon: ToolIcon::Generic,
-        running,
-        has_error,
-        has_cancelled,
-    }
-}
-
-fn activity_kind(name: &str, icon: ToolIcon) -> ActivityKind {
-    let normalized = name.to_ascii_lowercase();
-    if icon == ToolIcon::ListDirectory || normalized.contains("list") {
-        ActivityKind::ExploredFolder
-    } else if normalized.contains("search")
-        || normalized.contains("grep")
-        || normalized.contains("find")
-    {
-        ActivityKind::Search
-    } else if icon == ToolIcon::ReadFile || normalized.contains("read") {
-        ActivityKind::ExploredFile
-    } else if matches!(icon, ToolIcon::WriteFile | ToolIcon::EditFile)
-        || normalized.contains("write")
-        || normalized.contains("edit")
-    {
-        ActivityKind::Edited
-    } else if icon == ToolIcon::Terminal
-        || normalized.contains("command")
-        || normalized.contains("terminal")
-        || normalized.contains("shell")
-    {
-        ActivityKind::Command
-    } else if icon == ToolIcon::Skill || normalized.contains("skill") {
-        ActivityKind::Skill
-    } else if icon == ToolIcon::Subagent
-        || normalized.contains("subagent")
-        || normalized.contains("delegate")
-    {
-        ActivityKind::Delegated
-    } else {
-        ActivityKind::Other
-    }
-}
-
-fn pluralized(count: usize, singular: &str, plural: &str) -> String {
-    format!("{count} {}", if count == 1 { singular } else { plural })
-}
-
-fn activity_preview(counts: &ActivityCounts, has_thinking: bool) -> String {
-    let mut parts = Vec::new();
-    if has_thinking {
-        parts.push("Reasoned".to_string());
-    }
-    let mut explored = Vec::new();
-    if counts.explored_files > 0 {
-        explored.push(pluralized(counts.explored_files, "file", "files"));
-    }
-    if counts.explored_folders > 0 {
-        explored.push(pluralized(counts.explored_folders, "folder", "folders"));
-    }
-    if counts.searches > 0 {
-        explored.push(pluralized(counts.searches, "search", "searches"));
-    }
-    if !explored.is_empty() {
-        parts.push(format!("Explored {}", explored.join(", ")));
-    }
-    if counts.edited > 0 {
-        parts.push(format!(
-            "Edited {}",
-            pluralized(counts.edited, "file", "files")
-        ));
-    }
-    if counts.commands > 0 {
-        parts.push(format!(
-            "Ran {}",
-            pluralized(counts.commands, "command", "commands")
-        ));
-    }
-    if counts.skills > 0 {
-        parts.push(format!(
-            "Loaded {}",
-            pluralized(counts.skills, "skill", "skills")
-        ));
-    }
-    if counts.delegated > 0 {
-        parts.push(format!(
-            "Delegated {}",
-            pluralized(counts.delegated, "task", "tasks")
-        ));
-    }
-    if counts.other > 0 {
-        parts.push(format!(
-            "Used {}",
-            pluralized(counts.other, "tool", "tools")
-        ));
-    }
-    parts.join(" · ")
-}
-
-fn markdown_inline(text: &str) -> String {
-    text.replace(['\r', '\n'], " ").replace('`', "'")
-}
-
-fn activity_line(
-    kind: ActivityKind,
-    title: &str,
-    primary: &str,
-    result_metadata: &str,
-    status: ToolStatus,
-) -> String {
-    let action = match kind {
-        ActivityKind::ExploredFile | ActivityKind::ExploredFolder | ActivityKind::Search => {
-            "Explored"
-        }
-        ActivityKind::Edited => "Edited",
-        ActivityKind::Command => "Ran command",
-        ActivityKind::Skill => "Loaded skill",
-        ActivityKind::Delegated => "Delegated",
-        ActivityKind::Other => title,
-    };
-    let mut line = format!("- **{}**", markdown_inline(action));
-    if !primary.is_empty() {
-        line.push_str(&format!(" `{}`", markdown_inline(primary)));
-    }
-    match status {
-        ToolStatus::Running => line.push_str(" · Running"),
-        ToolStatus::Error => line.push_str(" · Failed"),
-        ToolStatus::Cancelled if !result_metadata.is_empty() => {
-            line.push_str(&format!(" · {}", markdown_inline(result_metadata)))
-        }
-        ToolStatus::Cancelled => line.push_str(" · Stopped"),
-        ToolStatus::Done if !result_metadata.is_empty() => {
-            line.push_str(&format!(" · {}", markdown_inline(result_metadata)))
-        }
-        ToolStatus::Done => {}
-    }
-    line
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ActivityDetailKind {
-    Thinking,
-    Tool,
-}
-
-fn append_activity_detail(
-    detail: &mut String,
-    previous_kind: &mut Option<ActivityDetailKind>,
-    kind: ActivityDetailKind,
-    block: &str,
-) {
-    if block.is_empty() {
-        return;
-    }
-    if !detail.is_empty() {
-        if *previous_kind == Some(ActivityDetailKind::Tool) && kind == ActivityDetailKind::Tool {
-            detail.push('\n');
-        } else {
-            detail.push_str("\n\n");
-        }
-    }
-    detail.push_str(block);
-    *previous_kind = Some(kind);
-}
-
-fn activity_detail(messages: &[ChatMessage], streaming_thinking: Option<&str>) -> String {
-    let mut detail = String::new();
-    let mut previous_kind = None;
-    let mut has_thinking = false;
-
-    for message in messages {
-        match message {
-            ChatMessage::Thinking { text } => {
-                has_thinking = true;
-                if !text.trim().is_empty() {
-                    append_activity_detail(
-                        &mut detail,
-                        &mut previous_kind,
-                        ActivityDetailKind::Thinking,
-                        &format!("**Thinking**\n\n{text}"),
-                    );
-                }
-            }
-            ChatMessage::Tool {
-                name,
-                status,
-                presentation,
-                result_metadata,
-                output,
-                ..
-            } => {
-                let kind = activity_kind(name, presentation.icon);
-                let mut line = activity_line(
-                    kind,
-                    &presentation.title,
-                    &presentation.primary,
-                    result_metadata,
-                    *status,
-                );
-                if name == "subagent" || presentation.icon == ToolIcon::Subagent {
-                    if !presentation.arguments_detail.is_empty() {
-                        line.push_str("\n\n");
-                        line.push_str(&presentation.arguments_detail);
-                    }
-                    if !output.trim().is_empty() {
-                        line.push_str("\n\n");
-                        line.push_str(output.trim());
-                    }
-                }
-                append_activity_detail(
-                    &mut detail,
-                    &mut previous_kind,
-                    ActivityDetailKind::Tool,
-                    &line,
-                );
-            }
-            ChatMessage::Text { .. } => {}
-        }
-    }
-
-    if let Some(text) = streaming_thinking {
-        has_thinking = true;
-        let block = if text.trim().is_empty() {
-            "**Thinking…**".to_string()
-        } else {
-            format!("**Thinking…**\n\n{text}")
-        };
-        append_activity_detail(
-            &mut detail,
-            &mut previous_kind,
-            ActivityDetailKind::Thinking,
-            &block,
-        );
-    }
-
-    if detail.is_empty() && has_thinking {
-        "Reasoning completed.".to_string()
-    } else {
-        detail
-    }
 }
 
 fn user_message_needs_wrapping(text: &str) -> bool {
@@ -986,6 +534,20 @@ impl Widget for ChatList {
                     };
 
                     match row {
+                        DisplayRow::StreamingThinking => {
+                            let item_widget = list.item(cx, item_id, id!(ThinkingMsg));
+                            let mut md = item_widget.markdown(cx, ids!(md));
+                            if md.text() != data.streaming_text {
+                                md.set_text(cx, &data.streaming_text);
+                            }
+                            let preview =
+                                super::state::collapsed_thinking_preview(&data.streaming_text, 72);
+                            let preview_lbl = item_widget.label(cx, ids!(preview_lbl));
+                            if preview_lbl.text() != preview {
+                                preview_lbl.set_text(cx, &preview);
+                            }
+                            item_widget.draw_all_unscoped(cx);
+                        }
                         DisplayRow::StreamingAssistant => {
                             draw_markdown_item(
                                 &mut list,
@@ -994,28 +556,6 @@ impl Widget for ChatList {
                                 id!(AssistantMsg),
                                 &data.streaming_text,
                             );
-                        }
-                        DisplayRow::ActivityGroup(group) => {
-                            let item_widget = list.item(cx, item_id, id!(ActivityGroupMsg));
-                            show_tool_icon(cx, &item_widget, group.tool_icon);
-                            item_widget
-                                .label(cx, ids!(title_lbl))
-                                .set_text(cx, group.title);
-                            item_widget
-                                .label(cx, ids!(preview_lbl))
-                                .set_text(cx, &group.preview);
-                            update_activity_status(
-                                cx,
-                                &item_widget,
-                                group.running,
-                                group.has_error,
-                                group.has_cancelled,
-                            );
-                            let mut md = item_widget.markdown(cx, ids!(md));
-                            if md.text() != group.detail {
-                                md.set_text(cx, &group.detail);
-                            }
-                            item_widget.draw_all_unscoped(cx);
                         }
                         DisplayRow::SubagentTool(tool) => {
                             let item_widget = list.item(cx, item_id, id!(SubagentMsg));
@@ -1454,7 +994,7 @@ mod tests {
     }
 
     #[test]
-    fn consecutive_activity_messages_share_one_display_row() {
+    fn consecutive_activity_messages_keep_individual_rows() {
         let messages = vec![
             ChatMessage::Thinking {
                 text: "Plan".into(),
@@ -1468,13 +1008,15 @@ mod tests {
         ];
 
         let rows = display_rows(&messages, None, "");
-        assert_eq!(rows.len(), 2);
-        assert!(matches!(rows[0], DisplayRow::ActivityGroup(_)));
-        assert!(matches!(rows[1], DisplayRow::Message(3)));
+        assert_eq!(rows.len(), 4);
+        assert!(matches!(rows[0], DisplayRow::Message(0)));
+        assert!(matches!(rows[1], DisplayRow::Tool(_)));
+        assert!(matches!(rows[2], DisplayRow::Tool(_)));
+        assert!(matches!(rows[3], DisplayRow::Message(3)));
     }
 
     #[test]
-    fn standalone_harness_activity_uses_the_worked_activity_group() {
+    fn standalone_harness_activity_uses_the_subagent_rail() {
         let activities = vec![super::super::state::HarnessActivity {
             key: "lane-a".into(),
             task: "Recover interrupted work".into(),
@@ -1486,12 +1028,14 @@ mod tests {
         let rows = display_rows_with_harness(&[], None, "", &activities);
 
         assert_eq!(rows.len(), 1);
-        let DisplayRow::ActivityGroup(row) = &rows[0] else {
-            panic!("expected a worked activity group");
+        let DisplayRow::SubagentTool(row) = &rows[0] else {
+            panic!("expected a subagent tool row with rail items");
         };
-        assert_eq!(row.title, "Working");
         assert_eq!(row.preview, "Recovering · 1 task");
-        assert!(row.detail.contains("Recover interrupted work"));
+        assert_eq!(row.rail_items.len(), 1);
+        assert_eq!(row.rail_items[0].key.as_deref(), Some("lane-a"));
+        assert_eq!(row.rail_items[0].status, "Recovering");
+        assert!(row.rail_items[0].detail.contains("Recovered checkpoint"));
     }
 
     #[test]
@@ -1696,7 +1240,7 @@ mod tests {
 
         let orphaned_rows = display_rows(std::slice::from_ref(&child), None, "");
         assert_eq!(orphaned_rows.len(), 1);
-        assert!(matches!(orphaned_rows[0], DisplayRow::ActivityGroup(_)));
+        assert!(matches!(orphaned_rows[0], DisplayRow::Tool(_)));
 
         let unrelated_child = tool(
             "subagent-405:0:read",
@@ -1710,64 +1254,16 @@ mod tests {
         );
         assert_eq!(owned_rows.len(), 2);
         assert!(matches!(owned_rows[0], DisplayRow::SubagentTool(_)));
-        assert!(matches!(owned_rows[1], DisplayRow::ActivityGroup(_)));
+        assert!(matches!(owned_rows[1], DisplayRow::Tool(_)));
     }
 
     #[test]
-    fn streaming_thinking_merges_into_trailing_activity_group() {
+    fn streaming_thinking_keeps_its_own_activity_row() {
         let messages = vec![tool("read", "read_file", r#"{"path":"src/app.rs"}"#)];
 
         let rows = display_rows(&messages, Some(StreamingKind::Thinking), "Reviewing");
-        assert_eq!(rows.len(), 1);
-        assert!(matches!(rows[0], DisplayRow::ActivityGroup(_)));
-    }
-
-    #[test]
-    fn activity_detail_preserves_finalized_and_streaming_thinking_in_order() {
-        let completed = format!(
-            "Starting analysis. {}Final persisted reasoning sentence.",
-            "Detailed reasoning step. ".repeat(400)
-        );
-        let messages = vec![
-            ChatMessage::Thinking {
-                text: completed.clone(),
-            },
-            tool("read", "read_file", r#"{"path":"src/app.rs"}"#),
-            ChatMessage::Thinking {
-                text: "Reasoning after the tool.".into(),
-            },
-        ];
-
-        let detail = activity_detail(&messages, Some("Current streaming reasoning."));
-
-        assert!(detail.contains(&completed));
-        let completed_index = detail.find("Final persisted reasoning sentence.").unwrap();
-        let tool_index = detail.find("src/app.rs").unwrap();
-        let resumed_index = detail.find("Reasoning after the tool.").unwrap();
-        let streaming_index = detail.find("Current streaming reasoning.").unwrap();
-        assert!(completed_index < tool_index);
-        assert!(tool_index < resumed_index);
-        assert!(resumed_index < streaming_index);
-    }
-
-    #[test]
-    fn activity_preview_distinguishes_exploration_types() {
-        let counts = ActivityCounts {
-            explored_files: 2,
-            explored_folders: 1,
-            searches: 1,
-            edited: 3,
-            commands: 1,
-            ..Default::default()
-        };
-
-        assert_eq!(
-            activity_preview(&counts, false),
-            "Explored 2 files, 1 folder, 1 search · Edited 3 files · Ran 1 command"
-        );
-        assert_eq!(
-            activity_preview(&counts, true),
-            "Reasoned · Explored 2 files, 1 folder, 1 search · Edited 3 files · Ran 1 command"
-        );
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(rows[0], DisplayRow::Tool(_)));
+        assert!(matches!(rows[1], DisplayRow::StreamingThinking));
     }
 }
