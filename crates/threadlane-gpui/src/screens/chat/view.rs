@@ -2,6 +2,7 @@ use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
+use gpui_component::theme::ActiveTheme;
 
 use crate::app::{actions::AppAction, controller};
 use crate::state::{AppState, ChatMessageInfo, MessageRole, ToolActivityInfo};
@@ -9,6 +10,7 @@ use crate::state::{AppState, ChatMessageInfo, MessageRole, ToolActivityInfo};
 pub struct ChatListView {
     pub model: Entity<AppState>,
     pub input_state: Entity<InputState>,
+    pub header_left_padding: Pixels,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -47,106 +49,58 @@ impl ChatListView {
         Self {
             model,
             input_state,
+            header_left_padding: px(14.0),
             _subscriptions: vec![sub1, sub2],
         }
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let state = self.model.read(cx);
-        let active_title = state
-            .projects
-            .iter()
-            .flat_map(|p| p.sessions.iter())
-            .find(|s| state.active_session_id.as_deref() == Some(&s.id))
-            .map(|s| s.title.as_str())
-            .unwrap_or("No active session");
-
-        let selected_model = state.selected_model.clone();
-        let model = self.model.clone();
+        let active_title = {
+            let state = self.model.read(cx);
+            state
+                .projects
+                .iter()
+                .flat_map(|project| project.sessions.iter())
+                .find(|session| state.active_session_id.as_deref() == Some(&session.id))
+                .map(|session| session.title.clone())
+                .unwrap_or_else(|| "New task".to_string())
+        };
+        let theme = cx.theme().colors;
 
         div()
+            .h(px(48.0))
+            .flex_none()
             .flex()
-            .items_center()
-            .justify_between()
-            .px_4()
-            .py_3()
+            .items_start()
+            .pt(px(9.0))
+            .pl(self.header_left_padding)
+            .pr_4()
             .border_b_1()
-            .border_color(rgb(0x2d2d30))
-            .bg(rgb(0x18181b))
+            .border_color(theme.title_bar_border)
+            .bg(theme.title_bar)
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(0xf4f4f5))
-                            .child(active_title.to_string()),
-                    )
-                    .child(
-                        div()
-                            .px_2()
-                            .py_0p5()
-                            .rounded_full()
-                            .bg(rgb(0x1e3a8a))
-                            .text_xs()
-                            .text_color(rgb(0x60a5fa))
-                            .child(if state.active_session_id.is_some() {
-                                "Active"
-                            } else {
-                                "Idle"
-                            }),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        Button::new("new-session-btn")
-                            .label("+ New Session")
-                            .ghost()
-                            .on_click({
-                                let model = model.clone();
-                                move |_event, _window, cx| {
-                                    model.update(cx, |state, _cx| {
-                                        controller::dispatch(state, AppAction::CreateSession);
-                                    });
-                                }
-                            }),
-                    )
-                    .child(
-                        Button::new("settings-btn")
-                            .label(format!("⚙ {selected_model}"))
-                            .ghost()
-                            .on_click({
-                                let model = model.clone();
-                                move |_event, _window, cx| {
-                                    model.update(cx, |state, _cx| {
-                                        controller::dispatch(state, AppAction::ToggleSettings);
-                                    });
-                                }
-                            }),
-                    ),
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(13.0))
+                    .line_height(px(18.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.foreground)
+                    .child(active_title),
             )
     }
 
-    fn render_tool_activity(&self, activity: &ToolActivityInfo) -> impl IntoElement {
-        let badge_bg = match activity.category.as_str() {
-            "Created" | "Edited" => rgb(0x064e3b),
-            "Ran" => rgb(0x312e81),
-            "Error" => rgb(0x7f1d1d),
-            _ => rgb(0x27272a),
-        };
-
-        let badge_fg = match activity.category.as_str() {
-            "Created" | "Edited" => rgb(0x34d399),
-            "Ran" => rgb(0x818cf8),
-            "Error" => rgb(0xfca5a5),
-            _ => rgb(0xa1a1aa),
+    fn render_tool_activity(
+        &self,
+        activity: &ToolActivityInfo,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme().colors;
+        let (badge_bg, badge_fg) = match activity.category.as_str() {
+            "Created" | "Edited" => (theme.success, theme.success_foreground),
+            "Ran" => (theme.info, theme.info_foreground),
+            "Error" => (theme.danger, theme.danger_foreground),
+            _ => (theme.muted, theme.muted_foreground),
         };
 
         div()
@@ -155,9 +109,9 @@ impl ChatListView {
             .my_1()
             .p_2()
             .rounded_md()
-            .bg(rgb(0x18181b))
+            .bg(theme.title_bar)
             .border_1()
-            .border_color(rgb(0x2d2d30))
+            .border_color(theme.border)
             .child(
                 div()
                     .flex()
@@ -178,7 +132,7 @@ impl ChatListView {
                         div()
                             .text_xs()
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(0xe4e4e7))
+                            .text_color(theme.foreground)
                             .child(activity.title.clone()),
                     ),
             )
@@ -186,28 +140,29 @@ impl ChatListView {
                 div()
                     .mt_1()
                     .text_xs()
-                    .text_color(rgb(0x71717a))
+                    .text_color(theme.muted_foreground)
                     .child(activity.detail.clone()),
             )
     }
 
-    fn render_message(&self, msg: &ChatMessageInfo, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_message(&self, msg: &ChatMessageInfo, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().colors;
         match msg.role {
             MessageRole::User => div().flex().justify_end().my_2().px_4().child(
                 div()
                     .max_w(px(600.0))
                     .p_3()
                     .rounded_lg()
-                    .bg(rgb(0x27272a))
+                    .bg(theme.secondary)
                     .text_sm()
-                    .text_color(rgb(0xffffff))
+                    .text_color(theme.secondary_foreground)
                     .child(msg.content.clone()),
             ),
             MessageRole::Assistant => {
                 let tool_elements: Vec<_> = msg
                     .tool_activities
                     .iter()
-                    .map(|tool| self.render_tool_activity(tool))
+                    .map(|tool| self.render_tool_activity(tool, cx))
                     .collect();
 
                 div().flex().flex_col().my_2().px_4().child(
@@ -220,7 +175,7 @@ impl ChatListView {
                             Some(
                                 div()
                                     .text_sm()
-                                    .text_color(rgb(0xe4e4e7))
+                                    .text_color(theme.foreground)
                                     .child(msg.content.clone())
                                     .into_any_element(),
                             )
@@ -233,7 +188,7 @@ impl ChatListView {
             MessageRole::System => div().flex().justify_center().my_2().child(
                 div()
                     .text_xs()
-                    .text_color(rgb(0x71717a))
+                    .text_color(theme.muted_foreground)
                     .child(msg.content.clone()),
             ),
             MessageRole::Error => div().flex().justify_center().my_2().px_4().child(
@@ -242,9 +197,9 @@ impl ChatListView {
                     .w_full()
                     .p_3()
                     .rounded_lg()
-                    .bg(rgb(0x450a0a))
+                    .bg(theme.danger)
                     .border_1()
-                    .border_color(rgb(0xef4444))
+                    .border_color(theme.danger)
                     .child(
                         div()
                             .flex()
@@ -254,13 +209,13 @@ impl ChatListView {
                                 div()
                                     .text_xs()
                                     .font_weight(FontWeight::BOLD)
-                                    .text_color(rgb(0xf87171))
+                                    .text_color(theme.danger_foreground)
                                     .child("ERROR"),
                             )
                             .child(
                                 div()
                                     .text_sm()
-                                    .text_color(rgb(0xfecaca))
+                                    .text_color(theme.danger_foreground)
                                     .child(msg.content.clone()),
                             ),
                     ),
@@ -268,15 +223,16 @@ impl ChatListView {
         }
     }
 
-    fn render_composer(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().colors;
         let model = self.model.clone();
         let input_state = self.input_state.clone();
 
         div()
             .p_3()
             .border_t_1()
-            .border_color(rgb(0x2d2d30))
-            .bg(rgb(0x18181b))
+            .border_color(theme.border)
+            .bg(theme.title_bar)
             .child(
                 div()
                     .flex()
@@ -313,6 +269,7 @@ impl ChatListView {
 impl Render for ChatListView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let messages = self.model.read(cx).messages.clone();
+        let theme = cx.theme().colors;
 
         div()
             .flex()
@@ -320,7 +277,7 @@ impl Render for ChatListView {
             .flex_1()
             .h_full()
             .min_h_0()
-            .bg(rgb(0x09090b))
+            .bg(theme.background)
             .child(self.render_header(cx))
             .child(if messages.is_empty() {
                 div()
@@ -330,7 +287,7 @@ impl Render for ChatListView {
                     .items_center()
                     .justify_center()
                     .child(
-                        div().text_sm().text_color(rgb(0x71717a)).child(
+                        div().text_sm().text_color(theme.muted_foreground).child(
                             "No messages in this session yet. Type a prompt below to begin.",
                         ),
                     )

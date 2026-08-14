@@ -3,6 +3,7 @@ use gpui::*;
 
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::theme::ActiveTheme;
 use gpui_component::IconName;
@@ -104,7 +105,7 @@ impl SidebarView {
             .flex_col()
             .gap_1()
             .px_3()
-            .pt_4()
+            .pt(px(48.0))
             .pb_3()
             .bg(theme.title_bar)
             .child(
@@ -201,10 +202,10 @@ impl SidebarView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme().colors;
-        let (status_color, status_icon) = match session.health {
-            SessionHealth::Working => (theme.info, "◔"),
-            SessionHealth::Healthy => (theme.success, "●"),
-            SessionHealth::Warning => (theme.warning, "▲"),
+        let status_indicator = match session.health {
+            SessionHealth::Working => Some((theme.info, "◔")),
+            SessionHealth::Warning => Some((theme.warning, "▲")),
+            SessionHealth::Healthy => None,
         };
 
         let bg_color = if is_active {
@@ -228,6 +229,9 @@ impl SidebarView {
         let work_dir = session.work_dir.clone();
         let session_id = session.id.clone();
         let model = self.model.clone();
+        let context_work_dir = session.work_dir.clone();
+        let context_session_id = session.id.clone();
+        let context_model = self.model.clone();
         let time_ago = format_time_ago(session.updated_at);
         let status = if session.health == SessionHealth::Working {
             format!("Working for {}", time_ago.trim_end_matches(" ago"))
@@ -284,13 +288,9 @@ impl SidebarView {
                             .truncate()
                             .child(session.title.clone()),
                     )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_sm()
-                            .text_color(status_color)
-                            .child(status_icon),
-                    ),
+                    .children(status_indicator.map(|(color, icon)| {
+                        div().flex_none().text_sm().text_color(color).child(icon)
+                    })),
             )
             .child(
                 div()
@@ -317,6 +317,42 @@ impl SidebarView {
                             .child(status),
                     ),
             )
+            .context_menu(move |menu, _window, _cx| {
+                let settle_model = context_model.clone();
+                let settle_work_dir = context_work_dir.clone();
+                let settle_session_id = context_session_id.clone();
+                let remove_model = context_model.clone();
+                let remove_work_dir = context_work_dir.clone();
+                let remove_session_id = context_session_id.clone();
+
+                menu.item(PopupMenuItem::new("Settle Session").on_click(
+                    move |_event, _window, cx| {
+                        settle_model.update(cx, |state, _cx| {
+                            controller::dispatch(
+                                state,
+                                AppAction::SettleSession {
+                                    work_dir: settle_work_dir.clone(),
+                                    session_id: settle_session_id.clone(),
+                                },
+                            );
+                        });
+                    },
+                ))
+                .separator()
+                .item(
+                    PopupMenuItem::new("Remove Session").on_click(move |_event, _window, cx| {
+                        remove_model.update(cx, |state, _cx| {
+                            controller::dispatch(
+                                state,
+                                AppAction::RemoveSession {
+                                    work_dir: remove_work_dir.clone(),
+                                    session_id: remove_session_id.clone(),
+                                },
+                            );
+                        });
+                    }),
+                )
+            })
     }
 
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {

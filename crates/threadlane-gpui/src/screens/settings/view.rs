@@ -1,6 +1,7 @@
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::{ActiveTheme, Selectable};
 
 use crate::app::{actions::AppAction, controller};
 use crate::state::AppState;
@@ -76,9 +77,13 @@ impl SettingsModalView {
 
 impl Render for SettingsModalView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let state = self.model.read(cx);
-        let selected_model = state.selected_model.clone();
-        let auth_status = state.auth_status_msg.clone();
+        let (selected_model, auth_status) = {
+            let state = self.model.read(cx);
+            (state.selected_model.clone(), state.auth_status_msg.clone())
+        };
+        let theme = cx.theme().colors;
+        let active_theme = crate::theme::active_theme_name(cx);
+        let theme_options = crate::theme::available_themes(cx);
         let model = self.model.clone();
         let openai_input_state = self.openai_input.clone();
         let opencode_input_state = self.opencode_input.clone();
@@ -99,7 +104,7 @@ impl Render for SettingsModalView {
         div()
             .absolute()
             .inset_0()
-            .bg(rgba(0x000000aa))
+            .bg(theme.background.opacity(0.8))
             .flex()
             .items_center()
             .justify_center()
@@ -108,9 +113,9 @@ impl Render for SettingsModalView {
                     .w(px(520.0))
                     .p_6()
                     .rounded_xl()
-                    .bg(rgb(0x18181b))
+                    .bg(theme.popover)
                     .border_1()
-                    .border_color(rgb(0x3f3f46))
+                    .border_color(theme.border)
                     .shadow_lg()
                     .flex()
                     .flex_col()
@@ -122,13 +127,13 @@ impl Render for SettingsModalView {
                             .items_center()
                             .justify_between()
                             .border_b_1()
-                            .border_color(rgb(0x27272a))
+                            .border_color(theme.border)
                             .pb_3()
                             .child(
                                 div()
                                     .text_base()
                                     .font_weight(FontWeight::BOLD)
-                                    .text_color(rgb(0xffffff))
+                                    .text_color(theme.foreground)
                                     .child("Provider & Model Settings"),
                             )
                             .child(
@@ -155,16 +160,48 @@ impl Render for SettingsModalView {
                                 .px_3()
                                 .py_2()
                                 .rounded_md()
-                                .bg(rgb(0x064e3b))
+                                .bg(theme.success)
                                 .border_1()
-                                .border_color(rgb(0x059669))
+                                .border_color(theme.success)
                                 .text_xs()
-                                .text_color(rgb(0x6ee7b7))
+                                .text_color(theme.success_foreground)
                                 .child(status),
                         )
                     } else {
                         None
                     })
+                    // Appearance Section
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.foreground)
+                                    .child("Appearance"),
+                            )
+                            .child(div().flex().flex_col().gap_1p5().children(
+                                theme_options.into_iter().map(|(name, _mode)| {
+                                    let selected = active_theme == name;
+                                    let button_name = name.clone();
+                                    Button::new(SharedString::from(format!(
+                                        "theme-{}",
+                                        name.to_lowercase().replace(' ', "-")
+                                    )))
+                                    .label(name)
+                                    .ghost()
+                                    .selected(selected)
+                                    .on_click(
+                                        move |_event, _window, cx| {
+                                            crate::theme::apply_theme(&button_name, cx);
+                                        },
+                                    )
+                                }),
+                            )),
+                    )
                     // Model Selection Section
                     .child(
                         div()
@@ -175,7 +212,7 @@ impl Render for SettingsModalView {
                                 div()
                                     .text_xs()
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(0xd4d4d8))
+                                    .text_color(theme.foreground)
                                     .child("Active AI Model"),
                             )
                             .child(div().flex().flex_col().gap_1p5().children(
@@ -192,15 +229,15 @@ impl Render for SettingsModalView {
                                         .py_2()
                                         .rounded_lg()
                                         .bg(if is_selected {
-                                            rgb(0x1e3a8a)
+                                            theme.primary
                                         } else {
-                                            rgb(0x27272a)
+                                            theme.secondary
                                         })
                                         .border_1()
                                         .border_color(if is_selected {
-                                            rgb(0x3b82f6)
+                                            theme.ring
                                         } else {
-                                            rgb(0x27272a)
+                                            theme.border
                                         })
                                         .cursor_pointer()
                                         .on_mouse_down(
@@ -220,9 +257,9 @@ impl Render for SettingsModalView {
                                                 .text_xs()
                                                 .font_weight(FontWeight::MEDIUM)
                                                 .text_color(if is_selected {
-                                                    rgb(0xffffff)
+                                                    theme.primary_foreground
                                                 } else {
-                                                    rgb(0xe4e4e7)
+                                                    theme.secondary_foreground
                                                 })
                                                 .child(label),
                                         )
@@ -230,9 +267,9 @@ impl Render for SettingsModalView {
                                             div()
                                                 .text_xs()
                                                 .text_color(if is_selected {
-                                                    rgb(0x60a5fa)
+                                                    theme.primary_foreground
                                                 } else {
-                                                    rgb(0x71717a)
+                                                    theme.muted_foreground
                                                 })
                                                 .child(if is_selected {
                                                     "Active"
@@ -253,7 +290,7 @@ impl Render for SettingsModalView {
                                 div()
                                     .text_xs()
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(0xd4d4d8))
+                                    .text_color(theme.foreground)
                                     .child("OpenAI API Key (sk-...)"),
                             )
                             .child(
@@ -299,7 +336,7 @@ impl Render for SettingsModalView {
                                 div()
                                     .text_xs()
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(0xd4d4d8))
+                                    .text_color(theme.foreground)
                                     .child("Opencode API Key"),
                             )
                             .child(

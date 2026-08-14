@@ -7,6 +7,14 @@ pub enum AppAction {
         work_dir: PathBuf,
         session_id: String,
     },
+    SettleSession {
+        work_dir: PathBuf,
+        session_id: String,
+    },
+    RemoveSession {
+        work_dir: PathBuf,
+        session_id: String,
+    },
     ToggleProject(PathBuf),
     CreateSession,
     SendPrompt(String),

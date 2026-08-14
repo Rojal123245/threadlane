@@ -16,6 +16,18 @@ pub fn dispatch(state: &mut AppState, action: AppAction) {
         } => {
             state.select_session(work_dir, session_id);
         }
+        AppAction::SettleSession {
+            work_dir,
+            session_id,
+        } => {
+            let _ = state.settle_session(work_dir, session_id);
+        }
+        AppAction::RemoveSession {
+            work_dir,
+            session_id,
+        } => {
+            let _ = state.remove_session(work_dir, session_id);
+        }
         AppAction::ToggleProject(path) => state.toggle_project_expanded(&path),
         AppAction::CreateSession => {
             let _ = state.create_new_session();

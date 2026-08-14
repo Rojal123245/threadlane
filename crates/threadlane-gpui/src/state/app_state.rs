@@ -508,6 +508,72 @@ impl AppState {
         }
     }
 
+    pub fn settle_session(&mut self, work_dir: PathBuf, session_id: String) -> Result<(), String> {
+        let session_file = self.session_file(&work_dir, &session_id);
+        let archive_dir = work_dir.join(".threadlane/sessions/archive");
+        std::fs::create_dir_all(&archive_dir).map_err(|error| error.to_string())?;
+        let file_name = session_file
+            .file_name()
+            .ok_or_else(|| "Session file has no file name".to_string())?;
+        std::fs::rename(&session_file, archive_dir.join(file_name))
+            .map_err(|error| error.to_string())?;
+        self.finish_session_removal(&work_dir, &session_id);
+        Ok(())
+    }
+
+    pub fn remove_session(&mut self, work_dir: PathBuf, session_id: String) -> Result<(), String> {
+        let session_file = self.session_file(&work_dir, &session_id);
+        std::fs::remove_file(session_file).map_err(|error| error.to_string())?;
+        self.finish_session_removal(&work_dir, &session_id);
+        Ok(())
+    }
+
+    fn session_file(&self, work_dir: &Path, session_id: &str) -> PathBuf {
+        self.projects
+            .iter()
+            .find(|project| project.work_dir == work_dir)
+            .and_then(|project| {
+                project
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == session_id)
+            })
+            .map(|session| session.session_file.clone())
+            .unwrap_or_else(|| {
+                work_dir
+                    .join(".threadlane/sessions")
+                    .join(format!("{session_id}.jsonl"))
+            })
+    }
+
+    fn finish_session_removal(&mut self, work_dir: &Path, session_id: &str) {
+        if let Some(project) = self
+            .projects
+            .iter_mut()
+            .find(|project| project.work_dir == work_dir)
+        {
+            project.sessions = discover_sessions_in_project(work_dir);
+        }
+
+        let removed_active = self.active_work_dir.as_deref() == Some(work_dir)
+            && self.active_session_id.as_deref() == Some(session_id);
+        if !removed_active {
+            return;
+        }
+
+        self.active_session_id = None;
+        self.messages.clear();
+        let next_session = self
+            .projects
+            .iter()
+            .flat_map(|project| project.sessions.iter())
+            .next()
+            .map(|session| (session.work_dir.clone(), session.id.clone()));
+        if let Some((next_work_dir, next_session_id)) = next_session {
+            self.select_session(next_work_dir, next_session_id);
+        }
+    }
+
     pub fn toggle_project_expanded(&mut self, work_dir: &Path) {
         if let Some(proj) = self.projects.iter_mut().find(|p| p.work_dir == work_dir) {
             proj.is_expanded = !proj.is_expanded;

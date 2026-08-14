@@ -1,7 +1,8 @@
 use gpui::*;
-use gpui_component::{Root, Theme, ThemeMode};
+use gpui_component::Root;
 use gpui_component_assets::Assets;
 use threadlane_gpui::screens::workspace::WorkspaceView;
+use threadlane_gpui::theme;
 
 fn main() {
     env_logger::init();
@@ -10,7 +11,7 @@ fn main() {
 
     app.run(move |cx| {
         gpui_component::init(cx);
-        Theme::change(ThemeMode::Dark, None, cx);
+        theme::init(cx);
 
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
