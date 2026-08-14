@@ -1,3 +1,3 @@
 mod view;
 
-pub use view::SettingsModalView;
+pub use view::SettingsView;

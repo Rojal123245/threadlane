@@ -123,7 +123,7 @@ impl SidebarView {
                     .cursor_pointer()
                     .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                         model.update(cx, |state, _cx| {
-                            controller::dispatch(state, AppAction::CreateSession);
+                            controller::dispatch(state, AppAction::BeginNewTask);
                         });
                     })
                     .child(IconName::Plus)
@@ -367,7 +367,7 @@ impl SidebarView {
                 .text_color(theme.muted_foreground)
                 .on_click(move |_event, _window, cx| {
                     model.update(cx, |state, _cx| {
-                        controller::dispatch(state, AppAction::ToggleSettings);
+                        controller::dispatch(state, AppAction::OpenSettings);
                     });
                 }),
         )

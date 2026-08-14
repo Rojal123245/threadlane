@@ -3,15 +3,15 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{ActiveTheme, IconName, Sizable};
 
 use crate::screens::chat::ChatListView;
-use crate::screens::settings::SettingsModalView;
+use crate::screens::settings::SettingsView;
 use crate::screens::sidebar::SidebarView;
-use crate::state::AppState;
+use crate::state::{AppState, WorkspacePage};
 
 pub struct WorkspaceView {
     model: Entity<AppState>,
     sidebar: Entity<SidebarView>,
     chat_list: Entity<ChatListView>,
-    settings_modal: Entity<SettingsModalView>,
+    settings: Entity<SettingsView>,
     sidebar_collapsed: bool,
     _subscriptions: Vec<Subscription>,
 }
@@ -21,7 +21,7 @@ impl WorkspaceView {
         let model = cx.new(|_cx| AppState::load());
         let sidebar = cx.new(|cx| SidebarView::new(model.clone(), window, cx));
         let chat_list = cx.new(|cx| ChatListView::new(model.clone(), window, cx));
-        let settings_modal = cx.new(|cx| SettingsModalView::new(model.clone(), window, cx));
+        let settings = cx.new(|cx| SettingsView::new(model.clone(), window, cx));
 
         let model_clone = model.clone();
         cx.new(|cx| {
@@ -33,7 +33,7 @@ impl WorkspaceView {
                 model,
                 sidebar,
                 chat_list,
-                settings_modal,
+                settings,
                 sidebar_collapsed: false,
                 _subscriptions: vec![sub],
             }
@@ -43,7 +43,7 @@ impl WorkspaceView {
 
 impl Render for WorkspaceView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let is_settings_open = self.model.read(cx).is_settings_open;
+        let workspace_page = self.model.read(cx).workspace_page;
         let theme = cx.theme().colors;
         let sidebar_tooltip = if self.sidebar_collapsed {
             "Show sidebar"
@@ -57,9 +57,15 @@ impl Render for WorkspaceView {
             .w_full()
             .h_full()
             .bg(theme.background)
-            .children((!self.sidebar_collapsed).then(|| self.sidebar.clone()))
-            .child(self.chat_list.clone())
-            .child(
+            .children(
+                (workspace_page == WorkspacePage::Chat && !self.sidebar_collapsed)
+                    .then(|| self.sidebar.clone()),
+            )
+            .child(match workspace_page {
+                WorkspacePage::Chat => self.chat_list.clone().into_any_element(),
+                WorkspacePage::Settings => self.settings.clone().into_any_element(),
+            })
+            .children((workspace_page == WorkspacePage::Chat).then(|| {
                 Button::new("sidebar-collapse-toggle")
                     .icon(IconName::PanelLeft)
                     .tooltip(sidebar_tooltip)
@@ -80,12 +86,7 @@ impl Render for WorkspaceView {
                             cx.notify();
                         });
                         cx.notify();
-                    })),
-            )
-            .children(if is_settings_open {
-                Some(self.settings_modal.clone())
-            } else {
-                None
-            })
+                    }))
+            }))
     }
 }

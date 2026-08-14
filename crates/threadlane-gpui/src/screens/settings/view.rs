@@ -1,19 +1,28 @@
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::{ActiveTheme, Selectable};
+use gpui_component::scroll::ScrollableElement;
+use gpui_component::{ActiveTheme, IconName, Selectable};
 
 use crate::app::{actions::AppAction, controller};
 use crate::state::AppState;
 
-pub struct SettingsModalView {
-    pub model: Entity<AppState>,
-    pub openai_input: Entity<InputState>,
-    pub opencode_input: Entity<InputState>,
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum SettingsPage {
+    #[default]
+    Appearance,
+    Providers,
+}
+
+pub struct SettingsView {
+    model: Entity<AppState>,
+    openai_input: Entity<InputState>,
+    opencode_input: Entity<InputState>,
+    page: SettingsPage,
     _subscriptions: Vec<Subscription>,
 }
 
-impl SettingsModalView {
+impl SettingsView {
     pub fn new(model: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (openai_key, opencode_key) = {
             let state = model.read(cx);
@@ -26,7 +35,6 @@ impl SettingsModalView {
                 .default_value(&openai_key)
                 .masked(true)
         });
-
         let opencode_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("opencode-key-...")
@@ -34,32 +42,28 @@ impl SettingsModalView {
                 .masked(true)
         });
 
-        let sub1 = cx.observe(&model, |_this, _model, cx| {
-            cx.notify();
-        });
-
-        let model_clone1 = model.clone();
-        let sub2 = cx.subscribe_in(
+        let observe_model = cx.observe(&model, |_this, _model, cx| cx.notify());
+        let openai_model = model.clone();
+        let save_openai = cx.subscribe_in(
             &openai_input,
             window,
-            move |_this, input_state, event: &InputEvent, _window, cx| {
+            move |_this, input, event: &InputEvent, _window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
-                    let key = input_state.read(cx).value().to_string();
-                    model_clone1.update(cx, |state, _cx| {
+                    let key = input.read(cx).value().to_string();
+                    openai_model.update(cx, |state, _cx| {
                         controller::dispatch(state, AppAction::SaveOpenAiKey(key));
                     });
                 }
             },
         );
-
-        let model_clone2 = model.clone();
-        let sub3 = cx.subscribe_in(
+        let opencode_model = model.clone();
+        let save_opencode = cx.subscribe_in(
             &opencode_input,
             window,
-            move |_this, input_state, event: &InputEvent, _window, cx| {
+            move |_this, input, event: &InputEvent, _window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
-                    let key = input_state.read(cx).value().to_string();
-                    model_clone2.update(cx, |state, _cx| {
+                    let key = input.read(cx).value().to_string();
+                    opencode_model.update(cx, |state, _cx| {
                         controller::dispatch(state, AppAction::SaveOpenCodeKey(key));
                     });
                 }
@@ -70,307 +74,314 @@ impl SettingsModalView {
             model,
             openai_input,
             opencode_input,
-            _subscriptions: vec![sub1, sub2, sub3],
+            page: SettingsPage::default(),
+            _subscriptions: vec![observe_model, save_openai, save_opencode],
         }
     }
-}
 
-impl Render for SettingsModalView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (selected_model, auth_status) = {
+    fn render_navigation(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().colors;
+        let model = self.model.clone();
+
+        div()
+            .w(px(260.0))
+            .h_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .border_r_1()
+            .border_color(theme.sidebar_border)
+            .bg(theme.sidebar)
+            .child(div().h(px(48.0)).flex_none())
+            .child(
+                div().px_3().child(
+                    Button::new("settings-back")
+                        .icon(IconName::ArrowLeft)
+                        .label("Back")
+                        .ghost()
+                        .w_full()
+                        .on_click(move |_event, _window, cx| {
+                            model.update(cx, |state, _cx| {
+                                controller::dispatch(state, AppAction::CloseSettings);
+                            });
+                        }),
+                ),
+            )
+            .child(
+                div()
+                    .px_3()
+                    .pt_4()
+                    .pb_2()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.muted_foreground)
+                    .child("SETTINGS"),
+            )
+            .child(
+                div()
+                    .px_3()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        Button::new("settings-appearance")
+                            .icon(IconName::Palette)
+                            .label("Appearance")
+                            .ghost()
+                            .selected(self.page == SettingsPage::Appearance)
+                            .w_full()
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.page = SettingsPage::Appearance;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("settings-providers")
+                            .icon(IconName::Bot)
+                            .label("Providers")
+                            .ghost()
+                            .selected(self.page == SettingsPage::Providers)
+                            .w_full()
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.page = SettingsPage::Providers;
+                                cx.notify();
+                            })),
+                    ),
+            )
+    }
+
+    fn render_appearance(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().colors;
+        let active_theme = crate::theme::active_theme_name(cx);
+        let themes = crate::theme::available_themes(cx);
+
+        div()
+            .mt_5()
+            .rounded_xl()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.title_bar)
+            .p_4()
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.foreground)
+                    .child("Theme"),
+            )
+            .child(
+                div()
+                    .mt_1()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("Choose a bundled theme or one installed in ~/.threadlane/themes."),
+            )
+            .child(
+                div()
+                    .mt_4()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .children(themes.into_iter().map(|(name, _mode)| {
+                        let selected = name == active_theme;
+                        let apply_name = name.clone();
+                        Button::new(SharedString::from(format!(
+                            "settings-theme-{}",
+                            name.to_lowercase().replace(' ', "-")
+                        )))
+                        .label(name)
+                        .selected(selected)
+                        .ghost()
+                        .w_full()
+                        .on_click(move |_event, _window, cx| {
+                            crate::theme::apply_theme(&apply_name, cx);
+                        })
+                    })),
+            )
+            .into_any_element()
+    }
+
+    fn render_key_row(
+        &self,
+        label: &'static str,
+        input: &Entity<InputState>,
+        button_id: &'static str,
+        action: fn(String) -> AppAction,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme().colors;
+        let model = self.model.clone();
+        let input = input.clone();
+
+        div()
+            .py_4()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.foreground)
+                    .child(label),
+            )
+            .child(
+                div()
+                    .mt_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_1().child(Input::new(&input).mask_toggle()))
+                    .child(Button::new(button_id).label("Save").primary().on_click(
+                        move |_event, _window, cx| {
+                            let value = input.read(cx).value().to_string();
+                            model.update(cx, |state, _cx| {
+                                controller::dispatch(state, action(value));
+                            });
+                        },
+                    )),
+            )
+    }
+
+    fn render_providers(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().colors;
+        let (selected_model, status) = {
             let state = self.model.read(cx);
             (state.selected_model.clone(), state.auth_status_msg.clone())
         };
-        let theme = cx.theme().colors;
-        let active_theme = crate::theme::active_theme_name(cx);
-        let theme_options = crate::theme::available_themes(cx);
         let model = self.model.clone();
-        let openai_input_state = self.openai_input.clone();
-        let opencode_input_state = self.opencode_input.clone();
-
-        let model_options = vec![
-            ("gpt-4o", "OpenAI (GPT-4o)"),
-            ("gpt-4o-mini", "OpenAI (GPT-4o Mini)"),
+        let model_options = [
+            ("gpt-4o", "OpenAI · GPT-4o"),
+            ("gpt-4o-mini", "OpenAI · GPT-4o Mini"),
             (
                 "antigravity/gemini-3.6-flash",
-                "Google Antigravity (Gemini 3.6 Flash)",
+                "Google Antigravity · Gemini 3.6 Flash",
             ),
             (
                 "opencode-go/claude-3-5-sonnet",
-                "Opencode (Claude 3.5 Sonnet)",
+                "OpenCode · Claude 3.5 Sonnet",
             ),
         ];
 
         div()
-            .absolute()
-            .inset_0()
-            .bg(theme.background.opacity(0.8))
-            .flex()
-            .items_center()
-            .justify_center()
+            .mt_5()
+            .rounded_xl()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.title_bar)
+            .px_4()
+            .children(status.map(|status| {
+                div()
+                    .mt_4()
+                    .rounded_md()
+                    .bg(theme.success)
+                    .p_3()
+                    .text_xs()
+                    .text_color(theme.success_foreground)
+                    .child(status)
+            }))
             .child(
                 div()
-                    .w(px(520.0))
-                    .p_6()
-                    .rounded_xl()
-                    .bg(theme.popover)
-                    .border_1()
+                    .py_4()
+                    .border_b_1()
                     .border_color(theme.border)
-                    .shadow_lg()
-                    .flex()
-                    .flex_col()
-                    .gap_5()
-                    // Modal Header
                     .child(
                         div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .border_b_1()
-                            .border_color(theme.border)
-                            .pb_3()
-                            .child(
-                                div()
-                                    .text_base()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(theme.foreground)
-                                    .child("Provider & Model Settings"),
-                            )
-                            .child(
-                                Button::new("settings-close-btn")
-                                    .label("✕ Close")
-                                    .ghost()
-                                    .on_click({
-                                        let model = model.clone();
-                                        move |_event, _window, cx| {
-                                            model.update(cx, |state, _cx| {
-                                                controller::dispatch(
-                                                    state,
-                                                    AppAction::ToggleSettings,
-                                                );
-                                            });
-                                        }
-                                    }),
-                            ),
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.foreground)
+                            .child("Default model"),
                     )
-                    // Status Notification if any
-                    .children(if let Some(status) = auth_status {
-                        Some(
-                            div()
-                                .px_3()
-                                .py_2()
-                                .rounded_md()
-                                .bg(theme.success)
-                                .border_1()
-                                .border_color(theme.success)
-                                .text_xs()
-                                .text_color(theme.success_foreground)
-                                .child(status),
-                        )
-                    } else {
-                        None
-                    })
-                    // Appearance Section
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.foreground)
-                                    .child("Appearance"),
-                            )
-                            .child(div().flex().flex_col().gap_1p5().children(
-                                theme_options.into_iter().map(|(name, _mode)| {
-                                    let selected = active_theme == name;
-                                    let button_name = name.clone();
-                                    Button::new(SharedString::from(format!(
-                                        "theme-{}",
-                                        name.to_lowercase().replace(' ', "-")
-                                    )))
-                                    .label(name)
-                                    .ghost()
-                                    .selected(selected)
-                                    .on_click(
-                                        move |_event, _window, cx| {
-                                            crate::theme::apply_theme(&button_name, cx);
-                                        },
-                                    )
-                                }),
-                            )),
-                    )
-                    // Model Selection Section
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.foreground)
-                                    .child("Active AI Model"),
-                            )
-                            .child(div().flex().flex_col().gap_1p5().children(
-                                model_options.into_iter().map(|(id, label)| {
-                                    let is_selected = selected_model == id;
-                                    let model = model.clone();
-                                    let id_str = id.to_string();
+                    .child(div().mt_3().flex().flex_col().gap_2().children(
+                        model_options.into_iter().map(|(id, label)| {
+                            let selected = selected_model == id;
+                            let model = model.clone();
+                            let id = id.to_string();
+                            Button::new(SharedString::from(format!("settings-model-{id}")))
+                                .label(label)
+                                .selected(selected)
+                                .ghost()
+                                .w_full()
+                                .on_click(move |_event, _window, cx| {
+                                    model.update(cx, |state, _cx| {
+                                        controller::dispatch(
+                                            state,
+                                            AppAction::SelectModel(id.clone()),
+                                        );
+                                    });
+                                })
+                        }),
+                    )),
+            )
+            .child(self.render_key_row(
+                "OpenAI API key",
+                &self.openai_input,
+                "save-openai-key",
+                AppAction::SaveOpenAiKey,
+                cx,
+            ))
+            .child(self.render_key_row(
+                "OpenCode API key",
+                &self.opencode_input,
+                "save-opencode-key",
+                AppAction::SaveOpenCodeKey,
+                cx,
+            ))
+            .into_any_element()
+    }
+}
 
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .px_3()
-                                        .py_2()
-                                        .rounded_lg()
-                                        .bg(if is_selected {
-                                            theme.primary
-                                        } else {
-                                            theme.secondary
-                                        })
-                                        .border_1()
-                                        .border_color(if is_selected {
-                                            theme.ring
-                                        } else {
-                                            theme.border
-                                        })
-                                        .cursor_pointer()
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            move |_event, _window, cx| {
-                                                let id_str = id_str.clone();
-                                                model.update(cx, |state, _cx| {
-                                                    controller::dispatch(
-                                                        state,
-                                                        AppAction::SelectModel(id_str),
-                                                    );
-                                                });
-                                            },
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .text_color(if is_selected {
-                                                    theme.primary_foreground
-                                                } else {
-                                                    theme.secondary_foreground
-                                                })
-                                                .child(label),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(if is_selected {
-                                                    theme.primary_foreground
-                                                } else {
-                                                    theme.muted_foreground
-                                                })
-                                                .child(if is_selected {
-                                                    "Active"
-                                                } else {
-                                                    "Select"
-                                                }),
-                                        )
-                                }),
-                            )),
-                    )
-                    // OpenAI API Key Section
+impl Render for SettingsView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().colors;
+        let (title, description, content) = match self.page {
+            SettingsPage::Appearance => (
+                "Appearance",
+                "Customize how Threadlane looks.",
+                self.render_appearance(cx),
+            ),
+            SettingsPage::Providers => (
+                "Providers",
+                "Configure models and provider credentials.",
+                self.render_providers(cx),
+            ),
+        };
+
+        div()
+            .flex_1()
+            .h_full()
+            .min_w_0()
+            .flex()
+            .bg(theme.background)
+            .child(self.render_navigation(cx))
+            .child(
+                div()
+                    .flex_1()
+                    .h_full()
+                    .min_w_0()
+                    .overflow_y_scrollbar()
+                    .px_8()
+                    .pb_8()
                     .child(
                         div()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
+                            .w_full()
+                            .max_w(px(760.0))
+                            .mx_auto()
+                            .child(div().h(px(48.0)).flex_none())
                             .child(
                                 div()
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_xl()
+                                    .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme.foreground)
-                                    .child("OpenAI API Key (sk-...)"),
+                                    .child(title),
                             )
                             .child(
                                 div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div().flex_1().child(
-                                            Input::new(&self.openai_input)
-                                                .appearance(false)
-                                                .bordered(false),
-                                        ),
-                                    )
-                                    .child(
-                                        Button::new("save-openai-key-btn")
-                                            .label("Save Key")
-                                            .primary()
-                                            .on_click({
-                                                let model = model.clone();
-                                                let openai_input = openai_input_state.clone();
-                                                move |_event, _window, cx| {
-                                                    let key =
-                                                        openai_input.read(cx).value().to_string();
-                                                    model.update(cx, |state, _cx| {
-                                                        controller::dispatch(
-                                                            state,
-                                                            AppAction::SaveOpenAiKey(key),
-                                                        );
-                                                    });
-                                                }
-                                            }),
-                                    ),
-                            ),
-                    )
-                    // Opencode API Key Section
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.foreground)
-                                    .child("Opencode API Key"),
+                                    .mt_1()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child(description),
                             )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div().flex_1().child(
-                                            Input::new(&self.opencode_input)
-                                                .appearance(false)
-                                                .bordered(false),
-                                        ),
-                                    )
-                                    .child(
-                                        Button::new("save-opencode-key-btn")
-                                            .label("Save Key")
-                                            .ghost()
-                                            .on_click({
-                                                let model = model.clone();
-                                                let opencode_input = opencode_input_state.clone();
-                                                move |_event, _window, cx| {
-                                                    let key =
-                                                        opencode_input.read(cx).value().to_string();
-                                                    model.update(cx, |state, _cx| {
-                                                        controller::dispatch(
-                                                            state,
-                                                            AppAction::SaveOpenCodeKey(key),
-                                                        );
-                                                    });
-                                                }
-                                            }),
-                                    ),
-                            ),
+                            .child(content),
                     ),
             )
     }

@@ -29,14 +29,14 @@ pub fn dispatch(state: &mut AppState, action: AppAction) {
             let _ = state.remove_session(work_dir, session_id);
         }
         AppAction::ToggleProject(path) => state.toggle_project_expanded(&path),
-        AppAction::CreateSession => {
-            let _ = state.create_new_session();
-        }
+        AppAction::BeginNewTask => state.begin_new_task(),
+        AppAction::SelectDraftProject(path) => state.select_draft_project(path),
         AppAction::SendPrompt(text) => {
             let _ = state.send_prompt(text);
         }
         AppAction::SelectModel(model) => state.set_selected_model(model),
-        AppAction::ToggleSettings => state.toggle_settings_modal(),
+        AppAction::OpenSettings => state.open_settings(),
+        AppAction::CloseSettings => state.close_settings(),
         AppAction::SaveOpenAiKey(key) => {
             let _ = state.save_openai_key(key);
         }

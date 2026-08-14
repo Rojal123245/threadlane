@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::UNIX_EPOCH;
-use threadlane_agent::{AgentMessage, SessionTree};
+use threadlane_agent::{AgentEvent, AgentMessage, SessionTree};
 
 use crate::persistence::{load_project_registry, save_project_registry};
 
@@ -67,21 +68,42 @@ pub struct ChatMessageInfo {
 }
 
 #[derive(Clone, Debug)]
+pub enum ChatStreamEvent {
+    Agent {
+        session_id: String,
+        event: AgentEvent,
+    },
+    Finished {
+        session_id: String,
+        session_file: PathBuf,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WorkspacePage {
+    #[default]
+    Chat,
+    Settings,
+}
+
 pub struct AppState {
     pub projects: Vec<ProjectInfo>,
     pub active_work_dir: Option<PathBuf>,
     pub active_session_id: Option<String>,
+    pub is_new_task: bool,
     pub search_query: String,
     pub messages: Vec<ChatMessageInfo>,
     pub is_generating: bool,
     pub composer_text: String,
 
     pub selected_model: String,
-    pub is_settings_open: bool,
+    pub workspace_page: WorkspacePage,
     pub openai_key: String,
     pub opencode_key: String,
     pub antigravity_connected: bool,
     pub auth_status_msg: Option<String>,
+    stream_tx: Sender<ChatStreamEvent>,
+    stream_rx: Receiver<ChatStreamEvent>,
 }
 
 fn file_mtime(path: &Path) -> u64 {
@@ -417,6 +439,7 @@ impl AppState {
         let antigravity_connected =
             threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some();
 
+        let (stream_tx, stream_rx) = mpsc::channel();
         let selected_model = if !openai_key.is_empty() {
             "gpt-4o".to_string()
         } else if antigravity_connected {
@@ -430,17 +453,20 @@ impl AppState {
         Self {
             projects: project_infos,
             active_work_dir,
+            is_new_task: active_session_id.is_none(),
             active_session_id,
             search_query: String::new(),
             messages,
             is_generating: false,
             composer_text: String::new(),
             selected_model,
-            is_settings_open: false,
+            workspace_page: WorkspacePage::Chat,
             openai_key,
             opencode_key,
             antigravity_connected,
             auth_status_msg: None,
+            stream_tx,
+            stream_rx,
         }
     }
 
@@ -477,8 +503,13 @@ impl AppState {
         self.auth_status_msg = Some(format!("Model switched to {model}"));
     }
 
-    pub fn toggle_settings_modal(&mut self) {
-        self.is_settings_open = !self.is_settings_open;
+    pub fn open_settings(&mut self) {
+        self.workspace_page = WorkspacePage::Settings;
+        self.auth_status_msg = None;
+    }
+
+    pub fn close_settings(&mut self) {
+        self.workspace_page = WorkspacePage::Chat;
         self.auth_status_msg = None;
     }
 
@@ -497,9 +528,37 @@ impl AppState {
         }
     }
 
+    pub fn begin_new_task(&mut self) {
+        self.workspace_page = WorkspacePage::Chat;
+        self.active_session_id = None;
+        self.is_new_task = true;
+        self.messages.clear();
+        if self.active_work_dir.is_none() {
+            self.active_work_dir = self
+                .projects
+                .first()
+                .map(|project| project.work_dir.clone());
+        }
+    }
+
+    pub fn select_draft_project(&mut self, work_dir: PathBuf) {
+        if self
+            .projects
+            .iter()
+            .any(|project| project.work_dir == work_dir)
+        {
+            self.active_work_dir = Some(work_dir);
+            self.active_session_id = None;
+            self.is_new_task = true;
+            self.messages.clear();
+        }
+    }
+
     pub fn select_session(&mut self, work_dir: PathBuf, session_id: String) {
+        self.workspace_page = WorkspacePage::Chat;
         self.active_work_dir = Some(work_dir.clone());
         self.active_session_id = Some(session_id.clone());
+        self.is_new_task = false;
 
         if let Some(proj) = self.projects.iter().find(|p| p.work_dir == work_dir) {
             if let Some(sess) = proj.sessions.iter().find(|s| s.id == session_id) {
@@ -562,6 +621,7 @@ impl AppState {
         }
 
         self.active_session_id = None;
+        self.is_new_task = true;
         self.messages.clear();
         let next_session = self
             .projects
@@ -608,6 +668,9 @@ impl AppState {
 
         *self = Self::load();
         self.active_work_dir = Some(canonical);
+        self.active_session_id = None;
+        self.is_new_task = true;
+        self.messages.clear();
         Ok(())
     }
 
@@ -649,7 +712,180 @@ impl AppState {
 
         *self = Self::load();
         self.select_session(work_dir, session_id.clone());
+        self.is_new_task = false;
         Ok(session_id)
+    }
+
+    pub fn drain_chat_stream(&mut self) -> bool {
+        let events = self.stream_rx.try_iter().collect::<Vec<_>>();
+        if events.is_empty() {
+            return false;
+        }
+
+        for event in events {
+            match event {
+                ChatStreamEvent::Agent { session_id, event }
+                    if self.active_session_id.as_deref() == Some(&session_id) =>
+                {
+                    match event {
+                        AgentEvent::MessageUpdate {
+                            text_delta: Some(delta),
+                            ..
+                        } => {
+                            if let Some(message) = self.messages.last_mut().filter(|message| {
+                                message.role == MessageRole::Assistant
+                                    && message.id == format!("streaming-{session_id}")
+                            }) {
+                                message.content.push_str(&delta);
+                            } else {
+                                self.messages.push(ChatMessageInfo {
+                                    id: format!("streaming-{session_id}"),
+                                    role: MessageRole::Assistant,
+                                    content: delta,
+                                    timestamp: String::new(),
+                                    tool_activities: Vec::new(),
+                                });
+                            }
+                        }
+                        AgentEvent::MessageUpdate {
+                            reasoning_delta: Some(delta),
+                            ..
+                        } => {
+                            let activity_id = format!("reasoning-{session_id}");
+                            if let Some(activity) = self
+                                .messages
+                                .iter_mut()
+                                .rev()
+                                .flat_map(|message| message.tool_activities.iter_mut().rev())
+                                .find(|activity| activity.id == activity_id)
+                            {
+                                activity.detail.push_str(&delta);
+                            } else {
+                                let activity = ToolActivityInfo {
+                                    id: activity_id,
+                                    category: "Thinking".into(),
+                                    title: "Reasoning".into(),
+                                    detail: delta,
+                                    is_expanded: false,
+                                };
+                                if let Some(message) = self
+                                    .messages
+                                    .last_mut()
+                                    .filter(|message| message.role == MessageRole::Assistant)
+                                {
+                                    message.tool_activities.push(activity);
+                                } else {
+                                    self.messages.push(ChatMessageInfo {
+                                        id: format!("streaming-{session_id}"),
+                                        role: MessageRole::Assistant,
+                                        content: String::new(),
+                                        timestamp: String::new(),
+                                        tool_activities: vec![activity],
+                                    });
+                                }
+                            }
+                        }
+                        AgentEvent::ToolExecutionStart {
+                            tool_call_id,
+                            name,
+                            arguments,
+                        } => {
+                            let activity = ToolActivityInfo {
+                                id: tool_call_id,
+                                category: "Working".into(),
+                                title: name,
+                                detail: arguments,
+                                is_expanded: false,
+                            };
+                            if let Some(message) = self
+                                .messages
+                                .last_mut()
+                                .filter(|message| message.role == MessageRole::Assistant)
+                            {
+                                message.tool_activities.push(activity);
+                            } else {
+                                self.messages.push(ChatMessageInfo {
+                                    id: format!("streaming-{session_id}"),
+                                    role: MessageRole::Assistant,
+                                    content: String::new(),
+                                    timestamp: String::new(),
+                                    tool_activities: vec![activity],
+                                });
+                            }
+                        }
+                        AgentEvent::ToolExecutionUpdate {
+                            tool_call_id,
+                            partial_result,
+                        } => {
+                            if let Some(activity) = self
+                                .messages
+                                .iter_mut()
+                                .rev()
+                                .flat_map(|message| message.tool_activities.iter_mut().rev())
+                                .find(|activity| activity.id == tool_call_id)
+                            {
+                                activity.detail = partial_result;
+                            }
+                        }
+                        AgentEvent::ToolExecutionEnd {
+                            tool_call_id,
+                            result,
+                            ..
+                        } => {
+                            if let Some(activity) = self
+                                .messages
+                                .iter_mut()
+                                .rev()
+                                .flat_map(|message| message.tool_activities.iter_mut().rev())
+                                .find(|activity| activity.id == tool_call_id)
+                            {
+                                activity.category = if result.is_error {
+                                    "Error".into()
+                                } else {
+                                    "Completed".into()
+                                };
+                                activity.detail = result.content;
+                            }
+                        }
+                        AgentEvent::AgentError { error } => {
+                            self.messages.push(ChatMessageInfo {
+                                id: format!("stream-error-{session_id}"),
+                                role: MessageRole::Error,
+                                content: error,
+                                timestamp: String::new(),
+                                tool_activities: Vec::new(),
+                            });
+                            self.is_generating = false;
+                        }
+                        _ => {}
+                    }
+                }
+                ChatStreamEvent::Finished {
+                    session_id,
+                    session_file,
+                } => {
+                    if self.active_session_id.as_deref() == Some(&session_id) {
+                        self.messages = load_session_messages(&session_file);
+                    }
+                    self.is_generating = false;
+                    if let Some(work_dir) = session_file
+                        .parent()
+                        .and_then(Path::parent)
+                        .and_then(Path::parent)
+                    {
+                        if let Some(project) = self
+                            .projects
+                            .iter_mut()
+                            .find(|project| project.work_dir == work_dir)
+                        {
+                            project.sessions = discover_sessions_in_project(work_dir);
+                        }
+                    }
+                }
+                ChatStreamEvent::Agent { .. } => {}
+            }
+        }
+        true
     }
 
     pub fn send_prompt(&mut self, text: String) -> Result<(), String> {
@@ -685,21 +921,17 @@ impl AppState {
             }
         };
 
-        // 2. Add User Message via add_message (updates active_node_id + appends node to file)
-        let user_msg = AgentMessage::User {
+        // Present the accepted prompt immediately. CodingAgent owns durable
+        // persistence; writing it through SessionTree here would duplicate it.
+        self.messages.push(ChatMessageInfo {
+            id: format!("pending-user-{session_id}-{}", self.messages.len()),
+            role: MessageRole::User,
             content: text.clone(),
-        };
-        tree.add_message(user_msg);
+            timestamp: String::new(),
+            tool_activities: Vec::new(),
+        });
 
-        // Auto-set title if default
-        if tree.name.is_none() {
-            tree.name = Some(extract_session_title(&tree, &session_id));
-        }
-
-        // 3. Reload messages immediately to render user prompt bubble
-        self.messages = load_session_messages(&session_file);
-
-        // 4. Resolve API credentials for selected model
+        // Resolve API credentials for selected model
         let model = self.selected_model.clone();
         let api_key = if threadlane_provider::router::is_antigravity_model(&model) {
             threadlane_provider::antigravity_auth::load_antigravity_credentials()
@@ -742,6 +974,8 @@ impl AppState {
 
         let text_to_agent = text.clone();
         let session_file_bg = session_file.clone();
+        let session_id_bg = session_id.clone();
+        let stream_tx = self.stream_tx.clone();
         std::thread::spawn(move || {
             let rt = match tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -756,17 +990,45 @@ impl AppState {
 
             rt.block_on(async move {
                 let mut agent = threadlane_coding_agent::CodingAgent::new(options);
-                if let Some(Err(err)) = agent.handle_input_with_images(&text_to_agent, Vec::new()).await {
-                    eprintln!("CodingAgent execution error: {err}");
-                    if let Ok(mut err_tree) = SessionTree::load_from_file(&session_file_bg) {
-                        err_tree.file_path = Some(session_file_bg.clone());
-                        let err_msg = AgentMessage::Custom {
-                            custom_type: "error".to_string(),
-                            payload: serde_json::json!({ "error": format!("Model execution error: {err}") }),
-                        };
-                        err_tree.add_message(err_msg);
+                let mut events = agent.subscribe();
+                let run = agent.handle_input_with_images(&text_to_agent, Vec::new());
+                tokio::pin!(run);
+
+                loop {
+                    tokio::select! {
+                        result = &mut run => {
+                            if let Some(Err(err)) = result {
+                                let _ = stream_tx.send(ChatStreamEvent::Agent {
+                                    session_id: session_id_bg.clone(),
+                                    event: AgentEvent::AgentError { error: err.to_string() },
+                                });
+                            }
+                            while let Ok(event) = events.try_recv() {
+                                let _ = stream_tx.send(ChatStreamEvent::Agent {
+                                    session_id: session_id_bg.clone(),
+                                    event,
+                                });
+                            }
+                            break;
+                        }
+                        event = events.recv() => {
+                            match event {
+                                Ok(event) => {
+                                    let _ = stream_tx.send(ChatStreamEvent::Agent {
+                                        session_id: session_id_bg.clone(),
+                                        event,
+                                    });
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            }
+                        }
                     }
                 }
+                let _ = stream_tx.send(ChatStreamEvent::Finished {
+                    session_id: session_id_bg,
+                    session_file: session_file_bg,
+                });
             });
         });
 
@@ -774,7 +1036,6 @@ impl AppState {
         if let Some(proj) = self.projects.iter_mut().find(|p| p.work_dir == work_dir) {
             proj.sessions = discover_sessions_in_project(&work_dir);
         }
-        self.messages = load_session_messages(&session_file);
         self.composer_text.clear();
         Ok(())
     }
