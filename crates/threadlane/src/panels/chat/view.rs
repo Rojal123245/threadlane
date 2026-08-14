@@ -81,6 +81,7 @@ struct CachedTool {
 enum DisplayRow {
     Message(usize),
     SubagentTool(CachedSubagentTool),
+    HarnessActivities(CachedSubagentTool),
     Tool(CachedTool),
     StreamingThinking,
     StreamingAssistant,
@@ -198,55 +199,11 @@ fn display_rows_with_harness(
         })
         .collect::<Vec<_>>();
 
-    let mut matched = vec![false; activities.len()];
-    for row in &mut rows {
-        let DisplayRow::SubagentTool(row) = row else {
-            continue;
-        };
-        let mut row_activities = Vec::new();
-        for (index, activity) in activities.iter().enumerate() {
-            if row
-                .rail_items
-                .iter()
-                .any(|item| item.key.as_deref() == Some(activity.key.as_str()))
-            {
-                matched[index] = true;
-                row_activities.push(activity.clone());
-            }
-        }
-        for item in row.rail_items.iter_mut().filter(|item| item.key.is_none()) {
-            let Some((index, activity)) =
-                activities.iter().enumerate().find(|(index, activity)| {
-                    !matched[*index]
-                        && item.task
-                            == super::state::normalize_whitespace_bounded(&activity.task, 160)
-                        && (activity.agent.is_empty()
-                            || activity.agent == "subagent"
-                            || item.agent == activity.agent)
-                })
-            else {
-                continue;
-            };
-            item.key = Some(activity.key.clone());
-            matched[index] = true;
-            row_activities.push(activity.clone());
-        }
-        if !row_activities.is_empty() {
-            super::state::merge_harness_activities(&mut row.rail_items, &row_activities);
-            row.preview = harness_activity_preview(&row_activities);
-        }
-    }
-
-    let unmatched = activities
-        .iter()
-        .enumerate()
-        .filter_map(|(index, activity)| (!matched[index]).then_some(activity.clone()))
-        .collect::<Vec<_>>();
-    if !unmatched.is_empty() {
+    if !activities.is_empty() {
         let mut rail_items = Vec::new();
-        super::state::merge_harness_activities(&mut rail_items, &unmatched);
-        let preview = harness_activity_preview(&unmatched);
-        rows.push(DisplayRow::SubagentTool(CachedSubagentTool {
+        super::state::merge_harness_activities(&mut rail_items, activities);
+        let preview = harness_activity_preview(activities);
+        rows.push(DisplayRow::HarnessActivities(CachedSubagentTool {
             rail_items,
             preview,
         }));
@@ -333,6 +290,10 @@ pub struct ChatList {
     cached_streaming_text_len: usize,
     #[rust]
     cached_revision: u64,
+    #[rust]
+    cached_harness_activities: Vec<HarnessActivity>,
+    #[rust]
+    scroll_to_activity_tail: bool,
     #[rust]
     hovered_starter: Option<StarterPromptAction>,
     #[rust]
@@ -473,6 +434,10 @@ impl Widget for ChatList {
             || streaming_text_len != self.cached_streaming_text_len
             || data.revision != self.cached_revision
         {
+            if data.harness_activities != self.cached_harness_activities {
+                self.cached_harness_activities = data.harness_activities.clone();
+                self.scroll_to_activity_tail = !data.harness_activities.is_empty();
+            }
             if msg_count != self.cached_msg_count || data.revision != self.cached_base_revision {
                 self.cached_base_rows =
                     display_rows_with_harness(&data.messages, None, "", &data.harness_activities);
@@ -538,12 +503,12 @@ impl Widget for ChatList {
 
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
-                // Markdown remeasurement changes item heights after the list has chosen its
-                // viewport. Preserve the user's bottom-lock explicitly so PortalList does not
-                // animate the full stale overflow back into view.
-                let was_at_end = list.is_at_end();
-                list.set_tail_range(was_at_end);
                 list.set_item_range(cx, 0, rows.len());
+                if self.scroll_to_activity_tail {
+                    list.set_tail_range(true);
+                    list.set_first_id_and_scroll(rows.len().saturating_sub(1), 0.0);
+                    self.scroll_to_activity_tail = false;
+                }
 
                 while let Some(item_id) = list.next_visible_item(cx) {
                     let Some(row) = rows.get(item_id) else {
@@ -574,8 +539,16 @@ impl Widget for ChatList {
                                 &data.streaming_text,
                             );
                         }
-                        DisplayRow::SubagentTool(tool) => {
+                        DisplayRow::SubagentTool(tool) | DisplayRow::HarnessActivities(tool) => {
                             let item_widget = list.item(cx, item_id, id!(SubagentMsg));
+                            item_widget.label(cx, ids!(title_lbl)).set_text(
+                                cx,
+                                if matches!(rows.get(item_id), Some(DisplayRow::HarnessActivities(_))) {
+                                    "Activity"
+                                } else {
+                                    "Agent tasks"
+                                },
+                            );
                             item_widget
                                 .label(cx, ids!(preview_lbl))
                                 .set_text(cx, &tool.preview);
@@ -1030,8 +1003,8 @@ mod tests {
         let rows = display_rows_with_harness(&[], None, "", &activities);
 
         assert_eq!(rows.len(), 1);
-        let DisplayRow::SubagentTool(row) = &rows[0] else {
-            panic!("expected a subagent tool row with rail items");
+        let DisplayRow::HarnessActivities(row) = &rows[0] else {
+            panic!("expected a standalone activity row");
         };
         assert_eq!(row.preview, "Recovering · 1 task");
         assert_eq!(row.rail_items.len(), 1);
@@ -1085,15 +1058,14 @@ mod tests {
 
         let rows = display_rows_with_harness(&messages, None, "", &activities);
 
-        assert_eq!(rows.len(), 2);
-        let [DisplayRow::SubagentTool(first), DisplayRow::SubagentTool(second)] = &rows[..] else {
-            panic!("expected two delegation rows");
+        assert_eq!(rows.len(), 3);
+        let DisplayRow::HarnessActivities(activity) = &rows[2] else {
+            panic!("expected a trailing activity row");
         };
-        assert_eq!(first.rail_items[0].key.as_deref(), Some("lane-a"));
-        assert_eq!(first.rail_items[0].status, "Recovered");
-        assert_eq!(second.rail_items[0].key.as_deref(), Some("lane-b"));
-        assert_eq!(second.rail_items[0].status, "Recovering");
-        assert_eq!(second.rail_items.len(), 1);
+        assert_eq!(activity.rail_items[0].key.as_deref(), Some("lane-a"));
+        assert_eq!(activity.rail_items[0].status, "Recovered");
+        assert_eq!(activity.rail_items[1].key.as_deref(), Some("lane-b"));
+        assert_eq!(activity.rail_items[1].status, "Recovering");
     }
 
     #[test]
@@ -1148,9 +1120,9 @@ mod tests {
 
         let rows = display_rows_with_harness(&[message], None, "", &activities);
 
-        assert_eq!(rows.len(), 1);
-        let DisplayRow::SubagentTool(row) = &rows[0] else {
-            panic!("expected one delegation row");
+        assert_eq!(rows.len(), 2);
+        let DisplayRow::HarnessActivities(row) = &rows[1] else {
+            panic!("expected a trailing activity row");
         };
         assert_eq!(row.rail_items.len(), 2);
         assert_eq!(row.rail_items[0].key.as_deref(), Some("lane-a"));
@@ -1161,7 +1133,7 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_live_subagent_activity_updates_the_existing_tool_row() {
+    fn cancelled_live_subagent_activity_uses_a_trailing_activity_row() {
         let arguments = serde_json::json!({
             "parallel": true,
             "tasks": [{"agent": "scout", "task": "Inspect the repository"}]
@@ -1188,16 +1160,16 @@ mod tests {
 
         let rows = display_rows_with_harness(&[message], None, "", &activities);
 
-        assert_eq!(rows.len(), 1);
-        let DisplayRow::SubagentTool(row) = &rows[0] else {
-            panic!("expected one delegation row");
+        assert_eq!(rows.len(), 2);
+        let DisplayRow::HarnessActivities(row) = &rows[1] else {
+            panic!("expected a trailing activity row");
         };
         assert_eq!(row.rail_items[0].status, "Cancelled");
         assert_eq!(row.preview, "Cancelled · 1 task");
     }
 
     #[test]
-    fn generic_harness_activity_is_merged_into_live_subagent_rail() {
+    fn generic_harness_activity_stays_separate_from_live_subagent_rail() {
         let arguments = serde_json::json!({
             "parallel": true,
             "tasks": [{"agent": "scout", "task": "Inspect the repository"}]
@@ -1224,8 +1196,8 @@ mod tests {
 
         let rows = display_rows_with_harness(&[message], None, "", &activities);
 
-        let [DisplayRow::SubagentTool(row)] = &rows[..] else {
-            panic!("expected one delegation row");
+        let [DisplayRow::SubagentTool(_), DisplayRow::HarnessActivities(row)] = &rows[..] else {
+            panic!("expected separate delegation and activity rows");
         };
         assert_eq!(row.rail_items.len(), 1);
         assert_eq!(row.rail_items[0].key.as_deref(), Some("subagent-0-0:0"));
