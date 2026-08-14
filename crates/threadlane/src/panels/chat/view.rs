@@ -48,6 +48,23 @@ fn update_activity_status(
         .set_visible(cx, !running && error);
 }
 
+fn sync_jump_to_latest(
+    view: &View,
+    cx: &mut Cx,
+    visible: bool,
+    hint_visible: bool,
+) {
+    let layer = view.widget(cx, ids!(jump_to_latest_layer));
+    layer.set_visible(cx, visible);
+    layer.redraw(cx);
+    let button = view.button(cx, ids!(jump_to_latest_btn));
+    button.set_visible(cx, visible);
+    button.redraw(cx);
+    let hint = view.widget(cx, ids!(jump_to_latest_hint));
+    hint.set_visible(cx, visible && hint_visible);
+    hint.redraw(cx);
+}
+
 #[derive(Clone, Debug)]
 struct CachedSubagentTool {
     rail_items: Vec<SubagentRailItem>,
@@ -737,15 +754,12 @@ impl Widget for ChatList {
                 }
 
                 let can_jump_to_latest = !list.is_at_end() && !rows.is_empty();
-                let jump_layer = self.view.widget(cx, ids!(jump_to_latest_layer));
-                jump_layer.set_visible(cx, can_jump_to_latest);
-                jump_layer.redraw(cx);
-                let jump_button = self.view.button(cx, ids!(jump_to_latest_btn));
-                jump_button.set_visible(cx, can_jump_to_latest);
-                jump_button.redraw(cx);
-                let jump_hint = self.view.widget(cx, ids!(jump_to_latest_hint));
-                jump_hint.set_visible(cx, can_jump_to_latest && self.hovered_jump_to_latest);
-                jump_hint.redraw(cx);
+                sync_jump_to_latest(
+                    &self.view,
+                    cx,
+                    can_jump_to_latest,
+                    self.hovered_jump_to_latest,
+                );
             }
         }
         DrawStep::done()
@@ -774,18 +788,15 @@ impl Widget for ChatList {
             let list = self.view.portal_list(cx, ids!(list));
             if list.scrolled(actions) {
                 let can_jump_to_latest = !list.is_at_end() && !self.cached_rows.is_empty();
-                let jump_layer = self.view.widget(cx, ids!(jump_to_latest_layer));
-                jump_layer.set_visible(cx, can_jump_to_latest);
-                jump_layer.redraw(cx);
-                let jump_button = self.view.button(cx, ids!(jump_to_latest_btn));
-                jump_button.set_visible(cx, can_jump_to_latest);
-                jump_button.redraw(cx);
                 if !can_jump_to_latest {
                     self.hovered_jump_to_latest = false;
-                    let jump_hint = self.view.widget(cx, ids!(jump_to_latest_hint));
-                    jump_hint.set_visible(cx, false);
-                    jump_hint.redraw(cx);
                 }
+                sync_jump_to_latest(
+                    &self.view,
+                    cx,
+                    can_jump_to_latest,
+                    self.hovered_jump_to_latest,
+                );
             }
             if list.smooth_scroll_reached(actions) {
                 list.set_tail_range(true);
@@ -796,25 +807,16 @@ impl Widget for ChatList {
             let jump_button_view = jump_button_ref.as_view();
             if jump_button_view.finger_hover_in(actions).is_some() {
                 self.hovered_jump_to_latest = true;
-                self.view.widget(cx, ids!(jump_to_latest_hint)).redraw(cx);
+                sync_jump_to_latest(&self.view, cx, true, true);
             } else if jump_button_view.finger_hover_out(actions).is_some() {
                 self.hovered_jump_to_latest = false;
-                let jump_hint = self.view.widget(cx, ids!(jump_to_latest_hint));
-                jump_hint.set_visible(cx, false);
-                jump_hint.redraw(cx);
+                sync_jump_to_latest(&self.view, cx, true, false);
             }
             if jump_button.clicked(actions) {
                 list.set_tail_range(false);
                 list.smooth_scroll_to_end(cx, 12.0, None);
-                let jump_layer = self.view.widget(cx, ids!(jump_to_latest_layer));
-                jump_layer.set_visible(cx, false);
-                jump_layer.redraw(cx);
-                jump_button.set_visible(cx, false);
-                jump_button.redraw(cx);
                 self.hovered_jump_to_latest = false;
-                let jump_hint = self.view.widget(cx, ids!(jump_to_latest_hint));
-                jump_hint.set_visible(cx, false);
-                jump_hint.redraw(cx);
+                sync_jump_to_latest(&self.view, cx, false, false);
                 self.view.redraw(cx);
             }
 

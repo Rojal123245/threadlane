@@ -12,15 +12,19 @@ script_mod! {
         draw_bg +: {
             color: theme.color_secondary
             color_hover: theme.color_accent
+            color_focus: theme.color_accent
             color_down: theme.color_input
             border_color: theme.color_border
             border_color_hover: theme.color_border
+            border_color_focus: theme.color_ring
+            border_color_down: theme.color_border
             border_size: 1.0
             border_radius: theme.radius_sm
         }
         draw_text +: {
             color: theme.color_foreground
             color_hover: theme.color_foreground
+            color_focus: theme.color_foreground
             color_down: theme.color_primary_foreground
             text_style +: { font_size: 9.0 }
         }
@@ -45,11 +49,19 @@ script_mod! {
         draw_bg +: {
             color: theme.color_primary
             color_hover: theme.color_primary
+            color_focus: theme.color_primary
             color_down: theme.color_primary
+            border_color: theme.color_primary
+            border_color_hover: theme.color_primary
+            border_color_focus: theme.color_ring
+            border_color_down: theme.color_primary
             border_radius: theme.radius_sm
         }
         draw_text +: {
             color: theme.color_primary_foreground
+            color_hover: theme.color_primary_foreground
+            color_focus: theme.color_primary_foreground
+            color_down: theme.color_primary_foreground
             text_style: theme.font_bold { font_size: 9.5 }
         }
     }

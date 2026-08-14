@@ -616,78 +616,54 @@ impl ProviderSettingsModal {
     }
 
     pub fn sync_page_visibility(&mut self, cx: &mut Cx) {
-        let google_selected = self.page == SettingsPage::GoogleAntigravity;
-        let openai_selected = self.page == SettingsPage::OpenAi;
-        let opencode_selected = self.page == SettingsPage::OpenCodeGo;
-        let capabilities_selected = self.page == SettingsPage::Capabilities;
-        let skills_selected = self.page == SettingsPage::Skills;
-        let mcp_selected = self.page == SettingsPage::McpServers;
-        let acp_selected = self.page == SettingsPage::AcpAgents;
-        let about_selected = self.page == SettingsPage::About;
-
-        for (button_id, selected) in [
-            (ids!(settings_nav_google_btn), google_selected),
-            (ids!(settings_nav_openai_btn), openai_selected),
-            (ids!(settings_nav_opencode_btn), opencode_selected),
-            (ids!(settings_nav_capabilities_btn), capabilities_selected),
-            (ids!(settings_nav_skills_btn), skills_selected),
-            (ids!(settings_nav_mcp_btn), mcp_selected),
-            (ids!(settings_nav_acp_btn), acp_selected),
-            (ids!(settings_nav_about_btn), about_selected),
+        for (page, button_id, page_id) in [
+            (
+                SettingsPage::GoogleAntigravity,
+                ids!(settings_nav_google_btn),
+                ids!(google_antigravity_page),
+            ),
+            (
+                SettingsPage::OpenAi,
+                ids!(settings_nav_openai_btn),
+                ids!(openai_page),
+            ),
+            (
+                SettingsPage::OpenCodeGo,
+                ids!(settings_nav_opencode_btn),
+                ids!(opencode_page),
+            ),
+            (
+                SettingsPage::Capabilities,
+                ids!(settings_nav_capabilities_btn),
+                ids!(capabilities_page),
+            ),
+            (
+                SettingsPage::Skills,
+                ids!(settings_nav_skills_btn),
+                ids!(skills_page),
+            ),
+            (
+                SettingsPage::McpServers,
+                ids!(settings_nav_mcp_btn),
+                ids!(mcp_page),
+            ),
+            (
+                SettingsPage::AcpAgents,
+                ids!(settings_nav_acp_btn),
+                ids!(acp_page),
+            ),
+            (
+                SettingsPage::About,
+                ids!(settings_nav_about_btn),
+                ids!(about_page),
+            ),
         ] {
+            let selected = self.page == page;
             let button = self.view.button(cx, button_id);
             crate::components::nav_button::set_selected(cx, &button, selected);
             button.redraw(cx);
+            self.view.widget(cx, page_id).set_visible(cx, selected);
         }
-
-        self.view
-            .button(cx, ids!(settings_nav_google_btn))
-            .set_visible(cx, true);
-        self.view
-            .button(cx, ids!(settings_nav_openai_btn))
-            .set_visible(cx, true);
-        self.view
-            .button(cx, ids!(settings_nav_opencode_btn))
-            .set_visible(cx, true);
-        self.view
-            .button(cx, ids!(settings_nav_capabilities_btn))
-            .set_visible(cx, true);
-        self.view
-            .button(cx, ids!(settings_nav_skills_btn))
-            .set_visible(cx, true);
-        self.view
-            .button(cx, ids!(settings_nav_mcp_btn))
-            .set_visible(cx, true);
-        self.view
-            .button(cx, ids!(settings_nav_acp_btn))
-            .set_visible(cx, true);
-        self.view
-            .button(cx, ids!(settings_nav_about_btn))
-            .set_visible(cx, true);
-        self.view
-            .widget(cx, ids!(google_antigravity_page))
-            .set_visible(cx, google_selected);
-        self.view
-            .widget(cx, ids!(openai_page))
-            .set_visible(cx, openai_selected);
-        self.view
-            .widget(cx, ids!(opencode_page))
-            .set_visible(cx, opencode_selected);
-        self.view
-            .widget(cx, ids!(capabilities_page))
-            .set_visible(cx, capabilities_selected);
-        self.view
-            .widget(cx, ids!(skills_page))
-            .set_visible(cx, skills_selected);
-        self.view
-            .widget(cx, ids!(mcp_page))
-            .set_visible(cx, mcp_selected);
-        self.view
-            .widget(cx, ids!(acp_page))
-            .set_visible(cx, acp_selected);
-        self.view
-            .widget(cx, ids!(about_page))
-            .set_visible(cx, about_selected);
         self.sync_install_scope(cx);
     }
 

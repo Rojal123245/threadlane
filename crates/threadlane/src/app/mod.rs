@@ -1621,11 +1621,19 @@ script_mod! {
                                 draw_bg +: {
                                     color: theme.color_success
                                     color_hover: theme.color_success
+                                    color_focus: theme.color_success
                                     color_down: theme.color_success
-                                    border_radius: 6.0
+                                    border_color: theme.color_success
+                                    border_color_hover: theme.color_success
+                                    border_color_focus: theme.color_ring
+                                    border_color_down: theme.color_success
+                                    border_radius: theme.radius_sm
                                 }
                                 draw_text +: {
                                     color: theme.color_primary_foreground
+                                    color_hover: theme.color_primary_foreground
+                                    color_focus: theme.color_primary_foreground
+                                    color_down: theme.color_primary_foreground
                                     text_style: theme.font_bold { font_size: 9.5 }
                                 }
                             }

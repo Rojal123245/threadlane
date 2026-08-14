@@ -8,7 +8,6 @@ pub mod add_server_card;
 pub mod auth_row;
 pub mod capability_row;
 pub mod chat_bubble;
-pub mod chat_fold_row_base;
 pub mod clipped_label;
 pub mod code_editor_view;
 pub mod code_label;
@@ -49,7 +48,6 @@ pub mod status_pill;
 pub mod task_sidebar;
 pub mod terminal_panel;
 pub mod themed_button;
-pub mod themed_label;
 pub mod themed_text_input;
 pub mod tool_fold_header;
 pub mod tool_section;
@@ -63,14 +61,12 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     secondary_action_button::script_mod(vm);
     themed_text_input::script_mod(vm);
     themed_button::script_mod(vm);
-    themed_label::script_mod(vm);
     add_server_card::script_mod(vm);
     settings_page::script_mod(vm);
     status_dot::script_mod(vm);
     chat_bubble::script_mod(vm);
     activity_header::script_mod(vm);
     user_msg_base::script_mod(vm);
-    chat_fold_row_base::script_mod(vm);
     clipped_label::script_mod(vm);
     code_label::script_mod(vm);
     // The upstream code editor registers `CodeEditor` into `mod.widgets`, which
@@ -79,7 +75,6 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     code_editor_view::script_mod(vm);
     notice_banner::script_mod(vm);
     section_header::script_mod(vm);
-    page_header::script_mod(vm);
     workspace_badge::script_mod(vm);
     activity_loader::script_mod(vm);
     auth_row::script_mod(vm);
@@ -99,6 +94,7 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     file_tree::script_mod(vm);
     git_changes::script_mod(vm);
     git_diff::script_mod(vm);
+    page_header::script_mod(vm);
     panel_header::script_mod(vm);
     panel_surface::script_mod(vm);
     project_header::script_mod(vm);
