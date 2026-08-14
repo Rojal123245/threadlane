@@ -1,26 +1,26 @@
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use async_trait::async_trait;
-use log::warn;
-use serde_json::Value;
-use tokio::sync::broadcast;
-use threadlane_agent::{AgentEvent, AgentToolCall, AgentToolDefinition, ToolExecutor};
-use threadlane_agent::harness::{HookContext, HookEffect, HookHandler, HookKind};
+use super::{
+    AgentRunTask, AgentRunner, AgentWorkScheduler, HostCapabilityHandler, ManagedProcessRegistry,
+    MAX_BROKER_CONTINUATION_ROUNDS, MAX_SUBAGENT_TASKS,
+};
 use crate::agents::{discover_agents, AgentScope};
-use threadlane_agent::Capability;
 use crate::extension_broker::{
     BrokerError, CapabilityDispatcher, HostBrokerRequest, BROKER_API_VERSION,
 };
-use threadlane_mcp::{McpManager, McpToolExecutor};
 use crate::plan::{SessionPlanStore, UpdatePlanToolExecutor};
 use crate::policy::ToolPolicy;
+use async_trait::async_trait;
+use log::warn;
+use serde_json::Value;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use threadlane_agent::harness::{HookContext, HookEffect, HookHandler, HookKind};
+use threadlane_agent::Capability;
+use threadlane_agent::{AgentEvent, AgentToolCall, AgentToolDefinition, ToolExecutor};
+use threadlane_mcp::{McpManager, McpToolExecutor};
 use threadlane_skills::{LoadSkillToolExecutor, SkillRegistry};
 use threadlane_wasi::WasiExtensionManager;
-use super::{
-    AgentRunner, AgentRunTask, AgentWorkScheduler, MAX_SUBAGENT_TASKS,
-    HostCapabilityHandler, ManagedProcessRegistry, MAX_BROKER_CONTINUATION_ROUNDS,
-};
+use tokio::sync::broadcast;
 
 const SUBAGENT_TOOL_NAME: &str = "subagent";
 

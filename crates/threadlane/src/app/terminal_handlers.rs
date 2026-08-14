@@ -1,6 +1,6 @@
 use super::*;
-use makepad_terminal_core::{Pty, TermKeyCode as TerminalKeyCode, Terminal};
 use ::log::warn;
+use makepad_terminal_core::{Pty, TermKeyCode as TerminalKeyCode, Terminal};
 use std::path::{Path, PathBuf};
 
 pub(super) fn canonical_terminal_work_dir(work_dir: &Path) -> PathBuf {

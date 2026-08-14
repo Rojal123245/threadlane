@@ -760,4 +760,3 @@ pub struct InterruptedSubagentLane {
     pub safe_tools: Vec<Record>,
     pub unsafe_tools: Vec<Record>,
 }
-

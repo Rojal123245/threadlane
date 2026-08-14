@@ -923,7 +923,10 @@ mod tests {
         assert!(path_matches("src/main.rs", "./src/main.rs"));
         assert!(path_matches("./src/main.rs", "src/main.rs"));
         assert!(path_matches("crates/threadlane/src/main.rs", "src/main.rs"));
-        assert!(path_matches("src/main.rs", "/Users/foo/project/src/main.rs"));
+        assert!(path_matches(
+            "src/main.rs",
+            "/Users/foo/project/src/main.rs"
+        ));
         assert!(!path_matches("src/other_main.rs", "main.rs"));
     }
 

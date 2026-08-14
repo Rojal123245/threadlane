@@ -1,8 +1,8 @@
 use gpui::*;
 
-use crate::chat_list::ChatListView;
-use crate::settings_modal::SettingsModalView;
-use crate::sidebar::SidebarView;
+use crate::screens::chat::ChatListView;
+use crate::screens::settings::SettingsModalView;
+use crate::screens::sidebar::SidebarView;
 use crate::state::AppState;
 
 pub struct WorkspaceView {

@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use threadlane_agent::{AgentMessage, SessionTree};
+
+use crate::persistence::{load_project_registry, save_project_registry};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AttachedProject {
@@ -83,41 +84,6 @@ pub struct AppState {
     pub auth_status_msg: Option<String>,
 }
 
-pub fn global_threadlane_dir() -> PathBuf {
-    threadlane_coding_agent::default_global_threadlane_dir()
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".threadlane"))
-}
-
-pub fn load_project_registry() -> Vec<AttachedProject> {
-    let path = global_threadlane_dir().join("gui").join("projects.json");
-    if let Ok(contents) = std::fs::read(&path) {
-        if let Ok(projects) = serde_json::from_slice::<Vec<AttachedProject>>(&contents) {
-            let mut seen = HashSet::new();
-            return projects
-                .into_iter()
-                .filter_map(|mut p| {
-                    p.path = std::fs::canonicalize(&p.path).unwrap_or(p.path);
-                    if seen.insert(p.path.clone()) {
-                        Some(p)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-        }
-    }
-    Vec::new()
-}
-
-pub fn save_project_registry(projects: &[AttachedProject]) -> Result<(), String> {
-    let dir = global_threadlane_dir().join("gui");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let path = dir.join("projects.json");
-    let json = serde_json::to_string_pretty(projects).map_err(|e| e.to_string())?;
-    std::fs::write(&path, json).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
 fn file_mtime(path: &Path) -> u64 {
     std::fs::metadata(path)
         .and_then(|m| m.modified())
@@ -173,7 +139,8 @@ pub fn discover_sessions_in_project(work_dir: &Path) -> Vec<SessionInfo> {
         return Vec::new();
     };
 
-    let canonical_work_dir = std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+    let canonical_work_dir =
+        std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
     let mut sessions = Vec::new();
 
     for entry in entries.flatten() {
@@ -216,7 +183,11 @@ pub fn discover_sessions_in_project(work_dir: &Path) -> Vec<SessionInfo> {
         });
     }
 
-    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| a.title.cmp(&b.title)));
+    sessions.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| a.title.cmp(&b.title))
+    });
     sessions
 }
 
@@ -258,14 +229,18 @@ pub fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
                     tool_activities: Vec::new(),
                 });
             }
-            AgentMessage::Assistant { content, tool_calls, .. } => {
+            AgentMessage::Assistant {
+                content,
+                tool_calls,
+                ..
+            } => {
                 let mut tool_activities = Vec::new();
                 if let Some(calls) = tool_calls {
                     for (i, call) in calls.iter().enumerate() {
                         let category = match call.function.name.as_str() {
-                            "write_file" | "replace_file_content" | "multi_replace_file_content" => {
-                                "Edited".into()
-                            }
+                            "write_file"
+                            | "replace_file_content"
+                            | "multi_replace_file_content" => "Edited".into(),
                             "create_file" => "Created".into(),
                             "run_command" | "execute" => "Ran".into(),
                             "read_file" | "list_dir" => "Loaded".into(),
@@ -297,7 +272,11 @@ pub fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
                 is_error,
                 ..
             } => {
-                let category = if is_error { "Error".into() } else { "Result".into() };
+                let category = if is_error {
+                    "Error".into()
+                } else {
+                    "Result".into()
+                };
                 let tool_info = ToolActivityInfo {
                     id: tool_call_id,
                     category,
@@ -320,7 +299,9 @@ pub fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
                 });
             }
             AgentMessage::System { content } => {
-                let role = if content.to_lowercase().contains("error") || content.to_lowercase().contains("failed") {
+                let role = if content.to_lowercase().contains("error")
+                    || content.to_lowercase().contains("failed")
+                {
                     MessageRole::Error
                 } else {
                     MessageRole::System
@@ -333,7 +314,10 @@ pub fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
                     tool_activities: Vec::new(),
                 });
             }
-            AgentMessage::Custom { custom_type, payload } => {
+            AgentMessage::Custom {
+                custom_type,
+                payload,
+            } => {
                 let is_error_type = custom_type == "error" || custom_type == "agent_error";
                 let err_msg = payload
                     .get("error")
@@ -342,7 +326,11 @@ pub fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
                     .unwrap_or_else(|| payload.to_string());
                 result.push(ChatMessageInfo {
                     id: format!("msg_{msg_counter}"),
-                    role: if is_error_type { MessageRole::Error } else { MessageRole::System },
+                    role: if is_error_type {
+                        MessageRole::Error
+                    } else {
+                        MessageRole::System
+                    },
                     content: err_msg,
                     timestamp: String::new(),
                     tool_activities: Vec::new(),
@@ -424,8 +412,10 @@ impl AppState {
         let openai_key = threadlane_auth::openai_auth::load_openai_api_key()
             .or_else(|| std::env::var("OPENAI_API_KEY").ok())
             .unwrap_or_default();
-        let opencode_key = threadlane_auth::opencode_auth::load_opencode_api_key().unwrap_or_default();
-        let antigravity_connected = threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some();
+        let opencode_key =
+            threadlane_auth::opencode_auth::load_opencode_api_key().unwrap_or_default();
+        let antigravity_connected =
+            threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some();
 
         let selected_model = if !openai_key.is_empty() {
             "gpt-4o".to_string()
@@ -493,8 +483,13 @@ impl AppState {
     }
 
     pub fn refresh_active_session(&mut self) {
-        if let (Some(work_dir), Some(session_id)) = (&self.active_work_dir.clone(), &self.active_session_id.clone()) {
-            let session_file = work_dir.join(".threadlane/sessions").join(format!("{session_id}.jsonl"));
+        if let (Some(work_dir), Some(session_id)) = (
+            &self.active_work_dir.clone(),
+            &self.active_session_id.clone(),
+        ) {
+            let session_file = work_dir
+                .join(".threadlane/sessions")
+                .join(format!("{session_id}.jsonl"));
             self.messages = load_session_messages(&session_file);
             if let Some(proj) = self.projects.iter_mut().find(|p| &p.work_dir == work_dir) {
                 proj.sessions = discover_sessions_in_project(work_dir);
@@ -601,12 +596,15 @@ impl AppState {
             self.create_new_session()?;
         }
 
-        let (work_dir, session_id) = match (self.active_work_dir.clone(), self.active_session_id.clone()) {
-            (Some(w), Some(s)) => (w, s),
-            _ => return Err("Failed to ensure active session".into()),
-        };
+        let (work_dir, session_id) =
+            match (self.active_work_dir.clone(), self.active_session_id.clone()) {
+                (Some(w), Some(s)) => (w, s),
+                _ => return Err("Failed to ensure active session".into()),
+            };
 
-        let session_file = work_dir.join(".threadlane/sessions").join(format!("{session_id}.jsonl"));
+        let session_file = work_dir
+            .join(".threadlane/sessions")
+            .join(format!("{session_id}.jsonl"));
 
         // 1. Load or create SessionTree with file_path bound
         let mut tree = match SessionTree::load_from_file(&session_file) {
@@ -622,7 +620,9 @@ impl AppState {
         };
 
         // 2. Add User Message via add_message (updates active_node_id + appends node to file)
-        let user_msg = AgentMessage::User { content: text.clone() };
+        let user_msg = AgentMessage::User {
+            content: text.clone(),
+        };
         tree.add_message(user_msg);
 
         // Auto-set title if default
@@ -677,7 +677,10 @@ impl AppState {
         let text_to_agent = text.clone();
         let session_file_bg = session_file.clone();
         std::thread::spawn(move || {
-            let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+            let rt = match tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+            {
                 Ok(rt) => rt,
                 Err(e) => {
                     eprintln!("Failed to build tokio runtime: {e}");

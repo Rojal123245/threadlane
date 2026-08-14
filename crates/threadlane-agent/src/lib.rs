@@ -30,7 +30,8 @@ pub use error::AgentError;
 pub use events::{AgentEvent, HarnessMetrics, SubagentRecoveryStatus};
 pub use harness::{
     has_open_subagent_lanes, interrupted_subagent_lanes, InterruptedSubagentLane, LaneQueue,
-    OperationOutcome, QueueKind, Record, RecoveryResult, SteerItem, SteerPriority, ToolReplaySafety,
+    OperationOutcome, QueueKind, Record, RecoveryResult, SteerItem, SteerPriority,
+    ToolReplaySafety,
 };
 pub use loop_engine::repair_interrupted_tool_turn;
 pub use provider::{
@@ -45,4 +46,3 @@ pub use tool_executor::ToolExecutor;
 pub use turn_driver::TurnDriver;
 pub use types::*;
 pub use unified::{TurnState, UnifiedAgent};
-

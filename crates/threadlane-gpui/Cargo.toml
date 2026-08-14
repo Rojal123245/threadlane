@@ -6,6 +6,7 @@ description = "GPUI Desktop application for Threadlane using gpui-component"
 
 [dependencies]
 gpui-component = { git = "https://github.com/longbridge/gpui-component" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
 threadlane-agent = { version = "0.1.0", path = "../threadlane-agent" }

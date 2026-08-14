@@ -101,7 +101,6 @@ impl<S: SessionStore> SessionAgent<S> {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Child-lane bootstrap
 // ---------------------------------------------------------------------------
@@ -242,9 +241,7 @@ impl<S: SessionStore> SessionAgent<S> {
         self.validate_lane(lane)
             .map_err(|e| ProcedureError::Invalid(e.to_string()))?;
         match run_id {
-            Some(id) => self
-                .harness
-                .enqueue_on_lane(lane.name(), id, queue, target),
+            Some(id) => self.harness.enqueue_on_lane(lane.name(), id, queue, target),
             None => self
                 .harness
                 .enqueue_unbound_on_lane(lane.name(), queue, target),
@@ -270,27 +267,21 @@ impl<S: SessionStore> SessionAgent<S> {
             None => {
                 let state = Reducer::reduce(self.harness.store())
                     .map_err(|e| ProcedureError::Invalid(format!("reduce failed: {e:?}")))?;
-                let lane_state = state
-                    .lane(lane.name())
-                    .ok_or_else(|| {
-                        ProcedureError::Invalid(format!("unknown lane: {}", lane.name()))
-                    })?;
+                let lane_state = state.lane(lane.name()).ok_or_else(|| {
+                    ProcedureError::Invalid(format!("unknown lane: {}", lane.name()))
+                })?;
                 let queued = lane_state
                     .queued
                     .iter()
                     .find(|entry| entry.target.id == entry_id)
-                    .ok_or_else(|| {
-                        ProcedureError::Invalid("queued entry does not exist".into())
-                    })?;
+                    .ok_or_else(|| ProcedureError::Invalid("queued entry does not exist".into()))?;
                 if queued.run_id.is_some() {
                     return Err(ProcedureError::Invalid(format!(
                         "queued entry {} is bound to run {:?}, not unbound",
-                        entry_id,
-                        queued.run_id
+                        entry_id, queued.run_id
                     )));
                 }
-                self.harness
-                    .cancel_unbound_on_lane(lane.name(), entry_id)
+                self.harness.cancel_unbound_on_lane(lane.name(), entry_id)
             }
         }
     }
@@ -314,27 +305,21 @@ impl<S: SessionStore> SessionAgent<S> {
             None => {
                 let state = Reducer::reduce(self.harness.store())
                     .map_err(|e| ProcedureError::Invalid(format!("reduce failed: {e:?}")))?;
-                let lane_state = state
-                    .lane(lane.name())
-                    .ok_or_else(|| {
-                        ProcedureError::Invalid(format!("unknown lane: {}", lane.name()))
-                    })?;
+                let lane_state = state.lane(lane.name()).ok_or_else(|| {
+                    ProcedureError::Invalid(format!("unknown lane: {}", lane.name()))
+                })?;
                 let queued = lane_state
                     .queued
                     .iter()
                     .find(|entry| entry.target.id == entry_id)
-                    .ok_or_else(|| {
-                        ProcedureError::Invalid("queued entry does not exist".into())
-                    })?;
+                    .ok_or_else(|| ProcedureError::Invalid("queued entry does not exist".into()))?;
                 if queued.run_id.is_some() {
                     return Err(ProcedureError::Invalid(format!(
                         "queued entry {} is bound to run {:?}, not unbound",
-                        entry_id,
-                        queued.run_id
+                        entry_id, queued.run_id
                     )));
                 }
-                self.harness
-                    .consume_unbound_on_lane(lane.name(), entry_id)
+                self.harness.consume_unbound_on_lane(lane.name(), entry_id)
             }
         }
     }
@@ -344,20 +329,14 @@ impl<S: SessionStore> SessionAgent<S> {
     /// Abort intent is durable; reconciliation happens when the operation
     /// finishes.  The supplied lane must own `run_id` (the lane's reduced
     /// [`LaneState::open_operation`] must match).
-    pub fn request_abort(
-        &mut self,
-        lane: &LaneHandle,
-        run_id: &str,
-    ) -> Result<(), ProcedureError> {
+    pub fn request_abort(&mut self, lane: &LaneHandle, run_id: &str) -> Result<(), ProcedureError> {
         let state = Reducer::reduce(self.harness.store())
             .map_err(|e| ProcedureError::Invalid(format!("reduce failed: {e:?}")))?;
         let lane_state = state
             .lanes
             .iter()
             .find(|l| l.name == lane.name())
-            .ok_or_else(|| {
-                ProcedureError::Invalid(format!("unknown lane: {}", lane.name()))
-            })?;
+            .ok_or_else(|| ProcedureError::Invalid(format!("unknown lane: {}", lane.name())))?;
         if lane_state.open_operation.as_deref() != Some(run_id) {
             return Err(ProcedureError::Invalid(format!(
                 "lane {} does not own operation {}",

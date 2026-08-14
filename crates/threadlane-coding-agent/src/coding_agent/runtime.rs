@@ -16,15 +16,11 @@ use crate::agents::{discover_agents, AgentDefinition, AgentScope};
 use crate::commands::{execute_slash_command, parse_slash_command, CommandAction};
 use crate::context::ProjectContext;
 use crate::extension_broker::CapabilityDispatcher;
-use threadlane_mcp::McpManager;
-use log::warn;
-use threadlane_wasi::packages::default_global_threadlane_dir;
 use crate::plan::SessionPlanStore;
-use threadlane_skills::{SkillManager, SkillRegistry};
 use crate::system_prompt::{build_system_prompt, SystemPromptBuildOptions, SystemPromptConfig};
-use threadlane_wasi::{WasiExtensionManager, WasiLegacyEffect};
 #[cfg(test)]
 use async_trait::async_trait;
+use log::warn;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -47,7 +43,11 @@ use threadlane_agent::{
 };
 #[cfg(test)]
 use threadlane_agent::{AgentToolDefinition, ToolExecutor};
+use threadlane_mcp::McpManager;
 use threadlane_provider::openai::fetch_available_models;
+use threadlane_skills::{SkillManager, SkillRegistry};
+use threadlane_wasi::packages::default_global_threadlane_dir;
+use threadlane_wasi::{WasiExtensionManager, WasiLegacyEffect};
 use tokio::sync::broadcast;
 use tokio::time::{timeout, Duration};
 

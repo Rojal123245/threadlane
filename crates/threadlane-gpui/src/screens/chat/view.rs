@@ -1,8 +1,9 @@
-use gpui::InteractiveElement;
 use gpui::*;
+use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
 
+use crate::app::{actions::AppAction, controller};
 use crate::state::{AppState, ChatMessageInfo, MessageRole, ToolActivityInfo};
 
 pub struct ChatListView {
@@ -24,20 +25,24 @@ impl ChatListView {
         });
 
         let model_clone = model.clone();
-        let sub2 = cx.subscribe_in(&input_state, window, move |_this, input_state, event: &InputEvent, window, cx| {
-            if matches!(event, InputEvent::PressEnter { .. }) {
-                let text = input_state.read(cx).value().to_string();
-                if !text.trim().is_empty() {
-                    let text_to_send = text.clone();
-                    model_clone.update(cx, |state, _cx| {
-                        let _ = state.send_prompt(text_to_send);
-                    });
-                    input_state.update(cx, |state, cx| {
-                        state.set_value("", window, cx);
-                    });
+        let sub2 = cx.subscribe_in(
+            &input_state,
+            window,
+            move |_this, input_state, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    let text = input_state.read(cx).value().to_string();
+                    if !text.trim().is_empty() {
+                        let text_to_send = text.clone();
+                        model_clone.update(cx, |state, _cx| {
+                            controller::dispatch(state, AppAction::SendPrompt(text_to_send));
+                        });
+                        input_state.update(cx, |state, cx| {
+                            state.set_value("", window, cx);
+                        });
+                    }
                 }
-            }
-        });
+            },
+        );
 
         Self {
             model,
@@ -101,46 +106,30 @@ impl ChatListView {
                     .items_center()
                     .gap_2()
                     .child(
-                        div()
-                            .px_2p5()
-                            .py_1()
-                            .rounded_md()
-                            .bg(rgb(0x27272a))
-                            .hover(|style| style.bg(rgb(0x3f3f46)))
-                            .cursor_pointer()
-                            .text_xs()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(0xe4e4e7))
-                            .on_mouse_down(MouseButton::Left, {
+                        Button::new("new-session-btn")
+                            .label("+ New Session")
+                            .ghost()
+                            .on_click({
                                 let model = model.clone();
                                 move |_event, _window, cx| {
                                     model.update(cx, |state, _cx| {
-                                        let _ = state.create_new_session();
+                                        controller::dispatch(state, AppAction::CreateSession);
                                     });
                                 }
-                            })
-                            .child("+ New Session"),
+                            }),
                     )
                     .child(
-                        div()
-                            .px_2p5()
-                            .py_1()
-                            .rounded_md()
-                            .bg(rgb(0x27272a))
-                            .hover(|style| style.bg(rgb(0x3f3f46)))
-                            .cursor_pointer()
-                            .text_xs()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(0x60a5fa))
-                            .on_mouse_down(MouseButton::Left, {
+                        Button::new("settings-btn")
+                            .label(format!("⚙ {selected_model}"))
+                            .ghost()
+                            .on_click({
                                 let model = model.clone();
                                 move |_event, _window, cx| {
                                     model.update(cx, |state, _cx| {
-                                        state.toggle_settings_modal();
+                                        controller::dispatch(state, AppAction::ToggleSettings);
                                     });
                                 }
-                            })
-                            .child(format!("⚙ {selected_model}")),
+                            }),
                     ),
             )
     }
@@ -204,21 +193,16 @@ impl ChatListView {
 
     fn render_message(&self, msg: &ChatMessageInfo, _cx: &mut Context<Self>) -> impl IntoElement {
         match msg.role {
-            MessageRole::User => div()
-                .flex()
-                .justify_end()
-                .my_2()
-                .px_4()
-                .child(
-                    div()
-                        .max_w(px(600.0))
-                        .p_3()
-                        .rounded_lg()
-                        .bg(rgb(0x27272a))
-                        .text_sm()
-                        .text_color(rgb(0xffffff))
-                        .child(msg.content.clone()),
-                ),
+            MessageRole::User => div().flex().justify_end().my_2().px_4().child(
+                div()
+                    .max_w(px(600.0))
+                    .p_3()
+                    .rounded_lg()
+                    .bg(rgb(0x27272a))
+                    .text_sm()
+                    .text_color(rgb(0xffffff))
+                    .child(msg.content.clone()),
+            ),
             MessageRole::Assistant => {
                 let tool_elements: Vec<_> = msg
                     .tool_activities
@@ -298,32 +282,30 @@ impl ChatListView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().flex_1().child(Input::new(&self.input_state)))
                     .child(
-                        div()
-                            .px_3()
-                            .py_1p5()
-                            .rounded_md()
-                            .bg(rgb(0x3b82f6))
-                            .hover(|style| style.bg(rgb(0x2563eb)))
-                            .cursor_pointer()
-                            .text_xs()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(0xffffff))
-                            .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-                                let text = input_state.read(cx).value().to_string();
-                                if !text.trim().is_empty() {
-                                    let text_to_send = text.clone();
-                                    model.update(cx, |state, _cx| {
-                                        let _ = state.send_prompt(text_to_send);
-                                    });
-                                    input_state.update(cx, |state, cx| {
-                                        state.set_value("", window, cx);
-                                    });
-                                }
-                            })
-                            .child("Send"),
-                    ),
+                        div().flex_1().child(
+                            Input::new(&self.input_state)
+                                .appearance(false)
+                                .bordered(false),
+                        ),
+                    )
+                    .child(Button::new("send-btn").label("Send").primary().on_click(
+                        move |_event, window, cx| {
+                            let text = input_state.read(cx).value().to_string();
+                            if !text.trim().is_empty() {
+                                let text_to_send = text.clone();
+                                model.update(cx, |state, _cx| {
+                                    controller::dispatch(
+                                        state,
+                                        AppAction::SendPrompt(text_to_send),
+                                    );
+                                });
+                                input_state.update(cx, |state, cx| {
+                                    state.set_value("", window, cx);
+                                });
+                            }
+                        },
+                    )),
             )
     }
 }
@@ -348,10 +330,9 @@ impl Render for ChatListView {
                     .items_center()
                     .justify_center()
                     .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(0x71717a))
-                            .child("No messages in this session yet. Type a prompt below to begin."),
+                        div().text_sm().text_color(rgb(0x71717a)).child(
+                            "No messages in this session yet. Type a prompt below to begin.",
+                        ),
                     )
                     .into_any_element()
             } else {

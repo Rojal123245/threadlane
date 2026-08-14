@@ -1,20 +1,16 @@
-mod app;
-mod chat_list;
-mod settings_modal;
-mod sidebar;
-mod state;
-
-use app::WorkspaceView;
 use gpui::*;
-use gpui_component::Root;
+use gpui_component::{Root, Theme, ThemeMode};
+use gpui_component_assets::Assets;
+use threadlane_gpui::screens::workspace::WorkspaceView;
 
 fn main() {
     env_logger::init();
 
-    let app = gpui_platform::application();
+    let app = gpui_platform::application().with_assets(Assets);
 
     app.run(move |cx| {
         gpui_component::init(cx);
+        Theme::change(ThemeMode::Dark, None, cx);
 
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
