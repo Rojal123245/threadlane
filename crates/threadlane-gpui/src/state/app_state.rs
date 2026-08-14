@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Mutex;
 use std::time::UNIX_EPOCH;
 use threadlane_agent::{AgentEvent, AgentMessage, SessionTree};
 
@@ -104,6 +105,7 @@ pub struct AppState {
     pub auth_status_msg: Option<String>,
     stream_tx: Sender<ChatStreamEvent>,
     stream_rx: Receiver<ChatStreamEvent>,
+    pending_stream_event: Mutex<Option<ChatStreamEvent>>,
 }
 
 fn file_mtime(path: &Path) -> u64 {
@@ -467,6 +469,7 @@ impl AppState {
             auth_status_msg: None,
             stream_tx,
             stream_rx,
+            pending_stream_event: Mutex::new(None),
         }
     }
 
@@ -716,8 +719,26 @@ impl AppState {
         Ok(session_id)
     }
 
+    pub fn chat_stream_pending(&self) -> bool {
+        let Ok(mut pending) = self.pending_stream_event.lock() else {
+            return false;
+        };
+        if pending.is_none() {
+            *pending = self.stream_rx.try_recv().ok();
+        }
+        pending.is_some()
+    }
+
     pub fn drain_chat_stream(&mut self) -> bool {
-        let events = self.stream_rx.try_iter().collect::<Vec<_>>();
+        let first = self
+            .pending_stream_event
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.take());
+        let events = first
+            .into_iter()
+            .chain(self.stream_rx.try_iter())
+            .collect::<Vec<_>>();
         if events.is_empty() {
             return false;
         }

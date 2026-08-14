@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use gpui::*;
@@ -5,7 +6,7 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{InputEvent, Textarea, TextareaState};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
-use gpui_component::text::markdown;
+use gpui_component::text::{TextView, TextViewState};
 use gpui_component::theme::ActiveTheme;
 use gpui_component::{Disableable, IconName};
 
@@ -17,6 +18,7 @@ pub struct ChatListView {
     pub input_state: Entity<TextareaState>,
     pub header_left_padding: Pixels,
     scroll_handle: ScrollHandle,
+    markdown_states: HashMap<String, (String, Entity<TextViewState>)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -74,13 +76,16 @@ impl ChatListView {
                 cx.background_executor()
                     .timer(Duration::from_millis(33))
                     .await;
-                let changed = stream_model.update(cx, |state, cx| {
-                    let changed = state.drain_chat_stream();
-                    if changed {
-                        cx.notify();
-                    }
-                    changed
-                });
+                let has_event =
+                    stream_model.read_with(cx, |state, _cx| state.chat_stream_pending());
+                let changed = has_event
+                    && stream_model.update(cx, |state, cx| {
+                        let changed = state.drain_chat_stream();
+                        if changed {
+                            cx.notify();
+                        }
+                        changed
+                    });
 
                 if changed {
                     settle_frames = 4;
@@ -110,6 +115,7 @@ impl ChatListView {
             input_state,
             header_left_padding: px(14.0),
             scroll_handle,
+            markdown_states: HashMap::new(),
             _subscriptions: vec![sub1, sub2],
         }
     }
@@ -205,7 +211,7 @@ impl ChatListView {
             )
     }
 
-    fn render_message(&self, msg: &ChatMessageInfo, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_message(&mut self, msg: &ChatMessageInfo, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().colors;
         match msg.role {
             MessageRole::User => div().flex().justify_end().my_2().px_4().child(
@@ -237,7 +243,25 @@ impl ChatListView {
                                     .w_full()
                                     .text_sm()
                                     .text_color(theme.foreground)
-                                    .child(markdown(msg.content.clone()).selectable(true))
+                                    .child({
+                                        let entry = self
+                                            .markdown_states
+                                            .entry(msg.id.clone())
+                                            .or_insert_with(|| {
+                                                let content = msg.content.clone();
+                                                let state = cx.new(|cx| {
+                                                    TextViewState::markdown(&content, cx)
+                                                });
+                                                (content, state)
+                                            });
+                                        if entry.0 != msg.content {
+                                            entry.0 = msg.content.clone();
+                                            entry.1.update(cx, |state, cx| {
+                                                state.set_text(&msg.content, cx);
+                                            });
+                                        }
+                                        TextView::new(&entry.1).selectable(true)
+                                    })
                                     .into_any_element(),
                             )
                         } else {
@@ -282,6 +306,7 @@ impl ChatListView {
                     ),
             ),
         }
+        .into_any_element()
     }
 
     fn render_new_task(&self, cx: &mut Context<Self>) -> AnyElement {
