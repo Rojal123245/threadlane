@@ -16,7 +16,7 @@
 
 Threadlane combines a GPU-accelerated desktop interface with a capable coding-agent runtime. It keeps projects, sessions, tools, skills, background agents, and model output in one focused native application—without requiring a browser-based editor shell.
 
-> **Release status:** automated release artifacts currently target Apple Silicon macOS. The Rust workspace can be built from source on hosts supported by its Makepad and native dependency stack.
+> **Release status:** automated release artifacts target Apple Silicon macOS and Ubuntu 24.04 x86_64 (`.deb`). The Rust workspace can be built from source on other hosts supported by its Makepad and native dependency stack.
 
 <p align="center">
   <a href="docs/images/threadlane-workspace.png">
@@ -75,7 +75,7 @@ flowchart TD
 - A current stable Rust toolchain.
 - The `wasm32-wasip1` Rust target.
 - A native C toolchain and the platform dependencies required by Makepad.
-- macOS is required for the repository's packaged `.app`/DMG release workflow.
+- macOS is required for the repository's packaged `.app`/DMG release workflow; Ubuntu 24.04 x86_64 is used for the packaged `.deb` release workflow.
 
 Install the WASI target if needed:
 
@@ -488,21 +488,35 @@ cargo run -p threadlane
 
 Open `$HOME/Applications/Threadlane Test.app` instead to test the complete installation and relaunch flow. Restore the intended package version and unset `THREADLANE_UPDATER_ENDPOINT` afterward.
 
-### Automated macOS Releases
+### Automated Releases
 
-The release workflow is defined in [`.github/workflows/release.yml`](.github/workflows/release.yml). A release tag must exactly match the version in `crates/threadlane/Cargo.toml`:
+[Release Please](https://github.com/googleapis/release-please) prepares releases from `main`. It opens
+or updates a release pull request containing the next workspace version and the
+root [`CHANGELOG.md`](CHANGELOG.md). Merging that pull request creates a
+`v<version>` tag and GitHub release. The release notes include the generated
+changelog entries for the included conventional commits.
+At least one included commit must use a release-worthy Conventional Commit
+prefix such as `fix:` or `feat:`; other messages do not trigger a release PR.
 
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
+The automation is split between
+[`.github/workflows/release-please.yml`](.github/workflows/release-please.yml), which
+manages the release pull request, changelog, tag, and GitHub release, and
+[`.github/workflows/release.yml`](.github/workflows/release.yml), which is called
+directly after Release Please creates a release and attaches the platform
+artifacts. Both workflows use the repository's built-in `GITHUB_TOKEN`; no
+release-specific token or GitHub App is required. The packaging workflow also
+retains its tag-push and manual triggers. The tag must exactly match the
+`threadlane` workspace version; the packaging workflow verifies that invariant
+before building. In **Settings → Actions → General → Workflow permissions**,
+enable **Allow GitHub Actions to create and approve pull requests** so
+Release Please can maintain its release pull request.
 
 A tagged build publishes:
 
 - A user-facing DMG.
 - A signed `.app.tar.gz` updater bundle.
 - The updater signature.
-- A `latest.json` update manifest.
+- A `latest.json` update manifest containing the GitHub release notes.
 
 ### macOS Gatekeeper Note
 

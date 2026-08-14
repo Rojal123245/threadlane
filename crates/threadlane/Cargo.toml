@@ -1,7 +1,7 @@
 [package]
 name = "threadlane"
-version = "0.0.7"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "GPU Desktop UI application for threadlane agent using Makepad"
 
 [dependencies]
@@ -9,12 +9,12 @@ makepad-widgets = { git = "https://github.com/makepad/makepad.git", branch = "de
 makepad-terminal-core = { git = "https://github.com/makepad/makepad.git", branch = "dev" }
 makepad-code-editor = { git = "https://github.com/makepad/makepad.git", branch = "dev" }
 unicode-segmentation = "1.12.0"
-threadlane-agent = { path = "../threadlane-agent" }
-threadlane-coding-agent = { path = "../threadlane-coding-agent" }
-threadlane-provider = { path = "../threadlane-provider" }
-threadlane-tools = { path = "../threadlane-tools" }
-threadlane-git = { path = "../threadlane-git" }
-threadlane-updater = { path = "../threadlane-updater" }
+threadlane-agent = { version = "0.1.0", path = "../threadlane-agent" }
+threadlane-coding-agent = { version = "0.1.0", path = "../threadlane-coding-agent" }
+threadlane-provider = { version = "0.1.0", path = "../threadlane-provider" }
+threadlane-tools = { version = "0.1.0", path = "../threadlane-tools" }
+threadlane-git = { version = "0.1.0", path = "../threadlane-git" }
+threadlane-updater = { version = ">=0.1.0, <1.0.0", path = "../threadlane-updater" }
 tokio = { version = "1.38", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }

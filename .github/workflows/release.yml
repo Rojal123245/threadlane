@@ -1,13 +1,33 @@
-name: Release (macOS)
+name: Release
 
 on:
+  workflow_call:
+    inputs:
+      release_tag:
+        description: 'Release tag created by Release Please'
+        required: true
+        type: string
+    secrets:
+      CARGO_PACKAGER_SIGN_PRIVATE_KEY:
+        required: true
+      CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD:
+        required: true
   push:
     tags:
       - 'v*.*.*'
   workflow_dispatch:
+    inputs:
+      build_ubuntu_24_x86_64:
+        description: 'Build Ubuntu 24.04 x86_64'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
+
+env:
+  RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -30,10 +50,8 @@ jobs:
           targets: wasm32-wasip1
 
       - name: Verify release tag matches the app version
-        if: startsWith(github.ref, 'refs/tags/')
+        if: inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/')
         shell: bash
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           APP_VERSION=$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "threadlane") | .version')
@@ -80,9 +98,14 @@ jobs:
       - name: Package and sign Threadlane updates
         shell: bash
         env:
+          THREADLANE_UPDATER_PUBLIC_KEY: ${{ vars.THREADLANE_UPDATER_PUBLIC_KEY }}
           CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.CARGO_PACKAGER_SIGN_PRIVATE_KEY }}
           CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD }}
         run: |
+          if [[ -z "$THREADLANE_UPDATER_PUBLIC_KEY" ]]; then
+            echo "::error::Repository variable THREADLANE_UPDATER_PUBLIC_KEY is not configured"
+            exit 1
+          fi
           if [[ -z "$CARGO_PACKAGER_SIGN_PRIVATE_KEY" ]]; then
             echo "::error::Secret CARGO_PACKAGER_SIGN_PRIVATE_KEY is not configured"
             exit 1
@@ -120,10 +143,10 @@ jobs:
           codesign --verify --strict --verbose=4 "${dmgs[0]}"
 
       - name: Generate signed update manifest
-        if: startsWith(github.ref, 'refs/tags/')
+        if: inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/')
         shell: bash
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           cd crates/threadlane
           ARCHIVE_PATH=$(find dist -maxdepth 1 -name '*.app.tar.gz' -print -quit)
@@ -132,10 +155,12 @@ jobs:
           VERSION="${RELEASE_TAG#v}"
           DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${ARCHIVE_NAME}"
           PUBLISHED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+          RELEASE_NOTES=$(gh release view "$RELEASE_TAG" --json body --jq '.body' 2>/dev/null \
+            || printf 'Threadlane %s' "$RELEASE_TAG")
 
           jq -n \
             --arg version "$VERSION" \
-            --arg notes "Threadlane $RELEASE_TAG" \
+            --arg notes "$RELEASE_NOTES" \
             --arg pub_date "$PUBLISHED_AT" \
             --arg url "$DOWNLOAD_URL" \
             --arg signature "$SIGNATURE" \
@@ -161,13 +186,106 @@ jobs:
 
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+        if: inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/')
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           files: |
             crates/threadlane/dist/*.dmg
             crates/threadlane/dist/*.app.tar.gz
             crates/threadlane/dist/*.app.tar.gz.sig
             crates/threadlane/dist/latest.json
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-and-package-ubuntu-24-x86-64:
+    name: Build & Package (Ubuntu 24.04 x86_64)
+    if: >-
+      ${{
+        inputs.release_tag != '' ||
+        startsWith(github.ref, 'refs/tags/') ||
+        (github.event_name == 'workflow_dispatch' && inputs.build_ubuntu_24_x86_64)
+      }}
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev \
+            libclang-dev \
+            libegl1 \
+            libpulse-dev \
+            libsqlite3-dev \
+            libssl-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxkbcommon-dev \
+            libxcursor-dev \
+            llvm \
+            pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install packaging tooling
+        run: |
+          cargo install --locked cargo-packager --version 0.11.8
+          cargo install --locked --git https://github.com/project-robius/robius-packaging-commands.git
+          cargo packager --version
+
+      - name: Build WASI Extensions
+        shell: bash
+        run: |
+          chmod +x ./scripts/build_extensions.sh
+          ./scripts/build_extensions.sh
+
+      - name: Build Threadlane Binary (Release)
+        env:
+          THREADLANE_UPDATER_PUBLIC_KEY: ${{ vars.THREADLANE_UPDATER_PUBLIC_KEY }}
+        run: |
+          if [[ -z "$THREADLANE_UPDATER_PUBLIC_KEY" ]]; then
+            echo "::error::Repository variable THREADLANE_UPDATER_PUBLIC_KEY is not configured"
+            exit 1
+          fi
+          cargo build --release --bin threadlane
+
+      - name: Package Threadlane (.deb)
+        shell: bash
+        env:
+          THREADLANE_UPDATER_PUBLIC_KEY: ${{ vars.THREADLANE_UPDATER_PUBLIC_KEY }}
+        run: |
+          if [[ -z "$THREADLANE_UPDATER_PUBLIC_KEY" ]]; then
+            echo "::error::Repository variable THREADLANE_UPDATER_PUBLIC_KEY is not configured"
+            exit 1
+          fi
+          cd crates/threadlane
+          rm -rf dist/*.deb dist/.cargo-packager
+          cargo packager --release --formats deb --verbose
+
+          shopt -s nullglob
+          debs=(dist/*.deb)
+          if (( ${#debs[@]} != 1 )); then
+            echo "::error::Expected exactly one Debian package"
+            printf 'Packages: %s\n' "${debs[@]}"
+            exit 1
+          fi
+
+      - name: Upload Ubuntu Release Asset
+        if: inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: crates/threadlane/dist/*.deb
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

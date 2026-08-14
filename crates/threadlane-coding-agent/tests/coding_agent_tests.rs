@@ -56,6 +56,7 @@ async fn compact_command_stays_in_current_session() {
 
 #[test]
 fn test_slash_command_parsing() {
+    // Happy paths for existing commands
     assert_eq!(
         parse_slash_command("/model gpt-4o"),
         Some(CommandAction::SwitchModel("gpt-4o".to_string()))
@@ -64,6 +65,38 @@ fn test_slash_command_parsing() {
         parse_slash_command("/compact"),
         Some(CommandAction::Compact)
     );
+    assert_eq!(parse_slash_command("/quit"), Some(CommandAction::Quit));
+    assert_eq!(parse_slash_command("/exit"), Some(CommandAction::Quit));
+    assert_eq!(
+        parse_slash_command("/session"),
+        Some(CommandAction::ShowSession)
+    );
+    assert_eq!(
+        parse_slash_command("/name test session"),
+        Some(CommandAction::SetName("test session".to_string()))
+    );
+    assert_eq!(
+        parse_slash_command("/tree 123"),
+        Some(CommandAction::SwitchTreeBranch("123".to_string()))
+    );
+    assert_eq!(
+        parse_slash_command("/fork 123"),
+        Some(CommandAction::Fork("123".to_string()))
+    );
+    assert_eq!(
+        parse_slash_command("/clone"),
+        Some(CommandAction::CloneSession)
+    );
+    assert_eq!(
+        parse_slash_command("/skill my_skill"),
+        Some(CommandAction::InvokeSkill("my_skill".to_string()))
+    );
+    assert_eq!(
+        parse_slash_command("/prompt tpl arg1 arg2"),
+        Some(CommandAction::PromptTemplate("tpl arg1 arg2".to_string()))
+    );
+
+    // Unknown commands
     assert_eq!(
         parse_slash_command("/plan"),
         Some(CommandAction::Unknown("plan".to_string()))
@@ -72,9 +105,20 @@ fn test_slash_command_parsing() {
         parse_slash_command("/todos"),
         Some(CommandAction::Unknown("todos".to_string()))
     );
-    assert_eq!(parse_slash_command("/quit"), Some(CommandAction::Quit));
+
+    // Whitespace handling
     assert_eq!(
-        parse_slash_command("/session"),
-        Some(CommandAction::ShowSession)
+        parse_slash_command("  /model   gpt-4o  "),
+        Some(CommandAction::SwitchModel("gpt-4o".to_string()))
     );
+    assert_eq!(
+        parse_slash_command("\n\t/compact\n"),
+        Some(CommandAction::Compact)
+    );
+
+    // Invalid inputs
+    assert_eq!(parse_slash_command("not a slash command"), None);
+    assert_eq!(parse_slash_command(""), None);
+    assert_eq!(parse_slash_command("  "), None);
+    assert_eq!(parse_slash_command("/"), None);
 }

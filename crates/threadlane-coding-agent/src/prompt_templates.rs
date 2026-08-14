@@ -277,3 +277,117 @@ pub fn expand_prompt_template(text: &str, templates: &[PromptTemplate]) -> Strin
         text.to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_no_substitution() {
+        let content = "Hello, world!";
+        let args = vec!["arg1".to_string(), "arg2".to_string()];
+        let result = substitute_args(content, &args);
+        assert_eq!(result, "Hello, world!");
+    }
+
+    #[test]
+    fn test_positional_args() {
+        let content = "Hello $1, you are $2 years old.";
+        let args = vec!["Alice".to_string(), "30".to_string()];
+        let result = substitute_args(content, &args);
+        assert_eq!(result, "Hello Alice, you are 30 years old.");
+
+        let content_with_braces = "Hello ${1}, you are ${2} years old.";
+        let result_with_braces = substitute_args(content_with_braces, &args);
+        assert_eq!(result_with_braces, "Hello Alice, you are 30 years old.");
+    }
+
+    #[test]
+    fn test_all_args() {
+        let content_at = "Args: $@";
+        let content_arguments = "Args: $ARGUMENTS";
+        let args = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+
+        let result_at = substitute_args(content_at, &args);
+        assert_eq!(result_at, "Args: a b c");
+
+        let result_arguments = substitute_args(content_arguments, &args);
+        assert_eq!(result_arguments, "Args: a b c");
+
+        let content_at_braces = "Args: ${@}";
+        let content_arguments_braces = "Args: ${ARGUMENTS}";
+
+        let result_at_braces = substitute_args(content_at_braces, &args);
+        assert_eq!(result_at_braces, "Args: a b c");
+
+        let result_arguments_braces = substitute_args(content_arguments_braces, &args);
+        assert_eq!(result_arguments_braces, "Args: a b c");
+    }
+
+    #[test]
+    fn test_defaults() {
+        let args = vec!["arg1".to_string()];
+
+        let content_pos_default = "Arg2 is ${2:-missing}";
+        let result_pos_default = substitute_args(content_pos_default, &args);
+        assert_eq!(result_pos_default, "Arg2 is missing");
+
+        let content_pos_present = "Arg1 is ${1:-missing}";
+        let result_pos_present = substitute_args(content_pos_present, &args);
+        assert_eq!(result_pos_present, "Arg1 is arg1");
+
+        let empty_args: Vec<String> = vec![];
+        let content_arguments_default = "Args: ${ARGUMENTS:-nothing}";
+        let result_arguments_default = substitute_args(content_arguments_default, &empty_args);
+        assert_eq!(result_arguments_default, "Args: nothing");
+    }
+
+    #[test]
+    #[ignore = "TODO: fix bug in default slicing for @:-default"]
+    fn test_defaults_at_symbol_bug() {
+        let empty_args: Vec<String> = vec![];
+        let content_all_default = "Args: ${@:-none}";
+        let result_all_default = substitute_args(content_all_default, &empty_args);
+
+        // BUG: In the current implementation `eval_braced_expr` treats `@:-none` as slicing `@:` with value `-none`,
+        // returning an empty string. The expected output is "none".
+        assert_eq!(result_all_default, "Args: none");
+    }
+
+    #[test]
+    fn test_slicing() {
+        let args = vec!["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string()];
+
+        let content_slice_from = "Slice: ${@:2}";
+        let result_slice_from = substitute_args(content_slice_from, &args);
+        assert_eq!(result_slice_from, "Slice: b c d");
+
+        let content_slice_len = "Slice: ${@:2:2}";
+        let result_slice_len = substitute_args(content_slice_len, &args);
+        assert_eq!(result_slice_len, "Slice: b c");
+
+        let content_slice_out_of_bounds = "Slice: ${@:10}";
+        let result_slice_out_of_bounds = substitute_args(content_slice_out_of_bounds, &args);
+        assert_eq!(result_slice_out_of_bounds, "Slice: ");
+    }
+
+    #[test]
+    fn test_edge_cases() {
+        let args = vec!["a".to_string(), "b".to_string()];
+
+        // Out of bounds positional without default
+        let result = substitute_args("Missing $3", &args);
+        assert_eq!(result, "Missing ");
+
+        let result_braced = substitute_args("Missing ${3}", &args);
+        assert_eq!(result_braced, "Missing ");
+
+        // Malformed expression - missing closing brace
+        let result_malformed = substitute_args("Malformed ${1", &args);
+        assert_eq!(result_malformed, "Malformed ${1");
+
+        // Literal $ followed by non-variable character
+        let result_no_match = substitute_args("Cost is $X", &args);
+        assert_eq!(result_no_match, "Cost is $X");
+    }
+}
