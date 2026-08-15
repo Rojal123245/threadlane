@@ -7204,6 +7204,7 @@ name = "threadlane-gpui"
 version = "0.1.4"
 dependencies = [
  "anyhow",
+ "base64",
  "dirs 5.0.1",
  "env_logger",
  "gpui",

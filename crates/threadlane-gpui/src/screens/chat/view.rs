@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use std::time::Duration;
 
+use base64::Engine as _;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
@@ -16,7 +17,21 @@ use gpui_component::{Disableable, Icon, IconName, Sizable};
 
 use crate::app::{actions::AppAction, controller};
 use crate::state::{AppState, ChatMessageInfo, MessageRole, ToolActivityInfo};
-use threadlane_agent::{PlanItemStatus, SessionPlan};
+use threadlane_agent::{ImageAttachment, PlanItemStatus, SessionPlan};
+
+actions!(threadlane_composer, [PasteClipboard]);
+
+const INPUT_KEY_CONTEXT: &str = "Input";
+
+pub fn init(cx: &mut App) {
+    // gpui-component's Textarea owns the focused `Input` context. Register
+    // after gpui-component initialization so this action can inspect image
+    // clipboard entries while preserving text paste behavior.
+    cx.bind_keys([
+        KeyBinding::new("cmd-v", PasteClipboard, Some(INPUT_KEY_CONTEXT)),
+        KeyBinding::new("ctrl-v", PasteClipboard, Some(INPUT_KEY_CONTEXT)),
+    ]);
+}
 
 pub struct ChatListView {
     pub model: Entity<AppState>,
@@ -25,6 +40,7 @@ pub struct ChatListView {
     scroll_handle: ScrollHandle,
     expanded_activity_groups: HashSet<String>,
     markdown_states: HashMap<String, (String, Entity<TextViewState>)>,
+    pasted_images: Vec<ImageAttachment>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -48,7 +64,7 @@ impl ChatListView {
         let sub2 = cx.subscribe_in(
             &input_state,
             window,
-            move |_this, input_state, event: &InputEvent, window, cx| {
+            move |this, input_state, event: &InputEvent, window, cx| {
                 cx.notify();
                 if matches!(
                     event,
@@ -58,16 +74,21 @@ impl ChatListView {
                     }
                 ) {
                     let text = input_state.read(cx).value().to_string();
-                    if !text.trim().is_empty() {
-                        let text_to_send = text.clone();
-                        let is_generating = model_clone.read(cx).is_generating;
+                    let is_generating = model_clone.read(cx).is_generating;
+                    if !text.trim().is_empty() || (!is_generating && !this.pasted_images.is_empty())
+                    {
+                        let images = if is_generating {
+                            Vec::new()
+                        } else {
+                            std::mem::take(&mut this.pasted_images)
+                        };
                         model_clone.update(cx, |state, cx| {
                             controller::dispatch(
                                 state,
                                 if is_generating {
-                                    AppAction::StageBusyMessage(text_to_send)
+                                    AppAction::StageBusyMessage(text)
                                 } else {
-                                    AppAction::SendPrompt(text_to_send)
+                                    AppAction::SendPromptWithImages { text, images }
                                 },
                             );
                             cx.notify();
@@ -87,9 +108,15 @@ impl ChatListView {
             let mut follow_tail = true;
             let mut settle_frames = 0_u8;
             loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(33))
-                    .await;
+                // Event-driven pacing: check quickly when generating,
+                // slow down when idle.
+                let interval = if settle_frames > 0 {
+                    Duration::from_millis(16) // ~60fps for animation frames
+                } else {
+                    Duration::from_millis(33)
+                };
+                cx.background_executor().timer(interval).await;
+
                 let has_event =
                     stream_model.read_with(cx, |state, _cx| state.chat_stream_pending());
                 let changed = has_event
@@ -102,7 +129,7 @@ impl ChatListView {
                     });
 
                 if changed {
-                    settle_frames = 4;
+                    settle_frames = 3;
                 } else if settle_frames == 0 {
                     let children = stream_scroll_handle.children_count();
                     follow_tail = children == 0
@@ -110,10 +137,6 @@ impl ChatListView {
                 }
 
                 if follow_tail && (changed || settle_frames > 0) {
-                    // Markdown parsing and text shaping can change the final
-                    // row height after the event frame. Keep applying the tail
-                    // anchor until a quiet frame observes an intentional
-                    // scroll away from the latest row.
                     stream_scroll_handle.scroll_to_bottom();
                     stream_model.update(cx, |_state, cx| cx.notify());
                     if !changed {
@@ -131,7 +154,50 @@ impl ChatListView {
             scroll_handle,
             expanded_activity_groups: HashSet::new(),
             markdown_states: HashMap::new(),
+            pasted_images: Vec::new(),
             _subscriptions: vec![sub1, sub2],
+        }
+    }
+
+    fn paste_composer_clipboard(
+        &mut self,
+        _action: &PasteClipboard,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(clipboard) = cx.read_from_clipboard() else {
+            return;
+        };
+        if let Some(text) = clipboard.text().filter(|text| !text.is_empty()) {
+            self.input_state.update(cx, |input, cx| {
+                input.insert(text, window, cx);
+            });
+        }
+
+        let mut pasted = 0;
+        for entry in clipboard.entries {
+            let ClipboardEntry::Image(image) = entry else {
+                continue;
+            };
+            if image.bytes.is_empty() {
+                continue;
+            }
+
+            let mime_type = image.format.mime_type();
+            let extension = mime_type.strip_prefix("image/").unwrap_or("png");
+            self.pasted_images.push(ImageAttachment {
+                display_name: format!("Pasted image {}.{extension}", self.pasted_images.len() + 1),
+                data_url: format!(
+                    "data:{mime_type};base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(image.bytes)
+                ),
+            });
+            pasted += 1;
+        }
+
+        cx.stop_propagation();
+        if pasted > 0 {
+            cx.notify();
         }
     }
 
@@ -292,10 +358,11 @@ impl ChatListView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme().colors;
-        let (marker, marker_color) = match activity.category.as_str() {
-            "Error" => ("!", theme.danger),
-            "Working" | "Thinking" => ("◌", theme.primary),
-            _ => ("✓", theme.muted_foreground),
+        let (marker, marker_color, is_active) = match activity.category.as_str() {
+            "Error" => ("!", theme.danger, false),
+            "Working" | "Thinking" => ("◌", theme.primary, true),
+            "Completed" | "Edited" | "Created" | "Ran" | "Loaded" => ("✓", theme.success, false),
+            _ => ("✓", theme.muted_foreground, false),
         };
         let model = self.model.clone();
         let tool_call_id = activity.id.clone();
@@ -330,16 +397,29 @@ impl ChatListView {
                                 });
                             })
                     })
-                    .child(
-                        div()
+                    .child({
+                        let marker_el = div()
                             .w(px(18.0))
                             .flex_none()
                             .text_center()
                             .text_xs()
                             .font_weight(FontWeight::BOLD)
                             .text_color(marker_color)
-                            .child(marker),
-                    )
+                            .child(marker);
+                        if is_active {
+                            marker_el.with_animation(
+                                SharedString::from(format!("tool-pulse-{}", activity.id)),
+                                Animation::new(Duration::from_millis(1000))
+                                    .repeat()
+                                    .with_easing(ease_in_out),
+                                |el, delta| {
+                                    el.opacity(0.3 + 0.7 * (delta * std::f32::consts::PI).sin().abs())
+                                },
+                            ).into_any_element()
+                        } else {
+                            marker_el.into_any_element()
+                        }
+                    })
                     .child(
                         div()
                             .min_w_0()
@@ -432,6 +512,69 @@ impl ChatListView {
             .into_any_element()
     }
 
+    fn render_working_indicator(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().colors;
+        div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .my_1()
+            .px_4()
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .max_w(px(720.0))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .py_1()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(3.0))
+                            .with_animation(
+                                SharedString::from("working-wave-dots"),
+                                Animation::new(Duration::from_millis(1200))
+                                    .repeat()
+                                    .with_easing(ease_in_out),
+                                |el, delta| {
+                                    let opacity = 0.35 + 0.65 * (delta * std::f32::consts::PI).sin().abs();
+                                    el.opacity(opacity)
+                                },
+                            )
+                            .child(
+                                div()
+                                    .size(px(4.5))
+                                    .rounded_full()
+                                    .bg(theme.primary),
+                            )
+                            .child(
+                                div()
+                                    .size(px(4.5))
+                                    .rounded_full()
+                                    .bg(theme.primary),
+                            )
+                            .child(
+                                div()
+                                    .size(px(4.5))
+                                    .rounded_full()
+                                    .bg(theme.primary),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.muted_foreground)
+                            .child("Working…"),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_transcript_rows(
         &mut self,
         messages: &[ChatMessageInfo],
@@ -443,6 +586,7 @@ impl ChatListView {
             let message = &messages[index];
             let is_activity_only = message.role == MessageRole::Assistant
                 && message.content.is_empty()
+                && message.reasoning_content.is_none()
                 && message
                     .tool_activities
                     .iter()
@@ -458,6 +602,7 @@ impl ChatListView {
                 let candidate = &messages[index];
                 let candidate_is_activity_only = candidate.role == MessageRole::Assistant
                     && candidate.content.is_empty()
+                    && candidate.reasoning_content.is_none()
                     && candidate
                         .tool_activities
                         .iter()
@@ -476,7 +621,138 @@ impl ChatListView {
             }
             rows.push(self.render_activity_group(&activities, cx));
         }
+
+        if self.model.read(cx).is_generating {
+            rows.push(self.render_working_indicator(cx));
+        }
+
         rows
+    }
+
+    fn render_reasoning_block(
+        &mut self,
+        msg: &ChatMessageInfo,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let reasoning = msg.reasoning_content.as_deref()?;
+        if reasoning.trim().is_empty() {
+            return None;
+        }
+        let theme = cx.theme().colors;
+        let is_streaming = msg.streaming;
+        let is_expanded = msg.reasoning_expanded;
+        let model = self.model.clone();
+        let msg_id = msg.id.clone();
+
+        let icon_element = if is_streaming {
+            div()
+                .text_xs()
+                .text_color(theme.primary)
+                .with_animation(
+                    SharedString::from(format!("reasoning-pulse-{}", msg.id)),
+                    Animation::new(Duration::from_millis(1200))
+                        .repeat()
+                        .with_easing(ease_in_out),
+                    |el, delta| {
+                        let opacity = 0.4 + 0.6 * (delta * std::f32::consts::PI).sin().abs();
+                        el.opacity(opacity)
+                    },
+                )
+                .child("✦")
+                .into_any_element()
+        } else {
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child("✦")
+                .into_any_element()
+        };
+
+        let header = div()
+            .id(SharedString::from(format!("reasoning-toggle-{}", msg.id)))
+            .h(px(28.0))
+            .px_1()
+            .rounded_md()
+            .flex()
+            .items_center()
+            .gap_2()
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.muted))
+            .child(
+                div()
+                    .w(px(18.0))
+                    .flex_none()
+                    .text_center()
+                    .child(icon_element),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child(if is_streaming {
+                        "Thinking…"
+                    } else {
+                        "Thought process"
+                    }),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(if is_expanded { "⌄" } else { "›" }),
+            )
+            .on_click(move |_event, _window, cx| {
+                model.update(cx, |state, cx| {
+                    controller::dispatch(
+                        state,
+                        AppAction::ToggleReasoningExpanded(msg_id.clone()),
+                    );
+                    cx.notify();
+                });
+            });
+
+        let detail = is_expanded.then(|| {
+            let entry = self
+                .markdown_states
+                .entry(format!("reasoning-{}", msg.id))
+                .or_insert_with(|| {
+                    let state = cx.new(|cx| TextViewState::markdown(reasoning, cx));
+                    (reasoning.to_string(), state)
+                });
+            if entry.0 != reasoning {
+                entry.0 = reasoning.to_string();
+                entry.1.update(cx, |state, cx| {
+                    state.set_text(reasoning, cx);
+                });
+            }
+            div()
+                .ml(px(26.0))
+                .mt_1()
+                .p_2()
+                .max_h(px(300.0))
+                .rounded_md()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.title_bar)
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .overflow_y_scrollbar()
+                .child(TextView::new(&entry.1).selectable(true))
+        });
+
+        Some(
+            div()
+                .w_full()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(header)
+                .children(detail)
+                .into_any_element(),
+        )
     }
 
     fn render_message(&mut self, msg: &ChatMessageInfo, cx: &mut Context<Self>) -> AnyElement {
@@ -518,6 +794,7 @@ impl ChatListView {
                         }),
                 ),
             MessageRole::Assistant => {
+                let reasoning_element = self.render_reasoning_block(msg, cx);
                 let tool_elements: Vec<_> = msg
                     .tool_activities
                     .iter()
@@ -540,33 +817,43 @@ impl ChatListView {
                             .flex()
                             .flex_col()
                             .gap_2()
+                            .children(reasoning_element)
                             .children(if !msg.content.is_empty() {
-                                Some(
-                                    div()
-                                        .w_full()
-                                        .text_sm()
-                                        .text_color(theme.foreground)
-                                        .child({
-                                            let entry = self
-                                                .markdown_states
-                                                .entry(msg.id.clone())
-                                                .or_insert_with(|| {
-                                                    let content = msg.content.clone();
-                                                    let state = cx.new(|cx| {
-                                                        TextViewState::markdown(&content, cx)
-                                                    });
-                                                    (content, state)
+                                let content_element = div()
+                                    .w_full()
+                                    .text_sm()
+                                    .text_color(theme.foreground)
+                                    .child({
+                                        let entry = self
+                                            .markdown_states
+                                            .entry(msg.id.clone())
+                                            .or_insert_with(|| {
+                                                let content = msg.content.clone();
+                                                let state = cx.new(|cx| {
+                                                    TextViewState::markdown(&content, cx)
                                                 });
-                                            if entry.0 != msg.content {
-                                                entry.0 = msg.content.clone();
-                                                entry.1.update(cx, |state, cx| {
-                                                    state.set_text(&msg.content, cx);
-                                                });
-                                            }
-                                            TextView::new(&entry.1).selectable(true)
-                                        })
-                                        .into_any_element(),
-                                )
+                                                (content, state)
+                                            });
+                                        if entry.0 != msg.content {
+                                            entry.0 = msg.content.clone();
+                                            entry.1.update(cx, |state, cx| {
+                                                state.set_text(&msg.content, cx);
+                                            });
+                                        }
+                                        TextView::new(&entry.1).selectable(true)
+                                    });
+
+                                Some(if msg.streaming {
+                                    content_element
+                                        .with_animation(
+                                            SharedString::from(format!("stream-text-{}", msg.id)),
+                                            Animation::new(Duration::from_millis(150)),
+                                            |el, delta| el.opacity(0.85 + 0.15 * delta),
+                                        )
+                                        .into_any_element()
+                                } else {
+                                    content_element.into_any_element()
+                                })
                             } else {
                                 None
                             })
@@ -716,7 +1003,8 @@ impl ChatListView {
                 state.active_pending_composer_message().map(str::to_owned),
             )
         };
-        let has_prompt = !self.input_state.read(cx).value().trim().is_empty();
+        let has_prompt =
+            !self.input_state.read(cx).value().trim().is_empty() || !self.pasted_images.is_empty();
         let project_root = self.model.read(cx).active_work_dir.clone();
         let model_options =
             crate::model_catalog::available_models_for_project(project_root.as_deref());
@@ -736,6 +1024,39 @@ impl ChatListView {
         let dismiss_input = self.input_state.clone();
         let stage_model = self.model.clone();
         let stage_input = self.input_state.clone();
+
+        let image_chips = self
+            .pasted_images
+            .iter()
+            .enumerate()
+            .map(|(index, image)| {
+                let name = image.display_name.clone();
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(theme.secondary)
+                    .text_xs()
+                    .child("▣")
+                    .child(name)
+                    .child(
+                        Button::new(("remove-pasted-image", index))
+                            .icon(IconName::Close)
+                            .xsmall()
+                            .ghost()
+                            .tooltip("Remove image")
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                if index < this.pasted_images.len() {
+                                    this.pasted_images.remove(index);
+                                    cx.notify();
+                                }
+                            })),
+                    )
+            })
+            .collect::<Vec<_>>();
 
         let pending_preview = pending_message.map(|text| {
             div()
@@ -868,6 +1189,11 @@ impl ChatListView {
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.title_bar)
+                    .on_action(cx.listener(Self::paste_composer_clipboard))
+                    .children(
+                        (!image_chips.is_empty())
+                            .then(|| div().flex().flex_wrap().gap_2().children(image_chips)),
+                    )
                     .child(
                         Textarea::new(&self.input_state)
                             .appearance(false)
@@ -918,7 +1244,7 @@ impl ChatListView {
                                     .when(is_generating, |button| button.danger())
                                     .when(!is_generating, |button| button.primary())
                                     .disabled(!is_generating && !has_prompt)
-                                    .on_click(move |_event, window, cx| {
+                                    .on_click(cx.listener(move |this, _event, window, cx| {
                                         if is_generating {
                                             model.update(cx, |state, cx| {
                                                 controller::dispatch(
@@ -930,12 +1256,16 @@ impl ChatListView {
                                             return;
                                         }
                                         let text = input_state.read(cx).value().to_string();
-                                        if !text.trim().is_empty() {
-                                            let text_to_send = text.clone();
+                                        if !text.trim().is_empty() || !this.pasted_images.is_empty()
+                                        {
+                                            let images = std::mem::take(&mut this.pasted_images);
                                             model.update(cx, |state, cx| {
                                                 controller::dispatch(
                                                     state,
-                                                    AppAction::SendPrompt(text_to_send),
+                                                    AppAction::SendPromptWithImages {
+                                                        text,
+                                                        images,
+                                                    },
                                                 );
                                                 cx.notify();
                                             });
@@ -943,7 +1273,7 @@ impl ChatListView {
                                                 state.set_value("", window, cx);
                                             });
                                         }
-                                    }),
+                                    })),
                             ),
                     ),
             )

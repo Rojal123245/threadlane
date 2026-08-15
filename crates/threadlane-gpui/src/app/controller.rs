@@ -34,6 +34,9 @@ pub fn dispatch(state: &mut AppState, action: AppAction) {
         AppAction::SendPrompt(text) => {
             let _ = state.send_prompt(text);
         }
+        AppAction::SendPromptWithImages { text, images } => {
+            let _ = state.send_prompt_with_images(text, images);
+        }
         AppAction::StageBusyMessage(text) => {
             let _ = state.stage_busy_message(text);
         }
@@ -56,6 +59,11 @@ pub fn dispatch(state: &mut AppState, action: AppAction) {
         }
         AppAction::SaveOpenCodeKey(key) => {
             let _ = state.save_opencode_key(key);
+        }
+        AppAction::ToggleReasoningExpanded(msg_id) => {
+            if let Some(message) = state.messages.iter_mut().find(|m| m.id == msg_id) {
+                message.reasoning_expanded = !message.reasoning_expanded;
+            }
         }
     }
 }

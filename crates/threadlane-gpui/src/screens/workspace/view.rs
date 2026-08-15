@@ -436,6 +436,7 @@ impl WorkspaceView {
                     .flex_col()
                     .child(
                         DialogHeader::new()
+                            .relative()
                             .px_5()
                             .pt_5()
                             .pb_4()
@@ -474,10 +475,14 @@ impl WorkspaceView {
                             )
                             .child(
                                 Button::new("git-dialog-close")
+                                    .absolute()
+                                    .top(px(16.0))
+                                    .right(px(16.0))
                                     .icon(IconName::Close)
                                     .tooltip("Close")
                                     .ghost()
                                     .xsmall()
+                                    .disabled(self.git_busy)
                                     .on_click(cx.listener(|this, _event, _window, cx| {
                                         if !this.git_busy {
                                             this.git_dialog_open = false;

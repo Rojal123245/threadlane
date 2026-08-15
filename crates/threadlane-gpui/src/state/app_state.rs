@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
-use threadlane_agent::{AgentEvent, AgentMessage, SessionPlan, SessionTree};
+use threadlane_agent::{AgentEvent, AgentMessage, ImageAttachment, SessionPlan, SessionTree};
 
 use crate::adapters::agent_events::{adapt_agent_event, ChatAgentUpdate};
 use crate::persistence::{load_project_registry, save_project_registry};
@@ -70,6 +70,9 @@ pub struct ChatMessageInfo {
     pub content: String,
     pub timestamp: String,
     pub tool_activities: Vec<ToolActivityInfo>,
+    pub streaming: bool,
+    pub reasoning_content: Option<String>,
+    pub reasoning_expanded: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -282,6 +285,9 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                     content,
                     timestamp: String::new(),
                     tool_activities: Vec::new(),
+                    streaming: false,
+                    reasoning_content: None,
+                    reasoning_expanded: false,
                 });
             }
             AgentMessage::UserWithImages { content, .. } => {
@@ -291,6 +297,9 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                     content,
                     timestamp: String::new(),
                     tool_activities: Vec::new(),
+                    streaming: false,
+                    reasoning_content: None,
+                    reasoning_expanded: false,
                 });
             }
             AgentMessage::Assistant {
@@ -328,6 +337,9 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                     content: content.unwrap_or_default(),
                     timestamp: String::new(),
                     tool_activities,
+                    streaming: false,
+                    reasoning_content: None,
+                    reasoning_expanded: false,
                 });
             }
             AgentMessage::Tool {
@@ -372,6 +384,9 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                     content: String::new(),
                     timestamp: String::new(),
                     tool_activities: vec![tool_info],
+                    streaming: false,
+                    reasoning_content: None,
+                    reasoning_expanded: false,
                 });
             }
             AgentMessage::System { content } => {
@@ -388,6 +403,9 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                     content,
                     timestamp: String::new(),
                     tool_activities: Vec::new(),
+                    streaming: false,
+                    reasoning_content: None,
+                    reasoning_expanded: false,
                 });
             }
             AgentMessage::Custom {
@@ -406,14 +424,10 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                         role: MessageRole::Assistant,
                         content: String::new(),
                         timestamp: String::new(),
-                        tool_activities: vec![ToolActivityInfo {
-                            id: format!("thinking_{msg_counter}"),
-                            category: "Thinking".into(),
-                            title: "Reasoning".into(),
-                            summary: "Thinking".into(),
-                            detail: text,
-                            is_expanded: false,
-                        }],
+                        tool_activities: Vec::new(),
+                        streaming: false,
+                        reasoning_content: Some(text),
+                        reasoning_expanded: false,
                     });
                     continue;
                 }
@@ -429,6 +443,9 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                     content: text,
                     timestamp: String::new(),
                     tool_activities: Vec::new(),
+                    streaming: false,
+                    reasoning_content: None,
+                    reasoning_expanded: false,
                 });
             }
         }
@@ -1083,34 +1100,31 @@ impl AppState {
                                     content: delta,
                                     timestamp: String::new(),
                                     tool_activities: Vec::new(),
+                                    streaming: true,
+                                    reasoning_content: None,
+                                    reasoning_expanded: false,
                                 });
                             }
                         }
                         ChatAgentUpdate::ReasoningDelta(delta) => {
-                            let active_reasoning = self
-                                .messages
-                                .last_mut()
-                                .filter(|message| message.role == MessageRole::Assistant)
-                                .and_then(|message| message.tool_activities.last_mut())
-                                .filter(|activity| activity.title == "Reasoning");
-                            if let Some(activity) = active_reasoning {
-                                activity.detail.push_str(&delta);
+                            if let Some(message) = self.messages.last_mut().filter(|m| {
+                                m.role == MessageRole::Assistant && m.streaming
+                            }) {
+                                match &mut message.reasoning_content {
+                                    Some(content) => content.push_str(&delta),
+                                    None => message.reasoning_content = Some(delta),
+                                }
                             } else {
                                 let segment = self.messages.len();
-                                let activity = ToolActivityInfo {
-                                    id: format!("reasoning-{session_id}-{segment}"),
-                                    category: "Thinking".into(),
-                                    title: "Reasoning".into(),
-                                    summary: "Thinking".into(),
-                                    detail: delta,
-                                    is_expanded: false,
-                                };
                                 self.messages.push(ChatMessageInfo {
                                     id: format!("streaming-{session_id}-{segment}"),
                                     role: MessageRole::Assistant,
                                     content: String::new(),
                                     timestamp: String::new(),
-                                    tool_activities: vec![activity],
+                                    tool_activities: Vec::new(),
+                                    streaming: true,
+                                    reasoning_content: Some(delta),
+                                    reasoning_expanded: false,
                                 });
                             }
                         }
@@ -1138,6 +1152,9 @@ impl AppState {
                                     content: String::new(),
                                     timestamp: String::new(),
                                     tool_activities: vec![activity],
+                                    streaming: true,
+                                    reasoning_content: None,
+                                    reasoning_expanded: false,
                                 });
                             }
                         }
@@ -1185,6 +1202,9 @@ impl AppState {
                                 content: error.clone(),
                                 timestamp: String::new(),
                                 tool_activities: Vec::new(),
+                                streaming: false,
+                                reasoning_content: None,
+                                reasoning_expanded: false,
                             });
                             self.is_generating = false;
                             self.session_status = Some(error);
@@ -1328,13 +1348,24 @@ impl AppState {
                 content: text,
                 timestamp: String::new(),
                 tool_activities: Vec::new(),
+                streaming: false,
+                reasoning_content: None,
+                reasoning_expanded: false,
             });
         }
     }
 
     pub fn send_prompt(&mut self, text: String) -> Result<(), String> {
+        self.send_prompt_with_images(text, Vec::new())
+    }
+
+    pub fn send_prompt_with_images(
+        &mut self,
+        text: String,
+        images: Vec<ImageAttachment>,
+    ) -> Result<(), String> {
         let text = text.trim().to_string();
-        if text.is_empty() {
+        if text.is_empty() && images.is_empty() {
             return Ok(());
         }
 
@@ -1372,6 +1403,9 @@ impl AppState {
                 ),
                 timestamp: String::new(),
                 tool_activities: Vec::new(),
+                streaming: false,
+                reasoning_content: None,
+                reasoning_expanded: false,
             });
             return Ok(());
         }
@@ -1381,6 +1415,7 @@ impl AppState {
             runtime,
             session_id.clone(),
             text.clone(),
+            images.clone(),
             self.stream_tx.clone(),
         )?;
         if !threadlane_provider::router::is_antigravity_model(&model) {
@@ -1400,9 +1435,18 @@ impl AppState {
         self.messages.push(ChatMessageInfo {
             id: format!("pending-user-{session_id}-{}", self.messages.len()),
             role: MessageRole::User,
-            content: text,
+            content: if images.is_empty() {
+                text
+            } else if text.is_empty() {
+                format!("[{} image attachment(s)]", images.len())
+            } else {
+                format!("{text}\n[{} image attachment(s)]", images.len())
+            },
             timestamp: String::new(),
             tool_activities: Vec::new(),
+            streaming: false,
+            reasoning_content: None,
+            reasoning_expanded: false,
         });
         self.is_generating = true;
         self.session_status = Some("Working…".into());
@@ -1438,7 +1482,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn persisted_thinking_message_projects_as_a_reasoning_activity() {
+    fn persisted_thinking_message_projects_as_reasoning_content() {
         let messages = project_agent_messages(vec![AgentMessage::Custom {
             custom_type: "thinking".into(),
             payload: serde_json::json!({"text": "Planning codebase inspection"}),
@@ -1447,11 +1491,10 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, MessageRole::Assistant);
         assert!(messages[0].content.is_empty());
-        assert_eq!(messages[0].tool_activities.len(), 1);
-        assert_eq!(messages[0].tool_activities[0].summary, "Thinking");
         assert_eq!(
-            messages[0].tool_activities[0].detail,
-            "Planning codebase inspection"
+            messages[0].reasoning_content.as_deref(),
+            Some("Planning codebase inspection")
         );
+        assert!(messages[0].tool_activities.is_empty());
     }
 }

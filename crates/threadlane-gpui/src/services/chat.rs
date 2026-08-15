@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, OnceLock};
 
-use threadlane_agent::{AgentEvent, SessionTree};
+use threadlane_agent::{AgentEvent, ImageAttachment, SessionTree};
 use threadlane_provider::ProviderClient;
 
 use crate::services::sessions::SessionRuntime;
@@ -49,6 +49,7 @@ pub fn execute_prompt(
     runtime: Arc<SessionRuntime>,
     session_id: String,
     text: String,
+    images: Vec<ImageAttachment>,
     stream_tx: Sender<ChatStreamEvent>,
 ) -> Result<(), String> {
     runtime.begin_generation()?;
@@ -80,7 +81,7 @@ pub fn execute_prompt(
         let mut agent = task_runtime.agent.lock().await;
         let mut events = agent.subscribe();
         let run_error = {
-            let run = agent.handle_input_with_images(&text, Vec::new());
+            let run = agent.handle_input_with_images(&text, images);
             tokio::pin!(run);
             let mut run_error = None;
             let mut saw_agent_error = false;
