@@ -274,6 +274,7 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 ## Session and Context-Menu Behavior
 
 - Project terminal groups are keyed by canonical project work directory, not by session ID. Each project can own multiple independent shell tabs; switching sessions in one project must retain its shells, active tab, and output, while switching projects selects that project's terminal group.
+- The GPUI terminal is a persistent `portable-pty` shell parsed through `vt100`, not a command-by-command `sh -lc` console. Keep PTY reads off the UI thread, apply parser updates through GPUI entity updates, forward focused keyboard input directly to the PTY, and retain terminal entities by project when switching workspaces.
 - Model-managed todo plans are session-scoped and persisted as complete `session_plan` records in the existing session JSONL. Show only the active session's plan above the project-wide task groups; do not derive plan state from compactable tool-call history or merge it into supervisor task state.
 
 - The project attach button appears while hovering the `PROJECTS` header. It is the only sidebar action synchronized from `App::sync_sidebar_action_visibility` and the retained app-level pointer.

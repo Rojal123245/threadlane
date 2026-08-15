@@ -1,19 +1,17 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::mpsc;
 use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::input::{Input, InputEvent, InputState};
-
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::{ActiveTheme, Icon, IconName, Selectable, Sizable};
 use threadlane_git::GitFile;
 
+use crate::screens::terminal::TerminalView;
 use crate::state::AppState;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,11 +62,6 @@ enum PanelEvent {
         title: String,
         content: String,
     },
-    CommandFinished {
-        project: PathBuf,
-        command: String,
-        output: String,
-    },
 }
 
 pub struct RightPanelView {
@@ -81,18 +74,14 @@ pub struct RightPanelView {
     review_error: Option<String>,
     document_title: Option<String>,
     document_state: Entity<TextViewState>,
-    terminal_input: Entity<InputState>,
-    terminal_state: Entity<TextViewState>,
-    terminal_output: String,
+    terminal_sessions: HashMap<PathBuf, Entity<TerminalView>>,
     event_tx: mpsc::Sender<PanelEvent>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl RightPanelView {
-    pub fn new(model: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let terminal_input = cx.new(|cx| InputState::new(window, cx).placeholder("Run a command…"));
+    pub fn new(model: Entity<AppState>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         let document_state = cx.new(|cx| TextViewState::markdown("", cx));
-        let terminal_state = cx.new(|cx| TextViewState::markdown("", cx));
         let (event_tx, event_rx) = mpsc::channel();
 
         cx.spawn(async move |this, cx| loop {
@@ -112,24 +101,6 @@ impl RightPanelView {
         })
         .detach();
 
-        let command_view = cx.entity().downgrade();
-        let command_subscription = cx.subscribe_in(
-            &terminal_input,
-            window,
-            move |_this, input, event: &InputEvent, window, cx| {
-                if !matches!(event, InputEvent::PressEnter { .. }) {
-                    return;
-                }
-                let command = input.read(cx).value().trim().to_string();
-                if command.is_empty() {
-                    return;
-                }
-                input.update(cx, |input, cx| input.set_value("", window, cx));
-                let _ = command_view.update(cx, |this, cx| {
-                    this.run_command(command, cx);
-                });
-            },
-        );
         let observe_model = cx.observe(&model, |_this, _model, cx| cx.notify());
 
         Self {
@@ -142,11 +113,9 @@ impl RightPanelView {
             review_error: None,
             document_title: None,
             document_state,
-            terminal_input,
-            terminal_state,
-            terminal_output: String::new(),
+            terminal_sessions: HashMap::new(),
             event_tx,
-            _subscriptions: vec![command_subscription, observe_model],
+            _subscriptions: vec![observe_model],
         }
     }
 
@@ -163,8 +132,11 @@ impl RightPanelView {
         self.document_title = None;
         self.document_state
             .update(cx, |state, cx| state.set_text("", cx));
-        self.terminal_output.clear();
-        self.sync_terminal_text(cx);
+        if let Some(project) = self.project.clone() {
+            self.terminal_sessions
+                .entry(project.clone())
+                .or_insert_with(|| cx.new(|cx| TerminalView::new(project, cx)));
+        }
         self.refresh_active_surface();
     }
 
@@ -262,33 +234,6 @@ impl RightPanelView {
         });
     }
 
-    fn run_command(&mut self, command: String, cx: &mut Context<Self>) {
-        let Some(project) = self.project.clone() else {
-            return;
-        };
-        self.terminal_output.push_str(&format!("\n$ {command}\n"));
-        self.sync_terminal_text(cx);
-        let tx = self.event_tx.clone();
-        std::thread::spawn(move || {
-            let output = Command::new("sh")
-                .arg("-lc")
-                .arg(&command)
-                .current_dir(&project)
-                .output()
-                .map(|output| {
-                    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-                    text.push_str(&String::from_utf8_lossy(&output.stderr));
-                    text
-                })
-                .unwrap_or_else(|error| format!("Unable to run command: {error}\n"));
-            let _ = tx.send(PanelEvent::CommandFinished {
-                project,
-                command,
-                output,
-            });
-        });
-    }
-
     fn apply_event(&mut self, event: PanelEvent, cx: &mut Context<Self>) {
         match event {
             PanelEvent::FilesLoaded { project, entries }
@@ -314,37 +259,8 @@ impl RightPanelView {
                 self.document_state
                     .update(cx, |state, cx| state.set_text(&markdown, cx));
             }
-            PanelEvent::CommandFinished {
-                project,
-                command,
-                output,
-            } if self.project.as_ref() == Some(&project) => {
-                if output.is_empty() {
-                    self.terminal_output
-                        .push_str(&format!("{command} completed.\n"));
-                } else {
-                    self.terminal_output.push_str(&output);
-                    if !output.ends_with('\n') {
-                        self.terminal_output.push('\n');
-                    }
-                }
-                self.sync_terminal_text(cx);
-            }
             _ => {}
         }
-    }
-
-    fn sync_terminal_text(&self, cx: &mut Context<Self>) {
-        let text = if self.terminal_output.is_empty() {
-            "Run project commands here. This command console is not a persistent PTY.".to_string()
-        } else {
-            format!(
-                "```text\n{}\n```",
-                self.terminal_output.replace("```", "` ` `")
-            )
-        };
-        self.terminal_state
-            .update(cx, |state, cx| state.set_text(&text, cx));
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -636,58 +552,20 @@ impl RightPanelView {
     }
 
     fn render_terminal(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().colors;
-        let project_name = self
-            .project
-            .as_ref()
-            .and_then(|path| path.file_name())
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "No project".into());
-        div()
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .bg(theme.background)
-            .child(
-                div()
-                    .h(px(38.0))
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(Icon::default().path("icons/square-terminal.svg"))
-                    .child(div().flex_1().text_xs().child(project_name))
-                    .child(
-                        Button::new("terminal-clear")
-                            .label("Clear")
-                            .ghost()
-                            .xsmall()
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.terminal_output.clear();
-                                this.sync_terminal_text(cx);
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scrollbar()
-                    .p_3()
-                    .child(TextView::new(&self.terminal_state).selectable(true)),
-            )
-            .child(
-                div()
-                    .p_3()
-                    .border_t_1()
-                    .border_color(theme.border)
-                    .child(Input::new(&self.terminal_input).prefix("$")),
-            )
-            .into_any_element()
+        let Some(project) = self.project.as_ref() else {
+            return self.render_empty(
+                "No project attached",
+                "Attach a project to start a terminal.",
+                cx,
+            );
+        };
+        self.terminal_sessions
+            .get(project)
+            .cloned()
+            .map(Entity::into_any_element)
+            .unwrap_or_else(|| {
+                self.render_empty("Starting terminal", "Opening a project shell…", cx)
+            })
     }
 
     fn render_empty(&self, title: &str, description: &str, cx: &mut Context<Self>) -> AnyElement {

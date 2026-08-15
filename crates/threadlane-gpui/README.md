@@ -29,3 +29,29 @@ theme repaints the entire application.
 cargo check -p threadlane-gpui
 cargo test -p threadlane-gpui
 ```
+
+## Releases
+
+`.github/workflows/release.yml` is the canonical Threadlane release pipeline.
+It packages the GPUI app from tags named `vX.Y.Z`, including tags created by
+Release Please. The tag version must match the workspace version in the root
+`Cargo.toml`. The workflow builds Linux x86_64 and arm64 archives, plus an
+ad-hoc-signed Apple Silicon macOS DMG and ZIP, then uploads them to the GitHub
+release. No Apple Developer ID or notarization secrets are currently required.
+Automatic updates still require the repository variable
+`THREADLANE_UPDATER_PUBLIC_KEY` and the updater-only secrets
+`CARGO_PACKAGER_SIGN_PRIVATE_KEY` and
+`CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD`; these authenticate update archives
+and are separate from Apple code signing.
+
+Local bundle commands (run from the repository root):
+
+```bash
+./scripts/bundle-gpui-linux.sh
+brew install create-dmg
+./scripts/bundle-gpui-macos.sh
+```
+
+The local macOS command and CI both use ad-hoc signing. Because the artifacts
+are not Developer ID signed or notarized, macOS Gatekeeper may require users to
+explicitly approve the application when opening it for the first time.

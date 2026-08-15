@@ -15,6 +15,7 @@ threadlane-provider = { version = "0.1.0", path = "../threadlane-provider" }
 threadlane-auth = { version = "0.1.0", path = "../threadlane-auth" }
 threadlane-tools = { version = "0.1.0", path = "../threadlane-tools" }
 threadlane-git = { version = "0.1.0", path = "../threadlane-git" }
+threadlane-updater = { version = ">=0.1.0, <1.0.0", path = "../threadlane-updater" }
 tokio = { version = "1.38", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -24,3 +25,5 @@ dirs = "5.0"
 anyhow = "1.0"
 log = "0.4"
 env_logger = "0.11"
+portable-pty = "0.9"
+vt100 = "0.15"

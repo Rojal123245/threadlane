@@ -13,7 +13,9 @@ use crate::screens::chat::ChatListView;
 use crate::screens::right_panel::RightPanelView;
 use crate::screens::settings::SettingsView;
 use crate::screens::sidebar::SidebarView;
+use crate::services::updater::{self, UpdaterEvent};
 use crate::state::{AppState, WorkspacePage};
+use threadlane_updater::UpdateStatus;
 
 enum GitAction {
     Commit,
@@ -61,6 +63,7 @@ pub struct WorkspaceView {
     git_feedback: Option<String>,
     git_message_input: Entity<InputState>,
     git_event_tx: mpsc::Sender<GitEvent>,
+    updater_tx: mpsc::Sender<UpdaterEvent>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -74,6 +77,12 @@ impl WorkspaceView {
         let git_message_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Commit message"));
         let (git_event_tx, git_event_rx) = mpsc::channel();
+        let (updater_tx, updater_rx) = mpsc::channel();
+
+        #[cfg(target_os = "macos")]
+        if threadlane_updater::is_configured() {
+            updater::check(updater_tx.clone());
+        }
 
         let model_clone = model.clone();
         cx.new(|cx| {
@@ -85,13 +94,21 @@ impl WorkspaceView {
                 cx.background_executor()
                     .timer(Duration::from_millis(80))
                     .await;
-                let events = git_event_rx.try_iter().collect::<Vec<_>>();
-                if events.is_empty() {
+                let git_events = git_event_rx.try_iter().collect::<Vec<_>>();
+                let updater_events = updater_rx.try_iter().collect::<Vec<_>>();
+                if git_events.is_empty() && updater_events.is_empty() {
                     continue;
                 }
                 let _ = this.update(cx, |this, cx| {
-                    for event in events {
+                    for event in git_events {
                         this.apply_git_event(event, cx);
+                    }
+                    for UpdaterEvent::Status(status) in updater_events {
+                        this.model.update(cx, |state, cx| {
+                            state.update_status = status;
+                            state.update_notice_dismissed = false;
+                            cx.notify();
+                        });
                     }
                     cx.notify();
                 });
@@ -116,6 +133,7 @@ impl WorkspaceView {
                 git_feedback: None,
                 git_message_input,
                 git_event_tx,
+                updater_tx,
                 _subscriptions: vec![sub],
             }
         })
@@ -647,6 +665,134 @@ impl WorkspaceView {
                     ),
             )
     }
+
+    fn render_update_notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let status = {
+            let state = self.model.read(cx);
+            if state.update_notice_dismissed {
+                return None;
+            }
+            state.update_status.clone()
+        };
+
+        let (title, detail) = match &status {
+            UpdateStatus::Available(info) => (
+                format!("Threadlane {} is available", info.version),
+                "Download the verified update in the background.".to_string(),
+            ),
+            UpdateStatus::Downloading { progress, .. } => (
+                "Downloading update".to_string(),
+                format!("{}% complete", (progress.clamp(0.0, 1.0) * 100.0).round()),
+            ),
+            UpdateStatus::ReadyToInstall { info, .. } => (
+                format!("Threadlane {} is ready", info.version),
+                "Install the update and relaunch Threadlane.".to_string(),
+            ),
+            UpdateStatus::Installing => (
+                "Installing update".to_string(),
+                "Threadlane will relaunch when installation finishes.".to_string(),
+            ),
+            UpdateStatus::Error(error) => (
+                "Update failed".to_string(),
+                error.chars().take(160).collect(),
+            ),
+            _ => return None,
+        };
+
+        let action = match &status {
+            UpdateStatus::Available(info) => {
+                let tx = self.updater_tx.clone();
+                let info = info.clone();
+                Some(
+                    Button::new("update-download")
+                        .label("Download")
+                        .primary()
+                        .on_click(move |_event, _window, _cx| {
+                            updater::download(info.clone(), tx.clone());
+                        }),
+                )
+            }
+            UpdateStatus::ReadyToInstall { info, bytes } => {
+                let tx = self.updater_tx.clone();
+                let info = info.clone();
+                let bytes = bytes.clone();
+                Some(
+                    Button::new("update-install")
+                        .label("Install and relaunch")
+                        .primary()
+                        .on_click(move |_event, _window, _cx| {
+                            updater::install(info.clone(), bytes.clone(), tx.clone());
+                        }),
+                )
+            }
+            UpdateStatus::Error(_) => {
+                let tx = self.updater_tx.clone();
+                Some(
+                    Button::new("update-retry")
+                        .label("Retry")
+                        .outline()
+                        .on_click(move |_event, _window, _cx| updater::check(tx.clone())),
+                )
+            }
+            _ => None,
+        };
+        let theme = cx.theme().colors;
+        let model = self.model.clone();
+
+        Some(
+            div()
+                .absolute()
+                .right(px(16.0))
+                .bottom(px(16.0))
+                .w(px(420.0))
+                .rounded_xl()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.title_bar)
+                .p_4()
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.foreground)
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .mt_1()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(detail),
+                        ),
+                )
+                .children(action)
+                .children(
+                    matches!(status, UpdateStatus::Available(_) | UpdateStatus::Error(_)).then(
+                        || {
+                            Button::new("update-dismiss")
+                                .icon(IconName::Close)
+                                .tooltip("Dismiss")
+                                .ghost()
+                                .xsmall()
+                                .on_click(move |_event, _window, cx| {
+                                    model.update(cx, |state, cx| {
+                                        state.update_notice_dismissed = true;
+                                        cx.notify();
+                                    });
+                                })
+                        },
+                    ),
+                )
+                .into_any_element(),
+        )
+    }
 }
 
 impl Render for WorkspaceView {
@@ -757,5 +903,6 @@ impl Render for WorkspaceView {
                     .then(|| self.render_environment_popover(cx)),
             )
             .children(self.git_dialog_open.then(|| self.render_git_dialog(cx)))
+            .children(self.render_update_notice(cx))
     }
 }
