@@ -62,7 +62,12 @@ impl Render for WorkspaceView {
                     .then(|| self.sidebar.clone()),
             )
             .child(match workspace_page {
-                WorkspacePage::Chat => self.chat_list.clone().into_any_element(),
+                WorkspacePage::Chat => div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .child(self.chat_list.clone())
+                    .into_any_element(),
                 WorkspacePage::Settings => self.settings.clone().into_any_element(),
             })
             .children((workspace_page == WorkspacePage::Chat).then(|| {

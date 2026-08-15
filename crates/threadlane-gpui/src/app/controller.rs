@@ -34,6 +34,19 @@ pub fn dispatch(state: &mut AppState, action: AppAction) {
         AppAction::SendPrompt(text) => {
             let _ = state.send_prompt(text);
         }
+        AppAction::StageBusyMessage(text) => {
+            let _ = state.stage_busy_message(text);
+        }
+        AppAction::QueuePendingMessage => {
+            let _ = state.queue_pending_message();
+        }
+        AppAction::SteerPendingMessage => {
+            let _ = state.steer_pending_message();
+        }
+        AppAction::DismissPendingMessage => state.dismiss_pending_message(),
+        AppAction::CancelGeneration => {
+            let _ = state.cancel_generation();
+        }
         AppAction::SelectModel(model) => state.set_selected_model(model),
         AppAction::OpenSettings => state.open_settings(),
         AppAction::CloseSettings => state.close_settings(),

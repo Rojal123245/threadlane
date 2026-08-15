@@ -1,6 +1,8 @@
 pub mod adapters;
 pub mod app;
+pub mod assets;
 pub mod components;
+pub mod model_catalog;
 pub mod persistence;
 pub mod screens;
 pub mod services;

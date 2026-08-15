@@ -1,11 +1,14 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 use threadlane_agent::{AgentEvent, AgentMessage, SessionTree};
 
+use crate::adapters::agent_events::{adapt_agent_event, ChatAgentUpdate};
 use crate::persistence::{load_project_registry, save_project_registry};
+use crate::services::sessions::{SessionRuntime, SessionRuntimeStatus};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AttachedProject {
@@ -78,6 +81,10 @@ pub enum ChatStreamEvent {
         session_id: String,
         session_file: PathBuf,
     },
+    TitleGenerated {
+        session_id: String,
+        session_file: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -96,6 +103,8 @@ pub struct AppState {
     pub messages: Vec<ChatMessageInfo>,
     pub is_generating: bool,
     pub composer_text: String,
+    pub session_status: Option<String>,
+    pub pending_composer_messages: HashMap<String, String>,
 
     pub selected_model: String,
     pub workspace_page: WorkspacePage,
@@ -106,6 +115,7 @@ pub struct AppState {
     stream_tx: Sender<ChatStreamEvent>,
     stream_rx: Receiver<ChatStreamEvent>,
     pending_stream_event: Mutex<Option<ChatStreamEvent>>,
+    session_runtimes: HashMap<PathBuf, Arc<SessionRuntime>>,
 }
 
 fn file_mtime(path: &Path) -> u64 {
@@ -229,6 +239,10 @@ pub fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
         }
     };
 
+    project_agent_messages(agent_messages)
+}
+
+fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageInfo> {
     let mut result = Vec::new();
     let mut msg_counter = 0;
 
@@ -365,6 +379,64 @@ pub fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
     result
 }
 
+fn runtime_status_text(status: SessionRuntimeStatus) -> Option<String> {
+    match status {
+        SessionRuntimeStatus::Ready => None,
+        SessionRuntimeStatus::Working => Some("Working…".into()),
+        SessionRuntimeStatus::Interrupted => {
+            Some("Turn interrupted · Safe replay checkpoints available".into())
+        }
+        SessionRuntimeStatus::Error(error) => Some(error),
+    }
+}
+
+fn provider_credentials(model: &str) -> (String, Option<String>) {
+    if threadlane_provider::router::is_antigravity_model(model) {
+        return (
+            threadlane_provider::antigravity_auth::load_antigravity_credentials()
+                .map(|credentials| credentials.access_token)
+                .unwrap_or_default(),
+            None,
+        );
+    }
+    if threadlane_provider::router::is_opencode_model(model) {
+        return (
+            threadlane_auth::opencode_auth::load_opencode_api_key().unwrap_or_default(),
+            None,
+        );
+    }
+    if let Some(api_key) =
+        threadlane_auth::openai_auth::load_openai_api_key().filter(|key| !key.trim().is_empty())
+    {
+        return (api_key, None);
+    }
+    if let Some(credentials) = threadlane_auth::openai_auth::load_credentials()
+        .filter(|credentials| threadlane_auth::openai_auth::is_own_source(&credentials.source))
+    {
+        return (credentials.access_token, credentials.account_id);
+    }
+    (std::env::var("OPENAI_API_KEY").unwrap_or_default(), None)
+}
+
+fn coding_agent_options(
+    work_dir: PathBuf,
+    session_file: PathBuf,
+    model: String,
+) -> threadlane_coding_agent::CodingAgentOptions {
+    let (api_key, account_id) = provider_credentials(&model);
+
+    threadlane_coding_agent::CodingAgentOptions {
+        api_key,
+        account_id,
+        model,
+        work_dir,
+        session_file: Some(session_file),
+        system_prompt: Default::default(),
+        agent_config: None,
+        coding_config: None,
+    }
+}
+
 impl Default for AppState {
     fn default() -> Self {
         Self::load()
@@ -427,12 +499,6 @@ impl AppState {
             });
         }
 
-        let messages = if let Some(ref file) = active_session_file {
-            load_session_messages(file)
-        } else {
-            Vec::new()
-        };
-
         let openai_key = threadlane_auth::openai_auth::load_openai_api_key()
             .or_else(|| std::env::var("OPENAI_API_KEY").ok())
             .unwrap_or_default();
@@ -442,14 +508,26 @@ impl AppState {
             threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some();
 
         let (stream_tx, stream_rx) = mpsc::channel();
-        let selected_model = if !openai_key.is_empty() {
-            "gpt-4o".to_string()
-        } else if antigravity_connected {
-            "antigravity/gemini-3.6-flash".to_string()
-        } else if !opencode_key.is_empty() {
-            "opencode-go/claude-3-5-sonnet".to_string()
-        } else {
-            "gpt-4o".to_string()
+        let mut selected_model =
+            crate::model_catalog::default_model_for_project(active_work_dir.as_deref())
+                .unwrap_or_default();
+
+        let mut session_runtimes = HashMap::new();
+        let mut session_status = None;
+        let messages = match (active_work_dir.as_ref(), active_session_file.as_ref()) {
+            (Some(work_dir), Some(session_file)) => {
+                let runtime = SessionRuntime::new(coding_agent_options(
+                    work_dir.clone(),
+                    session_file.clone(),
+                    selected_model.clone(),
+                ));
+                let messages = project_agent_messages(runtime.initial_messages.clone());
+                selected_model = runtime.selected_model.clone();
+                session_status = runtime_status_text(runtime.status());
+                session_runtimes.insert(session_file.clone(), runtime);
+                messages
+            }
+            _ => Vec::new(),
         };
 
         Self {
@@ -461,6 +539,8 @@ impl AppState {
             messages,
             is_generating: false,
             composer_text: String::new(),
+            session_status,
+            pending_composer_messages: HashMap::new(),
             selected_model,
             workspace_page: WorkspacePage::Chat,
             openai_key,
@@ -470,7 +550,17 @@ impl AppState {
             stream_tx,
             stream_rx,
             pending_stream_event: Mutex::new(None),
+            session_runtimes,
         }
+    }
+
+    fn invalidate_idle_runtimes(&mut self) {
+        self.session_runtimes
+            .retain(|_, runtime| runtime.is_generating());
+    }
+
+    pub fn invalidate_capability_runtimes(&mut self) {
+        self.invalidate_idle_runtimes();
     }
 
     pub fn save_openai_key(&mut self, key: String) -> Result<(), String> {
@@ -484,6 +574,8 @@ impl AppState {
             self.openai_key.clear();
             self.auth_status_msg = Some("OpenAI API key removed.".into());
         }
+        self.invalidate_idle_runtimes();
+        self.reconcile_selected_model();
         Ok(())
     }
 
@@ -498,11 +590,44 @@ impl AppState {
             self.opencode_key.clear();
             self.auth_status_msg = Some("Opencode API key removed.".into());
         }
+        self.invalidate_idle_runtimes();
+        self.reconcile_selected_model();
         Ok(())
     }
 
+    pub fn reconcile_selected_model(&mut self) {
+        if !crate::model_catalog::is_available_for_project(
+            &self.selected_model,
+            self.active_work_dir.as_deref(),
+        ) {
+            self.selected_model =
+                crate::model_catalog::default_model_for_project(self.active_work_dir.as_deref())
+                    .unwrap_or_default();
+            self.invalidate_idle_runtimes();
+        }
+    }
+
     pub fn set_selected_model(&mut self, model: String) {
+        if !crate::model_catalog::is_available_for_project(&model, self.active_work_dir.as_deref())
+        {
+            return;
+        }
         self.selected_model = model.clone();
+        if let (Some(work_dir), Some(session_id)) = (
+            self.active_work_dir.as_ref(),
+            self.active_session_id.as_ref(),
+        ) {
+            let session_file = work_dir
+                .join(".threadlane/sessions")
+                .join(format!("{session_id}.jsonl"));
+            if self
+                .session_runtimes
+                .get(&session_file)
+                .is_some_and(|runtime| !runtime.is_generating())
+            {
+                self.session_runtimes.remove(&session_file);
+            }
+        }
         self.auth_status_msg = Some(format!("Model switched to {model}"));
     }
 
@@ -536,6 +661,7 @@ impl AppState {
         self.active_session_id = None;
         self.is_new_task = true;
         self.messages.clear();
+        self.session_status = None;
         if self.active_work_dir.is_none() {
             self.active_work_dir = self
                 .projects
@@ -554,6 +680,7 @@ impl AppState {
             self.active_session_id = None;
             self.is_new_task = true;
             self.messages.clear();
+            self.session_status = None;
         }
     }
 
@@ -563,15 +690,28 @@ impl AppState {
         self.active_session_id = Some(session_id.clone());
         self.is_new_task = false;
 
-        if let Some(proj) = self.projects.iter().find(|p| p.work_dir == work_dir) {
-            if let Some(sess) = proj.sessions.iter().find(|s| s.id == session_id) {
-                self.messages = load_session_messages(&sess.session_file);
-            }
-        }
+        let session_file = self.session_file(&work_dir, &session_id);
+        let existed = self.session_runtimes.contains_key(&session_file);
+        let runtime = self.ensure_session_runtime(work_dir, session_file.clone());
+        self.messages = if existed {
+            load_session_messages(&session_file)
+        } else {
+            project_agent_messages(runtime.initial_messages.clone())
+        };
+        self.is_generating = runtime.is_generating();
+        self.selected_model = runtime.selected_model.clone();
+        self.session_status = runtime_status_text(runtime.status());
     }
 
     pub fn settle_session(&mut self, work_dir: PathBuf, session_id: String) -> Result<(), String> {
         let session_file = self.session_file(&work_dir, &session_id);
+        if self
+            .session_runtimes
+            .get(&session_file)
+            .is_some_and(|runtime| runtime.is_generating())
+        {
+            return Err("Stop the running generation before archiving this session".into());
+        }
         let archive_dir = work_dir.join(".threadlane/sessions/archive");
         std::fs::create_dir_all(&archive_dir).map_err(|error| error.to_string())?;
         let file_name = session_file
@@ -585,9 +725,33 @@ impl AppState {
 
     pub fn remove_session(&mut self, work_dir: PathBuf, session_id: String) -> Result<(), String> {
         let session_file = self.session_file(&work_dir, &session_id);
+        if self
+            .session_runtimes
+            .get(&session_file)
+            .is_some_and(|runtime| runtime.is_generating())
+        {
+            return Err("Stop the running generation before deleting this session".into());
+        }
         std::fs::remove_file(session_file).map_err(|error| error.to_string())?;
         self.finish_session_removal(&work_dir, &session_id);
         Ok(())
+    }
+
+    fn ensure_session_runtime(
+        &mut self,
+        work_dir: PathBuf,
+        session_file: PathBuf,
+    ) -> Arc<SessionRuntime> {
+        if let Some(runtime) = self.session_runtimes.get(&session_file) {
+            return runtime.clone();
+        }
+        let runtime = SessionRuntime::new(coding_agent_options(
+            work_dir,
+            session_file.clone(),
+            self.selected_model.clone(),
+        ));
+        self.session_runtimes.insert(session_file, runtime.clone());
+        runtime
     }
 
     fn session_file(&self, work_dir: &Path, session_id: &str) -> PathBuf {
@@ -609,6 +773,9 @@ impl AppState {
     }
 
     fn finish_session_removal(&mut self, work_dir: &Path, session_id: &str) {
+        let session_file = self.session_file(work_dir, session_id);
+        self.session_runtimes.remove(&session_file);
+        self.pending_composer_messages.remove(session_id);
         if let Some(project) = self
             .projects
             .iter_mut()
@@ -669,11 +836,27 @@ impl AppState {
             save_project_registry(&registry)?;
         }
 
-        *self = Self::load();
+        if !self
+            .projects
+            .iter()
+            .any(|project| project.work_dir == canonical)
+        {
+            let name = canonical
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "project".into());
+            self.projects.push(ProjectInfo {
+                name,
+                sessions: discover_sessions_in_project(&canonical),
+                work_dir: canonical.clone(),
+                is_expanded: true,
+            });
+        }
         self.active_work_dir = Some(canonical);
         self.active_session_id = None;
         self.is_new_task = true;
         self.messages.clear();
+        self.session_status = None;
         Ok(())
     }
 
@@ -713,7 +896,13 @@ impl AppState {
                 .collect::<Vec<_>>(),
         );
 
-        *self = Self::load();
+        if let Some(project) = self
+            .projects
+            .iter_mut()
+            .find(|project| project.work_dir == work_dir)
+        {
+            project.sessions = discover_sessions_in_project(&work_dir);
+        }
         self.select_session(work_dir, session_id.clone());
         self.is_new_task = false;
         Ok(session_id)
@@ -748,11 +937,8 @@ impl AppState {
                 ChatStreamEvent::Agent { session_id, event }
                     if self.active_session_id.as_deref() == Some(&session_id) =>
                 {
-                    match event {
-                        AgentEvent::MessageUpdate {
-                            text_delta: Some(delta),
-                            ..
-                        } => {
+                    match adapt_agent_event(event) {
+                        ChatAgentUpdate::TextDelta(delta) => {
                             if let Some(message) = self.messages.last_mut().filter(|message| {
                                 message.role == MessageRole::Assistant
                                     && message.id == format!("streaming-{session_id}")
@@ -768,10 +954,7 @@ impl AppState {
                                 });
                             }
                         }
-                        AgentEvent::MessageUpdate {
-                            reasoning_delta: Some(delta),
-                            ..
-                        } => {
+                        ChatAgentUpdate::ReasoningDelta(delta) => {
                             let activity_id = format!("reasoning-{session_id}");
                             if let Some(activity) = self
                                 .messages
@@ -806,7 +989,7 @@ impl AppState {
                                 }
                             }
                         }
-                        AgentEvent::ToolExecutionStart {
+                        ChatAgentUpdate::ToolStarted {
                             tool_call_id,
                             name,
                             arguments,
@@ -834,7 +1017,7 @@ impl AppState {
                                 });
                             }
                         }
-                        AgentEvent::ToolExecutionUpdate {
+                        ChatAgentUpdate::ToolUpdated {
                             tool_call_id,
                             partial_result,
                         } => {
@@ -848,10 +1031,10 @@ impl AppState {
                                 activity.detail = partial_result;
                             }
                         }
-                        AgentEvent::ToolExecutionEnd {
+                        ChatAgentUpdate::ToolFinished {
                             tool_call_id,
-                            result,
-                            ..
+                            content,
+                            is_error,
                         } => {
                             if let Some(activity) = self
                                 .messages
@@ -860,25 +1043,26 @@ impl AppState {
                                 .flat_map(|message| message.tool_activities.iter_mut().rev())
                                 .find(|activity| activity.id == tool_call_id)
                             {
-                                activity.category = if result.is_error {
+                                activity.category = if is_error {
                                     "Error".into()
                                 } else {
                                     "Completed".into()
                                 };
-                                activity.detail = result.content;
+                                activity.detail = content;
                             }
                         }
-                        AgentEvent::AgentError { error } => {
+                        ChatAgentUpdate::Error(error) => {
                             self.messages.push(ChatMessageInfo {
                                 id: format!("stream-error-{session_id}"),
                                 role: MessageRole::Error,
-                                content: error,
+                                content: error.clone(),
                                 timestamp: String::new(),
                                 tool_activities: Vec::new(),
                             });
                             self.is_generating = false;
+                            self.session_status = Some(error);
                         }
-                        _ => {}
+                        ChatAgentUpdate::Ignore => {}
                     }
                 }
                 ChatStreamEvent::Finished {
@@ -887,8 +1071,22 @@ impl AppState {
                 } => {
                     if self.active_session_id.as_deref() == Some(&session_id) {
                         self.messages = load_session_messages(&session_file);
+                        self.is_generating = false;
+                        self.session_status = self
+                            .session_runtimes
+                            .get(&session_file)
+                            .and_then(|runtime| runtime_status_text(runtime.status()));
                     }
-                    self.is_generating = false;
+                    let runtime_is_stale =
+                        self.session_runtimes
+                            .get(&session_file)
+                            .is_some_and(|runtime| {
+                                !runtime.is_generating()
+                                    && runtime.selected_model != self.selected_model
+                            });
+                    if runtime_is_stale {
+                        self.session_runtimes.remove(&session_file);
+                    }
                     if let Some(work_dir) = session_file
                         .parent()
                         .and_then(Path::parent)
@@ -903,10 +1101,119 @@ impl AppState {
                         }
                     }
                 }
+                ChatStreamEvent::TitleGenerated {
+                    session_id,
+                    session_file,
+                } => {
+                    if let Some(work_dir) = session_file
+                        .parent()
+                        .and_then(Path::parent)
+                        .and_then(Path::parent)
+                    {
+                        if let Some(project) = self
+                            .projects
+                            .iter_mut()
+                            .find(|project| project.work_dir == work_dir)
+                        {
+                            project.sessions = discover_sessions_in_project(work_dir);
+                        }
+                    }
+                    if self.active_session_id.as_deref() == Some(&session_id) {
+                        self.refresh_active_session();
+                    }
+                }
                 ChatStreamEvent::Agent { .. } => {}
             }
         }
         true
+    }
+
+    pub fn active_pending_composer_message(&self) -> Option<&str> {
+        self.active_session_id
+            .as_ref()
+            .and_then(|session_id| self.pending_composer_messages.get(session_id))
+            .map(String::as_str)
+    }
+
+    pub fn stage_busy_message(&mut self, text: String) -> Result<(), String> {
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return Ok(());
+        }
+        let session_id = self
+            .active_session_id
+            .clone()
+            .ok_or_else(|| "No active session".to_string())?;
+        if !self.is_generating {
+            return Err("The session is no longer generating".into());
+        }
+        self.pending_composer_messages.insert(session_id, text);
+        Ok(())
+    }
+
+    pub fn queue_pending_message(&mut self) -> Result<(), String> {
+        let (runtime, session_id, text) = self.pending_runtime_message()?;
+        runtime
+            .work_handle
+            .try_queue_follow_up_with_images(text.clone(), Vec::new())?;
+        self.pending_composer_messages.remove(&session_id);
+        self.push_optimistic_follow_up(&session_id, text);
+        self.session_status = Some("Message queued…".into());
+        Ok(())
+    }
+
+    pub fn steer_pending_message(&mut self) -> Result<(), String> {
+        let (runtime, session_id, text) = self.pending_runtime_message()?;
+        runtime
+            .work_handle
+            .queue_steer_with_images(text.clone(), Vec::new())?;
+        self.pending_composer_messages.remove(&session_id);
+        self.push_optimistic_follow_up(&session_id, text);
+        self.session_status = Some("Steering current turn…".into());
+        Ok(())
+    }
+
+    pub fn dismiss_pending_message(&mut self) {
+        if let Some(session_id) = self.active_session_id.as_ref() {
+            self.pending_composer_messages.remove(session_id);
+        }
+    }
+
+    fn pending_runtime_message(&self) -> Result<(Arc<SessionRuntime>, String, String), String> {
+        let session_id = self
+            .active_session_id
+            .clone()
+            .ok_or_else(|| "No active session".to_string())?;
+        let work_dir = self
+            .active_work_dir
+            .as_ref()
+            .ok_or_else(|| "No active project".to_string())?;
+        let session_file = work_dir
+            .join(".threadlane/sessions")
+            .join(format!("{session_id}.jsonl"));
+        let runtime = self
+            .session_runtimes
+            .get(&session_file)
+            .cloned()
+            .ok_or_else(|| "Session runtime is unavailable".to_string())?;
+        let text = self
+            .pending_composer_messages
+            .get(&session_id)
+            .cloned()
+            .ok_or_else(|| "No pending composer message".to_string())?;
+        Ok((runtime, session_id, text))
+    }
+
+    fn push_optimistic_follow_up(&mut self, session_id: &str, text: String) {
+        if self.active_session_id.as_deref() == Some(session_id) {
+            self.messages.push(ChatMessageInfo {
+                id: format!("queued-user-{session_id}-{}", self.messages.len()),
+                role: MessageRole::User,
+                content: text,
+                timestamp: String::new(),
+                tool_activities: Vec::new(),
+            });
+        }
     }
 
     pub fn send_prompt(&mut self, text: String) -> Result<(), String> {
@@ -928,136 +1235,86 @@ impl AppState {
         let session_file = work_dir
             .join(".threadlane/sessions")
             .join(format!("{session_id}.jsonl"));
+        if self
+            .session_runtimes
+            .get(&session_file)
+            .is_some_and(|runtime| runtime.is_generating())
+        {
+            return Err("A generation is already running for this session".into());
+        }
 
-        // 1. Load or create SessionTree with file_path bound
-        let mut tree = match SessionTree::load_from_file(&session_file) {
-            Ok(mut t) => {
-                t.file_path = Some(session_file.clone());
-                t
-            }
-            Err(_) => {
-                let mut t = SessionTree::new(&session_id);
-                t.file_path = Some(session_file.clone());
-                t
-            }
-        };
+        // Resolve credentials using the same provider routing as the runtime and title task.
+        let model = self.selected_model.clone();
+        let (api_key, account_id) = provider_credentials(&model);
+
+        if api_key.is_empty() {
+            self.messages.push(ChatMessageInfo {
+                id: format!("credential-error-{session_id}"),
+                role: MessageRole::Error,
+                content: format!(
+                    "No API key configured for model `{model}`. Open Settings and save the provider credential."
+                ),
+                timestamp: String::new(),
+                tool_activities: Vec::new(),
+            });
+            return Ok(());
+        }
+
+        let runtime = self.ensure_session_runtime(work_dir.clone(), session_file.clone());
+        crate::services::chat::execute_prompt(
+            runtime,
+            session_id.clone(),
+            text.clone(),
+            self.stream_tx.clone(),
+        )?;
+        if !threadlane_provider::router::is_antigravity_model(&model) {
+            crate::services::chat::spawn_session_title(
+                session_file,
+                session_id.clone(),
+                text.clone(),
+                api_key,
+                account_id,
+                model,
+                self.stream_tx.clone(),
+            );
+        }
 
         // Present the accepted prompt immediately. CodingAgent owns durable
         // persistence; writing it through SessionTree here would duplicate it.
         self.messages.push(ChatMessageInfo {
             id: format!("pending-user-{session_id}-{}", self.messages.len()),
             role: MessageRole::User,
-            content: text.clone(),
+            content: text,
             timestamp: String::new(),
             tool_activities: Vec::new(),
         });
-
-        // Resolve API credentials for selected model
-        let model = self.selected_model.clone();
-        let api_key = if threadlane_provider::router::is_antigravity_model(&model) {
-            threadlane_provider::antigravity_auth::load_antigravity_credentials()
-                .map(|c| c.access_token)
-                .unwrap_or_default()
-        } else if threadlane_provider::router::is_opencode_model(&model) {
-            threadlane_auth::opencode_auth::load_opencode_api_key().unwrap_or_default()
-        } else {
-            threadlane_auth::openai_auth::load_openai_api_key()
-                .or_else(|| std::env::var("OPENAI_API_KEY").ok())
-                .unwrap_or_default()
-        };
-
-        if api_key.is_empty() {
-            let err_msg = AgentMessage::Custom {
-                custom_type: "error".to_string(),
-                payload: serde_json::json!({
-                    "error": format!(
-                        "No API key configured for model `{model}`.\n\nPlease click the model badge in the top right to open Provider Settings and save your API key."
-                    )
-                }),
-            };
-            tree.add_message(err_msg);
-            self.messages = load_session_messages(&session_file);
-            return Ok(());
-        }
-
         self.is_generating = true;
-
-        let options = threadlane_coding_agent::CodingAgentOptions {
-            api_key: api_key.clone(),
-            account_id: None,
-            model: model.clone(),
-            work_dir: work_dir.clone(),
-            session_file: Some(session_file.clone()),
-            system_prompt: Default::default(),
-            agent_config: None,
-            coding_config: None,
-        };
-
-        let text_to_agent = text.clone();
-        let session_file_bg = session_file.clone();
-        let session_id_bg = session_id.clone();
-        let stream_tx = self.stream_tx.clone();
-        std::thread::spawn(move || {
-            let rt = match tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    eprintln!("Failed to build tokio runtime: {e}");
-                    return;
-                }
-            };
-
-            rt.block_on(async move {
-                let mut agent = threadlane_coding_agent::CodingAgent::new(options);
-                let mut events = agent.subscribe();
-                let run = agent.handle_input_with_images(&text_to_agent, Vec::new());
-                tokio::pin!(run);
-
-                loop {
-                    tokio::select! {
-                        result = &mut run => {
-                            if let Some(Err(err)) = result {
-                                let _ = stream_tx.send(ChatStreamEvent::Agent {
-                                    session_id: session_id_bg.clone(),
-                                    event: AgentEvent::AgentError { error: err.to_string() },
-                                });
-                            }
-                            while let Ok(event) = events.try_recv() {
-                                let _ = stream_tx.send(ChatStreamEvent::Agent {
-                                    session_id: session_id_bg.clone(),
-                                    event,
-                                });
-                            }
-                            break;
-                        }
-                        event = events.recv() => {
-                            match event {
-                                Ok(event) => {
-                                    let _ = stream_tx.send(ChatStreamEvent::Agent {
-                                        session_id: session_id_bg.clone(),
-                                        event,
-                                    });
-                                }
-                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                            }
-                        }
-                    }
-                }
-                let _ = stream_tx.send(ChatStreamEvent::Finished {
-                    session_id: session_id_bg,
-                    session_file: session_file_bg,
-                });
-            });
-        });
+        self.session_status = Some("Working…".into());
 
         // Refresh project sessions & reload messages
         if let Some(proj) = self.projects.iter_mut().find(|p| p.work_dir == work_dir) {
             proj.sessions = discover_sessions_in_project(&work_dir);
         }
         self.composer_text.clear();
+        Ok(())
+    }
+
+    pub fn cancel_generation(&mut self) -> Result<(), String> {
+        let (Some(work_dir), Some(session_id)) = (
+            self.active_work_dir.as_ref(),
+            self.active_session_id.as_ref(),
+        ) else {
+            return Ok(());
+        };
+        let session_file = work_dir
+            .join(".threadlane/sessions")
+            .join(format!("{session_id}.jsonl"));
+        let Some(runtime) = self.session_runtimes.get(&session_file).cloned() else {
+            return Ok(());
+        };
+        crate::services::chat::cancel_prompt(runtime, session_id.clone(), self.stream_tx.clone())?;
+        self.is_generating = false;
+        self.session_status = Some("Generation cancelled".into());
         Ok(())
     }
 }

@@ -1,6 +1,6 @@
 use gpui::*;
 use gpui_component::Root;
-use gpui_component_assets::Assets;
+use threadlane_gpui::assets::Assets;
 use threadlane_gpui::screens::workspace::WorkspaceView;
 use threadlane_gpui::theme;
 
