@@ -47,7 +47,7 @@ Threadlane combines a GPU-accelerated desktop interface with a capable coding-ag
 | Session trees | Fork, clone, navigate, persist, and compact branching conversation history. |
 | Provider integration | OpenAI-compatible streaming, Codex-oriented models, reasoning controls, device authorization, and credential persistence. |
 | WASI extensions | Sandboxed Wasm modules using the `threadlane_host` capability broker. |
-| Code editor | Open workspace files from the file tree in an embedded code editor with syntax highlighting and save. |
+| File viewer | Open workspace text files from the file tree in a selectable, read-only viewer. |
 | ACP agents | Configure external Agent Client Protocol agents per project or globally, and check that each one launches and handshakes. |
 | Signed updater | Background update checks, verified downloads, progress UI, and packaged-app installation/relaunch. |
 
@@ -509,23 +509,6 @@ xattr -dr com.apple.quarantine /Applications/Threadlane.app
 Only bypass quarantine for an artifact you trust. The release workflow verifies the app and DMG structure before publishing, while the updater signature separately authenticates automatic updates.
 
 ## Performance Measurement
-
-## Performance Measurement
-
-UI frame timing is opt-in:
-
-```bash
-THREADLANE_PERF=1 cargo run --release -p threadlane-gpui
-```
-
-Every five seconds the app prints a summary of how long its event passes take:
-
-```text
-[perf] frames=431 jank=12 (2.8%) p50=3.6ms p95=8.1ms p99=29.7ms max=31.2ms (over 200 samples)
-```
-
-`jank` counts passes over the 16.7ms budget for 60fps. Measure a release build;
-debug figures are much slower and not representative.
 
 Backend hot paths have measurement harnesses, kept out of normal test runs:
 
