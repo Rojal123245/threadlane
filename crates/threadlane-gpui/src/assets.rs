@@ -18,6 +18,9 @@ impl AssetSource for Assets {
                 Some(include_bytes!("../assets/icons/providers/opencode.svg"))
             }
             "icons/providers/acp.svg" => Some(include_bytes!("../assets/icons/providers/acp.svg")),
+            "icons/git/actions.svg" => Some(include_bytes!("../assets/icons/git/actions.svg")),
+            "icons/git/commit.svg" => Some(include_bytes!("../assets/icons/git/commit.svg")),
+            "icons/git/compare.svg" => Some(include_bytes!("../assets/icons/git/compare.svg")),
             _ => None,
         };
 
@@ -35,6 +38,9 @@ impl AssetSource for Assets {
                 "icons/providers/google.svg",
                 "icons/providers/opencode.svg",
                 "icons/providers/acp.svg",
+                "icons/git/actions.svg",
+                "icons/git/commit.svg",
+                "icons/git/compare.svg",
             ]
             .into_iter()
             .filter(|asset| asset.starts_with(path))

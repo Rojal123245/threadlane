@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
@@ -75,6 +76,7 @@ pub struct RightPanelView {
     active_surface: Option<Surface>,
     project: Option<PathBuf>,
     files: Vec<FileEntry>,
+    expanded_paths: HashSet<String>,
     review_files: Vec<GitFile>,
     review_error: Option<String>,
     document_title: Option<String>,
@@ -135,6 +137,7 @@ impl RightPanelView {
             active_surface: None,
             project: None,
             files: Vec::new(),
+            expanded_paths: HashSet::new(),
             review_files: Vec::new(),
             review_error: None,
             document_title: None,
@@ -154,6 +157,7 @@ impl RightPanelView {
         }
         self.project = project;
         self.files.clear();
+        self.expanded_paths.clear();
         self.review_files.clear();
         self.review_error = None;
         self.document_title = None;
@@ -162,6 +166,10 @@ impl RightPanelView {
         self.terminal_output.clear();
         self.sync_terminal_text(cx);
         self.refresh_active_surface();
+    }
+
+    pub fn open_review(&mut self, cx: &mut Context<Self>) {
+        self.open_surface(Surface::Review, cx);
     }
 
     fn open_surface(&mut self, surface: Surface, cx: &mut Context<Self>) {
@@ -186,9 +194,10 @@ impl RightPanelView {
             return;
         };
         let tx = self.event_tx.clone();
+        let expanded_paths = self.expanded_paths.clone();
         std::thread::spawn(move || match surface {
             Surface::Files => {
-                let entries = scan_project_files(&project, 500);
+                let entries = scan_project_files(&project, &expanded_paths, 500);
                 let _ = tx.send(PanelEvent::FilesLoaded { project, entries });
             }
             Surface::Review => {
@@ -204,6 +213,14 @@ impl RightPanelView {
             }
             Surface::Terminal => {}
         });
+    }
+
+    fn toggle_folder(&mut self, relative_path: String, cx: &mut Context<Self>) {
+        if !self.expanded_paths.remove(&relative_path) {
+            self.expanded_paths.insert(relative_path);
+        }
+        self.refresh_surface(Surface::Files);
+        cx.notify();
     }
 
     fn open_file(&self, relative_path: String) {
@@ -497,6 +514,9 @@ impl RightPanelView {
             .py_2()
             .children(self.files.iter().cloned().map(|entry| {
                 let relative_path = entry.relative_path.clone();
+                let folder_path = relative_path.clone();
+                let file_path = relative_path.clone();
+                let expanded = self.expanded_paths.contains(&relative_path);
                 div()
                     .id(SharedString::from(format!("project-file-{relative_path}")))
                     .h(px(30.0))
@@ -510,16 +530,34 @@ impl RightPanelView {
                     .text_xs()
                     .text_color(theme.muted_foreground)
                     .hover(|row| row.bg(theme.muted))
+                    .child(if entry.is_dir {
+                        Icon::default()
+                            .path(if expanded {
+                                "icons/chevron-down.svg"
+                            } else {
+                                "icons/chevron-right.svg"
+                            })
+                            .into_any_element()
+                    } else {
+                        div().w(px(16.0)).flex_none().into_any_element()
+                    })
                     .child(Icon::default().path(if entry.is_dir {
                         "icons/folder.svg"
                     } else {
                         "icons/file.svg"
                     }))
                     .child(entry.name)
+                    .when(entry.is_dir, |row| {
+                        row.cursor_pointer().on_click(cx.listener(
+                            move |this, _event, _window, cx| {
+                                this.toggle_folder(folder_path.clone(), cx);
+                            },
+                        ))
+                    })
                     .when(!entry.is_dir, |row| {
                         row.cursor_pointer().on_click(cx.listener(
                             move |this, _event, _window, _cx| {
-                                this.open_file(relative_path.clone());
+                                this.open_file(file_path.clone());
                             },
                         ))
                     })
@@ -701,8 +739,19 @@ impl Render for RightPanelView {
     }
 }
 
-fn scan_project_files(root: &Path, limit: usize) -> Vec<FileEntry> {
-    fn visit(root: &Path, relative: &Path, depth: usize, limit: usize, rows: &mut Vec<FileEntry>) {
+fn scan_project_files(
+    root: &Path,
+    expanded_paths: &HashSet<String>,
+    limit: usize,
+) -> Vec<FileEntry> {
+    fn visit(
+        root: &Path,
+        relative: &Path,
+        depth: usize,
+        expanded_paths: &HashSet<String>,
+        limit: usize,
+        rows: &mut Vec<FileEntry>,
+    ) {
         if rows.len() >= limit || depth > 5 {
             return;
         }
@@ -731,20 +780,21 @@ fn scan_project_files(root: &Path, limit: usize) -> Vec<FileEntry> {
                 is_dir,
                 depth,
             });
-            if is_dir {
-                visit(root, &path, depth + 1, limit, rows);
+            if is_dir && expanded_paths.contains(path.to_string_lossy().as_ref()) {
+                visit(root, &path, depth + 1, expanded_paths, limit, rows);
             }
         }
     }
 
     let mut rows = Vec::new();
-    visit(root, Path::new(""), 0, limit, &mut rows);
+    visit(root, Path::new(""), 0, expanded_paths, limit, &mut rows);
     rows
 }
 
 #[cfg(test)]
 mod tests {
     use super::scan_project_files;
+    use std::collections::HashSet;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -761,7 +811,17 @@ mod tests {
         std::fs::write(root.join("src/nested/lib.rs"), "pub fn value() {}\n").unwrap();
         std::fs::write(root.join("target/debug/generated"), "ignored").unwrap();
 
-        let rows = scan_project_files(&root, 10);
+        let collapsed = scan_project_files(&root, &HashSet::new(), 10);
+        assert_eq!(
+            collapsed
+                .iter()
+                .map(|entry| entry.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["src"]
+        );
+
+        let expanded = HashSet::from(["src".to_string()]);
+        let rows = scan_project_files(&root, &expanded, 10);
         assert!(rows.len() <= 10);
         assert!(rows
             .iter()

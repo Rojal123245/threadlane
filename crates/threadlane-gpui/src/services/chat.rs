@@ -10,7 +10,7 @@ use threadlane_provider::ProviderClient;
 use crate::services::sessions::SessionRuntime;
 use crate::state::ChatStreamEvent;
 
-fn executor() -> Result<&'static tokio::runtime::Runtime, String> {
+pub(crate) fn executor() -> Result<&'static tokio::runtime::Runtime, String> {
     static EXECUTOR: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
     EXECUTOR
         .get_or_init(|| {

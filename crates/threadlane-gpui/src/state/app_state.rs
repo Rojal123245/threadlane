@@ -390,7 +390,7 @@ fn runtime_status_text(status: SessionRuntimeStatus) -> Option<String> {
     }
 }
 
-fn provider_credentials(model: &str) -> (String, Option<String>) {
+pub(crate) fn provider_credentials(model: &str) -> (String, Option<String>) {
     if threadlane_provider::router::is_antigravity_model(model) {
         return (
             threadlane_provider::antigravity_auth::load_antigravity_credentials()
