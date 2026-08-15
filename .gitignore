@@ -4,11 +4,9 @@
 .DS_Store
 .threadlane
 .pi-subagents
-/crates/threadlane/dist/*
 /threadlane-updater.key
 /threadlane-updater.key.pub
 theadline_private_key_password
 .tokensave
-.makepad
 
 .worktrees/

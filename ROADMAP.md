@@ -6,10 +6,10 @@ Strategic vision and execution plan to match and exceed the **oh-my-pi (`omp`)**
 
 ## 1. Current System Capabilities (What We Already Have)
 
-Threadlane is a native Rust workspace centered on a GPU-accelerated Makepad desktop application. Core existing capabilities include:
+Threadlane is a native Rust workspace centered on a GPUI desktop application. Core existing capabilities include:
 
 * **Hash-Anchored File Editing**: Built-in `edit_file_hashline` tool (`crates/threadlane-tools/src/hashline.rs`) ensuring context-safe, zero-drift file modifications.
-* **Makepad GPU Desktop UI**: Liquid glass aesthetic, custom shaders, session sidebar, chat markdown renderer, and real-time collapsible `Working`/`Worked` subagent activity rails.
+* **GPUI Desktop UI**: Native desktop workspace, session sidebar, chat markdown renderer, and real-time collapsible `Working`/`Worked` subagent activity rails.
 * **WASI Extension Runner**: Sandboxed extension system (`extensions/` targeting `wasm32-wasip1`) for modular tooling and LSP extension plugins.
 * **Model Context Protocol (MCP)**: Native MCP client (`crates/threadlane-coding-agent/src/mcp.rs`) with built-in configuration for **TokenSave** Code Graph server.
 * **Task Supervisor & Subagent Worktrees**: `HarnessSupervisor` managing subagents with isolated git worktrees (`inherit`, `branch`, `share` modes).
@@ -55,7 +55,7 @@ Instead of re-inventing complex tooling engines from scratch, Threadlane leverag
 
 ### Phase 3: Headless Stdio RPC Engine (Target: Q4 2026)
 - [ ] **Decoupled Agent Engine Core**
-  - Separate `crates/threadlane-coding-agent` execution loop from Makepad UI dependencies.
+  - Separate `crates/threadlane-coding-agent` execution loop from desktop UI dependencies.
   - Create `threadlane-cli` binary target for terminal-native usage.
 - [ ] **Headless Stdio RPC Mode (`threadlane --mode rpc`)**
   - Implement NDJSON stdio RPC protocol for external embedding (Neovim, VSCode, CI/CD runners).
@@ -67,7 +67,7 @@ Instead of re-inventing complex tooling engines from scratch, Threadlane leverag
 - [ ] **Headless Browser Capability**
   - Integrate Playwright / Chromium CDP via MCP/WASI extension for Web UI testing and rendering verification.
 - [ ] **Dual-Mode UI Synchronization**
-  - Ensure feature parity between the Makepad GPU Desktop application and the headless CLI/TUI runtime.
+  - Ensure feature parity between the GPUI Desktop application and the headless CLI/TUI runtime.
 
 ---
 
