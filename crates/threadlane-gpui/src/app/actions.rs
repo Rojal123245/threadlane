@@ -23,6 +23,7 @@ pub enum AppAction {
     QueuePendingMessage,
     SteerPendingMessage,
     DismissPendingMessage,
+    ToggleToolActivity(String),
     CancelGeneration,
     SelectModel(String),
     OpenSettings,

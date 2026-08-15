@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
 use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
@@ -10,16 +11,19 @@ use gpui_component::scroll::ScrollableElement;
 use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::theme::ActiveTheme;
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{Disableable, Icon, IconName, Sizable};
 
 use crate::app::{actions::AppAction, controller};
 use crate::state::{AppState, ChatMessageInfo, MessageRole, ToolActivityInfo};
+use threadlane_agent::{PlanItemStatus, SessionPlan};
 
 pub struct ChatListView {
     pub model: Entity<AppState>,
     pub input_state: Entity<TextareaState>,
     pub header_left_padding: Pixels,
     scroll_handle: ScrollHandle,
+    expanded_activity_groups: HashSet<String>,
     markdown_states: HashMap<String, (String, Entity<TextViewState>)>,
     _subscriptions: Vec<Subscription>,
 }
@@ -125,6 +129,7 @@ impl ChatListView {
             input_state,
             header_left_padding: px(14.0),
             scroll_handle,
+            expanded_activity_groups: HashSet::new(),
             markdown_states: HashMap::new(),
             _subscriptions: vec![sub1, sub2],
         }
@@ -166,59 +171,312 @@ impl ChatListView {
             )
     }
 
+    fn render_plan_tracker(
+        &self,
+        plan: &SessionPlan,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if plan.items.is_empty() {
+            return None;
+        }
+
+        let theme = cx.theme().colors;
+        let completed = plan
+            .items
+            .iter()
+            .filter(|item| item.status == PlanItemStatus::Completed)
+            .count();
+        let total = plan.items.len();
+        let progress_width = 72.0 * completed as f32 / total as f32;
+        let tooltip_plan = plan.clone();
+
+        Some(
+            div()
+                .id("session-plan-hover-region")
+                .w_full()
+                .flex_none()
+                .flex()
+                .justify_center()
+                .py_1()
+                .tooltip(move |window, cx| {
+                    let colors = cx.theme().colors;
+                    let content_plan = tooltip_plan.clone();
+                    Tooltip::element(move |_window, _cx| {
+                        let rows = content_plan.items.iter().enumerate().map(|(index, item)| {
+                            let (marker, color) = match item.status {
+                                PlanItemStatus::Completed => ("✓", colors.success),
+                                PlanItemStatus::InProgress => ("●", colors.primary),
+                                PlanItemStatus::Pending => ("○", colors.muted_foreground),
+                            };
+                            div()
+                                .flex()
+                                .items_start()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .w(px(16.0))
+                                        .flex_none()
+                                        .text_center()
+                                        .text_xs()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(color)
+                                        .child(marker),
+                                )
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .text_sm()
+                                        .text_color(colors.foreground)
+                                        .child(format!("{}. {}", index + 1, item.step)),
+                                )
+                        });
+                        div()
+                            .w(px(640.0))
+                            .max_h(px(280.0))
+                            .overflow_y_scrollbar()
+                            .p_2()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .children(content_plan.explanation.clone().map(|explanation| {
+                                div()
+                                    .pb_2()
+                                    .border_b_1()
+                                    .border_color(colors.border)
+                                    .text_sm()
+                                    .text_color(colors.muted_foreground)
+                                    .child(explanation)
+                            }))
+                            .children(rows)
+                    })
+                    .build(window, cx)
+                })
+                .child(
+                    Button::new("session-plan-tracker").ghost().child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.muted_foreground)
+                                    .child(format!("{completed}/{total}")),
+                            )
+                            .child(
+                                div()
+                                    .w(px(72.0))
+                                    .h(px(3.0))
+                                    .rounded_full()
+                                    .overflow_hidden()
+                                    .bg(theme.border)
+                                    .child(
+                                        div()
+                                            .w(px(progress_width))
+                                            .h_full()
+                                            .rounded_full()
+                                            .bg(theme.primary),
+                                    ),
+                            ),
+                    ),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn render_tool_activity(
         &self,
         activity: &ToolActivityInfo,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme().colors;
-        let tag_variant = match activity.category.as_str() {
-            "Created" | "Edited" => TagVariant::Success,
-            "Ran" => TagVariant::Info,
-            "Error" => TagVariant::Danger,
-            _ => TagVariant::Secondary,
+        let (marker, marker_color) = match activity.category.as_str() {
+            "Error" => ("!", theme.danger),
+            "Working" | "Thinking" => ("◌", theme.primary),
+            _ => ("✓", theme.muted_foreground),
         };
+        let model = self.model.clone();
+        let tool_call_id = activity.id.clone();
+        let has_detail = !activity.detail.trim().is_empty();
+        let row_id = SharedString::from(activity.id.clone());
 
         div()
             .w_full()
             .min_w_0()
-            .overflow_hidden()
             .flex()
             .flex_col()
-            .my_1()
-            .p_2()
-            .rounded_md()
-            .bg(theme.title_bar)
-            .border_1()
-            .border_color(theme.border)
+            .py_1()
             .child(
                 div()
+                    .id(row_id)
+                    .h(px(28.0))
+                    .px_1()
+                    .rounded_md()
                     .flex()
                     .items_center()
                     .gap_2()
+                    .when(has_detail, |row| {
+                        row.cursor_pointer()
+                            .hover(|row| row.bg(theme.muted))
+                            .on_click(move |_event, _window, cx| {
+                                model.update(cx, |state, cx| {
+                                    controller::dispatch(
+                                        state,
+                                        AppAction::ToggleToolActivity(tool_call_id.clone()),
+                                    );
+                                    cx.notify();
+                                });
+                            })
+                    })
                     .child(
-                        Tag::new()
-                            .child(activity.category.clone())
-                            .with_variant(tag_variant)
-                            .small(),
+                        div()
+                            .w(px(18.0))
+                            .flex_none()
+                            .text_center()
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(marker_color)
+                            .child(marker),
                     )
                     .child(
                         div()
+                            .min_w_0()
+                            .flex_1()
+                            .truncate()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(activity.summary.clone()),
+                    )
+                    .children(has_detail.then(|| {
+                        div()
+                            .flex_none()
                             .text_xs()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.foreground)
-                            .child(activity.title.clone()),
-                    ),
+                            .text_color(theme.muted_foreground)
+                            .child(if activity.is_expanded { "⌄" } else { "›" })
+                    })),
             )
+            .children(activity.is_expanded.then(|| {
+                div()
+                    .ml(px(26.0))
+                    .mt_1()
+                    .p_2()
+                    .max_h(px(240.0))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.title_bar)
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .overflow_y_scrollbar()
+                    .child(activity.detail.clone())
+            }))
+    }
+
+    fn render_activity_group(
+        &mut self,
+        activities: &[ToolActivityInfo],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        const RECENT_ACTIVITY_LIMIT: usize = 4;
+
+        let theme = cx.theme().colors;
+        let group_id = activities
+            .first()
+            .map(|activity| activity.id.clone())
+            .unwrap_or_else(|| "empty".into());
+        let is_expanded = self.expanded_activity_groups.contains(&group_id);
+        let hidden_count = activities.len().saturating_sub(RECENT_ACTIVITY_LIMIT);
+        let visible_start = if is_expanded { 0 } else { hidden_count };
+        let activity_rows = activities[visible_start..]
+            .iter()
+            .map(|activity| self.render_tool_activity(activity, cx))
+            .collect::<Vec<_>>();
+        let button_group_id = group_id.clone();
+
+        div()
+            .w_full()
+            .min_w_0()
+            .flex_none()
+            .my_1()
+            .px_4()
             .child(
                 div()
                     .w_full()
                     .min_w_0()
-                    .mt_1()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(activity.detail.clone()),
+                    .max_w(px(720.0))
+                    .flex()
+                    .flex_col()
+                    .children((hidden_count > 0).then(|| {
+                        Button::new(SharedString::from(format!("activity-group-{group_id}")))
+                            .xsmall()
+                            .ghost()
+                            .justify_start()
+                            .text_color(theme.muted_foreground)
+                            .label(if is_expanded {
+                                "Collapse earlier activities".to_string()
+                            } else {
+                                format!("{hidden_count} earlier activities")
+                            })
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                if !this.expanded_activity_groups.remove(&button_group_id) {
+                                    this.expanded_activity_groups
+                                        .insert(button_group_id.clone());
+                                }
+                                cx.notify();
+                            }))
+                    }))
+                    .children(activity_rows),
             )
+            .into_any_element()
+    }
+
+    fn render_transcript_rows(
+        &mut self,
+        messages: &[ChatMessageInfo],
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let mut rows = Vec::new();
+        let mut index = 0;
+        while index < messages.len() {
+            let message = &messages[index];
+            let is_activity_only = message.role == MessageRole::Assistant
+                && message.content.is_empty()
+                && message
+                    .tool_activities
+                    .iter()
+                    .any(|activity| activity.title != "update_plan");
+            if !is_activity_only {
+                rows.push(self.render_message(message, cx));
+                index += 1;
+                continue;
+            }
+
+            let mut activities = Vec::new();
+            while index < messages.len() {
+                let candidate = &messages[index];
+                let candidate_is_activity_only = candidate.role == MessageRole::Assistant
+                    && candidate.content.is_empty()
+                    && candidate
+                        .tool_activities
+                        .iter()
+                        .any(|activity| activity.title != "update_plan");
+                if !candidate_is_activity_only {
+                    break;
+                }
+                activities.extend(
+                    candidate
+                        .tool_activities
+                        .iter()
+                        .filter(|activity| activity.title != "update_plan")
+                        .cloned(),
+                );
+                index += 1;
+            }
+            rows.push(self.render_activity_group(&activities, cx));
+        }
+        rows
     }
 
     fn render_message(&mut self, msg: &ChatMessageInfo, cx: &mut Context<Self>) -> AnyElement {
@@ -263,6 +521,7 @@ impl ChatListView {
                 let tool_elements: Vec<_> = msg
                     .tool_activities
                     .iter()
+                    .filter(|tool| tool.title != "update_plan")
                     .map(|tool| self.render_tool_activity(tool, cx))
                     .collect();
 
@@ -713,11 +972,16 @@ impl ChatListView {
 
 impl Render for ChatListView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (messages, is_new_task) = {
+        let (messages, is_new_task, active_plan) = {
             let state = self.model.read(cx);
-            (state.messages.clone(), state.is_new_task)
+            (
+                state.messages.clone(),
+                state.is_new_task,
+                state.active_plan.clone(),
+            )
         };
         let theme = cx.theme().colors;
+        let transcript_rows = self.render_transcript_rows(&messages, cx);
 
         div()
             .flex()
@@ -754,9 +1018,10 @@ impl Render for ChatListView {
                     .overflow_y_scrollbar()
                     .pt_3()
                     .pb_6()
-                    .children(messages.iter().map(|m| self.render_message(m, cx)))
+                    .children(transcript_rows)
                     .into_any_element()
             })
+            .children(self.render_plan_tracker(&active_plan, cx))
             .child(self.render_composer(cx))
     }
 }

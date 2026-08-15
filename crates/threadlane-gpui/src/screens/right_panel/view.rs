@@ -174,8 +174,8 @@ impl RightPanelView {
                 let _ = tx.send(PanelEvent::FilesLoaded { project, entries });
             }
             Surface::Review => {
-                let (files, error) = match threadlane_git::inspect(&project) {
-                    Ok(status) => (status.files, None),
+                let (files, error) = match threadlane_git::inspect_files(&project) {
+                    Ok(files) => (files, None),
                     Err(error) => (Vec::new(), Some(error.to_string())),
                 };
                 let _ = tx.send(PanelEvent::ReviewLoaded {

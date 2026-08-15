@@ -4,6 +4,9 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::dialog::{
+    Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+};
 use gpui_component::input::{Input, InputState};
 use gpui_component::spinner::Spinner;
 use gpui_component::switch::Switch;
@@ -98,10 +101,12 @@ impl WorkspaceView {
                     .await;
                 let git_events = git_event_rx.try_iter().collect::<Vec<_>>();
                 let updater_events = updater_rx.try_iter().collect::<Vec<_>>();
-                if git_events.is_empty() && updater_events.is_empty() {
-                    continue;
-                }
                 let _ = this.update(cx, |this, cx| {
+                    this.model.update(cx, |state, cx| {
+                        if state.apply_session_refreshes() {
+                            cx.notify();
+                        }
+                    });
                     for event in git_events {
                         this.apply_git_event(event, cx);
                     }
@@ -420,29 +425,17 @@ impl WorkspaceView {
             && status.is_some_and(|status| status.ahead > 0);
         let toggle_view = cx.entity().downgrade();
 
-        div()
-            .absolute()
-            .top_0()
-            .right_0()
-            .bottom_0()
-            .left_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgba(0x00000099))
+        Dialog::new(cx)
+            .w(px(440.0))
+            .overlay(true)
+            .overlay_closable(false)
+            .close_button(false)
             .child(
                 div()
-                    .w(px(440.0))
-                    .rounded_xl()
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.background)
-                    .shadow_lg()
-                    .overflow_hidden()
                     .flex()
                     .flex_col()
                     .child(
-                        div()
+                        DialogHeader::new()
                             .px_5()
                             .pt_5()
                             .pb_4()
@@ -467,13 +460,13 @@ impl WorkspaceView {
                                     .flex_col()
                                     .gap_1()
                                     .child(
-                                        div()
+                                        DialogTitle::new()
                                             .text_lg()
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .child("Commit changes"),
                                     )
                                     .child(
-                                        div()
+                                        DialogDescription::new()
                                             .text_xs()
                                             .text_color(theme.muted_foreground)
                                             .child(format!("On branch {branch}")),
@@ -538,7 +531,7 @@ impl WorkspaceView {
                             ),
                     )
                     .child(
-                        div()
+                        DialogContent::new()
                             .px_5()
                             .pb_5()
                             .flex()
@@ -558,7 +551,9 @@ impl WorkspaceView {
                                     .child(
                                         Button::new("git-generate-message")
                                             .when(self.git_message_pending, |button| {
-                                                button.child(Spinner::new().xsmall()).label("Generating…")
+                                                button
+                                                    .child(Spinner::new().xsmall())
+                                                    .label("Generating…")
                                             })
                                             .when(!self.git_message_pending, |button| {
                                                 button.label("Generate")
@@ -625,7 +620,7 @@ impl WorkspaceView {
                             })),
                     )
                     .child(
-                        div()
+                        DialogFooter::new()
                             .border_t_1()
                             .border_color(theme.border)
                             .bg(theme.title_bar)

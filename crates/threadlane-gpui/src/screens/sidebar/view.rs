@@ -6,7 +6,6 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::separator::Separator;
-use gpui_component::spinner::Spinner;
 use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::theme::ActiveTheme;
 use gpui_component::{IconName, Sizable};
@@ -184,7 +183,26 @@ impl SidebarView {
     ) -> impl IntoElement {
         let theme = cx.theme().colors;
         let status_indicator: Option<AnyElement> = match session.health {
-            SessionHealth::Working => Some(Spinner::new().xsmall().into_any_element()),
+            SessionHealth::Working => Some(
+                div()
+                    .size(px(14.0))
+                    .flex_none()
+                    .grid()
+                    .grid_cols(2)
+                    .gap(px(2.0))
+                    .p(px(2.0))
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(theme.primary)
+                    .children((0..4).map(|index| {
+                        div().size(px(3.0)).rounded_full().bg(if index == 3 {
+                            theme.primary
+                        } else {
+                            theme.muted_foreground
+                        })
+                    }))
+                    .into_any_element(),
+            ),
             SessionHealth::Warning => Some(
                 Tag::new()
                     .child("!")
@@ -368,6 +386,12 @@ impl SidebarView {
             .projects
             .iter()
             .flat_map(|project| project.sessions.iter().cloned())
+            .map(|mut session| {
+                if state.session_is_generating(&session.session_file) {
+                    session.health = SessionHealth::Working;
+                }
+                session
+            })
             .filter(|session| {
                 query.is_empty()
                     || session.title.to_lowercase().contains(&query)

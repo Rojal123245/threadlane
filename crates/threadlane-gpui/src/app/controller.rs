@@ -44,6 +44,7 @@ pub fn dispatch(state: &mut AppState, action: AppAction) {
             let _ = state.steer_pending_message();
         }
         AppAction::DismissPendingMessage => state.dismiss_pending_message(),
+        AppAction::ToggleToolActivity(tool_call_id) => state.toggle_tool_activity(&tool_call_id),
         AppAction::CancelGeneration => {
             let _ = state.cancel_generation();
         }
