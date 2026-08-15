@@ -18,7 +18,7 @@ cargo build --locked --release --bin threadlane-gpui
 rm -rf "$app" "$archive" "$dmg"
 mkdir -p "$contents/MacOS" "$contents/Resources" "$iconset"
 install -m755 "$target_dir/release/threadlane-gpui" "$contents/MacOS/threadlane"
-cp packaging/Info-gpui.plist "$contents/Info.plist"
+cp packaging/Info.plist "$contents/Info.plist"
 plutil -replace CFBundleExecutable -string threadlane "$contents/Info.plist"
 plutil -replace CFBundleShortVersionString -string "$version" "$contents/Info.plist"
 plutil -replace CFBundleVersion -string "$version" "$contents/Info.plist"

@@ -1018,13 +1018,13 @@ mod tests {
         assert!(initial_read.contains("No persistent memory found"));
 
         let payload =
-            json!({"content": "## Architectural Decision\nUse Makepad with threadlane state."})
+            json!({"content": "## Architectural Decision\nUse GPUI with threadlane state."})
                 .to_string();
         let save_res = execute_tool_in_workspace("save_memory", &payload, root);
         assert!(save_res.contains("Successfully saved memory"));
 
         let read_res = execute_tool_in_workspace("read_memory", "{}", root);
-        assert!(read_res.contains("Use Makepad with threadlane state."));
+        assert!(read_res.contains("Use GPUI with threadlane state."));
     }
 
     #[test]
@@ -1117,7 +1117,7 @@ mod tests {
 
         let consolidate_payload = json!({
             "action": "consolidate",
-            "architecture": ["Use Makepad UI components"],
+            "architecture": ["Use GPUI UI components"],
             "gotchas": ["cargo check requires unsandboxed bypass on macOS"],
             "verification": ["cargo test --workspace"]
         })
@@ -1128,7 +1128,7 @@ mod tests {
 
         let mem_content = execute_tool_in_workspace("manage_memory", &read_payload, root);
         assert!(mem_content.contains("## Architecture"));
-        assert!(mem_content.contains("Use Makepad UI components"));
+        assert!(mem_content.contains("Use GPUI UI components"));
         assert!(mem_content.contains("## Gotchas"));
         assert!(mem_content.contains("cargo check requires unsandboxed bypass on macOS"));
         assert!(mem_content.contains("## Verification Commands"));

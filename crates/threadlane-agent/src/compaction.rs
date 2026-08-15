@@ -357,7 +357,7 @@ fn extract_session_insights(messages: &[AgentMessage]) -> (Vec<String>, Vec<Stri
                         }
                     }
                     if content.contains("cargo check") && !content.contains("error:") {
-                        let line = "cargo check -p threadlane";
+                        let line = "cargo check -p threadlane-gpui";
                         if !verification.contains(&line.to_string()) {
                             verification.push(line.to_string());
                         }
@@ -376,8 +376,8 @@ fn extract_session_insights(messages: &[AgentMessage]) -> (Vec<String>, Vec<Stri
             AgentMessage::Assistant {
                 content: Some(text),
                 ..
-            } if text.contains("Makepad") && text.contains("theme") => {
-                let line = "UI components in crates/threadlane/src must reference theme tokens from crates/threadlane/src/theme/mod.rs.";
+            } if text.contains("GPUI") && text.contains("component") => {
+                let line = "UI components in crates/threadlane-gpui/src must use GPUI components.";
                 if !architecture.contains(&line.to_string()) {
                     architecture.push(line.to_string());
                 }
@@ -462,7 +462,7 @@ mod tests {
                 terminate: false,
             },
             AgentMessage::Assistant {
-                content: Some("Makepad theme tokens must be used.".into()),
+                content: Some("GPUI component guidelines must be followed.".into()),
                 tool_calls: None,
                 stop_reason: None,
                 deferred_handle: None,

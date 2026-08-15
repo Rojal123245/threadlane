@@ -3,20 +3,20 @@
 </h1>
 
 <p align="center">
-  A fast, native AI coding workspace built in Rust with Makepad.
+  A fast, native AI coding workspace built in Rust with GPUI.
 </p>
 
 <p align="center">
   <a href="https://github.com/wheregmis/threadlane/actions/workflows/release.yml"><img alt="macOS release workflow" src="https://github.com/wheregmis/threadlane/actions/workflows/release.yml/badge.svg"></a>
   <a href="https://github.com/wheregmis/threadlane/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/wheregmis/threadlane?display_name=tag&sort=semver"></a>
   <img alt="Rust 2021" src="https://img.shields.io/badge/Rust-2021-d65d0e?logo=rust&logoColor=white">
-  <img alt="Makepad UI" src="https://img.shields.io/badge/UI-Makepad-6f8cff">
+  <img alt="GPUI" src="https://img.shields.io/badge/UI-GPUI-6f8cff">
   <a href="#license"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-3da639"></a>
 </p>
 
 Threadlane combines a GPU-accelerated desktop interface with a capable coding-agent runtime. It keeps projects, sessions, tools, skills, background agents, and model output in one focused native application—without requiring a browser-based editor shell.
 
-> **Release status:** automated release artifacts target Apple Silicon macOS and Ubuntu 24.04 x86_64 (`.deb`). The Rust workspace can be built from source on other hosts supported by its Makepad and native dependency stack.
+> **Release status:** automated release artifacts target Apple Silicon macOS and Ubuntu 24.04 x86_64 (`.deb`). The Rust workspace can be built from source on other hosts supported by its GPUI and native dependency stack.
 
 <p align="center">
   <a href="docs/images/threadlane-workspace.png">
@@ -28,7 +28,7 @@ Threadlane combines a GPU-accelerated desktop interface with a capable coding-ag
 
 ## Why Threadlane?
 
-- **Native and responsive** — a Rust and Makepad interface designed for low-latency streaming and interaction.
+- **Native and responsive** — a Rust and GPUI interface designed for low-latency streaming and interaction.
 - **Workspace-aware** — attach multiple projects, preserve project-local sessions, and switch without losing drafts.
 - **Agentic by design** — inspect code, edit files, search repositories, execute commands, and delegate work to subagents.
 - **Extensible** — discover skills, prompts, agent presets, and sandboxed WASI extensions from project and user scopes.
@@ -39,7 +39,7 @@ Threadlane combines a GPU-accelerated desktop interface with a capable coding-ag
 
 | Capability | What it provides |
 | --- | --- |
-| Native Makepad UI | Streaming chat, Markdown, tool activity, reasoning states, image attachments, keyboard-first controls, and custom GPU shaders. |
+| Native GPUI Desktop UI | Streaming chat, Markdown, tool activity, reasoning states, image attachments, keyboard-first controls, and native terminal integration. |
 | Multi-project workspace | Attached-project registry, project switching, isolated drafts, persistent sessions, archive/delete actions, and automatic titles. |
 | Coding tools | Workspace-scoped file reading and writing, directory inspection, pattern search, and bounded command execution. |
 | Skills and commands | Global and project-local skill discovery with searchable slash-command completion. |
@@ -47,7 +47,7 @@ Threadlane combines a GPU-accelerated desktop interface with a capable coding-ag
 | Session trees | Fork, clone, navigate, persist, and compact branching conversation history. |
 | Provider integration | OpenAI-compatible streaming, Codex-oriented models, reasoning controls, device authorization, and credential persistence. |
 | WASI extensions | Sandboxed Wasm modules using the `threadlane_host` capability broker. |
-| Code editor | Open workspace files from the file tree in an embedded Makepad code editor with syntax highlighting and save. |
+| File viewer | Open workspace text files from the file tree in a selectable, read-only viewer. |
 | ACP agents | Configure external Agent Client Protocol agents per project or globally, and check that each one launches and handshakes. |
 | Signed updater | Background update checks, verified downloads, progress UI, and packaged-app installation/relaunch. |
 
@@ -93,7 +93,7 @@ cd threadlane
 ./scripts/build_extensions.sh
 
 # Start the native desktop app.
-cargo run -p threadlane
+cargo run -p threadlane-gpui
 
 # Start the interactive Ratatui TUI in your terminal
 cargo run -p threadlane-cli
@@ -110,18 +110,6 @@ threadlane -p "Summarize git diff"
 
 On first launch, use the in-app authorization flow or provide credentials through the supported provider configuration. Threadlane persists device-flow credentials under `~/.threadlane/auth.json`.
 
-### Code editor
-
-Selecting a file in the workspace file tree opens it in an embedded code editor
-in the right panel, backed by the same `makepad-code-editor` widget Makepad
-Studio uses. The header shows the workspace-relative path, marks unsaved changes
-with a dot, and offers save and close; the editor tab appears in the right
-sidebar's tab strip once a file is open.
-
-Directories, non-UTF-8 files, and files over 2 MB are refused with a message
-rather than opened, so a stray click on a build artifact cannot stall the UI.
-Saving writes the buffer back to the file and refreshes the Git panel.
-
 ### Structured logging
 
 Threadlane uses the [`log`](https://crates.io/crates/log) crate with
@@ -131,22 +119,19 @@ set `RUST_LOG` to control verbosity at runtime.
 
 ```bash
 # Default (info-level lifecycle events).
-cargo run -p threadlane
+cargo run -p threadlane-gpui
 
 # Debug-level: harness event dispatch, revision bumps, chat row rebuilds.
-RUST_LOG=threadlane=debug cargo run -p threadlane
+RUST_LOG=threadlane_gpui=debug cargo run -p threadlane-gpui
 
 # Combined debug & trace: app debug with core agent execution loop tracing.
-RUST_LOG=threadlane=debug,threadlane_agent=trace cargo run -p threadlane
+RUST_LOG=threadlane_gpui=debug,threadlane_agent=trace cargo run -p threadlane-gpui
 
 # Trace-level: every record, per-event lane/run_id, pre/post activity counts.
-RUST_LOG=threadlane=trace cargo run -p threadlane
-
-# Focus on the app shell only.
-RUST_LOG=threadlane::app=debug cargo run -p threadlane
+RUST_LOG=threadlane_gpui=trace cargo run -p threadlane-gpui
 
 # Focus on agent runtime (subagent lifecycle, harness starts).
-RUST_LOG=threadlane_coding_agent=debug cargo run -p threadlane
+RUST_LOG=threadlane_coding_agent=debug cargo run -p threadlane-gpui
 ```
 
 | Level | What you'll see |
@@ -206,7 +191,7 @@ Treat these directories as user data. Back them up before manually migrating or 
 
 | Crate | Responsibility |
 | --- | --- |
-| [`threadlane`](crates/threadlane) | Makepad desktop application, chat UI, composer, projects, sessions, updater, and application event loop. |
+| [`threadlane-gpui`](crates/threadlane-gpui) | GPUI desktop application, chat UI, composer, projects, sessions, updater, and application event loop. |
 | [`threadlane-cli`](crates/threadlane-cli) | Headless CLI & Ratatui TUI binary (`threadlane`). |
 | [`threadlane-auth`](crates/threadlane-auth) | Trait-based authentication (`AuthProvider`), device flow, and token storage. |
 | [`threadlane-coding-agent`](crates/threadlane-coding-agent) | Coding-agent orchestration, project context, skills, prompts, subagents, and WASI extension hosting. |
@@ -222,14 +207,14 @@ Treat these directories as user data. Back them up before manually migrating or 
 The desktop application is further organized by responsibility:
 
 ```text
-crates/threadlane/src/
-├── app/             # App shell, startup, actions, async event polling
-├── components/      # Reusable native Makepad components
-├── panels/chat/     # Chat, generation, composer, and message presentation
-├── panels/sessions/ # Project/session sidebar and persistence
-├── state.rs         # Shared application and session state
-├── updater.rs       # Signed update lifecycle
-└── workspace.rs     # Workspace-local state
+crates/threadlane-gpui/src/
+├── app/         # App startup, actions, and event handling
+├── components/  # Reusable GPUI components
+├── screens/     # Chat, sidebar, workspace, settings, terminal, and file views
+├── services/    # Chat, project, session, authentication, settings, and updater logic
+├── state/       # Shared application and session state
+├── persistence/ # Project registry persistence
+└── adapters/    # Agent event translation
 ```
 
 ## Extensions and Skills
@@ -349,16 +334,12 @@ grants a connected agent workspace-scoped file access only: reads and writes
 that resolve outside the project root are refused. Tool-permission requests are
 declined unless a handler is configured to answer them.
 
-## Development
-
-Run commands from the repository root.
-
 ```bash
 # Fast desktop-app validation
-cargo check -p threadlane
+cargo check -p threadlane-gpui
 
 # Focused updater tests
-cargo test -p threadlane updater::tests
+cargo test -p threadlane-updater
 
 # Full workspace test suite
 cargo test --workspace
@@ -367,10 +348,10 @@ cargo test --workspace
 git diff --check
 
 # Run the desktop app
-cargo run -p threadlane
+cargo run -p threadlane-gpui
 ```
 
-For repository-specific coding and Makepad conventions, see [`AGENTS.md`](AGENTS.md). The UI reference and Splash/Makepad notes are in [`Makepad.md`](Makepad.md).
+For repository-specific coding conventions, see [`AGENTS.md`](AGENTS.md).
 
 ## Packaging and Releases
 
@@ -389,11 +370,11 @@ Build extensions, compile the release binary, and package the application:
 
 ```bash
 ./scripts/build_extensions.sh
-cargo build --release --bin threadlane
-cargo packager --release --manifest-path crates/threadlane/Cargo.toml
+cargo build --release --bin threadlane-gpui
+cargo packager --release --manifest-path crates/threadlane-gpui/Cargo.toml
 ```
 
-Generated packages are placed in `crates/threadlane/dist/`.
+Generated packages are placed in `target/release/`.
 
 ### Signed Application Updates
 
@@ -529,21 +510,6 @@ Only bypass quarantine for an artifact you trust. The release workflow verifies 
 
 ## Performance Measurement
 
-UI frame timing is opt-in:
-
-```bash
-THREADLANE_PERF=1 cargo run --release -p threadlane
-```
-
-Every five seconds the app prints a summary of how long its event passes take:
-
-```text
-[perf] frames=431 jank=12 (2.8%) p50=3.6ms p95=8.1ms p99=29.7ms max=31.2ms (over 200 samples)
-```
-
-`jank` counts passes over the 16.7ms budget for 60fps. Measure a release build;
-debug figures are much slower and not representative.
-
 Backend hot paths have measurement harnesses, kept out of normal test runs:
 
 ```bash
@@ -562,8 +528,7 @@ cargo test -p threadlane-agent --test perf_baseline -- --ignored --nocapture
 ## Documentation
 
 - [`AGENTS.md`](AGENTS.md) — repository conventions for coding agents and contributors.
-- [`Makepad.md`](Makepad.md) — Makepad and Splash DSL reference notes.
-- [`crates/threadlane/README.md`](crates/threadlane/README.md) — desktop application overview.
+- [`crates/threadlane-gpui/README.md`](crates/threadlane-gpui/README.md) — GPUI desktop application overview.
 - [`crates/threadlane-agent/README.md`](crates/threadlane-agent/README.md) — core agent runtime.
 - [`crates/threadlane-coding-agent/README.md`](crates/threadlane-coding-agent/README.md) — coding-agent harness and extensions.
 - [`crates/threadlane-provider/README.md`](crates/threadlane-provider/README.md) — provider and authentication layer.
@@ -575,9 +540,9 @@ Focused contributions are welcome. Before opening a pull request:
 
 1. Keep changes scoped and consistent with existing architecture.
 2. Add or update tests for behavior changes.
-3. Run the narrowest relevant checks, followed by `cargo check -p threadlane` and `git diff --check` for desktop UI changes.
+3. Run the narrowest relevant checks, followed by `cargo check -p threadlane-gpui` and `git diff --check` for desktop UI changes.
 4. Run `cargo test --workspace` when the change affects shared crates or runtime behavior.
-5. Document new workflows, limitations, or durable Makepad lessons in `README.md` or `AGENTS.md` as appropriate.
+5. Document new workflows, limitations, or durable lessons in `README.md` or `AGENTS.md` as appropriate.
 
 ## License
 
