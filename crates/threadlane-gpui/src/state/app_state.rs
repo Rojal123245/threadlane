@@ -665,6 +665,7 @@ impl AppState {
         self.active_session_id = None;
         self.is_new_task = true;
         self.messages.clear();
+        self.is_generating = false;
         self.session_status = None;
         if self.active_work_dir.is_none() {
             self.active_work_dir = self
@@ -684,6 +685,7 @@ impl AppState {
             self.active_session_id = None;
             self.is_new_task = true;
             self.messages.clear();
+            self.is_generating = false;
             self.session_status = None;
         }
     }
@@ -797,6 +799,8 @@ impl AppState {
         self.active_session_id = None;
         self.is_new_task = true;
         self.messages.clear();
+        self.is_generating = false;
+        self.session_status = None;
         let next_session = self
             .projects
             .iter()
@@ -860,6 +864,7 @@ impl AppState {
         self.active_session_id = None;
         self.is_new_task = true;
         self.messages.clear();
+        self.is_generating = false;
         self.session_status = None;
         Ok(())
     }
