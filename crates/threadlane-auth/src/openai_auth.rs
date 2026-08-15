@@ -22,7 +22,7 @@ extern "system" {
     fn MoveFileExW(existing_file_name: *const u16, new_file_name: *const u16, flags: u32) -> i32;
 }
 
-const CLIENT_ID: &str = "app-8Nl2J3k7mP0xQ1vR";
+const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 
 fn deserialize_string_or_number<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
@@ -103,6 +103,12 @@ pub struct OAuthTokens {
     pub id_token: Option<String>,
     #[serde(default)]
     pub account_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeviceAuthorizationCode {
+    authorization_code: String,
+    code_verifier: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -351,7 +357,7 @@ pub async fn poll_device_token(
     user_code: &str,
 ) -> Result<OAuthTokens, String> {
     let tokens = poll_device_token_without_saving(device_auth_id, user_code).await?;
-    let _ = save_credentials(&tokens);
+    save_credentials(&tokens)?;
     Ok(tokens)
 }
 
@@ -363,7 +369,6 @@ pub async fn poll_device_token_without_saving(
     let res = client
         .post("https://auth.openai.com/api/accounts/deviceauth/token")
         .json(&serde_json::json!({
-            "client_id": CLIENT_ID,
             "device_auth_id": device_auth_id,
             "user_code": user_code
         }))
@@ -371,10 +376,18 @@ pub async fn poll_device_token_without_saving(
         .await
         .map_err(|e| format!("Error polling device token: {e}"))?;
 
+    let status = res.status();
     let body = res.text().await.unwrap_or_default();
 
-    if body.contains("deviceauth_authorization_pending") || body.contains("authorization_pending") {
+    if status == reqwest::StatusCode::FORBIDDEN
+        || status == reqwest::StatusCode::NOT_FOUND
+        || body.contains("deviceauth_authorization_pending")
+        || body.contains("authorization_pending")
+    {
         return Err("authorization_pending".to_string());
+    }
+    if !status.is_success() {
+        return Err(format!("Device login failed ({status})"));
     }
 
     let val: Value = crate::parse_oauth_response(&body)?;
@@ -399,34 +412,61 @@ pub async fn poll_device_token_without_saving(
         return Ok(tokens);
     }
 
-    let code_opt = val
-        .get("authorization_code")
-        .or_else(|| val.get("code"))
-        .and_then(|v| v.as_str());
-
-    if let Some(code) = code_opt {
-        return exchange_authorization_code_without_saving(code).await;
+    if val.get("authorization_code").is_some() {
+        let code: DeviceAuthorizationCode = serde_json::from_value(val).map_err(|_| {
+            "OAuth provider returned an incomplete device code response".to_string()
+        })?;
+        return exchange_authorization_code_without_saving(
+            &code.authorization_code,
+            &code.code_verifier,
+        )
+        .await;
     }
 
     Err("Unexpected OAuth token response".into())
 }
 
-async fn exchange_authorization_code_without_saving(code: &str) -> Result<OAuthTokens, String> {
+fn token_exchange_body(code: &str, code_verifier: &str) -> String {
+    url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("grant_type", "authorization_code")
+        .append_pair("code", code)
+        .append_pair(
+            "redirect_uri",
+            "https://auth.openai.com/deviceauth/callback",
+        )
+        .append_pair("client_id", CLIENT_ID)
+        .append_pair("code_verifier", code_verifier)
+        .finish()
+}
+
+async fn exchange_authorization_code_without_saving(
+    code: &str,
+    code_verifier: &str,
+) -> Result<OAuthTokens, String> {
     let client = reqwest::Client::new();
     let res = client
         .post("https://auth.openai.com/oauth/token")
-        .json(&serde_json::json!({
-            "grant_type": "authorization_code",
-            "client_id": CLIENT_ID,
-            "code": code,
-            "redirect_uri": "https://auth.openai.com/device"
-        }))
+        .header(
+            reqwest::header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded",
+        )
+        .body(token_exchange_body(code, code_verifier))
         .send()
         .await
         .map_err(|e| format!("Error exchanging code for OAuth token: {e}"))?;
 
+    let status = res.status();
     let body = res.text().await.unwrap_or_default();
     let val: Value = crate::parse_oauth_response(&body)?;
+
+    if !status.is_success() {
+        let reason = val
+            .get("error_description")
+            .or_else(|| val.get("error"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown error");
+        return Err(format!("Code exchange failed ({status}): {reason}"));
+    }
 
     if let Some(access_token) = val.get("access_token").and_then(|v| v.as_str()) {
         let tokens = OAuthTokens {
@@ -548,6 +588,43 @@ mod tests {
             resp.verification_uri,
             "https://auth.openai.com/codex/device"
         );
+    }
+
+    #[test]
+    fn test_uses_current_codex_oauth_client() {
+        assert_eq!(CLIENT_ID, "app_EMoamEEZ73f0CkXaXp7hrann");
+    }
+
+    #[test]
+    fn test_device_authorization_code_includes_pkce_verifier() {
+        let response: DeviceAuthorizationCode = serde_json::from_str(
+            r#"{
+                "authorization_code": "authorization-secret",
+                "code_challenge": "challenge",
+                "code_verifier": "verifier-secret"
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(response.authorization_code, "authorization-secret");
+        assert_eq!(response.code_verifier, "verifier-secret");
+    }
+
+    #[test]
+    fn test_token_exchange_body_uses_device_callback_and_pkce() {
+        let body = token_exchange_body("code with spaces", "verifier+/=");
+        let params = url::form_urlencoded::parse(body.as_bytes())
+            .into_owned()
+            .collect::<std::collections::HashMap<_, _>>();
+
+        assert_eq!(params.get("grant_type").unwrap(), "authorization_code");
+        assert_eq!(params.get("code").unwrap(), "code with spaces");
+        assert_eq!(
+            params.get("redirect_uri").unwrap(),
+            "https://auth.openai.com/deviceauth/callback"
+        );
+        assert_eq!(params.get("client_id").unwrap(), CLIENT_ID);
+        assert_eq!(params.get("code_verifier").unwrap(), "verifier+/=");
     }
 
     #[test]

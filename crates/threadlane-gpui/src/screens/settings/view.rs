@@ -8,6 +8,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::switch::Switch;
+use gpui_component::text::TextView;
 use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable};
 
 use crate::app::{actions::AppAction, controller};
@@ -661,7 +662,7 @@ impl SettingsView {
                     .p_3()
                     .text_xs()
                     .text_color(theme.foreground)
-                    .child(status)
+                    .child(TextView::markdown("provider-auth-status", status).selectable(true))
             }))
             .child(self.render_provider_connection(
                 "OpenAI / ChatGPT",
