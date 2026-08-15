@@ -47,8 +47,7 @@ pub fn start_chatgpt_login(tx: Sender<ProviderAuthEvent>) -> Result<(), String> 
                             ));
                             break;
                         }
-                        Err(error)
-                            if error == "authorization_pending" || error.contains("pending") => {}
+                        Err(error) if error == "authorization_pending" => {}
                         Err(error) => {
                             let _ = tx.send(ProviderAuthEvent::Error(format!(
                                 "ChatGPT sign-in failed: {error}"

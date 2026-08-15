@@ -4391,12 +4391,7 @@ impl MatchEvent for App {
                                         SignalToUI::set_ui_signal();
                                         break;
                                     }
-                                    Err(e)
-                                        if e == "authorization_pending"
-                                            || e.contains("pending") =>
-                                    {
-                                        continue
-                                    }
+                                    Err(e) if e == "authorization_pending" => continue,
                                     Err(e) => {
                                         let _ = tx.send(GuiAgentEvent::DeviceLoginError(e));
                                         SignalToUI::set_ui_signal();
