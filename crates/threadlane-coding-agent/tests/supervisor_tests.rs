@@ -28,6 +28,8 @@ async fn test_supervisor_multi_task_isolation() {
         work_dir: proj1_dir.path().to_path_buf(),
         session_file: None,
         system_prompt: Default::default(),
+        agent_config: None,
+        coding_config: None,
     };
 
     let opts2 = CodingAgentOptions {
@@ -37,6 +39,8 @@ async fn test_supervisor_multi_task_isolation() {
         work_dir: proj2_dir.path().to_path_buf(),
         session_file: None,
         system_prompt: Default::default(),
+        agent_config: None,
+        coding_config: None,
     };
 
     let task1_id = supervisor.create_task(&proj1.id, None, opts1).unwrap();
@@ -73,6 +77,8 @@ async fn test_supervisor_submit_updates_status_and_forwards_events() {
                 work_dir: project_dir.path().to_path_buf(),
                 session_file: None,
                 system_prompt: Default::default(),
+                agent_config: None,
+                coding_config: None,
             },
         )
         .unwrap();
@@ -225,6 +231,8 @@ async fn existing_coding_agent_reload_observes_replaced_extension_command() {
         work_dir: project.path().to_path_buf(),
         session_file: None,
         system_prompt: Default::default(),
+        agent_config: None,
+        coding_config: None,
     });
     let initial = agent
         .wasi_extensions

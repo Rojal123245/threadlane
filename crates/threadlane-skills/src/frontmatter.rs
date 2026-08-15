@@ -12,6 +12,24 @@ impl ParsedFrontmatter {
     pub fn get(&self, key: &str) -> Option<&str> {
         self.metadata.get(key).map(|s| s.as_str())
     }
+
+    pub fn get_str(&self, key: &str) -> Option<&str> {
+        self.get(key).filter(|s| !s.trim().is_empty())
+    }
+
+    pub fn get_string_list(&self, key: &str) -> Option<Vec<String>> {
+        let val = self.get(key)?;
+        let items: Vec<String> = val
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if items.is_empty() {
+            None
+        } else {
+            Some(items)
+        }
+    }
 }
 
 /// Parse frontmatter (delimited by `---`) and body from markdown content.

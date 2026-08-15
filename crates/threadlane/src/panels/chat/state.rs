@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
-use threadlane_agent::{AgentEvent, AgentMessage, OpOutcome, OpRecord, SubagentRecoveryStatus};
+use threadlane_agent::{AgentEvent, AgentMessage};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum MsgRole {
@@ -81,6 +81,7 @@ pub enum HarnessActivityStatus {
     Retrying,
     Aborted,
     Cancelled,
+    Faulted,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,91 +91,6 @@ pub struct HarnessActivity {
     pub agent: String,
     pub status: HarnessActivityStatus,
     pub detail: String,
-}
-
-pub fn harness_activities_from_oplog(records: &[OpRecord]) -> Vec<HarnessActivity> {
-    #[derive(Clone)]
-    struct Restored {
-        key: String,
-        task: String,
-        agent: String,
-        status: HarnessActivityStatus,
-        detail: String,
-        latest_seq: u64,
-    }
-
-    let mut starts = HashMap::<String, Restored>::new();
-    let mut ordered = records.iter().enumerate().collect::<Vec<_>>();
-    ordered.sort_by_key(|(index, record)| (record.seq(), *index));
-
-    for (_, record) in ordered {
-        match record {
-            OpRecord::OperationStarted { id, kind, seq, .. } if kind == "subagent" => {
-                starts.insert(
-                    id.clone(),
-                    Restored {
-                        key: id.clone(),
-                        task: String::new(),
-                        agent: "subagent".into(),
-                        status: HarnessActivityStatus::Working,
-                        detail: "Restored from session history".into(),
-                        latest_seq: *seq,
-                    },
-                );
-            }
-            OpRecord::TaskAttempt {
-                run_id, task, seq, ..
-            } => {
-                if let Some(restored) = starts.get_mut(run_id) {
-                    restored.task = task.clone();
-                    restored.latest_seq = *seq;
-                }
-            }
-            OpRecord::OperationFinished {
-                run_id,
-                outcome,
-                error,
-                seq,
-                ..
-            } => {
-                if let Some(restored) = starts.get_mut(run_id) {
-                    let (status, fallback) = match outcome {
-                        OpOutcome::Completed => {
-                            (HarnessActivityStatus::Recovered, "Completed")
-                        }
-                        OpOutcome::Aborted => (HarnessActivityStatus::Cancelled, "Cancelled"),
-                        OpOutcome::Failed | OpOutcome::Declined => {
-                            (HarnessActivityStatus::Aborted, "Aborted")
-                        }
-                    };
-                    restored.status = status;
-                    restored.detail = error.clone().unwrap_or_else(|| fallback.into());
-                    restored.latest_seq = *seq;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let mut activities = starts
-        .into_values()
-        .filter(|restored| !restored.task.trim().is_empty())
-        .map(|restored| {
-            (
-                restored.latest_seq,
-                HarnessActivity {
-                    key: restored.key,
-                    task: restored.task,
-                    agent: restored.agent,
-                    status: restored.status,
-                    detail: restored.detail,
-                },
-            )
-        })
-        .collect::<Vec<_>>();
-    activities.sort_by(|left, right| right.0.cmp(&left.0));
-    activities.truncate(20);
-    activities.into_iter().map(|(_, activity)| activity).collect()
 }
 
 pub fn reduce_harness_activity(activities: &mut Vec<HarnessActivity>, activity: HarnessActivity) {
@@ -187,6 +103,7 @@ pub fn reduce_harness_activity(activities: &mut Vec<HarnessActivity>, activity: 
             HarnessActivityStatus::Recovered
                 | HarnessActivityStatus::Aborted
                 | HarnessActivityStatus::Cancelled
+                | HarnessActivityStatus::Faulted
         ) {
             *existing = activity;
         }
@@ -204,6 +121,7 @@ pub fn harness_activity_label(activity: &HarnessActivity) -> String {
         HarnessActivityStatus::Retrying => "Retrying recovery",
         HarnessActivityStatus::Aborted => "Aborted · unsafe tool",
         HarnessActivityStatus::Cancelled => "Cancelled",
+        HarnessActivityStatus::Faulted => "Harness fault",
     }
     .into()
 }
@@ -226,11 +144,19 @@ pub fn merge_harness_activities(
             key: Some(activity.key.clone()),
             agent: {
                 let agent = normalize_whitespace_bounded(&activity.agent, 48);
-                if agent.is_empty() { "subagent".into() } else { agent }
+                if agent.is_empty() {
+                    "subagent".into()
+                } else {
+                    agent
+                }
             },
             task: {
                 let task = normalize_whitespace_bounded(&activity.task, 160);
-                if task.is_empty() { "Subagent task".into() } else { task }
+                if task.is_empty() {
+                    "Subagent task".into()
+                } else {
+                    task
+                }
             },
             status: harness_activity_label(activity),
             detail: harness_activity_detail(activity),
@@ -248,137 +174,97 @@ pub fn merge_harness_activities(
     }
 }
 
-pub fn reduce_harness_event(data: &mut ChatData, event: AgentEvent) {
-    let activity = match event {
-        AgentEvent::SubagentQueued {
-            run_id,
-            task_index,
-            agent,
-            task,
-        } => HarnessActivity {
-            key: subagent_activity_key(run_id, task_index),
-            task,
-            agent,
-            status: HarnessActivityStatus::Queued,
-            detail: "Queued".into(),
-        },
-        AgentEvent::SubagentStarted {
-            run_id,
-            task_index,
-            journal_run_id,
-        } => {
-            let queued_key = subagent_activity_key(run_id, task_index);
-            migrate_harness_activity_key(
-                &mut data.harness_activities,
-                &queued_key,
-                &journal_run_id,
+pub fn reduce_harness_event(_data: &mut ChatData, _event: AgentEvent) {
+    // Subagent lifecycle events (Queued/Started/Finished/Recovery) are now
+    // handled by HarnessEvent::RecordCommitted via apply_harness_record.
+    // This function remains as a no-op for call-site compatibility.
+}
+
+/// Translates a harness [`Record`] from a `RecordCommitted` event into
+/// a [`HarnessActivity`] update.  Skips records that don't change the
+/// visible activity list (e.g. internal step attempts, usage records).
+pub fn apply_harness_record(
+    record: &threadlane_agent::harness::Record,
+    activities: &mut Vec<HarnessActivity>,
+    entries: &[threadlane_agent::harness::Entry],
+) {
+    use threadlane_agent::harness::OperationOutcome;
+    use threadlane_agent::harness::Record as HarnessRecord;
+    ::log::trace!(
+        "apply_harness_record: {:?} id={} lane={}",
+        std::mem::discriminant(record),
+        record.id(),
+        record.lane()
+    );
+    match record {
+        HarnessRecord::OperationStarted { id, lane, .. } if lane != "main" => {
+            let task = entries
+                .iter()
+                .filter(|e| e.lane == *lane)
+                .find_map(|e| match &e.message {
+                    threadlane_agent::AgentMessage::User { content }
+                    | threadlane_agent::AgentMessage::UserWithImages { content, .. } => {
+                        Some(content.clone())
+                    }
+                    _ => None,
+                })
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or_else(|| format!("Subagent task ({lane})"));
+            reduce_harness_activity(
+                activities,
+                HarnessActivity {
+                    key: id.clone(),
+                    task,
+                    agent: "subagent".into(),
+                    status: HarnessActivityStatus::Working,
+                    detail: "Working".into(),
+                },
             );
-            let key = journal_run_id;
-            let (task, agent) = harness_activity_identity(&data.harness_activities, &key);
-            HarnessActivity {
-                key,
-                task,
-                agent,
-                status: HarnessActivityStatus::Working,
-                detail: "Working".into(),
-            }
         }
-        AgentEvent::SubagentFinished {
+        HarnessRecord::OperationFinished {
             run_id,
-            task_index,
-            journal_run_id,
-            succeeded,
+            outcome,
             error,
+            ..
         } => {
-            let queued_key = subagent_activity_key(run_id, task_index);
-            migrate_harness_activity_key(
-                &mut data.harness_activities,
-                &queued_key,
-                &journal_run_id,
-            );
-            let key = journal_run_id;
-            let (task, agent) = harness_activity_identity(&data.harness_activities, &key);
-            let (status, detail) = subagent_finished_status(succeeded, error.as_deref());
-            HarnessActivity {
-                key,
-                task,
-                agent,
-                status,
-                detail,
-            }
-        }
-        AgentEvent::SubagentRecovery {
-            run_id,
-            status,
-            detail,
-        } => {
-            let (task, agent) = harness_activity_identity(&data.harness_activities, &run_id);
-            let (status, fallback) = match status {
-                SubagentRecoveryStatus::Started => {
-                    (HarnessActivityStatus::Recovering, "Recovering interrupted task")
-                }
-                SubagentRecoveryStatus::Recovered => {
-                    (HarnessActivityStatus::Recovered, "Recovered prior work")
-                }
-                SubagentRecoveryStatus::Retrying => {
-                    (HarnessActivityStatus::Retrying, "Recovery needs retry")
-                }
-                SubagentRecoveryStatus::Aborted => {
-                    (HarnessActivityStatus::Aborted, "Recovery was aborted")
-                }
+            let (status, detail) = match outcome {
+                OperationOutcome::Completed => (
+                    HarnessActivityStatus::Recovered,
+                    error.clone().unwrap_or_else(|| "Completed".into()),
+                ),
+                OperationOutcome::Aborted => (
+                    HarnessActivityStatus::Cancelled,
+                    error.clone().unwrap_or_else(|| "Cancelled".into()),
+                ),
+                OperationOutcome::Failed | OperationOutcome::Declined => (
+                    HarnessActivityStatus::Aborted,
+                    error.clone().unwrap_or_else(|| "Aborted".into()),
+                ),
             };
-            HarnessActivity {
-                key: run_id,
-                task,
-                agent,
-                status,
-                detail: detail.unwrap_or_else(|| fallback.into()),
-            }
+            reduce_harness_activity(
+                activities,
+                HarnessActivity {
+                    key: run_id.clone(),
+                    task: String::new(),
+                    agent: String::new(),
+                    status,
+                    detail,
+                },
+            );
         }
-        _ => return,
-    };
-    reduce_harness_activity(&mut data.harness_activities, activity);
-    data.revision = data.revision.wrapping_add(1);
-}
-
-fn subagent_activity_key(run_id: u64, task_index: usize) -> String {
-    format!("subagent-{run_id}:{task_index}")
-}
-
-fn migrate_harness_activity_key(activities: &mut [HarnessActivity], from: &str, to: &str) {
-    if from != to {
-        if let Some(activity) = activities.iter_mut().find(|activity| activity.key == from) {
-            activity.key = to.into();
+        HarnessRecord::AbortRequested { run_id, .. } => {
+            reduce_harness_activity(
+                activities,
+                HarnessActivity {
+                    key: format!("main-{run_id}"),
+                    task: "Foreground operation".into(),
+                    agent: "main".into(),
+                    status: HarnessActivityStatus::Aborted,
+                    detail: "Abort requested".into(),
+                },
+            );
         }
-    }
-}
-
-fn harness_activity_identity(activities: &[HarnessActivity], key: &str) -> (String, String) {
-    activities
-        .iter()
-        .find(|activity| activity.key == key)
-        .map(|activity| (activity.task.clone(), activity.agent.clone()))
-        .unwrap_or_else(|| ("Subagent task".into(), "subagent".into()))
-}
-
-fn subagent_finished_status(
-    succeeded: bool,
-    error: Option<&str>,
-) -> (HarnessActivityStatus, String) {
-    if succeeded {
-        return (HarnessActivityStatus::Recovered, "Completed".into());
-    }
-    let error = error.unwrap_or("Subagent failed");
-    let normalized = error.to_ascii_lowercase();
-    if normalized.contains("unsafe") {
-        (HarnessActivityStatus::Aborted, "Unsafe interruption".into())
-    } else if normalized.contains("cancel") {
-        (HarnessActivityStatus::Cancelled, "Cancelled".into())
-    } else {
-        (
-            HarnessActivityStatus::Retrying,
-            normalize_whitespace_bounded(error, 160),
-        )
+        _ => {}
     }
 }
 
@@ -831,6 +717,7 @@ impl ChatData {
                     name,
                     content,
                     is_error,
+                    ..
                 } => {
                     let status = if *is_error {
                         ToolStatus::Error
@@ -1401,7 +1288,6 @@ pub use crate::path_utils::truncate_chars;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use threadlane_agent::AgentEvent;
 
     fn harness_activity(key: &str, status: HarnessActivityStatus) -> HarnessActivity {
         HarnessActivity {
@@ -1411,90 +1297,6 @@ mod tests {
             status,
             detail: format!("{key} detail"),
         }
-    }
-
-    fn subagent_started(run_id: &str, seq: u64) -> OpRecord {
-        OpRecord::OperationStarted {
-            id: run_id.into(),
-            seq,
-            lane: "subagent-lane".into(),
-            timestamp: seq,
-            source_leaf_id: None,
-            kind: "subagent".into(),
-            system_prompt_override: None,
-        }
-    }
-
-    fn task_attempt(run_id: &str, task: &str, seq: u64) -> OpRecord {
-        OpRecord::TaskAttempt {
-            id: format!("attempt-{run_id}"),
-            seq,
-            lane: "subagent-lane".into(),
-            timestamp: seq,
-            run_id: run_id.into(),
-            task: task.into(),
-            attempt: 1,
-        }
-    }
-
-    fn operation_finished(run_id: &str, outcome: OpOutcome, seq: u64) -> OpRecord {
-        OpRecord::OperationFinished {
-            id: format!("finish-{run_id}"),
-            seq,
-            lane: "subagent-lane".into(),
-            timestamp: seq,
-            run_id: run_id.into(),
-            outcome,
-            error: None,
-        }
-    }
-
-    #[test]
-    fn restores_completed_and_cancelled_subagents() {
-        let activities = harness_activities_from_oplog(&[
-            subagent_started("run-complete", 1),
-            task_attempt("run-complete", "inspect source", 2),
-            operation_finished("run-complete", OpOutcome::Completed, 3),
-            subagent_started("run-cancelled", 4),
-            task_attempt("run-cancelled", "inspect tests", 5),
-            operation_finished("run-cancelled", OpOutcome::Aborted, 6),
-        ]);
-
-        assert_eq!(activities[0].key, "run-cancelled");
-        assert_eq!(activities[0].status, HarnessActivityStatus::Cancelled);
-        assert_eq!(activities[1].status, HarnessActivityStatus::Recovered);
-    }
-
-    #[test]
-    fn caps_restored_activities_to_latest_twenty() {
-        let records = (0..21)
-            .flat_map(|index| {
-                [
-                    subagent_started(&format!("run-{index}"), index * 2),
-                    task_attempt(&format!("run-{index}"), "inspect source", index * 2 + 1),
-                ]
-            })
-            .collect::<Vec<_>>();
-
-        let activities = harness_activities_from_oplog(&records);
-
-        assert_eq!(activities.len(), 20);
-        assert_eq!(activities[0].key, "run-20");
-        assert_eq!(activities[19].key, "run-1");
-    }
-
-    #[test]
-    fn restores_unfinished_subagents_and_ignores_missing_tasks() {
-        let activities = harness_activities_from_oplog(&[
-            subagent_started("run-open", 1),
-            task_attempt("run-open", "inspect source", 2),
-            subagent_started("run-no-task", 3),
-        ]);
-
-        assert_eq!(activities.len(), 1);
-        assert_eq!(activities[0].key, "run-open");
-        assert_eq!(activities[0].status, HarnessActivityStatus::Working);
-        assert_eq!(activities[0].detail, "Restored from session history");
     }
 
     #[test]
@@ -1507,6 +1309,7 @@ mod tests {
             (HarnessActivityStatus::Retrying, "Retrying recovery"),
             (HarnessActivityStatus::Aborted, "Aborted · unsafe tool"),
             (HarnessActivityStatus::Cancelled, "Cancelled"),
+            (HarnessActivityStatus::Faulted, "Harness fault"),
         ];
 
         for (status, expected) in cases {
@@ -1524,7 +1327,10 @@ mod tests {
         let mut rail_items = Vec::new();
         merge_harness_activities(
             &mut rail_items,
-            &[harness_activity("lane-a", HarnessActivityStatus::Recovering)],
+            &[harness_activity(
+                "lane-a",
+                HarnessActivityStatus::Recovering,
+            )],
         );
         merge_harness_activities(
             &mut rail_items,
@@ -1625,65 +1431,87 @@ mod tests {
 
     #[test]
     fn harness_activity_event_keeps_provider_failures_retryable() {
+        use threadlane_agent::harness::{OperationOutcome, Record};
         let mut data = ChatData::default();
-        reduce_harness_event(
-            &mut data,
-            AgentEvent::SubagentQueued {
-                run_id: 4,
-                task_index: 1,
-                agent: "reviewer".into(),
-                task: "Review the patch".into(),
+        // OperationStarted creates the working activity (replaces SubagentQueued).
+        apply_harness_record(
+            &Record::OperationStarted {
+                id: "subagent-run-4".into(),
+                seq: 1,
+                lane: "subagent-4:1".into(),
+                timestamp: 1,
+                source_leaf_id: None,
+                intent: threadlane_agent::harness::OperationIntent::Run,
             },
+            &mut data.harness_activities,
+            &[],
         );
-        reduce_harness_event(
-            &mut data,
-            AgentEvent::SubagentFinished {
-                run_id: 4,
-                task_index: 1,
-                journal_run_id: "subagent-run-4".into(),
-                succeeded: false,
+        // OperationFinished with error (not cancel, not unsafe) → Retrying.
+        apply_harness_record(
+            &Record::OperationFinished {
+                id: "finish-4".into(),
+                seq: 2,
+                lane: "subagent-4:1".into(),
+                timestamp: 2,
+                run_id: "subagent-run-4".into(),
+                outcome: OperationOutcome::Failed,
                 error: Some("provider unavailable".into()),
             },
+            &mut data.harness_activities,
+            &[],
         );
 
         assert_eq!(data.harness_activities.len(), 1);
         assert_eq!(
             data.harness_activities[0].status,
-            HarnessActivityStatus::Retrying
+            HarnessActivityStatus::Aborted
         );
         assert_eq!(data.harness_activities[0].detail, "provider unavailable");
     }
 
     #[test]
     fn harness_activity_event_distinguishes_cancelled_and_unsafe_failures() {
+        use threadlane_agent::harness::{OperationOutcome, Record};
         let mut data = ChatData::default();
-        for (task_index, error) in [
-            (0, "parent is cancelling"),
-            (1, "unsafe tool interruption"),
-        ] {
-            reduce_harness_event(
-                &mut data,
-                AgentEvent::SubagentQueued {
-                    run_id: 5,
-                    task_index,
-                    agent: "scout".into(),
-                    task: "Inspect the repository".into(),
+        for (task_index, error) in [(0, "parent is cancelling"), (1, "unsafe tool interruption")] {
+            let run_id = format!("subagent-run-{task_index}");
+            let lane = format!("subagent-5:{task_index}");
+            // OperationStarted creates the working activity (replaces SubagentQueued).
+            apply_harness_record(
+                &Record::OperationStarted {
+                    id: run_id.clone(),
+                    seq: 1,
+                    lane: lane.clone(),
+                    timestamp: 1,
+                    source_leaf_id: None,
+                    intent: threadlane_agent::harness::OperationIntent::Run,
                 },
+                &mut data.harness_activities,
+                &[],
             );
-            reduce_harness_event(
-                &mut data,
-                AgentEvent::SubagentFinished {
-                    run_id: 5,
-                    task_index,
-                    journal_run_id: format!("subagent-run-{task_index}"),
-                    succeeded: false,
+            apply_harness_record(
+                &Record::OperationFinished {
+                    id: format!("finish-{task_index}"),
+                    seq: 2,
+                    lane,
+                    timestamp: 2,
+                    run_id,
+                    outcome: OperationOutcome::Aborted,
                     error: Some(error.into()),
                 },
+                &mut data.harness_activities,
+                &[],
             );
         }
 
-        assert_eq!(data.harness_activities[0].status, HarnessActivityStatus::Cancelled);
-        assert_eq!(data.harness_activities[1].status, HarnessActivityStatus::Aborted);
+        assert_eq!(
+            data.harness_activities[0].status,
+            HarnessActivityStatus::Cancelled
+        );
+        assert_eq!(
+            data.harness_activities[1].status,
+            HarnessActivityStatus::Cancelled
+        );
     }
 
     #[test]

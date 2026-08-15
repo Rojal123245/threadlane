@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::Write;
 use tempfile::tempdir;
-use threadlane_agent::{Agent, AgentMessage, SessionTree};
+use threadlane_agent::{AgentConfig, AgentMessage, SessionTree, UnifiedAgent};
 use threadlane_coding_agent::{
     execute_slash_command, parse_slash_command, CommandAction, ProjectContext,
 };
@@ -25,19 +25,22 @@ fn test_project_context_discovery() {
 
 #[tokio::test]
 async fn compact_command_stays_in_current_session() {
-    let mut agent = Agent::new("fake", None, "gpt-4o");
+    let tmp = tempdir().unwrap();
+    let session_file = tmp.path().join("test.jsonl");
+    let mut agent = UnifiedAgent::new(
+        "fake",
+        None,
+        "gpt-4o",
+        &session_file,
+        threadlane_agent::AgentConfig::default(),
+    )
+    .unwrap();
     let mut tree = SessionTree::new("current_session");
     for index in 0..60 {
         let message = AgentMessage::User {
             content: format!("message {index}"),
         };
-        agent
-            .loop_engine
-            .state
-            .lock()
-            .await
-            .messages
-            .push(message.clone());
+        agent.turn.lock().await.messages.push(message.clone());
         tree.add_message(message);
     }
 

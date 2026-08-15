@@ -33,7 +33,7 @@ impl AgentSource {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentConfig {
+pub struct AgentDefinition {
     pub name: String,
     pub description: String,
     pub(crate) tools: Option<Vec<String>>,
@@ -45,7 +45,7 @@ pub struct AgentConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDiscoveryResult {
-    pub agents: Vec<AgentConfig>,
+    pub agents: Vec<AgentDefinition>,
     project_agents_dir: Option<PathBuf>,
 }
 
@@ -58,7 +58,7 @@ struct AgentFrontmatterMeta {
 }
 
 fn parse_agent_frontmatter(content: &str) -> (AgentFrontmatterMeta, Option<String>, String) {
-    let parsed = crate::frontmatter::parse_frontmatter(content);
+    let parsed = threadlane_skills::frontmatter::parse_frontmatter(content);
     let mut meta = AgentFrontmatterMeta::default();
 
     if let Some(err) = parsed.parse_error {
@@ -72,27 +72,16 @@ fn parse_agent_frontmatter(content: &str) -> (AgentFrontmatterMeta, Option<Strin
         );
     }
 
-    if let Some(name) = parsed.get("name") {
+    if let Some(name) = parsed.get_str("name") {
         meta.name = name.to_string();
     }
-    if let Some(desc) = parsed.get("description") {
+    if let Some(desc) = parsed.get_str("description") {
         meta.description = desc.to_string();
     }
-    if let Some(model) = parsed.get("model") {
-        meta.model = if model.is_empty() {
-            None
-        } else {
-            Some(model.to_string())
-        };
+    if let Some(model) = parsed.get_str("model") {
+        meta.model = Some(model.to_string());
     }
-    if let Some(tools_str) = parsed.get("tools") {
-        let tools: Vec<String> = tools_str
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        meta.tools = if tools.is_empty() { None } else { Some(tools) };
-    }
+    meta.tools = parsed.get_string_list("tools");
 
     let mut err = None;
     if meta.name.is_empty() {
@@ -104,7 +93,7 @@ fn parse_agent_frontmatter(content: &str) -> (AgentFrontmatterMeta, Option<Strin
     (meta, err, parsed.body)
 }
 
-fn load_agents_from_dir(dir: &Path, source: AgentSource) -> Vec<AgentConfig> {
+fn load_agents_from_dir(dir: &Path, source: AgentSource) -> Vec<AgentDefinition> {
     let mut agents = Vec::new();
     if !dir.is_dir() {
         return agents;
@@ -158,7 +147,7 @@ fn load_agents_from_dir(dir: &Path, source: AgentSource) -> Vec<AgentConfig> {
             continue;
         }
 
-        agents.push(AgentConfig {
+        agents.push(AgentDefinition {
             name: frontmatter.name,
             description: frontmatter.description,
             tools: frontmatter.tools,
@@ -201,7 +190,7 @@ fn find_nearest_project_agent_dirs(cwd: &Path) -> (Option<PathBuf>, Vec<PathBuf>
 }
 
 pub fn discover_agents(cwd: &Path, scope: AgentScope) -> AgentDiscoveryResult {
-    let home = dirs_home();
+    let home = threadlane_agent::utils::dirs_home();
     let user_dirs = home
         .map(|h| {
             vec![
@@ -226,7 +215,7 @@ pub fn discover_agents(cwd: &Path, scope: AgentScope) -> AgentDiscoveryResult {
         }
     }
 
-    let mut agent_map: HashMap<String, AgentConfig> = HashMap::new();
+    let mut agent_map: HashMap<String, AgentDefinition> = HashMap::new();
 
     if scope == AgentScope::Both {
         for a in user_agents {
@@ -245,19 +234,13 @@ pub fn discover_agents(cwd: &Path, scope: AgentScope) -> AgentDiscoveryResult {
         }
     }
 
-    let mut result_agents: Vec<AgentConfig> = agent_map.into_values().collect();
+    let mut result_agents: Vec<AgentDefinition> = agent_map.into_values().collect();
     result_agents.sort_by(|a, b| a.name.cmp(&b.name));
 
     AgentDiscoveryResult {
         agents: result_agents,
         project_agents_dir,
     }
-}
-
-fn dirs_home() -> Option<PathBuf> {
-    directories::UserDirs::new()
-        .map(|u| u.home_dir().to_path_buf())
-        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
 }
 
 #[cfg(test)]

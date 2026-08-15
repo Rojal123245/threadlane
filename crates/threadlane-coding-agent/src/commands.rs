@@ -1,4 +1,36 @@
-use threadlane_agent::{Agent, SessionTree};
+use threadlane_agent::{SessionTree, UnifiedAgent};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlashCommandInfo {
+    pub name: String,
+    pub description: String,
+}
+
+/// Built-in slash commands handled by the coding agent.
+pub fn builtin_commands() -> Vec<SlashCommandInfo> {
+    [
+        ("model", "Switch model, or show the current one"),
+        ("compact", "Compact the conversation context"),
+        ("session", "Show session info"),
+        ("name", "Name this session"),
+        ("tree", "Switch session tree branch"),
+        ("fork", "Fork a session tree branch"),
+        ("clone", "Clone the active session tree"),
+        ("skill", "Load a discovered skill by ID"),
+        (
+            "subagent",
+            "Delegate tasks to subagents in parallel or sequentially",
+        ),
+        ("task", "Run a prompt as a background task"),
+        ("quit", "Quit threadlane agent"),
+    ]
+    .into_iter()
+    .map(|(name, description)| SlashCommandInfo {
+        name: name.to_string(),
+        description: description.to_string(),
+    })
+    .collect()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandAction {
@@ -44,7 +76,7 @@ pub fn parse_slash_command(input: &str) -> Option<CommandAction> {
 
 pub async fn execute_slash_command(
     action: CommandAction,
-    agent: &mut Agent,
+    agent: &mut UnifiedAgent,
     session_tree: &mut SessionTree,
 ) -> String {
     match action {
@@ -55,7 +87,7 @@ pub async fn execute_slash_command(
             } else if let Err(error) = session_tree.set_model(new_model.clone()) {
                 format!("Could not persist model switch: {error}")
             } else {
-                let mut st = agent.loop_engine.state.lock().await;
+                let mut st = agent.turn.lock().await;
                 st.model = new_model.clone();
                 format!("Switched model to: {}", new_model)
             }
@@ -86,7 +118,7 @@ pub async fn execute_slash_command(
         CommandAction::SwitchTreeBranch(node_id) => {
             if session_tree.switch_active_node(&node_id) {
                 let branch_msgs = session_tree.get_active_branch_messages();
-                let mut st = agent.loop_engine.state.lock().await;
+                let mut st = agent.turn.lock().await;
                 st.messages = branch_msgs;
                 format!("Switched session tree to node: {}", node_id)
             } else {

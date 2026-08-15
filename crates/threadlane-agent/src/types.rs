@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::HashMap;
 use threadlane_provider::openai::ToolCall;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -235,11 +234,19 @@ pub enum AgentMessage {
         content: String,
         #[serde(default)]
         is_error: bool,
+        #[serde(default)]
+        terminate: bool,
     },
     Custom {
         custom_type: String,
         payload: Value,
     },
+}
+
+impl PartialEq for AgentMessage {
+    fn eq(&self, other: &Self) -> bool {
+        serde_json::to_value(self).ok() == serde_json::to_value(other).ok()
+    }
 }
 
 impl AgentMessage {
@@ -307,14 +314,14 @@ impl TokenUsage {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentToolCall {
     pub id: String,
     pub name: String,
     pub arguments: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentToolResult {
     pub tool_call_id: String,
     pub name: String,
@@ -324,6 +331,10 @@ pub struct AgentToolResult {
 }
 
 impl AgentToolResult {
+    pub fn terminates(&self) -> bool {
+        self.terminate
+    }
+
     /// Builds a tool result produced outside the built-in tool loop.
     ///
     /// External agents (ACP) report tool outcomes that need to reach the same
@@ -345,42 +356,23 @@ impl AgentToolResult {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct BeforeToolCallResult {
-    pub block: bool,
-    pub reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct AfterToolCallResult {
-    pub override_content: Option<String>,
-    pub override_is_error: Option<bool>,
-    pub terminate: Option<bool>,
-}
-
 #[derive(Debug, Clone)]
-pub struct AgentState {
+pub struct TurnState {
     pub system_prompt: String,
+    pub messages: Vec<AgentMessage>,
     pub model: String,
     pub reasoning_effort: ReasoningEffort,
     pub tools: Vec<Value>,
-    pub messages: Vec<AgentMessage>,
-    pub is_streaming: bool,
-    pub pending_tool_calls: Vec<String>,
-    pub metadata: HashMap<String, Value>,
 }
 
-impl AgentState {
-    pub(crate) fn new(model: impl Into<String>, system_prompt: impl Into<String>) -> Self {
+impl TurnState {
+    pub fn new(model: impl Into<String>, system_prompt: impl Into<String>) -> Self {
         Self {
             system_prompt: system_prompt.into(),
+            messages: Vec::new(),
             model: model.into(),
             reasoning_effort: ReasoningEffort::default(),
             tools: Vec::new(),
-            messages: Vec::new(),
-            is_streaming: false,
-            pending_tool_calls: Vec::new(),
-            metadata: HashMap::new(),
         }
     }
 }

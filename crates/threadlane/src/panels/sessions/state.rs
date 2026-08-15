@@ -1,7 +1,7 @@
 //! Sessions panel state: projects, session discovery, file operations, and active selection.
 
-use crate::path_utils::{canonicalize_path, truncate_chars};
 use crate::panels::chat::state::{HarnessActivity, HarnessActivityStatus};
+use crate::path_utils::{canonicalize_path, truncate_chars};
 use threadlane_agent::{AgentMessage, SessionTree};
 
 use std::collections::{HashMap, HashSet};
@@ -34,17 +34,19 @@ pub enum SessionHealth {
 }
 
 pub fn session_health(activities: &[HarnessActivity]) -> SessionHealth {
-    activities.iter().fold(SessionHealth::Healthy, |health, activity| {
-        match activity.status {
-            HarnessActivityStatus::Retrying | HarnessActivityStatus::Aborted => {
-                SessionHealth::Warning
+    activities
+        .iter()
+        .fold(SessionHealth::Healthy, |health, activity| {
+            match activity.status {
+                HarnessActivityStatus::Retrying
+                | HarnessActivityStatus::Aborted
+                | HarnessActivityStatus::Faulted => SessionHealth::Warning,
+                HarnessActivityStatus::Recovering if health == SessionHealth::Healthy => {
+                    SessionHealth::Recovering
+                }
+                _ => health,
             }
-            HarnessActivityStatus::Recovering if health == SessionHealth::Healthy => {
-                SessionHealth::Recovering
-            }
-            _ => health,
-        }
-    })
+        })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -269,11 +271,6 @@ pub fn begin_title_generation(work_dir: &Path, session_id: &str) -> bool {
     TITLE_ATTEMPTED.write().unwrap().insert(key)
 }
 
-pub fn reset_title_attempt(work_dir: &Path, session_id: &str) {
-    let key = (canonicalize_path(work_dir), session_id.to_string());
-    TITLE_ATTEMPTED.write().unwrap().remove(&key);
-}
-
 pub fn end_title_generation(_work_dir: &Path, _session_id: &str) {
     // Kept as a no-op for completed title runs.
 }
@@ -359,18 +356,32 @@ fn discover_sessions_in_project(work_dir: &Path) -> Vec<SessionEntry> {
         if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
             continue;
         }
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".harness.jsonl"))
+        {
+            continue;
+        }
         let id = path
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "session".into());
-        let tree = SessionTree::load_from_file(&path).unwrap_or_else(|_| {
-            let mut t = SessionTree::new(id.clone());
-            t.file_path = Some(path.clone());
-            t
-        });
+        let (tree, title) = match SessionTree::load_from_file(&path) {
+            Ok(tree) => {
+                let title = session_title_from_tree(&tree, &id);
+                (tree, title)
+            }
+            Err(_) => {
+                set_session_health(&canonical_work_dir, &id, SessionHealth::Warning);
+                let mut tree = SessionTree::new(id.clone());
+                tree.file_path = Some(path.clone());
+                (tree, "Unreadable session".to_string())
+            }
+        };
         sessions.push(SessionEntry {
             id: id.clone(),
-            title: session_title_from_tree(&tree, &id),
+            title,
             // Store the canonical path once so draw_walk never needs a syscall.
             work_dir: canonical_work_dir.clone(),
             session_file: path.clone(),
@@ -489,14 +500,25 @@ pub fn is_session_working(work_dir: &Path, session_id: &str) -> bool {
         .is_some_and(|sessions| sessions.contains(session_id))
 }
 
-pub fn set_session_health(work_dir: &Path, session_id: &str, health: SessionHealth) {
+pub fn set_session_health(work_dir: &Path, session_id: &str, health: SessionHealth) -> bool {
     let mut data = SESSIONS_DATA.write().unwrap();
     let work_dir = canonicalize_path(work_dir);
+    let previous = data
+        .session_health
+        .get(&work_dir)
+        .and_then(|sessions| sessions.get(session_id))
+        .copied();
+    if previous == Some(health) {
+        return false;
+    }
     if health == SessionHealth::Healthy {
-        let remove_project = data.session_health.get_mut(&work_dir).is_some_and(|sessions| {
-            sessions.remove(session_id);
-            sessions.is_empty()
-        });
+        let remove_project = data
+            .session_health
+            .get_mut(&work_dir)
+            .is_some_and(|sessions| {
+                sessions.remove(session_id);
+                sessions.is_empty()
+            });
         if remove_project {
             data.session_health.remove(&work_dir);
         }
@@ -506,6 +528,7 @@ pub fn set_session_health(work_dir: &Path, session_id: &str, health: SessionHeal
             .or_default()
             .insert(session_id.into(), health);
     }
+    true
 }
 
 pub fn set_session_context_target(entry: Option<&SessionEntry>) {
@@ -1005,6 +1028,7 @@ mod tests {
                 id: "root".into(),
                 parent_id: None,
                 timestamp: 1,
+                seq: None,
                 message: AgentMessage::User {
                     content: "First persisted request".into(),
                 },
@@ -1013,6 +1037,7 @@ mod tests {
                 id: "branch_a".into(),
                 parent_id: Some("root".into()),
                 timestamp: 2,
+                seq: None,
                 message: AgentMessage::User {
                     content: "Inactive branch request".into(),
                 },
@@ -1021,6 +1046,7 @@ mod tests {
                 id: "branch_b".into(),
                 parent_id: Some("root".into()),
                 timestamp: 3,
+                seq: None,
                 message: AgentMessage::User {
                     content: "Active later branch request".into(),
                 },
@@ -1107,6 +1133,45 @@ mod tests {
             canonicalize_path(&created.session_file)
         );
 
+        let _ = std::fs::remove_dir_all(work_dir);
+    }
+
+    #[test]
+    fn session_discovery_ignores_harness_sidecars() {
+        let work_dir = unique_test_dir("session-sidecars");
+        let sessions_dir = work_dir.join(".threadlane/sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let session = create_new_session(&work_dir).unwrap();
+        std::fs::write(
+            sessions_dir.join(format!("{}.harness.jsonl", session.id)),
+            "{}\n",
+        )
+        .unwrap();
+        refresh_sessions(std::slice::from_ref(&work_dir));
+        let data = SESSIONS_DATA.read().unwrap();
+        assert_eq!(data.projects[0].sessions.len(), 1);
+        assert_eq!(data.projects[0].sessions[0].id, session.id);
+
+        let _ = std::fs::remove_dir_all(work_dir);
+    }
+
+    #[test]
+    fn malformed_session_is_marked_unreadable_instead_of_becoming_untitled() {
+        let work_dir = unique_test_dir("malformed-session");
+        let sessions_dir = work_dir.join(".threadlane/sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let path = sessions_dir.join("session_bad.jsonl");
+        std::fs::write(&path, "{ this is not a session }\n").unwrap();
+
+        refresh_sessions(std::slice::from_ref(&work_dir));
+        let data = SESSIONS_DATA.read().unwrap();
+        let session = &data.projects[0].sessions[0];
+        assert_eq!(session.title, "Unreadable session");
+        assert_eq!(
+            data.session_health_for(&session.work_dir, &session.id),
+            SessionHealth::Warning
+        );
+        drop(data);
         let _ = std::fs::remove_dir_all(work_dir);
     }
 }

@@ -122,6 +122,42 @@ Directories, non-UTF-8 files, and files over 2 MB are refused with a message
 rather than opened, so a stray click on a build artifact cannot stall the UI.
 Saving writes the buffer back to the file and refreshes the Git panel.
 
+### Structured logging
+
+Threadlane uses the [`log`](https://crates.io/crates/log) crate with
+[`env_logger`](https://crates.io/crates/env_logger) for structured console
+output. The logger initializes on first frame with a default filter of `info`;
+set `RUST_LOG` to control verbosity at runtime.
+
+```bash
+# Default (info-level lifecycle events).
+cargo run -p threadlane
+
+# Debug-level: harness event dispatch, revision bumps, chat row rebuilds.
+RUST_LOG=threadlane=debug cargo run -p threadlane
+
+# Combined debug & trace: app debug with core agent execution loop tracing.
+RUST_LOG=threadlane=debug,threadlane_agent=trace cargo run -p threadlane
+
+# Trace-level: every record, per-event lane/run_id, pre/post activity counts.
+RUST_LOG=threadlane=trace cargo run -p threadlane
+
+# Focus on the app shell only.
+RUST_LOG=threadlane::app=debug cargo run -p threadlane
+
+# Focus on agent runtime (subagent lifecycle, harness starts).
+RUST_LOG=threadlane_coding_agent=debug cargo run -p threadlane
+```
+
+| Level | What you'll see |
+| --- | --- |
+| `info` | Session creation/load, harness watch setup, subagent batch starts/completions, logger init |
+| `debug` | `RecordCommitted` dispatch, `HarnessSnapshot` receipt, revision bumps + redraws, chat row rebuilds, dropped events |
+| `trace` | Per-record `apply_harness_record` calls, per-tick harness poll event counts, lane/run_id on every event |
+| `warn` | Missing session file, harness unavailable, subagent start failures |
+
+All log output goes to stderr and includes millisecond timestamps.
+
 ### Git and GitHub actions
 
 For an attached Git project, the composer shows the current branch with checkout and new-branch actions in its dropdown. The resizable right-side Git panel groups staged and unstaged files, supports per-file selection and scrollable diff previews, and exposes only applicable staging, commit, pull, push, and GitHub pull-request actions. The Generate action can use the relevant Git diff and the active model to suggest a commit subject without changing the chat or committing automatically. Commit messages can be submitted with Enter, and Git operation feedback appears inline in the panel. Local operations use the configured `git` executable and its credential helpers. The GitHub pull-request action opens a compare URL in the browser; complete the pull-request form interactively on GitHub, with no `GITHUB_TOKEN` required by Threadlane.
@@ -361,7 +397,7 @@ Generated packages are placed in `crates/threadlane/dist/`.
 
 ### Signed Application Updates
 
-Threadlane uses [`cargo-packager-updater`](https://crates.io/crates/cargo-packager-updater) to check, download, verify, install, and relaunch signed macOS updates. It checks automatically in the background on every launch. The Projects sidebar remains unchanged when the application is current or the check cannot complete; an update action appears only when a newer signed release is available.
+Threadlane GPUI uses [`cargo-packager-updater`](https://crates.io/crates/cargo-packager-updater) to check, download, verify, install, and relaunch signed macOS updates. It checks automatically in the background on every launch and shows a compact update notice when a newer signed release is available. Linux release archives remain manual installs.
 
 Generate the updater key pair once and retain the same key for future releases:
 
@@ -387,7 +423,7 @@ A development run automatically checks the published manifest on launch and can 
 
 ```bash
 THREADLANE_UPDATER_PUBLIC_KEY="$(cat threadlane-updater.key.pub)" \
-cargo run -p threadlane
+cargo run -p threadlane-gpui
 ```
 
 Installation and relaunch remain restricted to a packaged `.app`, so a development run cannot replace `target/debug`.
@@ -401,35 +437,33 @@ export THREADLANE_UPDATER_PUBLIC_KEY="$(cat threadlane-updater.key.pub)"
 export THREADLANE_UPDATER_ENDPOINT="http://127.0.0.1:8787/latest.json"
 ```
 
-Build and preserve the lower-version application, then increase the version in `crates/threadlane/Cargo.toml` and create a signed update archive:
+Build and preserve the lower-version application, then increase the workspace version and create a signed update archive:
 
 ```bash
-./scripts/build_extensions.sh
-cargo build --release --bin threadlane
-cargo packager --release --formats app \
-  --manifest-path crates/threadlane/Cargo.toml
+./scripts/bundle-gpui-macos.sh
 
 mkdir -p "$HOME/Applications"
 rm -rf "$HOME/Applications/Threadlane Test.app"
-cp -R crates/threadlane/dist/Threadlane.app \
+cp -R target/release/Threadlane.app \
   "$HOME/Applications/Threadlane Test.app"
 
-# Increase the threadlane package version before continuing.
-rm -f crates/threadlane/dist/Threadlane.app.tar.gz*
-cargo build --release --bin threadlane
+# Increase the workspace package version before continuing.
+rm -f target/release/Threadlane.app.tar.gz*
+./scripts/bundle-gpui-macos.sh
+tar -czf target/release/Threadlane.app.tar.gz \
+  -C target/release Threadlane.app
 CARGO_PACKAGER_SIGN_PRIVATE_KEY=threadlane-updater.key \
 CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD='your-key-password' \
-  cargo packager --release --formats app \
-  --manifest-path crates/threadlane/Cargo.toml
+  cargo packager signer sign target/release/Threadlane.app.tar.gz
 ```
 
-Create `crates/threadlane/dist/latest.json` using the higher test version and generated signature:
+Create `target/release/latest.json` using the higher test version and generated signature:
 
 ```bash
 TEST_VERSION=0.0.7
 jq -n \
   --arg version "$TEST_VERSION" \
-  --arg signature "$(cat crates/threadlane/dist/Threadlane.app.tar.gz.sig)" \
+  --arg signature "$(cat target/release/Threadlane.app.tar.gz.sig)" \
   '{
     version: $version,
     platforms: {
@@ -439,15 +473,15 @@ jq -n \
         format: "app"
       }
     }
-  }' > crates/threadlane/dist/latest.json
+  }' > target/release/latest.json
 
-python3 -m http.server 8787 --directory crates/threadlane/dist
+python3 -m http.server 8787 --directory target/release
 ```
 
-While the server is running, start Threadlane in another terminal to test check/download behavior:
+While the server is running, start Threadlane GPUI in another terminal to test check/download behavior:
 
 ```bash
-cargo run -p threadlane
+cargo run -p threadlane-gpui
 ```
 
 Open `$HOME/Applications/Threadlane Test.app` instead to test the complete installation and relaunch flow. Restore the intended package version and unset `THREADLANE_UPDATER_ENDPOINT` afterward.
@@ -470,14 +504,15 @@ directly after Release Please creates a release and attaches the platform
 artifacts. Both workflows use the repository's built-in `GITHUB_TOKEN`; no
 release-specific token or GitHub App is required. The packaging workflow also
 retains its tag-push and manual triggers. The tag must exactly match the
-`threadlane` workspace version; the packaging workflow verifies that invariant
+`threadlane-gpui` workspace version; the packaging workflow verifies that invariant
 before building. In **Settings → Actions → General → Workflow permissions**,
 enable **Allow GitHub Actions to create and approve pull requests** so
 Release Please can maintain its release pull request.
 
 A tagged build publishes:
 
-- A user-facing DMG.
+- Linux x86_64 and arm64 archives.
+- A user-facing macOS DMG and ZIP.
 - A signed `.app.tar.gz` updater bundle.
 - The updater signature.
 - A `latest.json` update manifest containing the GitHub release notes.

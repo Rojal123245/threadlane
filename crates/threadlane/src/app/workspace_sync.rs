@@ -7,7 +7,12 @@ impl App {
             .select(SessionKey::new(work_dir, session_id));
     }
 
-    pub(super) fn select_workspace_ui(&mut self, cx: &mut Cx, work_dir: PathBuf, session_id: String) {
+    pub(super) fn select_workspace_ui(
+        &mut self,
+        cx: &mut Cx,
+        work_dir: PathBuf,
+        session_id: String,
+    ) {
         self.save_active_draft(cx);
         self.git_operation_pending = false;
         self.git_pr_pending = false;
@@ -106,6 +111,8 @@ impl App {
                 work_dir: work_dir.clone(),
                 session_file: None,
                 system_prompt: Default::default(),
+                agent_config: None,
+                coding_config: None,
             });
             self.session_runtimes
                 .insert(key.clone(), SessionRuntime::new(agent, model, effort));

@@ -147,6 +147,15 @@ impl FileTree {
         self.view.redraw(cx);
     }
 
+    /// Force-reload the file tree from disk (e.g. after tool writes).
+    pub fn refresh(&mut self, cx: &mut Cx) {
+        if self.work_dir.is_some() {
+            self.reload_nodes();
+            self.rebuild_visible_nodes();
+            self.view.redraw(cx);
+        }
+    }
+
     fn reload_nodes(&mut self) {
         self.all_nodes.clear();
         self.open_dirs.clear();

@@ -60,6 +60,7 @@ pub enum ComposerStatus {
     Ready,
     Working,
     Error,
+    Interrupted,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

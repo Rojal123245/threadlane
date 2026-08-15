@@ -1,9 +1,5 @@
+use crate::config::AgentConfig;
 use crate::types::AgentMessage;
-
-const AUTO_COMPACTION_THRESHOLD_TOKENS: usize = 96_000;
-pub(crate) const AUTO_COMPACTION_KEEP_RECENT_TOKENS: usize = 20_000;
-const MAX_CHECKPOINT_CHARS: usize = 12_000;
-const ESTIMATED_IMAGE_TOKENS: usize = 1_200;
 
 use serde::{Deserialize, Serialize};
 
@@ -29,11 +25,11 @@ impl Default for CompactionOptions {
     }
 }
 
-fn estimate_message_tokens(message: &AgentMessage) -> usize {
+fn estimate_message_tokens(message: &AgentMessage, config: &AgentConfig) -> usize {
     let chars = match message {
         AgentMessage::System { content } | AgentMessage::User { content } => content.len(),
         AgentMessage::UserWithImages { content, images } => {
-            return content.len().div_ceil(4) + images.len() * ESTIMATED_IMAGE_TOKENS;
+            return content.len().div_ceil(4) + images.len() * config.estimated_image_tokens;
         }
         AgentMessage::Assistant {
             content,
@@ -60,12 +56,15 @@ fn estimate_message_tokens(message: &AgentMessage) -> usize {
     chars.div_ceil(4)
 }
 
-fn estimate_context_tokens(messages: &[AgentMessage]) -> usize {
-    messages.iter().map(estimate_message_tokens).sum()
+fn estimate_context_tokens(messages: &[AgentMessage], config: &AgentConfig) -> usize {
+    messages
+        .iter()
+        .map(|m| estimate_message_tokens(m, config))
+        .sum()
 }
 
-pub(crate) fn should_auto_compact(messages: &[AgentMessage]) -> bool {
-    estimate_context_tokens(messages) > AUTO_COMPACTION_THRESHOLD_TOKENS
+pub(crate) fn should_auto_compact(messages: &[AgentMessage], config: &AgentConfig) -> bool {
+    estimate_context_tokens(messages, config) > config.auto_compaction_threshold_tokens
 }
 
 pub(crate) fn is_context_overflow_error(error: &str) -> bool {
@@ -117,7 +116,7 @@ pub(crate) fn compact_messages_to_token_budget(
         if matches!(message, AgentMessage::System { .. }) {
             continue;
         }
-        tokens += estimate_message_tokens(message);
+        tokens += estimate_message_tokens(message, &AgentConfig::default());
         start = index;
         if tokens >= keep_recent_tokens {
             break;
@@ -157,7 +156,7 @@ fn compact_from_index(messages: &[AgentMessage], mut start: usize) -> Vec<AgentM
     compacted.push(AgentMessage::Custom {
         custom_type: "compaction_summary".to_string(),
         payload: serde_json::json!({
-            "summary": build_checkpoint(&dropped),
+            "summary": build_checkpoint(&dropped, &AgentConfig::default()),
             "compacted_messages": dropped.len(),
         }),
     });
@@ -197,7 +196,10 @@ pub fn compact_messages_with_strategy(
                     user_keyframes += 1;
                 }
             }
-            let keyframe_tokens: usize = keyframes.iter().map(estimate_message_tokens).sum();
+            let keyframe_tokens: usize = keyframes
+                .iter()
+                .map(|m| estimate_message_tokens(m, &AgentConfig::default()))
+                .sum();
             let remaining_budget = target_tokens.saturating_sub(keyframe_tokens);
 
             let recent = compact_messages_to_token_budget(messages, remaining_budget);
@@ -244,6 +246,7 @@ pub fn prune_historical_tool_outputs(
                 name,
                 content,
                 is_error,
+                terminate,
             } => {
                 if keep_full[i] || content.len() <= INLINE_TOOL_OUTPUT_LIMIT {
                     result.push(msg.clone());
@@ -257,6 +260,7 @@ pub fn prune_historical_tool_outputs(
                         name: name.clone(),
                         content: pruned_content,
                         is_error: *is_error,
+                        terminate: *terminate,
                     });
                 }
             }
@@ -281,7 +285,7 @@ pub fn prepare_token_optimal_context(
     )
 }
 
-fn build_checkpoint(messages: &[AgentMessage]) -> String {
+fn build_checkpoint(messages: &[AgentMessage], config: &AgentConfig) -> String {
     let mut excerpts = Vec::new();
     let mut used_chars = 0;
 
@@ -289,7 +293,7 @@ fn build_checkpoint(messages: &[AgentMessage]) -> String {
         let Some(excerpt) = message_excerpt(message) else {
             continue;
         };
-        if used_chars + excerpt.len() > MAX_CHECKPOINT_CHARS {
+        if used_chars + excerpt.len() > config.max_checkpoint_chars {
             break;
         }
         used_chars += excerpt.len();
@@ -431,6 +435,7 @@ mod tests {
             name: "read_file".into(),
             content: "x".repeat(1_000),
             is_error: false,
+            terminate: false,
         });
 
         let compacted = compact_messages_to_token_budget(&msgs, 1);
@@ -454,6 +459,7 @@ mod tests {
                 name: "run_command".into(),
                 content: "running cargo test ... finished cleanly".into(),
                 is_error: false,
+                terminate: false,
             },
             AgentMessage::Assistant {
                 content: Some("Makepad theme tokens must be used.".into()),
@@ -518,6 +524,7 @@ mod tests {
                 name: "view_file".into(),
                 content: "a".repeat(5_000),
                 is_error: false,
+                terminate: false,
             });
         }
 

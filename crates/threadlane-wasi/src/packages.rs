@@ -62,9 +62,7 @@ impl ExtensionRecord {
 }
 
 pub fn default_global_threadlane_dir() -> Option<PathBuf> {
-    directories::UserDirs::new()
-        .map(|user| user.home_dir().join(".threadlane"))
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".threadlane")))
+    threadlane_agent::utils::dirs_home().map(|home| home.join(".threadlane"))
 }
 
 pub struct ExtensionManager {

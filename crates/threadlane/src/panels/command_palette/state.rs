@@ -1,36 +1,10 @@
 //! Command palette state: slash commands definition and matching.
 
-#[derive(Clone, Debug)]
-pub struct CommandInfo {
-    /// Command name without the leading slash.
-    pub name: String,
-    pub description: String,
-}
+pub use threadlane_coding_agent::SlashCommandInfo as CommandInfo;
 
 /// Built-in slash commands handled by the coding agent.
 pub fn builtin_commands() -> Vec<CommandInfo> {
-    [
-        ("model", "Switch model, or show the current one"),
-        ("compact", "Compact the conversation context"),
-        ("session", "Show session info"),
-        ("name", "Name this session"),
-        ("tree", "Switch session tree branch"),
-        ("fork", "Fork a session tree branch"),
-        ("clone", "Clone the active session tree"),
-        ("skill", "Load a discovered skill by ID"),
-        (
-            "subagent",
-            "Delegate tasks to subagents in parallel or sequentially",
-        ),
-        ("task", "Run a prompt as a background task"),
-        ("quit", "Quit threadlane agent"),
-    ]
-    .into_iter()
-    .map(|(name, description)| CommandInfo {
-        name: name.to_string(),
-        description: description.to_string(),
-    })
-    .collect()
+    threadlane_coding_agent::builtin_commands()
 }
 
 #[cfg(test)]

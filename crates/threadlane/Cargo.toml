@@ -26,6 +26,8 @@ robius-file-picker = { git = "https://github.com/project-robius/robius.git" }
 robius-open = { git = "https://github.com/project-robius/robius.git" }
 rfd = "0.17.2"
 directories = "5.0"
+log = "0.4"
+env_logger = "0.11"
 
 [package.metadata.packager]
 product_name = "Threadlane"

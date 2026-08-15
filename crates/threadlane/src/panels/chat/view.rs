@@ -48,15 +48,16 @@ fn update_activity_status(
         .set_visible(cx, !running && error);
 }
 
-#[derive(Clone, Debug)]
-struct CachedActivityGroup {
-    detail: String,
-    preview: String,
-    title: &'static str,
-    tool_icon: ToolIcon,
-    running: bool,
-    has_error: bool,
-    has_cancelled: bool,
+fn sync_jump_to_latest(view: &View, cx: &mut Cx, visible: bool, hint_visible: bool) {
+    let layer = view.widget(cx, ids!(jump_to_latest_layer));
+    layer.set_visible(cx, visible);
+    layer.redraw(cx);
+    let button = view.button(cx, ids!(jump_to_latest_btn));
+    button.set_visible(cx, visible);
+    button.redraw(cx);
+    let hint = view.widget(cx, ids!(jump_to_latest_hint));
+    hint.set_visible(cx, visible && hint_visible);
+    hint.redraw(cx);
 }
 
 #[derive(Clone, Debug)]
@@ -75,69 +76,17 @@ struct CachedTool {
 enum DisplayRow {
     Message(usize),
     SubagentTool(CachedSubagentTool),
+    HarnessActivities(CachedSubagentTool),
     Tool(CachedTool),
-    ActivityGroup(CachedActivityGroup),
+    StreamingThinking,
     StreamingAssistant,
 }
 
 #[derive(Clone, Copy)]
 enum InterimRow {
     Message(usize),
-    ActivityGroup {
-        start: usize,
-        end: usize,
-        streaming_thinking: bool,
-    },
+    StreamingThinking,
     StreamingAssistant,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ActivityKind {
-    ExploredFile,
-    ExploredFolder,
-    Search,
-    Edited,
-    Command,
-    Skill,
-    Delegated,
-    Other,
-}
-
-#[derive(Default)]
-struct ActivityCounts {
-    explored_files: usize,
-    explored_folders: usize,
-    searches: usize,
-    edited: usize,
-    commands: usize,
-    skills: usize,
-    delegated: usize,
-    other: usize,
-}
-
-impl ActivityCounts {
-    fn add(&mut self, kind: ActivityKind) {
-        match kind {
-            ActivityKind::ExploredFile => self.explored_files += 1,
-            ActivityKind::ExploredFolder => self.explored_folders += 1,
-            ActivityKind::Search => self.searches += 1,
-            ActivityKind::Edited => self.edited += 1,
-            ActivityKind::Command => self.commands += 1,
-            ActivityKind::Skill => self.skills += 1,
-            ActivityKind::Delegated => self.delegated += 1,
-            ActivityKind::Other => self.other += 1,
-        }
-    }
-}
-
-fn is_activity(message: &ChatMessage) -> bool {
-    match message {
-        ChatMessage::Thinking { .. } => true,
-        ChatMessage::Tool {
-            name, presentation, ..
-        } => name != "subagent" && presentation.icon != ToolIcon::Subagent,
-        _ => false,
-    }
 }
 
 #[cfg(test)]
@@ -163,49 +112,12 @@ fn display_rows_with_harness(
         if super::state::is_owned_subagent_child_tool(message, &owned_runs) {
             continue;
         }
-        if is_activity(message) {
-            if let Some(InterimRow::ActivityGroup { end, .. }) = interim.last_mut() {
-                if *end == message_index {
-                    *end = message_index + 1;
-                    continue;
-                }
-            }
-            interim.push(InterimRow::ActivityGroup {
-                start: message_index,
-                end: message_index + 1,
-                streaming_thinking: false,
-            });
-        } else {
-            interim.push(InterimRow::Message(message_index));
-        }
+        interim.push(InterimRow::Message(message_index));
     }
 
     if !streaming_text.is_empty() {
         match streaming_kind {
-            Some(StreamingKind::Thinking) => {
-                if let Some(InterimRow::ActivityGroup {
-                    end,
-                    streaming_thinking,
-                    ..
-                }) = interim.last_mut()
-                {
-                    if *end == messages.len() {
-                        *streaming_thinking = true;
-                    } else {
-                        interim.push(InterimRow::ActivityGroup {
-                            start: messages.len(),
-                            end: messages.len(),
-                            streaming_thinking: true,
-                        });
-                    }
-                } else {
-                    interim.push(InterimRow::ActivityGroup {
-                        start: messages.len(),
-                        end: messages.len(),
-                        streaming_thinking: true,
-                    });
-                }
-            }
+            Some(StreamingKind::Thinking) => interim.push(InterimRow::StreamingThinking),
             _ => interim.push(InterimRow::StreamingAssistant),
         }
     }
@@ -213,82 +125,8 @@ fn display_rows_with_harness(
     let mut rows = interim
         .into_iter()
         .map(|row| match row {
+            InterimRow::StreamingThinking => DisplayRow::StreamingThinking,
             InterimRow::StreamingAssistant => DisplayRow::StreamingAssistant,
-            InterimRow::ActivityGroup {
-                start,
-                end,
-                streaming_thinking,
-            } => {
-                let mut counts = ActivityCounts::default();
-                let mut has_thinking = streaming_thinking;
-                let mut running = streaming_thinking;
-                let mut has_error = false;
-                let mut has_cancelled = false;
-                let mut first_icon = None;
-                let mut mixed_icons = false;
-
-                if start < messages.len() {
-                    let group_end = end.min(messages.len());
-                    for message in &messages[start..group_end] {
-                        match message {
-                            ChatMessage::Thinking { .. } => has_thinking = true,
-                            ChatMessage::Tool {
-                                name,
-                                status,
-                                presentation,
-                                ..
-                            } => {
-                                let kind = activity_kind(name, presentation.icon);
-                                counts.add(kind);
-                                running |= *status == ToolStatus::Running;
-                                has_error |= *status == ToolStatus::Error;
-                                has_cancelled |= *status == ToolStatus::Cancelled;
-                                if let Some(icon) = first_icon {
-                                    mixed_icons |= icon != presentation.icon;
-                                } else {
-                                    first_icon = Some(presentation.icon);
-                                }
-                            }
-                            ChatMessage::Text { .. } => {}
-                        }
-                    }
-                }
-
-                let detail = activity_detail(
-                    if start < messages.len() {
-                        &messages[start..end.min(messages.len())]
-                    } else {
-                        &[]
-                    },
-                    streaming_thinking.then_some(streaming_text),
-                );
-
-                let title = if running {
-                    "Working"
-                } else if has_cancelled {
-                    "Stopped"
-                } else {
-                    "Worked"
-                };
-
-                let preview = activity_preview(&counts, has_thinking);
-
-                let tool_icon = if mixed_icons {
-                    ToolIcon::Generic
-                } else {
-                    first_icon.unwrap_or(ToolIcon::Generic)
-                };
-
-                DisplayRow::ActivityGroup(CachedActivityGroup {
-                    detail,
-                    preview,
-                    title,
-                    tool_icon,
-                    running,
-                    has_error,
-                    has_cancelled,
-                })
-            }
             InterimRow::Message(message_index) => {
                 let Some(message) = messages.get(message_index) else {
                     return DisplayRow::Message(message_index);
@@ -356,53 +194,14 @@ fn display_rows_with_harness(
         })
         .collect::<Vec<_>>();
 
-    let mut matched = vec![false; activities.len()];
-    for row in &mut rows {
-        let DisplayRow::SubagentTool(row) = row else {
-            continue;
-        };
-        let mut row_activities = Vec::new();
-        for (index, activity) in activities.iter().enumerate() {
-            if row
-                .rail_items
-                .iter()
-                .any(|item| item.key.as_deref() == Some(activity.key.as_str()))
-            {
-                matched[index] = true;
-                row_activities.push(activity.clone());
-            }
-        }
-        for item in row.rail_items.iter_mut().filter(|item| item.key.is_none()) {
-            let Some((index, activity)) = activities.iter().enumerate().find(|(index, activity)| {
-                !matched[*index]
-                    && item.task
-                        == super::state::normalize_whitespace_bounded(&activity.task, 160)
-                    && item.agent == activity.agent
-            }) else {
-                continue;
-            };
-            item.key = Some(activity.key.clone());
-            matched[index] = true;
-            row_activities.push(activity.clone());
-        }
-        if !row_activities.is_empty() {
-            super::state::merge_harness_activities(&mut row.rail_items, &row_activities);
-            row.preview = harness_activity_preview(&row_activities);
-        }
-    }
-
-    for (index, activity) in activities.iter().enumerate() {
-        if !matched[index] {
-            let mut rail_items = Vec::new();
-            super::state::merge_harness_activities(
-                &mut rail_items,
-                std::slice::from_ref(activity),
-            );
-            rows.push(DisplayRow::SubagentTool(CachedSubagentTool {
-                rail_items,
-                preview: harness_activity_preview(std::slice::from_ref(activity)),
-            }));
-        }
+    if !activities.is_empty() {
+        let mut rail_items = Vec::new();
+        super::state::merge_harness_activities(&mut rail_items, activities);
+        let preview = harness_activity_preview(activities);
+        rows.push(DisplayRow::HarnessActivities(CachedSubagentTool {
+            rail_items,
+            preview,
+        }));
     }
 
     rows
@@ -411,6 +210,7 @@ fn display_rows_with_harness(
 fn harness_activity_preview(activities: &[HarnessActivity]) -> String {
     let status = [
         HarnessActivityStatus::Aborted,
+        HarnessActivityStatus::Faulted,
         HarnessActivityStatus::Retrying,
         HarnessActivityStatus::Recovering,
         HarnessActivityStatus::Working,
@@ -428,239 +228,10 @@ fn harness_activity_preview(activities: &[HarnessActivity]) -> String {
             .expect("selected harness activity status"),
     );
     let count = activities.len();
-    format!("{label} · {count} {}", if count == 1 { "task" } else { "tasks" })
-}
-
-fn activity_kind(name: &str, icon: ToolIcon) -> ActivityKind {
-    let normalized = name.to_ascii_lowercase();
-    if icon == ToolIcon::ListDirectory || normalized.contains("list") {
-        ActivityKind::ExploredFolder
-    } else if normalized.contains("search")
-        || normalized.contains("grep")
-        || normalized.contains("find")
-    {
-        ActivityKind::Search
-    } else if icon == ToolIcon::ReadFile || normalized.contains("read") {
-        ActivityKind::ExploredFile
-    } else if matches!(icon, ToolIcon::WriteFile | ToolIcon::EditFile)
-        || normalized.contains("write")
-        || normalized.contains("edit")
-    {
-        ActivityKind::Edited
-    } else if icon == ToolIcon::Terminal
-        || normalized.contains("command")
-        || normalized.contains("terminal")
-        || normalized.contains("shell")
-    {
-        ActivityKind::Command
-    } else if icon == ToolIcon::Skill || normalized.contains("skill") {
-        ActivityKind::Skill
-    } else if icon == ToolIcon::Subagent
-        || normalized.contains("subagent")
-        || normalized.contains("delegate")
-    {
-        ActivityKind::Delegated
-    } else {
-        ActivityKind::Other
-    }
-}
-
-fn pluralized(count: usize, singular: &str, plural: &str) -> String {
-    format!("{count} {}", if count == 1 { singular } else { plural })
-}
-
-fn activity_preview(counts: &ActivityCounts, has_thinking: bool) -> String {
-    let mut parts = Vec::new();
-    if has_thinking {
-        parts.push("Reasoned".to_string());
-    }
-    let mut explored = Vec::new();
-    if counts.explored_files > 0 {
-        explored.push(pluralized(counts.explored_files, "file", "files"));
-    }
-    if counts.explored_folders > 0 {
-        explored.push(pluralized(counts.explored_folders, "folder", "folders"));
-    }
-    if counts.searches > 0 {
-        explored.push(pluralized(counts.searches, "search", "searches"));
-    }
-    if !explored.is_empty() {
-        parts.push(format!("Explored {}", explored.join(", ")));
-    }
-    if counts.edited > 0 {
-        parts.push(format!(
-            "Edited {}",
-            pluralized(counts.edited, "file", "files")
-        ));
-    }
-    if counts.commands > 0 {
-        parts.push(format!(
-            "Ran {}",
-            pluralized(counts.commands, "command", "commands")
-        ));
-    }
-    if counts.skills > 0 {
-        parts.push(format!(
-            "Loaded {}",
-            pluralized(counts.skills, "skill", "skills")
-        ));
-    }
-    if counts.delegated > 0 {
-        parts.push(format!(
-            "Delegated {}",
-            pluralized(counts.delegated, "task", "tasks")
-        ));
-    }
-    if counts.other > 0 {
-        parts.push(format!(
-            "Used {}",
-            pluralized(counts.other, "tool", "tools")
-        ));
-    }
-    parts.join(" · ")
-}
-
-fn markdown_inline(text: &str) -> String {
-    text.replace(['\r', '\n'], " ").replace('`', "'")
-}
-
-fn activity_line(
-    kind: ActivityKind,
-    title: &str,
-    primary: &str,
-    result_metadata: &str,
-    status: ToolStatus,
-) -> String {
-    let action = match kind {
-        ActivityKind::ExploredFile | ActivityKind::ExploredFolder | ActivityKind::Search => {
-            "Explored"
-        }
-        ActivityKind::Edited => "Edited",
-        ActivityKind::Command => "Ran command",
-        ActivityKind::Skill => "Loaded skill",
-        ActivityKind::Delegated => "Delegated",
-        ActivityKind::Other => title,
-    };
-    let mut line = format!("- **{}**", markdown_inline(action));
-    if !primary.is_empty() {
-        line.push_str(&format!(" `{}`", markdown_inline(primary)));
-    }
-    match status {
-        ToolStatus::Running => line.push_str(" · Running"),
-        ToolStatus::Error => line.push_str(" · Failed"),
-        ToolStatus::Cancelled if !result_metadata.is_empty() => {
-            line.push_str(&format!(" · {}", markdown_inline(result_metadata)))
-        }
-        ToolStatus::Cancelled => line.push_str(" · Stopped"),
-        ToolStatus::Done if !result_metadata.is_empty() => {
-            line.push_str(&format!(" · {}", markdown_inline(result_metadata)))
-        }
-        ToolStatus::Done => {}
-    }
-    line
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ActivityDetailKind {
-    Thinking,
-    Tool,
-}
-
-fn append_activity_detail(
-    detail: &mut String,
-    previous_kind: &mut Option<ActivityDetailKind>,
-    kind: ActivityDetailKind,
-    block: &str,
-) {
-    if block.is_empty() {
-        return;
-    }
-    if !detail.is_empty() {
-        if *previous_kind == Some(ActivityDetailKind::Tool) && kind == ActivityDetailKind::Tool {
-            detail.push('\n');
-        } else {
-            detail.push_str("\n\n");
-        }
-    }
-    detail.push_str(block);
-    *previous_kind = Some(kind);
-}
-
-fn activity_detail(messages: &[ChatMessage], streaming_thinking: Option<&str>) -> String {
-    let mut detail = String::new();
-    let mut previous_kind = None;
-    let mut has_thinking = false;
-
-    for message in messages {
-        match message {
-            ChatMessage::Thinking { text } => {
-                has_thinking = true;
-                if !text.trim().is_empty() {
-                    append_activity_detail(
-                        &mut detail,
-                        &mut previous_kind,
-                        ActivityDetailKind::Thinking,
-                        &format!("**Thinking**\n\n{text}"),
-                    );
-                }
-            }
-            ChatMessage::Tool {
-                name,
-                status,
-                presentation,
-                result_metadata,
-                output,
-                ..
-            } => {
-                let kind = activity_kind(name, presentation.icon);
-                let mut line = activity_line(
-                    kind,
-                    &presentation.title,
-                    &presentation.primary,
-                    result_metadata,
-                    *status,
-                );
-                if name == "subagent" || presentation.icon == ToolIcon::Subagent {
-                    if !presentation.arguments_detail.is_empty() {
-                        line.push_str("\n\n");
-                        line.push_str(&presentation.arguments_detail);
-                    }
-                    if !output.trim().is_empty() {
-                        line.push_str("\n\n");
-                        line.push_str(output.trim());
-                    }
-                }
-                append_activity_detail(
-                    &mut detail,
-                    &mut previous_kind,
-                    ActivityDetailKind::Tool,
-                    &line,
-                );
-            }
-            ChatMessage::Text { .. } => {}
-        }
-    }
-
-    if let Some(text) = streaming_thinking {
-        has_thinking = true;
-        let block = if text.trim().is_empty() {
-            "**Thinking…**".to_string()
-        } else {
-            format!("**Thinking…**\n\n{text}")
-        };
-        append_activity_detail(
-            &mut detail,
-            &mut previous_kind,
-            ActivityDetailKind::Thinking,
-            &block,
-        );
-    }
-
-    if detail.is_empty() && has_thinking {
-        "Reasoning completed.".to_string()
-    } else {
-        detail
-    }
+    format!(
+        "{label} · {count} {}",
+        if count == 1 { "task" } else { "tasks" }
+    )
 }
 
 fn user_message_needs_wrapping(text: &str) -> bool {
@@ -715,6 +286,10 @@ pub struct ChatList {
     #[rust]
     cached_revision: u64,
     #[rust]
+    cached_harness_activities: Vec<HarnessActivity>,
+    #[rust]
+    scroll_to_activity_tail: bool,
+    #[rust]
     hovered_starter: Option<StarterPromptAction>,
     #[rust]
     pressed_starter: Option<StarterPromptAction>,
@@ -743,10 +318,35 @@ pub struct SubagentRail {
     pub items: Vec<SubagentRailItem>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SubagentRailAction {
+    Resume(String),
+    Abort(String),
+}
+
 impl Widget for SubagentRail {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         for row in self.rows.values_mut() {
             row.handle_event(cx, event, scope);
+        }
+        if let Event::Actions(actions) = event {
+            for (index, item) in self.items.iter().enumerate() {
+                if item.status != "Recovering" {
+                    continue;
+                }
+                let row_id = LiveId::from_num(1, index as u64);
+                let Some(row) = self.rows.get_mut(&row_id) else {
+                    continue;
+                };
+                let Some(key) = item.key.as_ref() else {
+                    continue;
+                };
+                if row.button(cx, ids!(resume_btn)).clicked(actions) {
+                    cx.widget_action(self.uid, SubagentRailAction::Resume(key.clone()));
+                } else if row.button(cx, ids!(abort_btn)).clicked(actions) {
+                    cx.widget_action(self.uid, SubagentRailAction::Abort(key.clone()));
+                }
+            }
         }
     }
 
@@ -792,6 +392,10 @@ impl Widget for SubagentRail {
                 cx,
                 item.status == "Working" && item.detail.trim().is_empty(),
             );
+            row.button(cx, ids!(resume_btn))
+                .set_visible(cx, item.status == "Recovering");
+            row.button(cx, ids!(abort_btn))
+                .set_visible(cx, item.status == "Recovering");
             update_activity_status(
                 cx,
                 row,
@@ -825,14 +429,20 @@ impl Widget for ChatList {
             || streaming_text_len != self.cached_streaming_text_len
             || data.revision != self.cached_revision
         {
+            if data.harness_activities != self.cached_harness_activities {
+                self.cached_harness_activities = data.harness_activities.clone();
+                self.scroll_to_activity_tail = !data.harness_activities.is_empty();
+            }
             if msg_count != self.cached_msg_count || data.revision != self.cached_base_revision {
-                self.cached_base_rows = display_rows_with_harness(
-                    &data.messages,
-                    None,
-                    "",
-                    &data.harness_activities,
-                );
+                self.cached_base_rows =
+                    display_rows_with_harness(&data.messages, None, "", &data.harness_activities);
                 self.cached_base_revision = data.revision;
+                ::log::trace!(
+                    "chat view: rebuilt base rows: {} msgs + {} activities → {} rows",
+                    data.messages.len(),
+                    data.harness_activities.len(),
+                    self.cached_base_rows.len()
+                );
             }
 
             if data.streaming_kind == Some(StreamingKind::Assistant) {
@@ -888,12 +498,12 @@ impl Widget for ChatList {
 
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
-                // Markdown remeasurement changes item heights after the list has chosen its
-                // viewport. Preserve the user's bottom-lock explicitly so PortalList does not
-                // animate the full stale overflow back into view.
-                let was_at_end = list.is_at_end();
-                list.set_tail_range(was_at_end);
                 list.set_item_range(cx, 0, rows.len());
+                if self.scroll_to_activity_tail {
+                    list.set_tail_range(true);
+                    list.set_first_id_and_scroll(rows.len().saturating_sub(1), 0.0);
+                    self.scroll_to_activity_tail = false;
+                }
 
                 while let Some(item_id) = list.next_visible_item(cx) {
                     let Some(row) = rows.get(item_id) else {
@@ -901,6 +511,20 @@ impl Widget for ChatList {
                     };
 
                     match row {
+                        DisplayRow::StreamingThinking => {
+                            let item_widget = list.item(cx, item_id, id!(ThinkingMsg));
+                            let mut md = item_widget.markdown(cx, ids!(md));
+                            if md.text() != data.streaming_text {
+                                md.set_text(cx, &data.streaming_text);
+                            }
+                            let preview =
+                                super::state::collapsed_thinking_preview(&data.streaming_text, 72);
+                            let preview_lbl = item_widget.label(cx, ids!(preview_lbl));
+                            if preview_lbl.text() != preview {
+                                preview_lbl.set_text(cx, &preview);
+                            }
+                            item_widget.draw_all_unscoped(cx);
+                        }
                         DisplayRow::StreamingAssistant => {
                             draw_markdown_item(
                                 &mut list,
@@ -910,30 +534,19 @@ impl Widget for ChatList {
                                 &data.streaming_text,
                             );
                         }
-                        DisplayRow::ActivityGroup(group) => {
-                            let item_widget = list.item(cx, item_id, id!(ActivityGroupMsg));
-                            show_tool_icon(cx, &item_widget, group.tool_icon);
-                            item_widget
-                                .label(cx, ids!(title_lbl))
-                                .set_text(cx, group.title);
-                            item_widget
-                                .label(cx, ids!(preview_lbl))
-                                .set_text(cx, &group.preview);
-                            update_activity_status(
-                                cx,
-                                &item_widget,
-                                group.running,
-                                group.has_error,
-                                group.has_cancelled,
-                            );
-                            let mut md = item_widget.markdown(cx, ids!(md));
-                            if md.text() != group.detail {
-                                md.set_text(cx, &group.detail);
-                            }
-                            item_widget.draw_all_unscoped(cx);
-                        }
-                        DisplayRow::SubagentTool(tool) => {
+                        DisplayRow::SubagentTool(tool) | DisplayRow::HarnessActivities(tool) => {
                             let item_widget = list.item(cx, item_id, id!(SubagentMsg));
+                            item_widget.label(cx, ids!(title_lbl)).set_text(
+                                cx,
+                                if matches!(
+                                    rows.get(item_id),
+                                    Some(DisplayRow::HarnessActivities(_))
+                                ) {
+                                    "Activity"
+                                } else {
+                                    "Agent tasks"
+                                },
+                            );
                             item_widget
                                 .label(cx, ids!(preview_lbl))
                                 .set_text(cx, &tool.preview);
@@ -1112,16 +725,12 @@ impl Widget for ChatList {
                 }
 
                 let can_jump_to_latest = !list.is_at_end() && !rows.is_empty();
-                let jump_layer = self.view.widget(cx, ids!(jump_to_latest_layer));
-                jump_layer.set_visible(cx, can_jump_to_latest);
-                jump_layer.redraw(cx);
-                let jump_button = self.view.button(cx, ids!(jump_to_latest_btn));
-                jump_button.set_visible(cx, can_jump_to_latest);
-                jump_button.redraw(cx);
-                let jump_hint = self.view.widget(cx, ids!(jump_to_latest_hint));
-                jump_hint.set_visible(cx, can_jump_to_latest && self.hovered_jump_to_latest);
-                jump_hint.redraw(cx);
-
+                sync_jump_to_latest(
+                    &self.view,
+                    cx,
+                    can_jump_to_latest,
+                    self.hovered_jump_to_latest,
+                );
             }
         }
         DrawStep::done()
@@ -1150,18 +759,15 @@ impl Widget for ChatList {
             let list = self.view.portal_list(cx, ids!(list));
             if list.scrolled(actions) {
                 let can_jump_to_latest = !list.is_at_end() && !self.cached_rows.is_empty();
-                let jump_layer = self.view.widget(cx, ids!(jump_to_latest_layer));
-                jump_layer.set_visible(cx, can_jump_to_latest);
-                jump_layer.redraw(cx);
-                let jump_button = self.view.button(cx, ids!(jump_to_latest_btn));
-                jump_button.set_visible(cx, can_jump_to_latest);
-                jump_button.redraw(cx);
                 if !can_jump_to_latest {
                     self.hovered_jump_to_latest = false;
-                    let jump_hint = self.view.widget(cx, ids!(jump_to_latest_hint));
-                    jump_hint.set_visible(cx, false);
-                    jump_hint.redraw(cx);
                 }
+                sync_jump_to_latest(
+                    &self.view,
+                    cx,
+                    can_jump_to_latest,
+                    self.hovered_jump_to_latest,
+                );
             }
             if list.smooth_scroll_reached(actions) {
                 list.set_tail_range(true);
@@ -1172,25 +778,16 @@ impl Widget for ChatList {
             let jump_button_view = jump_button_ref.as_view();
             if jump_button_view.finger_hover_in(actions).is_some() {
                 self.hovered_jump_to_latest = true;
-                self.view.widget(cx, ids!(jump_to_latest_hint)).redraw(cx);
+                sync_jump_to_latest(&self.view, cx, true, true);
             } else if jump_button_view.finger_hover_out(actions).is_some() {
                 self.hovered_jump_to_latest = false;
-                let jump_hint = self.view.widget(cx, ids!(jump_to_latest_hint));
-                jump_hint.set_visible(cx, false);
-                jump_hint.redraw(cx);
+                sync_jump_to_latest(&self.view, cx, true, false);
             }
             if jump_button.clicked(actions) {
                 list.set_tail_range(false);
                 list.smooth_scroll_to_end(cx, 12.0, None);
-                let jump_layer = self.view.widget(cx, ids!(jump_to_latest_layer));
-                jump_layer.set_visible(cx, false);
-                jump_layer.redraw(cx);
-                jump_button.set_visible(cx, false);
-                jump_button.redraw(cx);
                 self.hovered_jump_to_latest = false;
-                let jump_hint = self.view.widget(cx, ids!(jump_to_latest_hint));
-                jump_hint.set_visible(cx, false);
-                jump_hint.redraw(cx);
+                sync_jump_to_latest(&self.view, cx, false, false);
                 self.view.redraw(cx);
             }
 
@@ -1220,10 +817,22 @@ impl Widget for ChatList {
 impl ChatList {
     fn focused_starter_action(&self, cx: &Cx) -> Option<StarterPromptAction> {
         [
-            (ids!(empty_state.cards_row.explore_card.btn), StarterPromptAction::Explore),
-            (ids!(empty_state.cards_row.build_card.btn), StarterPromptAction::Build),
-            (ids!(empty_state.cards_row.review_card.btn), StarterPromptAction::Review),
-            (ids!(empty_state.cards_row.fix_card.btn), StarterPromptAction::Fix),
+            (
+                ids!(empty_state.cards_row.explore_card.btn),
+                StarterPromptAction::Explore,
+            ),
+            (
+                ids!(empty_state.cards_row.build_card.btn),
+                StarterPromptAction::Build,
+            ),
+            (
+                ids!(empty_state.cards_row.review_card.btn),
+                StarterPromptAction::Review,
+            ),
+            (
+                ids!(empty_state.cards_row.fix_card.btn),
+                StarterPromptAction::Fix,
+            ),
         ]
         .into_iter()
         .find_map(|(path, action)| {
@@ -1358,7 +967,7 @@ mod tests {
     }
 
     #[test]
-    fn consecutive_activity_messages_share_one_display_row() {
+    fn consecutive_activity_messages_keep_individual_rows() {
         let messages = vec![
             ChatMessage::Thinking {
                 text: "Plan".into(),
@@ -1372,13 +981,15 @@ mod tests {
         ];
 
         let rows = display_rows(&messages, None, "");
-        assert_eq!(rows.len(), 2);
-        assert!(matches!(rows[0], DisplayRow::ActivityGroup(_)));
-        assert!(matches!(rows[1], DisplayRow::Message(3)));
+        assert_eq!(rows.len(), 4);
+        assert!(matches!(rows[0], DisplayRow::Message(0)));
+        assert!(matches!(rows[1], DisplayRow::Tool(_)));
+        assert!(matches!(rows[2], DisplayRow::Tool(_)));
+        assert!(matches!(rows[3], DisplayRow::Message(3)));
     }
 
     #[test]
-    fn harness_activity_uses_one_existing_subagent_rail_row() {
+    fn standalone_harness_activity_uses_the_subagent_rail() {
         let activities = vec![super::super::state::HarnessActivity {
             key: "lane-a".into(),
             task: "Recover interrupted work".into(),
@@ -1390,12 +1001,14 @@ mod tests {
         let rows = display_rows_with_harness(&[], None, "", &activities);
 
         assert_eq!(rows.len(), 1);
-        let DisplayRow::SubagentTool(row) = &rows[0] else {
-            panic!("expected a subagent rail row");
+        let DisplayRow::HarnessActivities(row) = &rows[0] else {
+            panic!("expected a standalone activity row");
         };
+        assert_eq!(row.preview, "Recovering · 1 task");
         assert_eq!(row.rail_items.len(), 1);
         assert_eq!(row.rail_items[0].key.as_deref(), Some("lane-a"));
         assert_eq!(row.rail_items[0].status, "Recovering");
+        assert!(row.rail_items[0].detail.contains("Recovered checkpoint"));
     }
 
     #[test]
@@ -1443,16 +1056,14 @@ mod tests {
 
         let rows = display_rows_with_harness(&messages, None, "", &activities);
 
-        assert_eq!(rows.len(), 2);
-        let [DisplayRow::SubagentTool(first), DisplayRow::SubagentTool(second)] = &rows[..]
-        else {
-            panic!("expected two delegation rows");
+        assert_eq!(rows.len(), 3);
+        let DisplayRow::HarnessActivities(activity) = &rows[2] else {
+            panic!("expected a trailing activity row");
         };
-        assert_eq!(first.rail_items[0].key.as_deref(), Some("lane-a"));
-        assert_eq!(first.rail_items[0].status, "Recovered");
-        assert_eq!(second.rail_items[0].key.as_deref(), Some("lane-b"));
-        assert_eq!(second.rail_items[0].status, "Recovering");
-        assert_eq!(second.rail_items.len(), 1);
+        assert_eq!(activity.rail_items[0].key.as_deref(), Some("lane-a"));
+        assert_eq!(activity.rail_items[0].status, "Recovered");
+        assert_eq!(activity.rail_items[1].key.as_deref(), Some("lane-b"));
+        assert_eq!(activity.rail_items[1].status, "Recovering");
     }
 
     #[test]
@@ -1507,9 +1118,9 @@ mod tests {
 
         let rows = display_rows_with_harness(&[message], None, "", &activities);
 
-        assert_eq!(rows.len(), 1);
-        let DisplayRow::SubagentTool(row) = &rows[0] else {
-            panic!("expected one delegation row");
+        assert_eq!(rows.len(), 2);
+        let DisplayRow::HarnessActivities(row) = &rows[1] else {
+            panic!("expected a trailing activity row");
         };
         assert_eq!(row.rail_items.len(), 2);
         assert_eq!(row.rail_items[0].key.as_deref(), Some("lane-a"));
@@ -1520,7 +1131,7 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_live_subagent_activity_updates_the_existing_tool_row() {
+    fn cancelled_live_subagent_activity_uses_a_trailing_activity_row() {
         let arguments = serde_json::json!({
             "parallel": true,
             "tasks": [{"agent": "scout", "task": "Inspect the repository"}]
@@ -1547,12 +1158,48 @@ mod tests {
 
         let rows = display_rows_with_harness(&[message], None, "", &activities);
 
-        assert_eq!(rows.len(), 1);
-        let DisplayRow::SubagentTool(row) = &rows[0] else {
-            panic!("expected one delegation row");
+        assert_eq!(rows.len(), 2);
+        let DisplayRow::HarnessActivities(row) = &rows[1] else {
+            panic!("expected a trailing activity row");
         };
         assert_eq!(row.rail_items[0].status, "Cancelled");
         assert_eq!(row.preview, "Cancelled · 1 task");
+    }
+
+    #[test]
+    fn generic_harness_activity_stays_separate_from_live_subagent_rail() {
+        let arguments = serde_json::json!({
+            "parallel": true,
+            "tasks": [{"agent": "scout", "task": "Inspect the repository"}]
+        })
+        .to_string();
+        let message = ChatMessage::Tool {
+            id: "delegate".into(),
+            name: "subagent".into(),
+            presentation: super::super::state::tool_presentation("subagent", "{}"),
+            arguments,
+            output: String::new(),
+            status: ToolStatus::Running,
+            result_preview: String::new(),
+            result_metadata: String::new(),
+            started_at: Instant::now(),
+        };
+        let activities = vec![super::super::state::HarnessActivity {
+            key: "subagent-0-0:0".into(),
+            task: "Inspect the repository".into(),
+            agent: "subagent".into(),
+            status: super::super::state::HarnessActivityStatus::Working,
+            detail: "Working".into(),
+        }];
+
+        let rows = display_rows_with_harness(&[message], None, "", &activities);
+
+        let [DisplayRow::SubagentTool(_), DisplayRow::HarnessActivities(row)] = &rows[..] else {
+            panic!("expected separate delegation and activity rows");
+        };
+        assert_eq!(row.rail_items.len(), 1);
+        assert_eq!(row.rail_items[0].key.as_deref(), Some("subagent-0-0:0"));
+        assert_eq!(row.rail_items[0].status, "Working");
     }
 
     #[test]
@@ -1565,7 +1212,7 @@ mod tests {
 
         let orphaned_rows = display_rows(std::slice::from_ref(&child), None, "");
         assert_eq!(orphaned_rows.len(), 1);
-        assert!(matches!(orphaned_rows[0], DisplayRow::ActivityGroup(_)));
+        assert!(matches!(orphaned_rows[0], DisplayRow::Tool(_)));
 
         let unrelated_child = tool(
             "subagent-405:0:read",
@@ -1579,64 +1226,16 @@ mod tests {
         );
         assert_eq!(owned_rows.len(), 2);
         assert!(matches!(owned_rows[0], DisplayRow::SubagentTool(_)));
-        assert!(matches!(owned_rows[1], DisplayRow::ActivityGroup(_)));
+        assert!(matches!(owned_rows[1], DisplayRow::Tool(_)));
     }
 
     #[test]
-    fn streaming_thinking_merges_into_trailing_activity_group() {
+    fn streaming_thinking_keeps_its_own_activity_row() {
         let messages = vec![tool("read", "read_file", r#"{"path":"src/app.rs"}"#)];
 
         let rows = display_rows(&messages, Some(StreamingKind::Thinking), "Reviewing");
-        assert_eq!(rows.len(), 1);
-        assert!(matches!(rows[0], DisplayRow::ActivityGroup(_)));
-    }
-
-    #[test]
-    fn activity_detail_preserves_finalized_and_streaming_thinking_in_order() {
-        let completed = format!(
-            "Starting analysis. {}Final persisted reasoning sentence.",
-            "Detailed reasoning step. ".repeat(400)
-        );
-        let messages = vec![
-            ChatMessage::Thinking {
-                text: completed.clone(),
-            },
-            tool("read", "read_file", r#"{"path":"src/app.rs"}"#),
-            ChatMessage::Thinking {
-                text: "Reasoning after the tool.".into(),
-            },
-        ];
-
-        let detail = activity_detail(&messages, Some("Current streaming reasoning."));
-
-        assert!(detail.contains(&completed));
-        let completed_index = detail.find("Final persisted reasoning sentence.").unwrap();
-        let tool_index = detail.find("src/app.rs").unwrap();
-        let resumed_index = detail.find("Reasoning after the tool.").unwrap();
-        let streaming_index = detail.find("Current streaming reasoning.").unwrap();
-        assert!(completed_index < tool_index);
-        assert!(tool_index < resumed_index);
-        assert!(resumed_index < streaming_index);
-    }
-
-    #[test]
-    fn activity_preview_distinguishes_exploration_types() {
-        let counts = ActivityCounts {
-            explored_files: 2,
-            explored_folders: 1,
-            searches: 1,
-            edited: 3,
-            commands: 1,
-            ..Default::default()
-        };
-
-        assert_eq!(
-            activity_preview(&counts, false),
-            "Explored 2 files, 1 folder, 1 search · Edited 3 files · Ran 1 command"
-        );
-        assert_eq!(
-            activity_preview(&counts, true),
-            "Reasoned · Explored 2 files, 1 folder, 1 search · Edited 3 files · Ran 1 command"
-        );
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(rows[0], DisplayRow::Tool(_)));
+        assert!(matches!(rows[1], DisplayRow::StreamingThinking));
     }
 }

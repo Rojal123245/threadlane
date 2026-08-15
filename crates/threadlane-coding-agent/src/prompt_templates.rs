@@ -161,9 +161,9 @@ fn eval_braced_expr(expr: &str, args: &[String], all_args: &str) -> String {
 
 /// Parse frontmatter metadata from markdown file content.
 pub fn parse_frontmatter(content: &str) -> (Option<String>, Option<String>, String) {
-    let parsed = crate::frontmatter::parse_frontmatter(content);
-    let description = parsed.get("description").map(ToString::to_string);
-    let argument_hint = parsed.get("argument-hint").map(ToString::to_string);
+    let parsed = threadlane_skills::frontmatter::parse_frontmatter(content);
+    let description = parsed.get_str("description").map(ToString::to_string);
+    let argument_hint = parsed.get_str("argument-hint").map(ToString::to_string);
     (description, argument_hint, parsed.body)
 }
 
@@ -356,7 +356,12 @@ mod tests {
 
     #[test]
     fn test_slicing() {
-        let args = vec!["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string()];
+        let args = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+        ];
 
         let content_slice_from = "Slice: ${@:2}";
         let result_slice_from = substitute_args(content_slice_from, &args);

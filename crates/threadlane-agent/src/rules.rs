@@ -1,4 +1,5 @@
-use crate::op_log::ToolReplaySafety;
+use crate::config::AgentConfig;
+use crate::harness::ToolReplaySafety;
 use serde::{Deserialize, Serialize};
 
 pub fn classify_tool_replay_safety(tool_name: &str) -> ToolReplaySafety {
@@ -18,6 +19,7 @@ pub struct StreamRule {
     pub(crate) reminder: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct RuleMatch {
     pub(crate) rule_id: String,
@@ -26,24 +28,25 @@ pub struct RuleMatch {
     pub(crate) reminder: String,
 }
 
-const MAX_WINDOW_BYTES: usize = 4096;
-
 pub(crate) struct StreamRuleMonitor {
     rules: Vec<(StreamRule, regex::Regex)>,
     accumulated_text: String,
+    max_window_bytes: usize,
 }
 
 impl StreamRuleMonitor {
-    pub(crate) fn new(rules: Vec<(StreamRule, regex::Regex)>) -> Self {
+    pub(crate) fn new(rules: Vec<(StreamRule, regex::Regex)>, config: &AgentConfig) -> Self {
         Self {
             rules,
             accumulated_text: String::new(),
+            max_window_bytes: config.stream_rule_max_window_bytes,
         }
     }
 
     fn clamp_window(&mut self) {
-        if self.accumulated_text.len() > MAX_WINDOW_BYTES {
-            let mut start = self.accumulated_text.len() - MAX_WINDOW_BYTES;
+        let max_window = self.max_window_bytes;
+        if self.accumulated_text.len() > max_window {
+            let mut start = self.accumulated_text.len() - max_window;
             while !self.accumulated_text.is_char_boundary(start) {
                 start += 1;
             }
@@ -87,7 +90,8 @@ mod tests {
         };
         let re = regex::Regex::new(&rule.pattern).unwrap();
 
-        let mut monitor = StreamRuleMonitor::new(vec![(rule, re)]);
+        let config = AgentConfig::default();
+        let mut monitor = StreamRuleMonitor::new(vec![(rule, re)], &config);
         assert!(monitor.push_chunk("let x = ").is_none());
         assert!(monitor.push_chunk("Box::leak(").is_none());
         let mat = monitor.push_chunk("ptr);");
@@ -108,7 +112,9 @@ mod tests {
         };
         let re = regex::Regex::new(&rule.pattern).unwrap();
 
-        let mut monitor = StreamRuleMonitor::new(vec![(rule, re)]);
+        let config = AgentConfig::default();
+        let mut monitor = StreamRuleMonitor::new(vec![(rule, re)], &config);
+        let max_window = config.stream_rule_max_window_bytes;
 
         // Push partial prefix that does not match by itself
         assert!(monitor.push_chunk("PREFIX_").is_none());
@@ -116,7 +122,7 @@ mod tests {
         // Push 5000 bytes of filler
         let filler = "a".repeat(5000);
         assert!(monitor.push_chunk(&filler).is_none());
-        assert!(monitor.accumulated_text.len() <= MAX_WINDOW_BYTES);
+        assert!(monitor.accumulated_text.len() <= max_window);
 
         // PREFIX_ was clamped away, so pushing suffix "SECRET_123" will not match
         assert!(monitor.push_chunk("SECRET_123").is_none());
@@ -137,7 +143,9 @@ mod tests {
         };
         let re = regex::Regex::new(&rule.pattern).unwrap();
 
-        let mut monitor = StreamRuleMonitor::new(vec![(rule, re)]);
+        let config = AgentConfig::default();
+        let mut monitor = StreamRuleMonitor::new(vec![(rule, re)], &config);
+        let max_window = config.stream_rule_max_window_bytes;
 
         // Push multi-byte UTF-8 characters (crab emoji is 4 bytes)
         // 4095 'a' bytes + 1 crab emoji (4 bytes) = 4099 bytes total
@@ -146,22 +154,22 @@ mod tests {
         monitor.push_chunk(&text);
 
         // Window size before clamp was 4099.
-        // target start = 4099 - 4096 = 3.
-        // Index 3 is char boundary ('a'), so clamped text len = 4096.
-        assert!(monitor.accumulated_text.len() <= MAX_WINDOW_BYTES);
+        // target start = 4099 - max_window = 3.
+        // Index 3 is char boundary ('a'), so clamped text len = max_window.
+        assert!(monitor.accumulated_text.len() <= max_window);
 
-        // Now align so target excess (len - 4096) falls INSIDE a multi-byte character
+        // Now align so target excess falls INSIDE a multi-byte character
         // 4094 'a's + "🦀" (4 bytes) + "🦀" (4 bytes) = 4102 bytes total
         let mut text2 = "a".repeat(4094);
         text2.push_str("🦀🦀");
         monitor.reset();
         monitor.push_chunk(&text2);
 
-        // 4102 - 4096 = 6.
+        // 4102 - max_window = 6.
         // Index 6 is inside the first 🦀 (bytes 4094..4098).
         // `start` advances to 4098 (next char boundary).
-        // Clamped text len = 4102 - 4098 = 4004 bytes <= 4096.
-        assert!(monitor.accumulated_text.len() <= MAX_WINDOW_BYTES);
+        // Clamped text len = 4102 - 4098 = 4004 bytes <= max_window.
+        assert!(monitor.accumulated_text.len() <= max_window);
         assert!(std::str::from_utf8(monitor.accumulated_text.as_bytes()).is_ok());
 
         // Match works after clamping
