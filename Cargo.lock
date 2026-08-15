@@ -8041,6 +8041,7 @@ dependencies = [
  "threadlane-agent",
  "threadlane-auth",
  "threadlane-coding-agent",
+ "threadlane-git",
  "threadlane-provider",
  "threadlane-tools",
  "tokio",

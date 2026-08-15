@@ -14,6 +14,7 @@ threadlane-coding-agent = { version = "0.1.0", path = "../threadlane-coding-agen
 threadlane-provider = { version = "0.1.0", path = "../threadlane-provider" }
 threadlane-auth = { version = "0.1.0", path = "../threadlane-auth" }
 threadlane-tools = { version = "0.1.0", path = "../threadlane-tools" }
+threadlane-git = { version = "0.1.0", path = "../threadlane-git" }
 tokio = { version = "1.38", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
