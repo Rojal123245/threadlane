@@ -15,7 +15,7 @@
         {
           "type": "toml",
           "path": "Cargo.lock",
-          "jsonpath": "$.package[?(@.name.value === 'threadlane' || @.name.value === 'threadlane-updater')].version"
+          "jsonpath": "$.package[?(@.name.value === 'threadlane' || @.name.value === 'threadlane-gpui' || @.name.value === 'threadlane-updater')].version"
         }
       ]
     }

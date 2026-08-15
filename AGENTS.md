@@ -374,6 +374,11 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 - Each MCP session carries its own lock. Hold the session map only long enough to look up or install a handle, never across the request round trip, or tool calls to unrelated servers serialize behind each other.
 - Session files are parsed once through the untagged `SessionLine` enum. Do not go back to trying `SessionRecord` and then `SessionNode`, which parsed the JSON text of every node line twice.
 
+## Release Automation
+
+- Keep the `release` job in `.github/workflows/release-please.yml` serialized per branch with stale-run cancellation. A release-please run can observe a release PR merged after its triggering push; without job-level concurrency, that stale run can create the new version tag on its older commit.
+- When a package starts inheriting `workspace.package.version`, add its `Cargo.lock` package entry to the TOML updater in `release-please-config.json`. Release builds use `--locked`, so updating `Cargo.toml` without every corresponding lock entry breaks packaging.
+
 ## Updater Behavior
 
 - `THREADLANE_UPDATER_PUBLIC_KEY` and `THREADLANE_UPDATER_ENDPOINT` are compile-time environment values through `option_env!`.
