@@ -7,6 +7,7 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{InputEvent, Textarea, TextareaState};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
+use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::theme::ActiveTheme;
 use gpui_component::{Disableable, Icon, IconName, Sizable};
@@ -171,11 +172,11 @@ impl ChatListView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme().colors;
-        let (badge_bg, badge_fg) = match activity.category.as_str() {
-            "Created" | "Edited" => (theme.success, theme.success_foreground),
-            "Ran" => (theme.info, theme.info_foreground),
-            "Error" => (theme.danger, theme.danger_foreground),
-            _ => (theme.muted, theme.muted_foreground),
+        let tag_variant = match activity.category.as_str() {
+            "Created" | "Edited" => TagVariant::Success,
+            "Ran" => TagVariant::Info,
+            "Error" => TagVariant::Danger,
+            _ => TagVariant::Secondary,
         };
 
         div()
@@ -196,15 +197,10 @@ impl ChatListView {
                     .items_center()
                     .gap_2()
                     .child(
-                        div()
-                            .px_1p5()
-                            .py_0p5()
-                            .rounded_sm()
-                            .bg(badge_bg)
-                            .text_xs()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(badge_fg)
-                            .child(activity.category.clone()),
+                        Tag::new()
+                            .child(activity.category.clone())
+                            .with_variant(tag_variant)
+                            .small(),
                     )
                     .child(
                         div()
@@ -498,15 +494,10 @@ impl ChatListView {
                 .items_center()
                 .gap_3()
                 .child(
-                    div()
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .bg(theme.secondary)
-                        .text_xs()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.muted_foreground)
-                        .child("Pending"),
+                    Tag::new()
+                        .child("Pending")
+                        .with_variant(TagVariant::Secondary)
+                        .small(),
                 )
                 .child(
                     div()

@@ -3,13 +3,17 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use gpui_component::alert::{Alert, AlertVariant};
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::group_box::GroupBox;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
+use gpui_component::separator::Separator;
 use gpui_component::switch::Switch;
+use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::text::TextView;
-use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable};
+use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable};
 
 use crate::app::{actions::AppAction, controller};
 use crate::services::provider_auth::{self, ProviderAuthEvent};
@@ -479,14 +483,14 @@ impl SettingsView {
                                     .child(title),
                             )
                             .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(if connected {
-                                        theme.success
+                                Tag::new()
+                                    .child(if connected { "Connected" } else { "Not connected" })
+                                    .with_variant(if connected {
+                                        TagVariant::Success
                                     } else {
-                                        theme.muted_foreground
+                                        TagVariant::Secondary
                                     })
-                                    .child(if connected { "Connected" } else { "Not connected" }),
+                                    .small(),
                             ),
                     )
                     .child(
@@ -754,15 +758,10 @@ impl SettingsView {
     }
 
     fn render_capability_status(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let theme = cx.theme().colors;
         self.capability_status.clone().map(|status| {
-            div()
-                .rounded_md()
-                .bg(theme.muted)
-                .p_3()
-                .text_xs()
-                .text_color(theme.foreground)
-                .child(status)
+            Alert::new("capability-status-alert", status)
+                .title("Notice")
+                .with_variant(AlertVariant::Info)
                 .into_any_element()
         })
     }
@@ -844,12 +843,12 @@ impl SettingsView {
                     ExtensionScope::Global => "Global",
                     ExtensionScope::Project => "Project",
                 };
-                let status = if !enabled {
-                    "Disabled"
+                let (status, status_variant) = if !enabled {
+                    ("Disabled", TagVariant::Secondary)
                 } else if record.is_effective() {
-                    "Active"
+                    ("Active", TagVariant::Success)
                 } else {
-                    "Overridden"
+                    ("Overridden", TagVariant::Warning)
                 };
                 div()
                     .rounded_lg()
@@ -886,9 +885,21 @@ impl SettingsView {
                             .child(
                                 div()
                                     .mt_1()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(format!("{scope} · {status}")),
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        Tag::new()
+                                            .child(scope)
+                                            .with_variant(TagVariant::Secondary)
+                                            .small(),
+                                    )
+                                    .child(
+                                        Tag::new()
+                                            .child(status)
+                                            .with_variant(status_variant)
+                                            .small(),
+                                    ),
                             )
                             .child(
                                 div()
@@ -1032,23 +1043,39 @@ impl SettingsView {
                                     .text_color(theme.muted_foreground)
                                     .child(skill.description),
                             )
-                            .child(
+                            .child({
+                                let status_label = if !skill.is_valid {
+                                    "Invalid"
+                                } else if enabled {
+                                    "Enabled"
+                                } else {
+                                    "Disabled"
+                                };
+                                let status_variant = if !skill.is_valid {
+                                    TagVariant::Danger
+                                } else if enabled {
+                                    TagVariant::Success
+                                } else {
+                                    TagVariant::Secondary
+                                };
                                 div()
                                     .mt_1()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(format!(
-                                        "{} · {}",
-                                        skill.scope.display_name(),
-                                        if !skill.is_valid {
-                                            "Invalid"
-                                        } else if enabled {
-                                            "Enabled"
-                                        } else {
-                                            "Disabled"
-                                        }
-                                    )),
-                            ),
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        Tag::new()
+                                            .child(skill.scope.display_name().to_string())
+                                            .with_variant(TagVariant::Secondary)
+                                            .small(),
+                                    )
+                                    .child(
+                                        Tag::new()
+                                            .child(status_label)
+                                            .with_variant(status_variant)
+                                            .small(),
+                                    )
+                            }),
                     )
                     .child(
                         Switch::new(SharedString::from(format!("skill-toggle-{skill_id}")))
@@ -1205,20 +1232,41 @@ impl SettingsView {
                                     .font_weight(FontWeight::MEDIUM)
                                     .child(config.name),
                             )
-                            .child(
+                            .child({
+                                let scope_label = match scope {
+                                    AcpScope::Global => "Global",
+                                    AcpScope::Project => "Project",
+                                };
+                                let status_label = record.status.display_status();
+                                let status_variant = if status_label.contains("Ready")
+                                    || status_label.contains("Available")
+                                {
+                                    TagVariant::Success
+                                } else if status_label.contains("Failed")
+                                    || status_label.contains("Error")
+                                {
+                                    TagVariant::Danger
+                                } else {
+                                    TagVariant::Info
+                                };
                                 div()
                                     .mt_1()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(format!(
-                                        "{} · {}",
-                                        match scope {
-                                            AcpScope::Global => "Global",
-                                            AcpScope::Project => "Project",
-                                        },
-                                        record.status.display_status()
-                                    )),
-                            )
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        Tag::new()
+                                            .child(scope_label)
+                                            .with_variant(TagVariant::Secondary)
+                                            .small(),
+                                    )
+                                    .child(
+                                        Tag::new()
+                                            .child(status_label)
+                                            .with_variant(status_variant)
+                                            .small(),
+                                    )
+                            })
                             .child(
                                 div()
                                     .mt_1()

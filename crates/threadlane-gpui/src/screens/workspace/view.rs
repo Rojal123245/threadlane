@@ -1,11 +1,13 @@
 use std::sync::mpsc;
 use std::time::Duration;
 
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
-
+use gpui_component::spinner::Spinner;
 use gpui_component::switch::Switch;
+use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable};
 use threadlane_git::GitStatus;
 
@@ -519,14 +521,16 @@ impl WorkspaceView {
                                     .gap_2()
                                     .text_xs()
                                     .child(
-                                        div()
-                                            .text_color(theme.success)
-                                            .child(format!("+{additions}")),
+                                        Tag::new()
+                                            .child(format!("+{additions}"))
+                                            .with_variant(TagVariant::Success)
+                                            .small(),
                                     )
                                     .child(
-                                        div()
-                                            .text_color(theme.danger)
-                                            .child(format!("−{deletions}")),
+                                        Tag::new()
+                                            .child(format!("−{deletions}"))
+                                            .with_variant(TagVariant::Danger)
+                                            .small(),
                                     )
                                     .child(div().text_color(theme.muted_foreground).child(
                                         format!("{} files", status.map_or(0, |s| s.files.len())),
@@ -553,10 +557,11 @@ impl WorkspaceView {
                                     )
                                     .child(
                                         Button::new("git-generate-message")
-                                            .label(if self.git_message_pending {
-                                                "Generating…"
-                                            } else {
-                                                "Generate"
+                                            .when(self.git_message_pending, |button| {
+                                                button.child(Spinner::new().xsmall()).label("Generating…")
+                                            })
+                                            .when(!self.git_message_pending, |button| {
+                                                button.label("Generate")
                                             })
                                             .ghost()
                                             .xsmall()

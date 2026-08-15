@@ -5,8 +5,11 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
+use gpui_component::separator::Separator;
+use gpui_component::spinner::Spinner;
+use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::theme::ActiveTheme;
-use gpui_component::IconName;
+use gpui_component::{IconName, Sizable};
 
 use crate::app::{actions::AppAction, controller};
 use crate::state::{AppState, SessionHealth, SessionInfo};
@@ -109,30 +112,16 @@ impl SidebarView {
             .pb_3()
             .bg(theme.title_bar)
             .child(
-                div()
-                    .id("new-task-btn")
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .h(px(36.0))
-                    .px_2()
-                    .rounded_md()
-                    .text_color(theme.sidebar_foreground)
+                Button::new("new-task-btn")
+                    .icon(IconName::Plus)
+                    .label("New Task")
+                    .ghost()
                     .w_full()
-                    .hover(|style| style.bg(theme.list_hover))
-                    .cursor_pointer()
-                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    .on_click(move |_event, _window, cx| {
                         model.update(cx, |state, _cx| {
                             controller::dispatch(state, AppAction::BeginNewTask);
                         });
-                    })
-                    .child(IconName::Plus)
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child("New Task"),
-                    ),
+                    }),
             )
             .child(
                 div()
@@ -172,26 +161,18 @@ impl SidebarView {
                     .child("Today"),
             )
             .child(
-                div()
-                    .id("attach-project-btn")
-                    .w(px(28.0))
-                    .h(px(28.0))
-                    .rounded_md()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_lg()
-                    .text_color(theme.muted_foreground)
-                    .hover(|style| style.bg(theme.list_hover).text_color(theme.foreground))
-                    .cursor_pointer()
-                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                Button::new("attach-project-btn")
+                    .icon(IconName::Folder)
+                    .tooltip("Attach Project")
+                    .ghost()
+                    .xsmall()
+                    .on_click(move |_event, _window, cx| {
                         if let Some(path) = rfd::FileDialog::new().pick_folder() {
                             model.update(cx, |state, _cx| {
                                 controller::dispatch(state, AppAction::AttachProject(path));
                             });
                         }
-                    })
-                    .child(IconName::Folder),
+                    }),
             )
     }
 
@@ -202,9 +183,15 @@ impl SidebarView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme().colors;
-        let status_indicator = match session.health {
-            SessionHealth::Working => Some((theme.info, "◔")),
-            SessionHealth::Warning => Some((theme.warning, "▲")),
+        let status_indicator: Option<AnyElement> = match session.health {
+            SessionHealth::Working => Some(Spinner::new().xsmall().into_any_element()),
+            SessionHealth::Warning => Some(
+                Tag::new()
+                    .child("!")
+                    .with_variant(TagVariant::Warning)
+                    .small()
+                    .into_any_element(),
+            ),
             SessionHealth::Healthy => None,
         };
 
@@ -288,9 +275,7 @@ impl SidebarView {
                             .truncate()
                             .child(session.title.clone()),
                     )
-                    .children(status_indicator.map(|(color, icon)| {
-                        div().flex_none().text_sm().text_color(color).child(icon)
-                    })),
+                    .children(status_indicator),
             )
             .child(
                 div()

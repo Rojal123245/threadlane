@@ -7,6 +7,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::scroll::ScrollableElement;
+use gpui_component::separator::Separator;
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::{ActiveTheme, Icon, IconName, Selectable, Sizable};
 use threadlane_git::GitFile;
@@ -388,8 +389,6 @@ impl RightPanelView {
                         .flex()
                         .items_center()
                         .gap_1()
-                        .border_b_1()
-                        .border_color(theme.border)
                         .child(
                             Button::new("right-panel-document-back")
                                 .icon(IconName::ArrowLeft)
@@ -413,6 +412,7 @@ impl RightPanelView {
                                 .child(title.clone()),
                         ),
                 )
+                .child(Separator::horizontal())
                 .child(
                     div()
                         .flex_1()
