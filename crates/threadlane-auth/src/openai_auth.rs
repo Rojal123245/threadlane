@@ -361,6 +361,41 @@ pub async fn poll_device_token(
     Ok(tokens)
 }
 
+fn device_token_error(status: reqwest::StatusCode, body: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+    let error = value.get("error");
+    let code = error
+        .and_then(Value::as_str)
+        .or_else(|| {
+            error
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| value.get("code").and_then(Value::as_str));
+
+    if matches!(
+        code,
+        Some("authorization_pending" | "deviceauth_authorization_pending")
+    ) {
+        return Some("authorization_pending".to_string());
+    }
+    if status.is_success() {
+        return None;
+    }
+
+    let reason = value
+        .get("error_description")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            error
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str)
+        })
+        .or(code)
+        .unwrap_or("unknown error");
+    Some(format!("Device login failed ({status}): {reason}"))
+}
+
 pub async fn poll_device_token_without_saving(
     device_auth_id: &str,
     user_code: &str,
@@ -379,15 +414,8 @@ pub async fn poll_device_token_without_saving(
     let status = res.status();
     let body = res.text().await.unwrap_or_default();
 
-    if status == reqwest::StatusCode::FORBIDDEN
-        || status == reqwest::StatusCode::NOT_FOUND
-        || body.contains("deviceauth_authorization_pending")
-        || body.contains("authorization_pending")
-    {
-        return Err("authorization_pending".to_string());
-    }
-    if !status.is_success() {
-        return Err(format!("Device login failed ({status})"));
+    if let Some(error) = device_token_error(status, &body) {
+        return Err(error);
     }
 
     let val: Value = crate::parse_oauth_response(&body)?;
@@ -625,6 +653,43 @@ mod tests {
         );
         assert_eq!(params.get("client_id").unwrap(), CLIENT_ID);
         assert_eq!(params.get("code_verifier").unwrap(), "verifier+/=");
+    }
+
+    #[test]
+    fn test_device_token_error_retries_only_explicit_pending_response() {
+        assert_eq!(
+            device_token_error(
+                reqwest::StatusCode::FORBIDDEN,
+                r#"{"error":{"code":"deviceauth_authorization_pending"}}"#,
+            ),
+            Some("authorization_pending".to_string())
+        );
+        assert_eq!(
+            device_token_error(
+                reqwest::StatusCode::BAD_REQUEST,
+                r#"{"error":"authorization_pending"}"#,
+            ),
+            Some("authorization_pending".to_string())
+        );
+    }
+
+    #[test]
+    fn test_device_token_error_stops_on_terminal_forbidden_or_not_found() {
+        let forbidden = device_token_error(
+            reqwest::StatusCode::FORBIDDEN,
+            r#"{"error":"authorization_expired"}"#,
+        )
+        .unwrap();
+        assert!(forbidden.contains("403 Forbidden"));
+        assert!(forbidden.contains("authorization_expired"));
+
+        let not_found = device_token_error(
+            reqwest::StatusCode::NOT_FOUND,
+            r#"{"error":"unknown_device"}"#,
+        )
+        .unwrap();
+        assert!(not_found.contains("404 Not Found"));
+        assert!(not_found.contains("unknown_device"));
     }
 
     #[test]
