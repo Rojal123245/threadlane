@@ -48,12 +48,7 @@ fn update_activity_status(
         .set_visible(cx, !running && error);
 }
 
-fn sync_jump_to_latest(
-    view: &View,
-    cx: &mut Cx,
-    visible: bool,
-    hint_visible: bool,
-) {
+fn sync_jump_to_latest(view: &View, cx: &mut Cx, visible: bool, hint_visible: bool) {
     let layer = view.widget(cx, ids!(jump_to_latest_layer));
     layer.set_visible(cx, visible);
     layer.redraw(cx);
@@ -543,7 +538,10 @@ impl Widget for ChatList {
                             let item_widget = list.item(cx, item_id, id!(SubagentMsg));
                             item_widget.label(cx, ids!(title_lbl)).set_text(
                                 cx,
-                                if matches!(rows.get(item_id), Some(DisplayRow::HarnessActivities(_))) {
+                                if matches!(
+                                    rows.get(item_id),
+                                    Some(DisplayRow::HarnessActivities(_))
+                                ) {
                                     "Activity"
                                 } else {
                                     "Agent tasks"

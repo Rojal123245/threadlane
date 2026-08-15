@@ -36,9 +36,6 @@ mod tests {
     };
     use crate::policy::ToolPolicy;
     use crate::system_prompt::SystemPromptConfig;
-    use threadlane_wasi::{
-        WasiExtension, WasiExtensionInvocation, WasiExtensionManager, WasiExtensionResponse,
-    };
     use serde_json::Value;
     use std::collections::{HashMap, HashSet};
     use std::path::PathBuf;
@@ -50,6 +47,9 @@ mod tests {
         AgentHarness, HookContext, HookEffect, HookHandler, HookKind, JsonlStore, OperationIntent,
         OperationOutcome, QueueKind, Record, Reducer, SessionStore, Snapshot, ToolReplaySafety,
         ToolResult as HarnessToolResult,
+    };
+    use threadlane_wasi::{
+        WasiExtension, WasiExtensionInvocation, WasiExtensionManager, WasiExtensionResponse,
     };
     // Alias for test compatibility — production code uses Record, but many
     // tests were written against the HarnessRecord name previously in scope.

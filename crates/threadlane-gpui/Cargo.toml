@@ -1,0 +1,29 @@
+[package]
+name = "threadlane-gpui"
+version.workspace = true
+edition.workspace = true
+description = "GPUI Desktop application for Threadlane using gpui-component"
+
+[dependencies]
+gpui-component = { git = "https://github.com/longbridge/gpui-component" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
+threadlane-agent = { version = "0.1.0", path = "../threadlane-agent" }
+threadlane-coding-agent = { version = "0.1.0", path = "../threadlane-coding-agent" }
+threadlane-provider = { version = "0.1.0", path = "../threadlane-provider" }
+threadlane-auth = { version = "0.1.0", path = "../threadlane-auth" }
+threadlane-tools = { version = "0.1.0", path = "../threadlane-tools" }
+threadlane-git = { version = "0.1.0", path = "../threadlane-git" }
+threadlane-updater = { version = ">=0.1.0, <1.0.0", path = "../threadlane-updater" }
+tokio = { version = "1.38", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rfd = "0.17.2"
+robius-open = { git = "https://github.com/project-robius/robius.git" }
+dirs = "5.0"
+anyhow = "1.0"
+log = "0.4"
+env_logger = "0.11"
+portable-pty = "0.9"
+vt100 = "0.15"

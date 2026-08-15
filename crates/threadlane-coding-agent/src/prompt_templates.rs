@@ -356,7 +356,12 @@ mod tests {
 
     #[test]
     fn test_slicing() {
-        let args = vec!["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string()];
+        let args = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+        ];
 
         let content_slice_from = "Slice: ${@:2}";
         let result_slice_from = substitute_args(content_slice_from, &args);

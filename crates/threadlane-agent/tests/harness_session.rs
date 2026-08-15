@@ -1,6 +1,6 @@
 use threadlane_agent::harness::{
-    AgentHarness, LaneHandle, MemoryStore, ProcedureError, ProvisionedEntry,
-    QueueKind, ReduceError, SessionAgent,
+    AgentHarness, LaneHandle, MemoryStore, ProcedureError, ProvisionedEntry, QueueKind,
+    ReduceError, SessionAgent,
 };
 
 use threadlane_agent::AgentMessage;
@@ -80,9 +80,7 @@ fn unknown_lane_rejected_without_writes() {
     let session = SessionAgent::new(harness);
 
     let result = session.lane("nonexistent");
-    assert!(
-        matches!(result, Err(ReduceError::InvalidLane(ref name)) if name == "nonexistent")
-    );
+    assert!(matches!(result, Err(ReduceError::InvalidLane(ref name)) if name == "nonexistent"));
 
     // Confirm the store is still empty — the rejection did not create a lane.
     let snap = session.snapshot().unwrap();
@@ -101,9 +99,7 @@ fn unknown_lane_accept_rejected_without_writes() {
     let ghost = LaneHandle::new("ghost".into()).unwrap();
 
     let result = session.accept_prompt(&ghost, "run-1", user("hello"));
-    assert!(
-        matches!(&result, Err(ProcedureError::Invalid(msg)) if msg.contains("ghost"))
-    );
+    assert!(matches!(&result, Err(ProcedureError::Invalid(msg)) if msg.contains("ghost")));
 
     // Confirm no entries or records were created.
     let snap = session.snapshot().unwrap();
@@ -123,9 +119,7 @@ fn unknown_lane_enqueue_rejected_without_writes() {
     };
 
     let result = session.enqueue(&ghost, Some("run-1"), QueueKind::Steer, target);
-    assert!(
-        matches!(&result, Err(ProcedureError::Invalid(msg)) if msg.contains("ghost"))
-    );
+    assert!(matches!(&result, Err(ProcedureError::Invalid(msg)) if msg.contains("ghost")));
 
     let snap = session.snapshot().unwrap();
     assert!(snap.entries.is_empty());
@@ -139,9 +133,7 @@ fn unknown_lane_cancel_rejected_without_writes() {
     let ghost = LaneHandle::new("ghost".into()).unwrap();
 
     let result = session.cancel_queued(&ghost, Some("run-1"), "entry-1");
-    assert!(
-        matches!(&result, Err(ProcedureError::Invalid(msg)) if msg.contains("ghost"))
-    );
+    assert!(matches!(&result, Err(ProcedureError::Invalid(msg)) if msg.contains("ghost")));
 
     let snap = session.snapshot().unwrap();
     assert!(snap.entries.is_empty());
@@ -211,9 +203,7 @@ fn unknown_lane_abort_rejected() {
     let ghost = LaneHandle::new("ghost".into()).unwrap();
 
     let result = session.request_abort(&ghost, "run-1");
-    assert!(
-        matches!(&result, Err(ProcedureError::Invalid(msg)) if msg.contains("unknown lane"))
-    );
+    assert!(matches!(&result, Err(ProcedureError::Invalid(msg)) if msg.contains("unknown lane")));
 
     let snap = session.snapshot().unwrap();
     assert!(snap.entries.is_empty());
@@ -386,11 +376,7 @@ fn lane_scoped_watch_filters_events() {
 
     // Poll the main subscription — must be non-empty and contain only
     // main-lane events.
-    let main_events = session
-        .harness()
-        .events()
-        .poll(&mut main_sub)
-        .unwrap();
+    let main_events = session.harness().events().poll(&mut main_sub).unwrap();
     assert!(
         !main_events.is_empty(),
         "main subscription must receive at least one event"
@@ -406,11 +392,7 @@ fn lane_scoped_watch_filters_events() {
 
     // Poll the child subscription — must be non-empty and contain at
     // least one child-lane event, with no main-lane events leaked.
-    let child_events = session
-        .harness()
-        .events()
-        .poll(&mut child_sub)
-        .unwrap();
+    let child_events = session.harness().events().poll(&mut child_sub).unwrap();
     assert!(
         !child_events.is_empty(),
         "child subscription must receive at least one event"
@@ -491,9 +473,9 @@ fn bound_queue_enqueue_and_cancel() {
     // Assert QueueCancelled record exists.
     let snap = session.snapshot().unwrap();
     assert!(
-        snap.records.iter().any(|r| {
-            matches!(r, threadlane_agent::harness::Record::QueueCancelled { .. })
-        }),
+        snap.records
+            .iter()
+            .any(|r| { matches!(r, threadlane_agent::harness::Record::QueueCancelled { .. }) }),
         "QueueCancelled record missing"
     );
 }
@@ -545,9 +527,7 @@ fn unbound_queue_enqueue_and_consume() {
         "unbound queue entry must have no run_id"
     );
     // Cancel the unbound entry through the facade (match by target.id).
-    session
-        .cancel_queued(&main, None, "queued-2")
-        .unwrap();
+    session.cancel_queued(&main, None, "queued-2").unwrap();
 
     // Drive to commit the QueueCancelled record.
     session.drive_to_completion(&main).unwrap();
@@ -555,9 +535,9 @@ fn unbound_queue_enqueue_and_consume() {
     // Assert QueueCancelled record exists.
     let snap = session.snapshot().unwrap();
     assert!(
-        snap.records.iter().any(|r| {
-            matches!(r, threadlane_agent::harness::Record::QueueCancelled { .. })
-        }),
+        snap.records
+            .iter()
+            .any(|r| { matches!(r, threadlane_agent::harness::Record::QueueCancelled { .. }) }),
         "QueueCancelled record missing after unbound cancel"
     );
 }
@@ -599,9 +579,9 @@ fn consume_queued_entry_through_facade() {
     // Assert QueueConsumed record exists.
     let snap = session.snapshot().unwrap();
     assert!(
-        snap.records.iter().any(|r| {
-            matches!(r, threadlane_agent::harness::Record::QueueConsumed { .. })
-        }),
+        snap.records
+            .iter()
+            .any(|r| { matches!(r, threadlane_agent::harness::Record::QueueConsumed { .. }) }),
         "QueueConsumed record missing"
     );
 }
@@ -776,9 +756,10 @@ fn unbound_cancel_rejects_bound_entry() {
     // Verify no QueueCancelled record was parked — snapshot unchanged.
     let snap = session.snapshot().unwrap();
     assert!(
-        !snap.records.iter().any(|r| {
-            matches!(r, threadlane_agent::harness::Record::QueueCancelled { .. })
-        }),
+        !snap
+            .records
+            .iter()
+            .any(|r| { matches!(r, threadlane_agent::harness::Record::QueueCancelled { .. }) }),
         "QueueCancelled record must not exist after rejected unbound cancel"
     );
 }
@@ -824,9 +805,10 @@ fn unbound_consume_rejects_bound_entry() {
     // Verify no QueueConsumed record was parked.
     let snap = session.snapshot().unwrap();
     assert!(
-        !snap.records.iter().any(|r| {
-            matches!(r, threadlane_agent::harness::Record::QueueConsumed { .. })
-        }),
+        !snap
+            .records
+            .iter()
+            .any(|r| { matches!(r, threadlane_agent::harness::Record::QueueConsumed { .. }) }),
         "QueueConsumed record must not exist after rejected unbound consume"
     );
 }
@@ -855,17 +837,15 @@ fn unbound_cancel_on_truly_unbound_entry_succeeds() {
     session.drive_to_completion(&main).unwrap();
 
     // Cancel with None run_id against a truly unbound entry must succeed.
-    session
-        .cancel_queued(&main, None, "unbound-entry")
-        .unwrap();
+    session.cancel_queued(&main, None, "unbound-entry").unwrap();
     session.drive_to_completion(&main).unwrap();
 
     // Verify QueueCancelled record exists.
     let snap = session.snapshot().unwrap();
     assert!(
-        snap.records.iter().any(|r| {
-            matches!(r, threadlane_agent::harness::Record::QueueCancelled { .. })
-        }),
+        snap.records
+            .iter()
+            .any(|r| { matches!(r, threadlane_agent::harness::Record::QueueCancelled { .. }) }),
         "QueueCancelled record missing after valid unbound cancel"
     );
 }
@@ -902,13 +882,12 @@ fn unbound_consume_on_truly_unbound_entry_succeeds() {
     // Verify QueueConsumed record exists.
     let snap = session.snapshot().unwrap();
     assert!(
-        snap.records.iter().any(|r| {
-            matches!(r, threadlane_agent::harness::Record::QueueConsumed { .. })
-        }),
+        snap.records
+            .iter()
+            .any(|r| { matches!(r, threadlane_agent::harness::Record::QueueConsumed { .. }) }),
         "QueueConsumed record missing after valid unbound consume"
     );
 }
-
 
 // ---------------------------------------------------------------------------
 // Pending effects + no-tool acceptance — next_seq_with_effects prevents
@@ -941,14 +920,7 @@ fn pending_effects_preserve_no_tool_sequences() {
     // NoToolRun::accept_on_lane MUST use next_seq_with_effects so the
     // sequences allocated to this run are strictly greater than the parked
     // child-lane sequences.
-    NoToolRun::accept(
-        &store,
-        "nt-main",
-        "hello",
-        assistant("hi"),
-        &mut effects,
-    )
-    .unwrap();
+    NoToolRun::accept(&store, "nt-main", "hello", assistant("hi"), &mut effects).unwrap();
 
     effects.run_to_completion(&mut store).unwrap();
 
@@ -991,16 +963,13 @@ fn pending_effects_preserve_no_tool_sequences() {
 
 #[test]
 fn executor_backed_child_bootstrap_succeeds() {
-    let shared = std::sync::Arc::new(std::sync::Mutex::new(
-        MemoryStore::new("session-exec"),
-    ));
+    let shared = std::sync::Arc::new(std::sync::Mutex::new(MemoryStore::new("session-exec")));
     let target = shared.clone();
     let events = threadlane_agent::harness::HarnessEventHub::new(256);
-    let harness = AgentHarness::with_executor(
-        MemoryStore::new("session-exec"),
-        events,
-        move |action| action.apply(&mut *target.lock().unwrap()),
-    );
+    let harness =
+        AgentHarness::with_executor(MemoryStore::new("session-exec"), events, move |action| {
+            action.apply(&mut *target.lock().unwrap())
+        });
     let mut session = SessionAgent::new(harness);
 
     // Bootstrap must succeed — the executor committed during park().

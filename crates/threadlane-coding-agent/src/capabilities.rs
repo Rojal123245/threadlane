@@ -1,5 +1,5 @@
-use threadlane_wasi::packages::{default_global_threadlane_dir, ExtensionManager, ExtensionRecord};
 use std::path::Path;
+use threadlane_wasi::packages::{default_global_threadlane_dir, ExtensionManager, ExtensionRecord};
 
 #[derive(Debug, Clone)]
 pub struct CapabilityCatalog {

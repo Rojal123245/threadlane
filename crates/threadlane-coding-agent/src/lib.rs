@@ -14,7 +14,6 @@ pub mod prompt_templates;
 pub mod supervisor;
 pub mod system_prompt;
 
-
 pub use acp::{
     AcpAgentCapabilities, AcpAgentConfig, AcpAgentRecord, AcpAgentStatus, AcpAuthMethod,
     AcpClientHandler, AcpConnection, AcpContentBlock, AcpInitializeResult, AcpManager,
@@ -29,7 +28,6 @@ pub use acp_bridge::{
 };
 pub use agents::{discover_agents, AgentDefinition, AgentDiscoveryResult, AgentScope, AgentSource};
 pub use capabilities::CapabilityCatalog;
-pub use threadlane_agent::{Capability, CapabilityRegistry};
 pub use coding_agent::{
     cancel_open_subagent_operations, extension_before_tool_hook_handler, CodingAgent,
     CodingAgentCancellation, CodingAgentOptions, CodingAgentWorkHandle, HarnessWatch,
@@ -49,6 +47,7 @@ pub use supervisor::{
     HarnessSupervisor, ProjectRecord, TaskAgentEvent, TaskKind, TaskRecord, TaskStatus,
 };
 pub use system_prompt::SystemPromptConfig;
+pub use threadlane_agent::{Capability, CapabilityRegistry};
 pub use threadlane_mcp::*;
 pub use threadlane_skills::*;
 pub use threadlane_wasi::broker::*;

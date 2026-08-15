@@ -70,7 +70,9 @@ pub fn has_open_subagent_lanes(records: &[Record]) -> bool {
 }
 
 /// Reconstructs open/interrupted subagent lanes from raw records.
-pub fn interrupted_subagent_lanes(records: &[Record]) -> Vec<super::types::InterruptedSubagentLane> {
+pub fn interrupted_subagent_lanes(
+    records: &[Record],
+) -> Vec<super::types::InterruptedSubagentLane> {
     use crate::harness::ToolReplaySafety;
     use crate::types::AgentMessage;
 

@@ -274,6 +274,7 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 ## Session and Context-Menu Behavior
 
 - Project terminal groups are keyed by canonical project work directory, not by session ID. Each project can own multiple independent shell tabs; switching sessions in one project must retain its shells, active tab, and output, while switching projects selects that project's terminal group.
+- The GPUI terminal is a persistent `portable-pty` shell parsed through `vt100`, not a command-by-command `sh -lc` console. Keep PTY reads off the UI thread, apply parser updates through GPUI entity updates, forward focused keyboard input directly to the PTY, and retain terminal entities by project when switching workspaces.
 - Model-managed todo plans are session-scoped and persisted as complete `session_plan` records in the existing session JSONL. Show only the active session's plan above the project-wide task groups; do not derive plan state from compactable tool-call history or merge it into supervisor task state.
 
 - The project attach button appears while hovering the `PROJECTS` header. It is the only sidebar action synchronized from `App::sync_sidebar_action_visibility` and the retained app-level pointer.
@@ -312,6 +313,11 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 - Child intent is durable before model/tool work; checkpoints use `WriteDeferred`; safe replay is automatic and unsafe interruption aborts. Child subagent lanes use the canonical `SessionAgent` path with deterministic identity derived from parent session + tool-call ID.
 - Concurrent child lanes can hold independently opened JSONL stores. Reload and rebase stale sequence inputs while holding the shared writer gate at the append boundary; sequence numbers allocated from an earlier snapshot are not authoritative.
 - Forward supervisor events through `GuiAgentEvent`; update `BackgroundTaskState` and widgets only on the Makepad event thread.
+- GPUI model mutations must call `cx.notify()` inside the `Entity::update` callback when observers need to redraw; mutating `AppState` without notification leaves optimistic messages and streamed updates invisible until another interaction causes a render.
+- In the GPUI chat path, `CodingAgent` is the sole owner of durable prompt persistence. Show an accepted prompt optimistically in `AppState.messages`, but do not also append it directly to `SessionTree` before `handle_input_with_images`, which would persist the same user message twice. Forward `AgentEvent`s to the GPUI thread and reconcile from the session file only when the run finishes.
+- GPUI sessions reuse one `SessionRuntime`/`CodingAgent` per durable session on a shared Tokio executor. Register each spawned turn with `CodingAgentCancellation::track_active_run` before exposing cancellation, and call `finish_active_run` after normal completion; `cancel()` records durable abort intent before aborting the registered task.
+- GPUI message queue and steer actions must use the active runtime's `CodingAgentWorkHandle` (`try_queue_follow_up_with_images` and `queue_steer_with_images`). Stage composer text per session, persist queue intent before optimistic presentation, and let `CodingAgent::run_scheduled_agent_work` consume it rather than creating a GUI-only queue.
+- `CodingAgent::new` opens `CodingSessionHarness` against the supplied session JSONL itself. Harness V2 records and legacy session records intentionally coexist in that canonical file; do not invent a GPUI-only `.harness.jsonl` sidecar. Existing `.harness.jsonl` filtering remains for legacy sidecars.
 - Threadlane extensions are compiled WASI modules with an exported
   `extension_info` manifest. The settings picker installs a `.wasm` into either
   `~/.threadlane/extensions/` or `<project>/.threadlane/extensions/`; it never

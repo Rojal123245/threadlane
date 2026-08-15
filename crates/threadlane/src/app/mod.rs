@@ -63,10 +63,10 @@ use threadlane_agent::{
     get_runtime, AgentEvent, ImageAttachment, ReasoningEffort, SessionPlan, TokenUsage,
 };
 use threadlane_coding_agent::{
-    cancel_open_subagent_operations, default_global_threadlane_dir, discover_agents, AgentDefinition,
-    AgentScope, CapabilityCatalog, CodingAgent, CodingAgentCancellation, CodingAgentOptions,
-    CodingAgentWorkHandle, ExtensionManager, ExtensionScope, HarnessSupervisor, ProjectContext,
-    SkillMetadata, SkillSettings, TaskKind, TaskRecord,
+    cancel_open_subagent_operations, default_global_threadlane_dir, discover_agents,
+    AgentDefinition, AgentScope, CapabilityCatalog, CodingAgent, CodingAgentCancellation,
+    CodingAgentOptions, CodingAgentWorkHandle, ExtensionManager, ExtensionScope, HarnessSupervisor,
+    ProjectContext, SkillMetadata, SkillSettings, TaskKind, TaskRecord,
 };
 use threadlane_provider::auth;
 use threadlane_provider::openai::fetch_available_models;
@@ -8801,9 +8801,7 @@ impl App {
             return;
         }
         let Some(tx) = self.tx.clone() else {
-            warn!(
-                "automatic session title generation unavailable: UI channel is closed"
-            );
+            warn!("automatic session title generation unavailable: UI channel is closed");
             end_title_generation(&work_dir, &session_id);
             return;
         };
@@ -9253,16 +9251,13 @@ impl App {
                 } => {
                     let work_dir_display = work_dir.display().to_string();
                     let key = SessionKey::new(work_dir, session_id);
-                    let is_current = self
-                        .session_runtimes
-                        .get(&key)
-                        .is_some_and(|runtime| {
-                            runtime
-                                .generation
-                                .as_ref()
-                                .is_some_and(|generation| generation.id == generation_id)
-                                || runtime.terminal_generation_id == Some(generation_id)
-                        });
+                    let is_current = self.session_runtimes.get(&key).is_some_and(|runtime| {
+                        runtime
+                            .generation
+                            .as_ref()
+                            .is_some_and(|generation| generation.id == generation_id)
+                            || runtime.terminal_generation_id == Some(generation_id)
+                    });
                     trace!(
                         "HarnessEvent {} lane={} is_current={is_current}",
                         event.payload_variant(),
@@ -9378,16 +9373,13 @@ impl App {
                     snapshot,
                 } => {
                     let key = SessionKey::new(work_dir, session_id);
-                    let is_current = self
-                        .session_runtimes
-                        .get(&key)
-                        .is_some_and(|runtime| {
-                            runtime
-                                .generation
-                                .as_ref()
-                                .is_some_and(|generation| generation.id == generation_id)
-                                || runtime.terminal_generation_id == Some(generation_id)
-                        });
+                    let is_current = self.session_runtimes.get(&key).is_some_and(|runtime| {
+                        runtime
+                            .generation
+                            .as_ref()
+                            .is_some_and(|generation| generation.id == generation_id)
+                            || runtime.terminal_generation_id == Some(generation_id)
+                    });
                     if !is_current {
                         continue;
                     }

@@ -17,9 +17,7 @@ use threadlane_agent::harness::{
 use threadlane_agent::session_tree::SessionTree;
 use threadlane_agent::{AgentMessage, AgentToolResult, TokenUsage};
 
-use threadlane_agent::harness::{
-    EventError, HarnessEvent, OperationIntent, Subscription,
-};
+use threadlane_agent::harness::{EventError, HarnessEvent, OperationIntent, Subscription};
 
 pub struct HarnessWatch {
     pub(crate) hub: HarnessEventHub,
@@ -784,9 +782,7 @@ impl CodingSessionHarness {
                     lane.leaf_id.clone()
                 }
             })
-            .or_else(|| {
-                latest_main_entry()
-            });
+            .or_else(|| latest_main_entry());
         let seq = self.next_seq();
         let terminate = matches!(
             &message,
@@ -2011,9 +2007,19 @@ mod tests {
 
         let tree = SessionTree::load_from_file(&path).unwrap();
         let branch = tree.get_active_branch_messages();
-        assert!(matches!(branch.get(1), Some(AgentMessage::Assistant { tool_calls: Some(_), .. })));
-        assert!(matches!(branch.get(2), Some(AgentMessage::Tool { tool_call_id, .. }) if tool_call_id == "call-1"));
-        assert!(matches!(branch.get(3), Some(AgentMessage::Assistant { content: Some(content), .. }) if content == "finished"));
+        assert!(matches!(
+            branch.get(1),
+            Some(AgentMessage::Assistant {
+                tool_calls: Some(_),
+                ..
+            })
+        ));
+        assert!(
+            matches!(branch.get(2), Some(AgentMessage::Tool { tool_call_id, .. }) if tool_call_id == "call-1")
+        );
+        assert!(
+            matches!(branch.get(3), Some(AgentMessage::Assistant { content: Some(content), .. }) if content == "finished")
+        );
     }
 
     // ── Error during finish_run propagates correctly ──────────────────

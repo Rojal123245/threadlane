@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       release_tag:
-        description: 'Release tag created by Release Please'
+        description: Release tag created by Release Please
         required: true
         type: string
     secrets:
@@ -14,242 +14,111 @@ on:
         required: true
   push:
     tags:
-      - 'v*.*.*'
+      - "v*.*.*"
   workflow_dispatch:
     inputs:
-      build_ubuntu_24_x86_64:
-        description: 'Build Ubuntu 24.04 x86_64'
-        required: false
-        type: boolean
-        default: false
+      tag:
+        description: Existing vX.Y.Z tag to package
+        required: true
+        type: string
 
 permissions:
-  contents: write
-
-env:
-  RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ inputs.release_tag || inputs.tag || github.ref_name }}
+
 jobs:
-  build-and-package-macos:
-    name: Build & Package (macOS)
-    # Pin the runner so changes to macos-latest do not break create-dmg.
-    # macos-14 is the Apple Silicon runner also used by Robrix.
-    runs-on: macos-14
-
+  linux:
+    name: Linux ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
         with:
-          targets: wasm32-wasip1
+          ref: ${{ env.RELEASE_TAG }}
 
-      - name: Verify release tag matches the app version
-        if: inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/')
+      - name: Verify release tag
         shell: bash
         run: |
-          APP_VERSION=$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "threadlane") | .version')
-          if [[ -z "$APP_VERSION" || "$APP_VERSION" == "null" ]]; then
-            echo "::error::Could not resolve the threadlane package version"
-            exit 1
-          fi
-          if [[ "$RELEASE_TAG" != "v$APP_VERSION" ]]; then
-            echo "::error::Tag $RELEASE_TAG does not match threadlane version v$APP_VERSION"
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "threadlane-gpui") | .version')
+          if [[ "$RELEASE_TAG" != "v$version" ]]; then
+            echo "::error::Tag $RELEASE_TAG does not match threadlane-gpui version v$version"
             exit 1
           fi
 
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install Packaging Tooling
-        run: |
-          # cargo-packager 0.10.1 can report a stale errno (such as EEXIST)
-          # instead of the real create-dmg subprocess failure.
-          cargo install --locked cargo-packager --version 0.11.8
-          cargo install --locked --git https://github.com/project-robius/robius-packaging-commands.git
-          cargo packager --version
-          sw_vers
-
-      - name: Build WASI Extensions
-        shell: bash
-        run: |
-          chmod +x ./scripts/build_extensions.sh
-          ./scripts/build_extensions.sh
-
-      - name: Test updater
-        run: cargo test -p threadlane updater::tests
-
-      - name: Build Threadlane Binary (Release)
-        env:
-          THREADLANE_UPDATER_PUBLIC_KEY: ${{ vars.THREADLANE_UPDATER_PUBLIC_KEY }}
-        run: |
-          if [[ -z "$THREADLANE_UPDATER_PUBLIC_KEY" ]]; then
-            echo "::error::Repository variable THREADLANE_UPDATER_PUBLIC_KEY is not configured"
-            exit 1
-          fi
-          cargo build --release --bin threadlane
-
-      - name: Package and sign Threadlane updates
-        shell: bash
-        env:
-          THREADLANE_UPDATER_PUBLIC_KEY: ${{ vars.THREADLANE_UPDATER_PUBLIC_KEY }}
-          CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.CARGO_PACKAGER_SIGN_PRIVATE_KEY }}
-          CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD }}
-        run: |
-          if [[ -z "$THREADLANE_UPDATER_PUBLIC_KEY" ]]; then
-            echo "::error::Repository variable THREADLANE_UPDATER_PUBLIC_KEY is not configured"
-            exit 1
-          fi
-          if [[ -z "$CARGO_PACKAGER_SIGN_PRIVATE_KEY" ]]; then
-            echo "::error::Secret CARGO_PACKAGER_SIGN_PRIVATE_KEY is not configured"
-            exit 1
-          fi
-          if [[ -z "$CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD" ]]; then
-            echo "::error::Secret CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD is not configured"
-            exit 1
-          fi
-
-          cd crates/threadlane
-          rm -rf \
-            dist/*.dmg \
-            dist/*.dmg.sig \
-            dist/*.app.tar.gz \
-            dist/*.app.tar.gz.sig \
-            dist/rw.*.dmg \
-            dist/.cargo-packager
-          cargo packager --release --formats app,dmg --verbose
-
-          shopt -s nullglob
-          dmgs=(dist/*.dmg)
-          archives=(dist/*.app.tar.gz)
-          signatures=(dist/*.app.tar.gz.sig)
-          if (( ${#dmgs[@]} != 1 || ${#archives[@]} != 1 || ${#signatures[@]} != 1 )); then
-            echo "::error::Expected one DMG, one app archive, and one app signature"
-            printf 'DMGs: %s\n' "${dmgs[@]}"
-            printf 'Archives: %s\n' "${archives[@]}"
-            printf 'Signatures: %s\n' "${signatures[@]}"
-            exit 1
-          fi
-
-          # Ad-hoc signatures do not establish Gatekeeper trust, but these checks
-          # prevent publishing an internally malformed bundle like v0.0.4.
-          codesign --verify --deep --strict --verbose=4 dist/Threadlane.app
-          codesign --verify --strict --verbose=4 "${dmgs[0]}"
-
-      - name: Generate signed update manifest
-        if: inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/')
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          cd crates/threadlane
-          ARCHIVE_PATH=$(find dist -maxdepth 1 -name '*.app.tar.gz' -print -quit)
-          ARCHIVE_NAME=$(basename "$ARCHIVE_PATH")
-          SIGNATURE=$(cat "${ARCHIVE_PATH}.sig")
-          VERSION="${RELEASE_TAG#v}"
-          DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${ARCHIVE_NAME}"
-          PUBLISHED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-          RELEASE_NOTES=$(gh release view "$RELEASE_TAG" --json body --jq '.body' 2>/dev/null \
-            || printf 'Threadlane %s' "$RELEASE_TAG")
-
-          jq -n \
-            --arg version "$VERSION" \
-            --arg notes "$RELEASE_NOTES" \
-            --arg pub_date "$PUBLISHED_AT" \
-            --arg url "$DOWNLOAD_URL" \
-            --arg signature "$SIGNATURE" \
-            '{
-              version: $version,
-              notes: $notes,
-              pub_date: $pub_date,
-              platforms: {
-                "macos-aarch64": {
-                  url: $url,
-                  signature: $signature,
-                  format: "app"
-                }
-              }
-            }' > dist/latest.json
-
-          jq -e \
-            '.version and
-             .platforms["macos-aarch64"].url and
-             .platforms["macos-aarch64"].signature and
-             (.platforms["macos-aarch64"].format == "app")' \
-            dist/latest.json
-
-      - name: Upload Release Assets
-        uses: softprops/action-gh-release@v2
-        if: inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/')
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          files: |
-            crates/threadlane/dist/*.dmg
-            crates/threadlane/dist/*.app.tar.gz
-            crates/threadlane/dist/*.app.tar.gz.sig
-            crates/threadlane/dist/latest.json
-          fail_on_unmatched_files: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  build-and-package-ubuntu-24-x86-64:
-    name: Build & Package (Ubuntu 24.04 x86_64)
-    if: >-
-      ${{
-        inputs.release_tag != '' ||
-        startsWith(github.ref, 'refs/tags/') ||
-        (github.event_name == 'workflow_dispatch' && inputs.build_ubuntu_24_x86_64)
-      }}
-    runs-on: ubuntu-24.04
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+          key: gpui-release-${{ matrix.arch }}
 
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get install --yes \
+            clang \
+            cmake \
             libasound2-dev \
-            libclang-dev \
-            libegl1 \
-            libpulse-dev \
-            libsqlite3-dev \
+            libfontconfig-dev \
             libssl-dev \
+            libvulkan1 \
             libwayland-dev \
-            libx11-dev \
-            libxkbcommon-dev \
-            libxcursor-dev \
-            llvm \
-            pkg-config
+            libx11-xcb-dev \
+            libxkbcommon-x11-dev \
+            pkg-config \
+            xdg-desktop-portal
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Bundle
+        run: ./scripts/bundle-gpui-linux.sh
+
+      - uses: actions/upload-artifact@v4
         with:
-          targets: wasm32-wasip1
+          name: linux-${{ matrix.arch }}
+          path: target/release/threadlane-*.tar.gz
+          if-no-files-found: error
 
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+  macos:
+    name: macOS Apple Silicon
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
-      - name: Install packaging tooling
+      - name: Verify release tag
+        shell: bash
         run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "threadlane-gpui") | .version')
+          if [[ "$RELEASE_TAG" != "v$version" ]]; then
+            echo "::error::Tag $RELEASE_TAG does not match threadlane-gpui version v$version"
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: gpui-release-aarch64
+
+      - name: Install packaging tools
+        run: |
+          brew install create-dmg
           cargo install --locked cargo-packager --version 0.11.8
-          cargo install --locked --git https://github.com/project-robius/robius-packaging-commands.git
-          cargo packager --version
 
-      - name: Build WASI Extensions
-        shell: bash
-        run: |
-          chmod +x ./scripts/build_extensions.sh
-          ./scripts/build_extensions.sh
-
-      - name: Build Threadlane Binary (Release)
+      - name: Bundle with ad-hoc app signing
         env:
           THREADLANE_UPDATER_PUBLIC_KEY: ${{ vars.THREADLANE_UPDATER_PUBLIC_KEY }}
         run: |
@@ -257,35 +126,76 @@ jobs:
             echo "::error::Repository variable THREADLANE_UPDATER_PUBLIC_KEY is not configured"
             exit 1
           fi
-          cargo build --release --bin threadlane
+          ./scripts/bundle-gpui-macos.sh
 
-      - name: Package Threadlane (.deb)
-        shell: bash
+      - name: Sign updater archive
         env:
-          THREADLANE_UPDATER_PUBLIC_KEY: ${{ vars.THREADLANE_UPDATER_PUBLIC_KEY }}
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.CARGO_PACKAGER_SIGN_PRIVATE_KEY }}
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD }}
         run: |
-          if [[ -z "$THREADLANE_UPDATER_PUBLIC_KEY" ]]; then
-            echo "::error::Repository variable THREADLANE_UPDATER_PUBLIC_KEY is not configured"
+          if [[ -z "$CARGO_PACKAGER_SIGN_PRIVATE_KEY" || -z "$CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD" ]]; then
+            echo "::error::Updater signing secrets are not configured"
             exit 1
           fi
-          cd crates/threadlane
-          rm -rf dist/*.deb dist/.cargo-packager
-          cargo packager --release --formats deb --verbose
+          tar -czf target/release/Threadlane.app.tar.gz -C target/release Threadlane.app
+          cargo packager signer sign target/release/Threadlane.app.tar.gz
 
-          shopt -s nullglob
-          debs=(dist/*.deb)
-          if (( ${#debs[@]} != 1 )); then
-            echo "::error::Expected exactly one Debian package"
-            printf 'Packages: %s\n' "${debs[@]}"
-            exit 1
-          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-aarch64
+          path: |
+            target/release/Threadlane-*.dmg
+            target/release/Threadlane-*.zip
+            target/release/Threadlane.app.tar.gz
+            target/release/Threadlane.app.tar.gz.sig
+          if-no-files-found: error
 
-      - name: Upload Ubuntu Release Asset
-        if: inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+  draft-release:
+    name: Draft GitHub release
+    needs: [linux, macos]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate update manifest and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test -f artifacts/Threadlane.app.tar.gz
+          test -f artifacts/Threadlane.app.tar.gz.sig
+          test -n "$(find artifacts -maxdepth 1 -name 'threadlane-*.tar.gz' -print -quit)"
+          test -n "$(find artifacts -maxdepth 1 -name 'Threadlane-*.dmg' -print -quit)"
+          test -n "$(find artifacts -maxdepth 1 -name 'Threadlane-*.zip' -print -quit)"
+          version="${RELEASE_TAG#v}"
+          signature=$(cat artifacts/Threadlane.app.tar.gz.sig)
+          notes=$(gh release view "$RELEASE_TAG" --json body --jq '.body' 2>/dev/null || printf 'Threadlane %s' "$RELEASE_TAG")
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/Threadlane.app.tar.gz"
+          jq -n \
+            --arg version "$version" \
+            --arg notes "$notes" \
+            --arg pub_date "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+            --arg url "$url" \
+            --arg signature "$signature" \
+            '{version: $version, notes: $notes, pub_date: $pub_date, platforms: {"macos-aarch64": {url: $url, signature: $signature, format: "app"}}}' \
+            > artifacts/latest.json
+          jq -e '.version and .platforms["macos-aarch64"].url and .platforms["macos-aarch64"].signature' artifacts/latest.json
+          sha256sum artifacts/* > artifacts/SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          files: crates/threadlane/dist/*.deb
+          name: Threadlane ${{ env.RELEASE_TAG }}
+          draft: false
+          generate_release_notes: true
           fail_on_unmatched_files: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          files: artifacts/*

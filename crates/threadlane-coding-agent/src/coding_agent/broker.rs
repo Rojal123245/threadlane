@@ -1,6 +1,5 @@
 use crate::extension_broker::{BrokerError, BrokerRequest, CapabilityHandler};
 use crate::policy::ToolPolicy;
-use threadlane_wasi::WasiExtensionManager;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -10,12 +9,13 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use threadlane_agent::AgentEvent;
+use threadlane_wasi::WasiExtensionManager;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::time::{timeout, Duration};
 
 use super::{
-    AgentRunner, AgentRunTask, AgentWork, AgentWorkScheduler, MAX_SUBAGENT_TASK_CHARS,
-    MAX_SUBAGENT_TASKS,
+    AgentRunTask, AgentRunner, AgentWork, AgentWorkScheduler, MAX_SUBAGENT_TASKS,
+    MAX_SUBAGENT_TASK_CHARS,
 };
 
 pub(crate) const CAPABILITY_TIMEOUT: Duration = Duration::from_secs(2);
@@ -914,7 +914,10 @@ pub(crate) fn unknown_operation(capability: &str, operation: &str) -> Result<Val
         message: format!("Capability `{capability}` does not implement operation `{operation}`"),
     })
 }
-pub(crate) fn string_argument<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, BrokerError> {
+pub(crate) fn string_argument<'a>(
+    arguments: &'a Value,
+    name: &str,
+) -> Result<&'a str, BrokerError> {
     arguments
         .get(name)
         .and_then(Value::as_str)

@@ -2,9 +2,8 @@ use crate::coding_agent::harness::CodingSessionHarness;
 use crate::coding_agent::{
     abort_open_subagent_operations, CodingAgent, CodingAgentOptions, SubagentCancellationGuard,
 };
-use threadlane_wasi::packages::ExtensionScope;
-use serde::{Deserialize, Serialize};
 use log::error;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use threadlane_agent::harness::HarnessEvent;
 use threadlane_agent::{AgentEvent, AgentMessage, LaneQueue, QueueKind, TokenUsage};
+use threadlane_wasi::packages::ExtensionScope;
 use tokio::sync::broadcast;
 use tokio::time::{interval, MissedTickBehavior};
 

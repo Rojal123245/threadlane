@@ -41,8 +41,12 @@ pub enum UpdateStatus {
     Error(String),
 }
 
+pub fn is_configured() -> bool {
+    !UPDATER_PUBLIC_KEY.trim().is_empty()
+}
+
 pub fn check_for_update() -> Result<Option<UpdateReleaseInfo>, String> {
-    if UPDATER_PUBLIC_KEY.trim().is_empty() {
+    if !is_configured() {
         return Err(
             "Updater public key is not configured in this build. Set THREADLANE_UPDATER_PUBLIC_KEY when compiling Threadlane."
                 .to_string(),
@@ -128,6 +132,11 @@ fn app_bundle_for_executable(executable: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn updater_configuration_matches_embedded_key() {
+        assert_eq!(is_configured(), !UPDATER_PUBLIC_KEY.trim().is_empty());
+    }
 
     #[test]
     fn updater_endpoint_is_valid() {
