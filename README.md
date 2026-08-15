@@ -207,14 +207,14 @@ Treat these directories as user data. Back them up before manually migrating or 
 The desktop application is further organized by responsibility:
 
 ```text
-crates/threadlane/src/
-├── app/             # App shell, startup, actions, async event polling
-├── components/      # Reusable native Makepad components
-├── panels/chat/     # Chat, generation, composer, and message presentation
-├── panels/sessions/ # Project/session sidebar and persistence
-├── state.rs         # Shared application and session state
-├── updater.rs       # Signed update lifecycle
-└── workspace.rs     # Workspace-local state
+crates/threadlane-gpui/src/
+├── app/         # App startup, actions, and event handling
+├── components/  # Reusable GPUI components
+├── screens/     # Chat, sidebar, workspace, settings, terminal, and file views
+├── services/    # Chat, project, session, authentication, settings, and updater logic
+├── state/       # Shared application and session state
+├── persistence/ # Project registry persistence
+└── adapters/    # Agent event translation
 ```
 
 ## Extensions and Skills
