@@ -185,22 +185,11 @@ impl SidebarView {
         let status_indicator: Option<AnyElement> = match session.health {
             SessionHealth::Working => Some(
                 div()
-                    .size(px(14.0))
-                    .flex_none()
-                    .grid()
-                    .grid_cols(2)
-                    .gap(px(2.0))
-                    .p(px(2.0))
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(theme.primary)
-                    .children((0..4).map(|index| {
-                        div().size(px(3.0)).rounded_full().bg(if index == 3 {
-                            theme.primary
-                        } else {
-                            theme.muted_foreground
-                        })
-                    }))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(theme.primary)
+                    .child(gpui_component::spinner::Spinner::new().xsmall())
                     .into_any_element(),
             ),
             SessionHealth::Warning => Some(

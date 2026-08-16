@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
-use threadlane_agent::{AgentEvent, AgentMessage, ImageAttachment, SessionPlan, SessionTree};
+use threadlane_agent::{
+    AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, SessionPlan, SessionTree,
+};
 
 use crate::adapters::agent_events::{adapt_agent_event, ChatAgentUpdate};
 use crate::persistence::{load_project_registry, save_project_registry};
@@ -112,6 +114,7 @@ pub struct AppState {
     pub pending_composer_messages: HashMap<String, String>,
 
     pub selected_model: String,
+    pub reasoning_effort: ReasoningEffort,
     pub workspace_page: WorkspacePage,
     pub openai_key: String,
     pub opencode_key: String,
@@ -634,6 +637,7 @@ impl AppState {
             session_status,
             pending_composer_messages: HashMap::new(),
             selected_model,
+            reasoning_effort: ReasoningEffort::default(),
             workspace_page: WorkspacePage::Chat,
             openai_key,
             opencode_key,
@@ -725,6 +729,10 @@ impl AppState {
             }
         }
         self.auth_status_msg = Some(format!("Model switched to {model}"));
+    }
+
+    pub fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
+        self.reasoning_effort = effort;
     }
 
     pub fn open_settings(&mut self) {
@@ -1416,6 +1424,7 @@ impl AppState {
             session_id.clone(),
             text.clone(),
             images.clone(),
+            self.reasoning_effort,
             self.stream_tx.clone(),
         )?;
         if !threadlane_provider::router::is_antigravity_model(&model) {

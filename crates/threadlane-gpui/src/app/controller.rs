@@ -52,6 +52,7 @@ pub fn dispatch(state: &mut AppState, action: AppAction) {
             let _ = state.cancel_generation();
         }
         AppAction::SelectModel(model) => state.set_selected_model(model),
+        AppAction::SelectReasoningEffort(effort) => state.set_reasoning_effort(effort),
         AppAction::OpenSettings => state.open_settings(),
         AppAction::CloseSettings => state.close_settings(),
         AppAction::SaveOpenAiKey(key) => {

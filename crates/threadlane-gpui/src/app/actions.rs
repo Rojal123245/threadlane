@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use threadlane_agent::ImageAttachment;
+use threadlane_agent::{ImageAttachment, ReasoningEffort};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppAction {
@@ -32,6 +32,7 @@ pub enum AppAction {
     ToggleToolActivity(String),
     CancelGeneration,
     SelectModel(String),
+    SelectReasoningEffort(ReasoningEffort),
     OpenSettings,
     CloseSettings,
     SaveOpenAiKey(String),

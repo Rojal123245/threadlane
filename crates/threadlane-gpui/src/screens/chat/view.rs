@@ -17,7 +17,8 @@ use gpui_component::{Disableable, Icon, IconName, Sizable};
 
 use crate::app::{actions::AppAction, controller};
 use crate::state::{AppState, ChatMessageInfo, MessageRole, ToolActivityInfo};
-use threadlane_agent::{ImageAttachment, PlanItemStatus, SessionPlan};
+use threadlane_agent::{ImageAttachment, PlanItemStatus, ReasoningEffort, SessionPlan};
+use threadlane_coding_agent::commands::builtin_commands;
 
 actions!(threadlane_composer, [PasteClipboard]);
 
@@ -41,6 +42,9 @@ pub struct ChatListView {
     expanded_activity_groups: HashSet<String>,
     markdown_states: HashMap<String, (String, Entity<TextViewState>)>,
     pasted_images: Vec<ImageAttachment>,
+    branches: Vec<String>,
+    current_checkout: Option<String>,
+    branch_error: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -83,20 +87,22 @@ impl ChatListView {
                             std::mem::take(&mut this.pasted_images)
                         };
                         model_clone.update(cx, |state, cx| {
-                            controller::dispatch(
-                                state,
-                                if is_generating {
-                                    AppAction::StageBusyMessage(text)
-                                } else {
-                                    AppAction::SendPromptWithImages { text, images }
-                                },
-                            );
+                            if is_generating {
+                                controller::dispatch(state, AppAction::StageBusyMessage(text));
+                                controller::dispatch(state, AppAction::QueuePendingMessage);
+                            } else {
+                                controller::dispatch(
+                                    state,
+                                    AppAction::SendPromptWithImages { text, images },
+                                );
+                            }
                             cx.notify();
                         });
                         input_state.update(cx, |state, cx| {
                             state.set_value("", window, cx);
                         });
                         submit_scroll_handle.scroll_to_bottom();
+                        cx.notify();
                     }
                 }
             },
@@ -104,7 +110,7 @@ impl ChatListView {
 
         let stream_model = model.clone();
         let stream_scroll_handle = scroll_handle.clone();
-        cx.spawn(async move |_this, cx| {
+        cx.spawn(async move |this, cx| {
             let mut follow_tail = true;
             let mut settle_frames = 0_u8;
             loop {
@@ -116,6 +122,15 @@ impl ChatListView {
                     Duration::from_millis(33)
                 };
                 cx.background_executor().timer(interval).await;
+
+                // Re-arm tail following as soon as the user manually returns to the bottom,
+                // even while stream events keep arriving and settling never reaches zero.
+                if !follow_tail {
+                    let distance_from_bottom =
+                        (stream_scroll_handle.offset().y + stream_scroll_handle.max_offset().y)
+                            .abs();
+                    follow_tail = distance_from_bottom <= px(24.0);
+                }
 
                 let has_event =
                     stream_model.read_with(cx, |state, _cx| state.chat_stream_pending());
@@ -129,16 +144,18 @@ impl ChatListView {
                     });
 
                 if changed {
-                    settle_frames = 3;
+                    // Markdown measurement and new rows can complete after the first redraw.
+                    settle_frames = 6;
                 } else if settle_frames == 0 {
-                    let children = stream_scroll_handle.children_count();
-                    follow_tail = children == 0
-                        || stream_scroll_handle.bottom_item().saturating_add(1) >= children;
+                    let distance_from_bottom =
+                        (stream_scroll_handle.offset().y + stream_scroll_handle.max_offset().y)
+                            .abs();
+                    follow_tail = distance_from_bottom <= px(24.0);
                 }
 
                 if follow_tail && (changed || settle_frames > 0) {
                     stream_scroll_handle.scroll_to_bottom();
-                    stream_model.update(cx, |_state, cx| cx.notify());
+                    let _ = this.update(cx, |_this, cx| cx.notify());
                     if !changed {
                         settle_frames = settle_frames.saturating_sub(1);
                     }
@@ -155,9 +172,60 @@ impl ChatListView {
             expanded_activity_groups: HashSet::new(),
             markdown_states: HashMap::new(),
             pasted_images: Vec::new(),
+            branches: Vec::new(),
+            current_checkout: None,
+            branch_error: None,
             _subscriptions: vec![sub1, sub2],
         }
     }
+
+    fn refresh_branches(&self, cx: &mut Context<Self>) {
+        let Some(work_dir) = self.model.read(cx).active_work_dir.clone() else {
+            return;
+        };
+        let _ = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    threadlane_git::inspect(&work_dir).map_err(|error| {
+                        format!("{}: {}", error.work_dir.display(), error.message)
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(status) => {
+                        this.current_checkout = status.branch;
+                        this.branches = status.branches;
+                        this.branch_error = None;
+                    }
+                    Err(error) => {
+                        this.branch_error = Some(error);
+                    }
+                }
+                cx.notify();
+            });
+        });
+    }
+
+    fn checkout_branch(&mut self, branch: String, cx: &mut Context<Self>) {
+        let Some(work_dir) = self.model.read(cx).active_work_dir.clone() else {
+            return;
+        };
+        let _ = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { threadlane_git::checkout(&work_dir, &branch) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if result.is_ok() {
+                    this.refresh_branches(cx);
+                }
+                cx.notify();
+            });
+        });
+    }
+
 
     fn paste_composer_clipboard(
         &mut self,
@@ -987,7 +1055,14 @@ impl ChatListView {
         let theme = cx.theme().colors;
         let model = self.model.clone();
         let input_state = self.input_state.clone();
-        let (selected_model, project_name, is_generating, session_status, pending_message) = {
+        let (
+            selected_model,
+            reasoning_effort,
+            project_name,
+            is_generating,
+            session_status,
+            pending_message,
+        ) = {
             let state = self.model.read(cx);
             let project_name = state
                 .active_work_dir
@@ -997,6 +1072,7 @@ impl ChatListView {
                 .unwrap_or_else(|| "No project".to_string());
             (
                 state.selected_model.clone(),
+                state.reasoning_effort,
                 project_name,
                 state.is_generating,
                 state.session_status.clone(),
@@ -1022,8 +1098,6 @@ impl ChatListView {
         let steer_model = self.model.clone();
         let dismiss_model = self.model.clone();
         let dismiss_input = self.input_state.clone();
-        let stage_model = self.model.clone();
-        let stage_input = self.input_state.clone();
 
         let image_chips = self
             .pasted_images
@@ -1142,6 +1216,42 @@ impl ChatListView {
             .dropdown_caret(true)
             .ghost()
             .disabled(!has_models);
+
+        if self.branches.is_empty() {
+            self.refresh_branches(cx);
+        }
+        let branch_model = self.model.clone();
+        let branch_view = cx.entity().clone();
+        let branches = self.branches.clone();
+        let current_checkout = self.current_checkout.clone();
+        let branch_error = self.branch_error.clone();
+        let refresh_view = cx.entity().clone();
+        let branch_picker = Button::new("composer-branch-picker")
+            .label(current_checkout.as_deref().unwrap_or("Current checkout"))
+            .dropdown_caret(true)
+            .ghost()
+            .on_click(move |_event, _window, cx| {
+                refresh_view.update(cx, |this, cx| this.refresh_branches(cx));
+            })
+            .icon(Icon::default().path("icons/git/branch.svg"))
+            .dropdown_menu(move |menu, _window, _cx| {
+                if branches.is_empty() {
+                    let message = branch_error
+                        .as_deref()
+                        .map(|error| format!("Git unavailable: {error}"))
+                        .unwrap_or_else(|| "Loading local branches…".to_owned());
+                    return menu.item(PopupMenuItem::new(message));
+                }
+
+                branches.iter().cloned().fold(menu, |menu, branch| {
+                    let branch_view = branch_view.clone();
+                    let branch_model = branch_model.clone();
+                    menu.item(PopupMenuItem::new(branch.clone()).on_click(move |_event, _window, cx| {
+                        branch_view.update(cx, |this, cx| this.checkout_branch(branch.clone(), cx));
+                        branch_model.update(cx, |_, cx| cx.notify());
+                    }))
+                })
+            });
         let model_picker = if let Some(option) = selected_option.as_ref() {
             model_picker.icon(Icon::default().path(option.provider.icon_path()))
         } else {
@@ -1165,6 +1275,135 @@ impl ChatListView {
             })
         });
 
+        let effort_model = self.model.clone();
+        let effort_picker = Button::new("composer-reasoning-effort-picker")
+            .icon(Icon::default().path("icons/effort.svg"))
+            .tooltip(format!("Effort: {}", reasoning_effort.label()))
+            .dropdown_caret(true)
+            .ghost()
+            .dropdown_menu(move |menu, _window, _cx| {
+                [
+                    ReasoningEffort::Off,
+                    ReasoningEffort::Minimal,
+                    ReasoningEffort::Low,
+                    ReasoningEffort::Medium,
+                    ReasoningEffort::High,
+                    ReasoningEffort::XHigh,
+                    ReasoningEffort::Max,
+                ]
+                .into_iter()
+                .fold(menu, |menu, effort| {
+                    let model = effort_model.clone();
+                    menu.item(
+                        PopupMenuItem::new(effort.label())
+                            .checked(effort == reasoning_effort)
+                            .on_click(move |_event, _window, cx| {
+                                model.update(cx, |state, _cx| {
+                                    controller::dispatch(
+                                        state,
+                                        AppAction::SelectReasoningEffort(effort),
+                                    );
+                                });
+                            }),
+                    )
+                })
+            });
+
+        let input_value = self.input_state.read(cx).value().to_string();
+        let command_menu = if input_value.starts_with('/') {
+            let query = input_value[1..].split_whitespace().next().unwrap_or_default();
+            let commands = builtin_commands()
+                .into_iter()
+                .filter(|command| query.is_empty() || command.name.starts_with(query))
+                .collect::<Vec<_>>();
+            let command_count = commands.len();
+            let shown_count = command_count.min(8);
+            let has_commands = command_count > 0;
+            let input_state = self.input_state.clone();
+            div()
+                .absolute()
+                .left(px(16.0))
+                .bottom(px(128.0))
+                .w_full()
+                .max_w(px(620.0))
+                .max_h(px(286.0))
+                .flex()
+                .flex_col()
+                .rounded_lg()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.title_bar)
+                .shadow_lg()
+                .p_1()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .h(px(28.0))
+                        .px_2()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("COMMANDS")
+                        .child(format!("{shown_count}/{command_count}")),
+                )
+                .child(
+                    div()
+                        .when(!has_commands, |list| {
+                            list.child(
+                                div()
+                                    .h(px(36.0))
+                                    .flex()
+                                    .items_center()
+                                    .px_2()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child("No matching commands"),
+                            )
+                        })
+                        .children(commands.into_iter().take(8).map(|command| {
+                            let input_state = input_state.clone();
+                            let value = format!("/{} ", command.name);
+                            div()
+                                .id(SharedString::from(format!(
+                                    "composer-command-{}",
+                                    command.name
+                                )))
+                                .h(px(30.0))
+                                .flex()
+                                .items_center()
+                                .rounded_md()
+                                .px_2()
+                                .text_sm()
+                                .hover(|style| style.bg(theme.list_hover))
+                                .cursor_pointer()
+                                .child(
+                                    div()
+                                        .w(px(112.0))
+                                        .flex_none()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(theme.foreground)
+                                        .child(format!("/{}", command.name)),
+                                )
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .text_color(theme.muted_foreground)
+                                        .child(command.description),
+                                )
+                                .on_click(move |_event, window, cx| {
+                                    input_state.update(cx, |state, cx| {
+                                        state.set_value(&value, window, cx);
+                                    });
+                                })
+                        })),
+                )
+                .into_any_element()
+        } else {
+            div().into_any_element()
+        };
+
         div()
             .w_full()
             .flex_none()
@@ -1180,6 +1419,7 @@ impl ChatListView {
                     .w_full()
                     .max_w(px(1000.0))
                     .mx_auto()
+                    .relative()
                     .min_h(px(132.0))
                     .flex()
                     .flex_col()
@@ -1194,6 +1434,7 @@ impl ChatListView {
                         (!image_chips.is_empty())
                             .then(|| div().flex().flex_wrap().gap_2().children(image_chips)),
                     )
+                    .child(command_menu)
                     .child(
                         Textarea::new(&self.input_state)
                             .appearance(false)
@@ -1205,32 +1446,8 @@ impl ChatListView {
                             .items_center()
                             .gap_1()
                             .child(model_picker)
+                            .child(effort_picker)
                             .child(div().flex_1())
-                            .children(is_generating.then(|| {
-                                Button::new("stage-message-btn")
-                                    .w(px(40.0))
-                                    .h(px(40.0))
-                                    .label("↑")
-                                    .tooltip("Choose Queue or Steer")
-                                    .primary()
-                                    .disabled(!has_prompt)
-                                    .on_click(move |_event, window, cx| {
-                                        let text = stage_input.read(cx).value().to_string();
-                                        if text.trim().is_empty() {
-                                            return;
-                                        }
-                                        stage_model.update(cx, |state, cx| {
-                                            controller::dispatch(
-                                                state,
-                                                AppAction::StageBusyMessage(text),
-                                            );
-                                            cx.notify();
-                                        });
-                                        stage_input.update(cx, |input, cx| {
-                                            input.set_value("", window, cx);
-                                        });
-                                    })
-                            }))
                             .child(
                                 Button::new("send-btn")
                                     .w(px(40.0))
@@ -1272,6 +1489,8 @@ impl ChatListView {
                                             input_state.update(cx, |state, cx| {
                                                 state.set_value("", window, cx);
                                             });
+                                            this.scroll_handle.scroll_to_bottom();
+                                            cx.notify();
                                         }
                                     })),
                             ),
@@ -1293,7 +1512,9 @@ impl ChatListView {
                     .child(project_name)
                     .child("·")
                     .child("Local")
-                    .children(session_status.map(|status| {
+                    .child(div().flex_1())
+                    .child(branch_picker)
+                    .children(session_status.filter(|status| !status.starts_with("Working")).map(|status| {
                         div().flex().items_center().gap_2().child("·").child(status)
                     })),
             )
@@ -1345,7 +1566,8 @@ impl Render for ChatListView {
                     .min_w_0()
                     .min_h_0()
                     .track_scroll(&self.scroll_handle)
-                    .overflow_y_scrollbar()
+                    .overflow_y_scroll()
+                    .vertical_scrollbar(&self.scroll_handle)
                     .pt_3()
                     .pb_6()
                     .children(transcript_rows)

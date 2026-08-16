@@ -237,9 +237,15 @@ pub fn inspect(work_dir: &Path) -> Result<GitStatus, GitError> {
         &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
     )?
     .lines()
+    .map(str::trim)
     .filter(|branch| !branch.is_empty())
     .map(str::to_owned)
     .collect();
+    if let Some(current_branch) = status.branch.as_ref() {
+        if !status.branches.iter().any(|branch| branch == current_branch) {
+            status.branches.push(current_branch.clone());
+        }
+    }
     status.remote = command(work_dir, &["config", "--get", "remote.origin.url"])
         .ok()
         .map(|remote| remote.trim().to_owned())
