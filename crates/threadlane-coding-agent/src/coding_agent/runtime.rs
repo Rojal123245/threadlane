@@ -1492,9 +1492,6 @@ impl CodingAgent {
             .filter(|message| !matches!(message, AgentMessage::System { .. }))
             .collect();
 
-        // V2 commits assistant and tool entries from the loop-engine
-        // recorders. Re-running the legacy prefix diff here can dispatch hooks
-        // twice and makes the UI tree a second persistence path.
         if harness_persists_messages {
             // Persist new provider messages through the canonical session
             // harness, then reload the session tree from the updated file.
@@ -1508,6 +1505,13 @@ impl CodingAgent {
                     Ok(tree) => self.session_tree = tree,
                     Err(error) => warn!("Failed to reload V2 session tree: {error}"),
                 }
+            }
+            if let Some(last_assistant) = state_messages
+                .iter()
+                .rev()
+                .find(|message| matches!(message, AgentMessage::Assistant { .. }))
+            {
+                self.dispatch_assistant_hook(last_assistant).await;
             }
             return;
         }

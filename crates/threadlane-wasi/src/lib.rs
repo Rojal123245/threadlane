@@ -481,6 +481,7 @@ pub struct WasiExtensionManager {
     pending_broker_requests: Mutex<HashMap<Option<String>, Vec<HostBrokerRequest>>>,
     capability_grant_policy: Mutex<HostCapabilityGrantPolicy>,
     state_dir: Option<PathBuf>,
+    project_dir: Option<PathBuf>,
     /// Stateful conversational extensions are isolated by the active session.
     /// `None` retains the project-wide scope for callers that explicitly need it.
     session_id: Mutex<Option<String>>,
@@ -605,6 +606,7 @@ impl WasiExtensionManager {
     pub fn for_project(project_dir: &Path) -> Self {
         Self {
             state_dir: Some(project_dir.join(".threadlane/state/extensions")),
+            project_dir: Some(project_dir.to_path_buf()),
             ..Self::default()
         }
     }
@@ -627,6 +629,7 @@ impl WasiExtensionManager {
     pub fn for_project_session(project_dir: &Path, session_id: impl Into<String>) -> Self {
         Self {
             state_dir: Some(project_dir.join(".threadlane/state/extensions")),
+            project_dir: Some(project_dir.to_path_buf()),
             session_id: Mutex::new(Some(session_id.into())),
             ..Self::default()
         }
@@ -978,7 +981,7 @@ impl WasiExtensionManager {
             .collect()
     }
 
-    fn find_response_extension(&self, kind: &str, name: &str) -> Option<Arc<WasiExtension>> {
+    fn find_response_extension_cached(&self, kind: &str, name: &str) -> Option<Arc<WasiExtension>> {
         self.extensions
             .read()
             .ok()?
@@ -996,6 +999,18 @@ impl WasiExtensionManager {
                 contributions.iter().any(|tool| tool.name == name)
             })
             .cloned()
+    }
+
+    fn find_response_extension(&self, kind: &str, name: &str) -> Option<Arc<WasiExtension>> {
+        if let Some(extension) = self.find_response_extension_cached(kind, name) {
+            return Some(extension);
+        }
+        if let Some(project_dir) = &self.project_dir {
+            let global_dir = default_global_threadlane_dir();
+            let _ = self.reload_from_roots(global_dir.as_deref(), Some(project_dir));
+            return self.find_response_extension_cached(kind, name);
+        }
+        None
     }
 
     fn find_hook_extensions(&self, name: &str) -> Vec<Arc<WasiExtension>> {

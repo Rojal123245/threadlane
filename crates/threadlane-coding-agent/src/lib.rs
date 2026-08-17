@@ -33,7 +33,8 @@ pub use coding_agent::{
     CodingAgentCancellation, CodingAgentOptions, CodingAgentWorkHandle, HarnessWatch,
 };
 pub use commands::{
-    builtin_commands, execute_slash_command, parse_slash_command, CommandAction, SlashCommandInfo,
+    available_slash_commands, builtin_commands, execute_slash_command, parse_slash_command,
+    CommandAction, SlashCommandInfo,
 };
 pub use config::{CodingAgentConfig, CodingAgentConfigBuilder};
 pub use context::{ProjectContext, ProjectInstruction};

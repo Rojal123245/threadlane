@@ -7,7 +7,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{InputEvent, Textarea, TextareaState};
-use gpui_component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::text::{TextView, TextViewState};
@@ -18,7 +18,7 @@ use gpui_component::{Disableable, Icon, IconName, Sizable};
 use crate::app::{actions::AppAction, controller};
 use crate::state::{AppState, ChatMessageInfo, MessageRole, ToolActivityInfo};
 use threadlane_agent::{ImageAttachment, PlanItemStatus, ReasoningEffort, SessionPlan};
-use threadlane_coding_agent::commands::builtin_commands;
+use threadlane_coding_agent::commands::available_slash_commands;
 
 actions!(threadlane_composer, [PasteClipboard]);
 
@@ -126,9 +126,9 @@ impl ChatListView {
                 // Re-arm tail following as soon as the user manually returns to the bottom,
                 // even while stream events keep arriving and settling never reaches zero.
                 if !follow_tail {
-                    let distance_from_bottom =
-                        (stream_scroll_handle.offset().y + stream_scroll_handle.max_offset().y)
-                            .abs();
+                    let distance_from_bottom = (stream_scroll_handle.offset().y
+                        + stream_scroll_handle.max_offset().y)
+                        .abs();
                     follow_tail = distance_from_bottom <= px(24.0);
                 }
 
@@ -147,9 +147,9 @@ impl ChatListView {
                     // Markdown measurement and new rows can complete after the first redraw.
                     settle_frames = 6;
                 } else if settle_frames == 0 {
-                    let distance_from_bottom =
-                        (stream_scroll_handle.offset().y + stream_scroll_handle.max_offset().y)
-                            .abs();
+                    let distance_from_bottom = (stream_scroll_handle.offset().y
+                        + stream_scroll_handle.max_offset().y)
+                        .abs();
                     follow_tail = distance_from_bottom <= px(24.0);
                 }
 
@@ -183,13 +183,12 @@ impl ChatListView {
         let Some(work_dir) = self.model.read(cx).active_work_dir.clone() else {
             return;
         };
-        let _ = cx.spawn(async move |this, cx| {
+        cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    threadlane_git::inspect(&work_dir).map_err(|error| {
-                        format!("{}: {}", error.work_dir.display(), error.message)
-                    })
+                    threadlane_git::inspect(&work_dir)
+                        .map_err(|error| format!("{}: {}", error.work_dir.display(), error.message))
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -205,14 +204,15 @@ impl ChatListView {
                 }
                 cx.notify();
             });
-        });
+        })
+        .detach();
     }
 
     fn checkout_branch(&mut self, branch: String, cx: &mut Context<Self>) {
         let Some(work_dir) = self.model.read(cx).active_work_dir.clone() else {
             return;
         };
-        let _ = cx.spawn(async move |this, cx| {
+        cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move { threadlane_git::checkout(&work_dir, &branch) })
@@ -223,9 +223,9 @@ impl ChatListView {
                 }
                 cx.notify();
             });
-        });
+        })
+        .detach();
     }
-
 
     fn paste_composer_clipboard(
         &mut self,
@@ -475,15 +475,19 @@ impl ChatListView {
                             .text_color(marker_color)
                             .child(marker);
                         if is_active {
-                            marker_el.with_animation(
-                                SharedString::from(format!("tool-pulse-{}", activity.id)),
-                                Animation::new(Duration::from_millis(1000))
-                                    .repeat()
-                                    .with_easing(ease_in_out),
-                                |el, delta| {
-                                    el.opacity(0.3 + 0.7 * (delta * std::f32::consts::PI).sin().abs())
-                                },
-                            ).into_any_element()
+                            marker_el
+                                .with_animation(
+                                    SharedString::from(format!("tool-pulse-{}", activity.id)),
+                                    Animation::new(Duration::from_millis(1000))
+                                        .repeat()
+                                        .with_easing(ease_in_out),
+                                    |el, delta| {
+                                        el.opacity(
+                                            0.3 + 0.7 * (delta * std::f32::consts::PI).sin().abs(),
+                                        )
+                                    },
+                                )
+                                .into_any_element()
                         } else {
                             marker_el.into_any_element()
                         }
@@ -609,28 +613,14 @@ impl ChatListView {
                                     .repeat()
                                     .with_easing(ease_in_out),
                                 |el, delta| {
-                                    let opacity = 0.35 + 0.65 * (delta * std::f32::consts::PI).sin().abs();
+                                    let opacity =
+                                        0.35 + 0.65 * (delta * std::f32::consts::PI).sin().abs();
                                     el.opacity(opacity)
                                 },
                             )
-                            .child(
-                                div()
-                                    .size(px(4.5))
-                                    .rounded_full()
-                                    .bg(theme.primary),
-                            )
-                            .child(
-                                div()
-                                    .size(px(4.5))
-                                    .rounded_full()
-                                    .bg(theme.primary),
-                            )
-                            .child(
-                                div()
-                                    .size(px(4.5))
-                                    .rounded_full()
-                                    .bg(theme.primary),
-                            ),
+                            .child(div().size(px(4.5)).rounded_full().bg(theme.primary))
+                            .child(div().size(px(4.5)).rounded_full().bg(theme.primary))
+                            .child(div().size(px(4.5)).rounded_full().bg(theme.primary)),
                     )
                     .child(
                         div()
@@ -774,10 +764,7 @@ impl ChatListView {
             )
             .on_click(move |_event, _window, cx| {
                 model.update(cx, |state, cx| {
-                    controller::dispatch(
-                        state,
-                        AppAction::ToggleReasoningExpanded(msg_id.clone()),
-                    );
+                    controller::dispatch(state, AppAction::ToggleReasoningExpanded(msg_id.clone()));
                     cx.notify();
                 });
             });
@@ -859,6 +846,19 @@ impl ChatListView {
                                 });
                             }
                             TextView::new(&entry.1).selectable(true)
+                        })
+                        .context_menu({
+                            let content = msg.content.clone();
+                            move |menu, _window, _cx| {
+                                let text = content.clone();
+                                menu.item(PopupMenuItem::new("Copy Message").on_click(
+                                    move |_event, _window, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            text.clone(),
+                                        ));
+                                    },
+                                ))
+                            }
                         }),
                 ),
             MessageRole::Assistant => {
@@ -925,14 +925,38 @@ impl ChatListView {
                             } else {
                                 None
                             })
-                            .children(tool_elements),
+                            .children(tool_elements)
+                            .context_menu({
+                                let content = msg.content.clone();
+                                move |menu, _window, _cx| {
+                                    let text = content.clone();
+                                    menu.item(PopupMenuItem::new("Copy Message").on_click(
+                                        move |_event, _window, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                text.clone(),
+                                            ));
+                                        },
+                                    ))
+                                }
+                            }),
                     )
             }
             MessageRole::System => div().flex().justify_center().my_2().child(
                 div()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child(msg.content.clone()),
+                    .child(msg.content.clone())
+                    .context_menu({
+                        let content = msg.content.clone();
+                        move |menu, _window, _cx| {
+                            let text = content.clone();
+                            menu.item(PopupMenuItem::new("Copy Message").on_click(
+                                move |_event, _window, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                                },
+                            ))
+                        }
+                    }),
             ),
             MessageRole::Error => div().flex().justify_center().my_2().px_4().child(
                 div()
@@ -959,7 +983,20 @@ impl ChatListView {
                                 div()
                                     .text_sm()
                                     .text_color(theme.danger_foreground)
-                                    .child(msg.content.clone()),
+                                    .child(msg.content.clone())
+                                    .context_menu({
+                                        let content = msg.content.clone();
+                                        move |menu, _window, _cx| {
+                                            let text = content.clone();
+                                            menu.item(PopupMenuItem::new("Copy Message").on_click(
+                                                move |_event, _window, cx| {
+                                                    cx.write_to_clipboard(
+                                                        ClipboardItem::new_string(text.clone()),
+                                                    );
+                                                },
+                                            ))
+                                        }
+                                    }),
                             ),
                     ),
             ),
@@ -998,11 +1035,12 @@ impl ChatListView {
                     let model = model.clone();
                     menu = menu.item(PopupMenuItem::new(name).on_click(
                         move |_event, _window, cx| {
-                            model.update(cx, |state, _cx| {
+                            model.update(cx, |state, cx| {
                                 controller::dispatch(
                                     state,
                                     AppAction::SelectDraftProject(work_dir.clone()),
                                 );
+                                cx.notify();
                             });
                         },
                     ));
@@ -1012,11 +1050,19 @@ impl ChatListView {
                 menu.separator()
                     .item(PopupMenuItem::new("New project...").on_click(
                         move |_event, _window, cx| {
-                            if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                                model.update(cx, |state, _cx| {
+                            let model = model.clone();
+                            cx.spawn(async move |cx| {
+                                let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await
+                                else {
+                                    return;
+                                };
+                                let path = folder.path().to_path_buf();
+                                let _ = model.update(cx, |state, cx| {
                                     controller::dispatch(state, AppAction::AttachProject(path));
+                                    cx.notify();
                                 });
-                            }
+                            })
+                            .detach();
                         },
                     ))
             });
@@ -1062,6 +1108,7 @@ impl ChatListView {
             is_generating,
             session_status,
             pending_message,
+            active_session_id,
         ) = {
             let state = self.model.read(cx);
             let project_name = state
@@ -1077,6 +1124,7 @@ impl ChatListView {
                 state.is_generating,
                 state.session_status.clone(),
                 state.active_pending_composer_message().map(str::to_owned),
+                state.active_session_id.clone(),
             )
         };
         let has_prompt =
@@ -1246,10 +1294,13 @@ impl ChatListView {
                 branches.iter().cloned().fold(menu, |menu, branch| {
                     let branch_view = branch_view.clone();
                     let branch_model = branch_model.clone();
-                    menu.item(PopupMenuItem::new(branch.clone()).on_click(move |_event, _window, cx| {
-                        branch_view.update(cx, |this, cx| this.checkout_branch(branch.clone(), cx));
-                        branch_model.update(cx, |_, cx| cx.notify());
-                    }))
+                    menu.item(PopupMenuItem::new(branch.clone()).on_click(
+                        move |_event, _window, cx| {
+                            branch_view
+                                .update(cx, |this, cx| this.checkout_branch(branch.clone(), cx));
+                            branch_model.update(cx, |_, cx| cx.notify());
+                        },
+                    ))
                 })
             });
         let model_picker = if let Some(option) = selected_option.as_ref() {
@@ -1264,11 +1315,12 @@ impl ChatListView {
                     PopupMenuItem::new(option.label)
                         .icon(Icon::default().path(option.provider.icon_path()))
                         .on_click(move |_event, _window, cx| {
-                            model.update(cx, |state, _cx| {
+                            model.update(cx, |state, cx| {
                                 controller::dispatch(
                                     state,
                                     AppAction::SelectModel(option.id.to_string()),
                                 );
+                                cx.notify();
                             });
                         }),
                 )
@@ -1278,7 +1330,8 @@ impl ChatListView {
         let effort_model = self.model.clone();
         let effort_picker = Button::new("composer-reasoning-effort-picker")
             .icon(Icon::default().path("icons/effort.svg"))
-            .tooltip(format!("Effort: {}", reasoning_effort.label()))
+            .label(reasoning_effort.label())
+            .tooltip(format!("Reasoning effort: {}", reasoning_effort.label()))
             .dropdown_caret(true)
             .ghost()
             .dropdown_menu(move |menu, _window, _cx| {
@@ -1298,11 +1351,12 @@ impl ChatListView {
                         PopupMenuItem::new(effort.label())
                             .checked(effort == reasoning_effort)
                             .on_click(move |_event, _window, cx| {
-                                model.update(cx, |state, _cx| {
+                                model.update(cx, |state, cx| {
                                     controller::dispatch(
                                         state,
                                         AppAction::SelectReasoningEffort(effort),
                                     );
+                                    cx.notify();
                                 });
                             }),
                     )
@@ -1311,8 +1365,11 @@ impl ChatListView {
 
         let input_value = self.input_state.read(cx).value().to_string();
         let command_menu = if input_value.starts_with('/') {
-            let query = input_value[1..].split_whitespace().next().unwrap_or_default();
-            let commands = builtin_commands()
+            let query = input_value[1..]
+                .split_whitespace()
+                .next()
+                .unwrap_or_default();
+            let commands = available_slash_commands(project_root.as_deref())
                 .into_iter()
                 .filter(|command| query.is_empty() || command.name.starts_with(query))
                 .collect::<Vec<_>>();
@@ -1404,6 +1461,192 @@ impl ChatListView {
             div().into_any_element()
         };
 
+        let token_usage = self.model.read(cx).current_session_token_usage();
+        let context_max = crate::model_catalog::model_context_window(&selected_model);
+        let percent = if context_max > 0 {
+            ((token_usage.total_tokens as f64 / context_max as f64) * 100.0).clamp(0.0, 100.0)
+        } else {
+            0.0
+        };
+
+        let meter_color = if percent >= 95.0 {
+            theme.danger
+        } else if percent >= 80.0 {
+            theme.warning
+        } else {
+            theme.accent
+        };
+        let context_tooltip = format!(
+            "Context window\n{} of {} tokens ({:.1}%)\nInput: {} • Output: {}",
+            token_usage.total_tokens,
+            context_max,
+            percent,
+            token_usage.input_tokens,
+            token_usage.output_tokens
+        );
+        let context_meter = div()
+            .id("context-meter-badge")
+            .relative()
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(30.0))
+            .rounded_full()
+            .tooltip(move |window, cx| {
+                let text = context_tooltip.clone();
+                Tooltip::element(move |_window, _cx| div().child(text.clone())).build(window, cx)
+            })
+            .children(
+                [
+                    (px(12.0), px(1.0)),
+                    (px(18.0), px(4.0)),
+                    (px(22.0), px(10.0)),
+                    (px(22.0), px(17.0)),
+                    (px(18.0), px(23.0)),
+                    (px(12.0), px(26.0)),
+                    (px(6.0), px(23.0)),
+                    (px(2.0), px(17.0)),
+                    (px(2.0), px(10.0)),
+                    (px(6.0), px(4.0)),
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(index, (left, top))| {
+                    div()
+                        .absolute()
+                        .left(left)
+                        .top(top)
+                        .size(px(4.0))
+                        .rounded_full()
+                        .bg(if percent >= ((index + 1) as f64 * 10.0) {
+                            meter_color
+                        } else {
+                            theme.border
+                        })
+                }),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.foreground)
+                    .child(format!("{percent:.0}")),
+            );
+
+        let stashed_draft = active_session_id
+            .as_ref()
+            .and_then(|id| self.model.read(cx).get_stashed_prompt(id).cloned());
+        let stash_model = self.model.clone();
+        let stash_input = self.input_state.clone();
+        let stash_session_id = active_session_id.clone();
+        let stash_banner = stashed_draft.map(|draft| {
+            let restore_input = stash_input.clone();
+            let restore_model = stash_model.clone();
+            let restore_session_id = stash_session_id.clone();
+            let dismiss_model = stash_model.clone();
+            let dismiss_session_id = stash_session_id.clone();
+            let preview_text = if draft.len() > 60 {
+                format!("{}…", &draft[..60])
+            } else {
+                draft.clone()
+            };
+            div()
+                .w_full()
+                .mb_2()
+                .px_3()
+                .py_2()
+                .rounded_lg()
+                .border_1()
+                .border_color(theme.accent.opacity(0.3))
+                .bg(theme.accent.opacity(0.1))
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .flex_1()
+                        .min_w_0()
+                        .child(Icon::default().path("icons/file.svg"))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.foreground)
+                                .truncate()
+                                .child(format!("Stashed draft: \"{preview_text}\"")),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            Button::new("restore-stashed-draft")
+                                .label("Restore Draft")
+                                .small()
+                                .primary()
+                                .on_click(move |_event, window, cx| {
+                                    if let Some(session_id) = &restore_session_id {
+                                        if let Some(text) = restore_model.update(cx, |state, cx| {
+                                            let popped = state.pop_stashed_prompt(session_id);
+                                            cx.notify();
+                                            popped
+                                        }) {
+                                            restore_input.update(cx, |input, cx| {
+                                                input.set_value(text, window, cx);
+                                            });
+                                        }
+                                    }
+                                }),
+                        )
+                        .child(
+                            Button::new("dismiss-stashed-draft")
+                                .icon(IconName::Close)
+                                .ghost()
+                                .xsmall()
+                                .tooltip("Discard stash")
+                                .on_click(move |_event, _window, cx| {
+                                    if let Some(session_id) = &dismiss_session_id {
+                                        dismiss_model.update(cx, |state, cx| {
+                                            state.clear_stashed_prompt(session_id);
+                                            cx.notify();
+                                        });
+                                    }
+                                }),
+                        ),
+                )
+        });
+
+        let stash_button = {
+            let do_stash_input = self.input_state.clone();
+            let do_stash_model = self.model.clone();
+            let do_stash_session_id = active_session_id.clone();
+            Button::new("stash-prompt-btn")
+                .icon(Icon::default().path("icons/folder.svg"))
+                .tooltip("Stash draft")
+                .ghost()
+                .small()
+                .disabled(is_generating || !has_prompt)
+                .on_click(move |_event, window, cx| {
+                    if let Some(session_id) = &do_stash_session_id {
+                        let text = do_stash_input.read(cx).value().to_string();
+                        if !text.trim().is_empty() {
+                            do_stash_model.update(cx, |state, cx| {
+                                state.stash_prompt(session_id, text);
+                                cx.notify();
+                            });
+                            do_stash_input.update(cx, |input, cx| {
+                                input.set_value("", window, cx);
+                            });
+                        }
+                    }
+                })
+        };
+
         div()
             .w_full()
             .flex_none()
@@ -1430,6 +1673,7 @@ impl ChatListView {
                     .border_color(theme.border)
                     .bg(theme.title_bar)
                     .on_action(cx.listener(Self::paste_composer_clipboard))
+                    .children(stash_banner)
                     .children(
                         (!image_chips.is_empty())
                             .then(|| div().flex().flex_wrap().gap_2().children(image_chips)),
@@ -1447,7 +1691,9 @@ impl ChatListView {
                             .gap_1()
                             .child(model_picker)
                             .child(effort_picker)
+                            .child(context_meter)
                             .child(div().flex_1())
+                            .child(stash_button)
                             .child(
                                 Button::new("send-btn")
                                     .w(px(40.0))
@@ -1514,9 +1760,13 @@ impl ChatListView {
                     .child("Local")
                     .child(div().flex_1())
                     .child(branch_picker)
-                    .children(session_status.filter(|status| !status.starts_with("Working")).map(|status| {
-                        div().flex().items_center().gap_2().child("·").child(status)
-                    })),
+                    .children(
+                        session_status
+                            .filter(|status| !status.starts_with("Working"))
+                            .map(|status| {
+                                div().flex().items_center().gap_2().child("·").child(status)
+                            }),
+                    ),
             )
     }
 }

@@ -5,11 +5,9 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::alert::{Alert, AlertVariant};
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::group_box::GroupBox;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
-use gpui_component::separator::Separator;
 use gpui_component::switch::Switch;
 use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::text::TextView;
@@ -757,7 +755,7 @@ impl SettingsView {
             .into_any_element()
     }
 
-    fn render_capability_status(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_capability_status(&self, _cx: &mut Context<Self>) -> Option<AnyElement> {
         self.capability_status.clone().map(|status| {
             Alert::new("capability-status-alert", status)
                 .title("Notice")

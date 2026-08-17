@@ -20,13 +20,17 @@ pub fn dispatch(state: &mut AppState, action: AppAction) {
             work_dir,
             session_id,
         } => {
-            let _ = state.settle_session(work_dir, session_id);
+            if let Err(error) = state.settle_session(work_dir, session_id) {
+                state.session_status = Some(error);
+            }
         }
         AppAction::RemoveSession {
             work_dir,
             session_id,
         } => {
-            let _ = state.remove_session(work_dir, session_id);
+            if let Err(error) = state.remove_session(work_dir, session_id) {
+                state.session_status = Some(error);
+            }
         }
         AppAction::ToggleProject(path) => state.toggle_project_expanded(&path),
         AppAction::BeginNewTask => state.begin_new_task(),

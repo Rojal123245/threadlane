@@ -5,7 +5,6 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
-use gpui_component::separator::Separator;
 use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::theme::ActiveTheme;
 use gpui_component::{IconName, Sizable};
@@ -84,8 +83,9 @@ impl SidebarView {
             move |_this, search_input, event: &InputEvent, _window, cx| {
                 if matches!(event, InputEvent::Change) {
                     let query = search_input.read(cx).value().to_string();
-                    model_clone.update(cx, |state, _cx| {
+                    model_clone.update(cx, |state, cx| {
                         state.search_query = query;
+                        cx.notify();
                     });
                 }
             },
@@ -117,8 +117,9 @@ impl SidebarView {
                     .ghost()
                     .w_full()
                     .on_click(move |_event, _window, cx| {
-                        model.update(cx, |state, _cx| {
+                        model.update(cx, |state, cx| {
                             controller::dispatch(state, AppAction::BeginNewTask);
+                            cx.notify();
                         });
                     }),
             )
@@ -166,11 +167,19 @@ impl SidebarView {
                     .ghost()
                     .xsmall()
                     .on_click(move |_event, _window, cx| {
-                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                            model.update(cx, |state, _cx| {
+                        let model = model.clone();
+                        cx.spawn(async move |cx| {
+                            let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await
+                            else {
+                                return;
+                            };
+                            let path = folder.path().to_path_buf();
+                            let _ = model.update(cx, |state, cx| {
                                 controller::dispatch(state, AppAction::AttachProject(path));
+                                cx.notify();
                             });
-                        }
+                        })
+                        .detach();
                     }),
             )
     }
@@ -182,24 +191,49 @@ impl SidebarView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme().colors;
-        let status_indicator: Option<AnyElement> = match session.health {
-            SessionHealth::Working => Some(
+        let is_generating = is_active && self.model.read(cx).is_generating;
+        let status_indicator = if is_generating {
+            Some(
                 div()
                     .flex()
                     .items_center()
-                    .justify_center()
-                    .text_color(theme.primary)
+                    .gap_1()
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded_full()
+                    .bg(theme.accent.opacity(0.15))
                     .child(gpui_component::spinner::Spinner::new().xsmall())
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.accent)
+                            .child("Running"),
+                    )
                     .into_any_element(),
-            ),
-            SessionHealth::Warning => Some(
-                Tag::new()
-                    .child("!")
-                    .with_variant(TagVariant::Warning)
-                    .small()
-                    .into_any_element(),
-            ),
-            SessionHealth::Healthy => None,
+            )
+        } else {
+            match session.health {
+                SessionHealth::Working => Some(
+                    div()
+                        .w(px(20.0))
+                        .h(px(20.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(theme.primary)
+                        .child(gpui_component::spinner::Spinner::new().xsmall())
+                        .into_any_element(),
+                ),
+                SessionHealth::Warning => Some(
+                    Tag::new()
+                        .child("!")
+                        .with_variant(TagVariant::Warning)
+                        .small()
+                        .into_any_element(),
+                ),
+                SessionHealth::Healthy => None,
+            }
         };
 
         let bg_color = if is_active {
@@ -226,6 +260,10 @@ impl SidebarView {
         let context_work_dir = session.work_dir.clone();
         let context_session_id = session.id.clone();
         let context_model = self.model.clone();
+        let copy_session_file = session.session_file.display().to_string();
+        let quick_settle_model = self.model.clone();
+        let quick_settle_work_dir = session.work_dir.clone();
+        let quick_settle_session_id = session.id.clone();
         let time_ago = format_time_ago(session.updated_at);
         let status = if session.health == SessionHealth::Working {
             format!("Working for {}", time_ago.trim_end_matches(" ago"))
@@ -237,6 +275,13 @@ impl SidebarView {
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| "Project".to_string());
+
+        let tooltip_text = format!(
+            "{}\n{}\nUpdated {}",
+            session.title,
+            session.work_dir.display(),
+            status,
+        );
 
         div()
             .id(SharedString::from(format!("session-card-{}", session.id)))
@@ -256,7 +301,7 @@ impl SidebarView {
             .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                 let work_dir = work_dir.clone();
                 let session_id = session_id.clone();
-                model.update(cx, |state, _cx| {
+                model.update(cx, |state, cx| {
                     controller::dispatch(
                         state,
                         AppAction::SelectSession {
@@ -264,6 +309,7 @@ impl SidebarView {
                             session_id,
                         },
                     );
+                    cx.notify();
                 });
             })
             .child(
@@ -282,7 +328,36 @@ impl SidebarView {
                             .truncate()
                             .child(session.title.clone()),
                     )
-                    .children(status_indicator),
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .children(status_indicator)
+                            .child(
+                                Button::new(SharedString::from(format!(
+                                    "settle-session-{}",
+                                    session.id
+                                )))
+                                .icon(IconName::Check)
+                                .ghost()
+                                .xsmall()
+                                .compact()
+                                .tooltip(tooltip_text)
+                                .on_click(move |_event, _window, cx| {
+                                    quick_settle_model.update(cx, |state, cx| {
+                                        controller::dispatch(
+                                            state,
+                                            AppAction::SettleSession {
+                                                work_dir: quick_settle_work_dir.clone(),
+                                                session_id: quick_settle_session_id.clone(),
+                                            },
+                                        );
+                                        cx.notify();
+                                    });
+                                }),
+                            ),
+                    ),
             )
             .child(
                 div()
@@ -310,6 +385,12 @@ impl SidebarView {
                     ),
             )
             .context_menu(move |menu, _window, _cx| {
+                let open_model = context_model.clone();
+                let open_work_dir = context_work_dir.clone();
+                let open_session_id = context_session_id.clone();
+                let copy_session_id = context_session_id.clone();
+                let copy_project_path = context_work_dir.to_string_lossy().into_owned();
+                let copy_session_file = copy_session_file.clone();
                 let settle_model = context_model.clone();
                 let settle_work_dir = context_work_dir.clone();
                 let settle_session_id = context_session_id.clone();
@@ -317,31 +398,95 @@ impl SidebarView {
                 let remove_work_dir = context_work_dir.clone();
                 let remove_session_id = context_session_id.clone();
 
-                menu.item(PopupMenuItem::new("Settle Session").on_click(
+                menu.item(PopupMenuItem::new("Open Session").on_click(
                     move |_event, _window, cx| {
-                        settle_model.update(cx, |state, _cx| {
+                        open_model.update(cx, |state, cx| {
                             controller::dispatch(
                                 state,
-                                AppAction::SettleSession {
-                                    work_dir: settle_work_dir.clone(),
-                                    session_id: settle_session_id.clone(),
+                                AppAction::SelectSession {
+                                    work_dir: open_work_dir.clone(),
+                                    session_id: open_session_id.clone(),
                                 },
                             );
+                            cx.notify();
                         });
+                    },
+                ))
+                .item(PopupMenuItem::new("Copy Session ID").on_click(
+                    move |_event, _window, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(copy_session_id.clone()));
+                    },
+                ))
+                .item(PopupMenuItem::new("Copy Project Root Path").on_click(
+                    move |_event, _window, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(copy_project_path.clone()));
+                    },
+                ))
+                .item(PopupMenuItem::new("Copy Session File Path").on_click(
+                    move |_event, _window, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(copy_session_file.clone()));
+                    },
+                ))
+                .separator()
+                .item(PopupMenuItem::new("Archive Session").on_click(
+                    move |_event, _window, cx| {
+                        let model = settle_model.clone();
+                        let work_dir = settle_work_dir.clone();
+                        let session_id = settle_session_id.clone();
+                        cx.spawn(async move |cx| {
+                            let result = rfd::AsyncMessageDialog::new()
+                                .set_title("Archive session?")
+                                .set_description(format!(
+                                    "This removes session {session_id} from the active list."
+                                ))
+                                .set_buttons(rfd::MessageButtons::YesNo)
+                                .show()
+                                .await;
+                            if matches!(result, rfd::MessageDialogResult::Yes) {
+                                let _ = model.update(cx, |state, cx| {
+                                    controller::dispatch(
+                                        state,
+                                        AppAction::SettleSession {
+                                            work_dir,
+                                            session_id,
+                                        },
+                                    );
+                                    cx.notify();
+                                });
+                            }
+                        })
+                        .detach();
                     },
                 ))
                 .separator()
                 .item(
                     PopupMenuItem::new("Remove Session").on_click(move |_event, _window, cx| {
-                        remove_model.update(cx, |state, _cx| {
-                            controller::dispatch(
-                                state,
-                                AppAction::RemoveSession {
-                                    work_dir: remove_work_dir.clone(),
-                                    session_id: remove_session_id.clone(),
-                                },
-                            );
-                        });
+                        let model = remove_model.clone();
+                        let work_dir = remove_work_dir.clone();
+                        let session_id = remove_session_id.clone();
+                        cx.spawn(async move |cx| {
+                            let result = rfd::AsyncMessageDialog::new()
+                                .set_title("Remove session?")
+                                .set_description(format!(
+                                    "This permanently removes session {session_id}."
+                                ))
+                                .set_buttons(rfd::MessageButtons::YesNo)
+                                .show()
+                                .await;
+                            if matches!(result, rfd::MessageDialogResult::Yes) {
+                                let _ = model.update(cx, |state, cx| {
+                                    controller::dispatch(
+                                        state,
+                                        AppAction::RemoveSession {
+                                            work_dir,
+                                            session_id,
+                                        },
+                                    );
+                                    cx.notify();
+                                });
+                            }
+                        })
+                        .detach();
                     }),
                 )
             })
@@ -358,8 +503,9 @@ impl SidebarView {
                 .ghost()
                 .text_color(theme.muted_foreground)
                 .on_click(move |_event, _window, cx| {
-                    model.update(cx, |state, _cx| {
+                    model.update(cx, |state, cx| {
                         controller::dispatch(state, AppAction::OpenSettings);
+                        cx.notify();
                     });
                 }),
         )

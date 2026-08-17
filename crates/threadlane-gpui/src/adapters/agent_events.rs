@@ -1,6 +1,4 @@
-//! Provider-neutral agent event projection for GPUI chat state.
-
-use threadlane_agent::{AgentEvent, SessionPlan};
+use threadlane_agent::{AgentEvent, SessionPlan, TokenUsage};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChatAgentUpdate {
@@ -21,12 +19,14 @@ pub enum ChatAgentUpdate {
         is_error: bool,
     },
     PlanUpdated(SessionPlan),
+    Usage(TokenUsage),
     Error(String),
     Ignore,
 }
 
 pub fn adapt_agent_event(event: AgentEvent) -> ChatAgentUpdate {
     match event {
+        AgentEvent::AgentEnd { usage } => ChatAgentUpdate::Usage(usage),
         AgentEvent::MessageUpdate {
             text_delta: Some(delta),
             ..

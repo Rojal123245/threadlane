@@ -37,6 +37,7 @@ const OPENAI_MODELS: &[(&str, &str)] = &[
 ];
 
 const ANTIGRAVITY_MODELS: &[(&str, &str)] = &[
+    ("antigravity/gemini-3.7-flash", "Gemini 3.7 Flash"),
     ("antigravity/gemini-3.6-flash", "Gemini 3.6 Flash"),
     ("antigravity/gemini-3.5-flash", "Gemini 3.5 Flash"),
     ("antigravity/gemini-3.1-pro", "Gemini 3.1 Pro"),
@@ -176,6 +177,32 @@ fn has_openai_credentials() -> bool {
         || std::env::var("OPENAI_API_KEY").is_ok_and(|key| !key.trim().is_empty())
 }
 
+pub fn model_context_window(model_id: &str) -> u32 {
+    let unadorned = model_id
+        .strip_prefix("antigravity/")
+        .or_else(|| model_id.strip_prefix("opencode-go/"))
+        .unwrap_or(model_id);
+    match unadorned {
+        "gemini-3.7-flash" | "gemini-3.6-flash" | "gemini-3.5-flash" => 1_000_000,
+        "gemini-3.1-pro" => 2_000_000,
+        "gpt-5.6-luna" | "gpt-5.4" | "gpt-5.5" | "gpt-5.6-sol" | "gpt-5.6-terra" => 1_000_000,
+        "gpt-5.4-mini" | "gpt-4o" | "gpt-4o-mini" => 128_000,
+        "claude-sonnet-4-6" | "claude-opus-4-6" => 200_000,
+        "gpt-oss-120b" => 128_000,
+        _ => 128_000,
+    }
+}
+
+pub fn format_tokens(tokens: u32) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.1}k", tokens as f64 / 1_000.0)
+    } else {
+        tokens.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,8 +228,17 @@ mod tests {
     #[test]
     fn catalog_matches_native_provider_inventory() {
         assert_eq!(OPENAI_MODELS.len(), 9);
-        assert_eq!(ANTIGRAVITY_MODELS.len(), 6);
+        assert_eq!(ANTIGRAVITY_MODELS.len(), 7);
         assert_eq!(OPENCODE_MODELS.len(), 8);
+    }
+
+    #[test]
+    fn context_window_and_token_formatting() {
+        assert_eq!(model_context_window("antigravity/gemini-3.7-flash"), 1_000_000);
+        assert_eq!(model_context_window("antigravity/gemini-3.1-pro"), 2_000_000);
+        assert_eq!(format_tokens(850), "850");
+        assert_eq!(format_tokens(24_500), "24.5k");
+        assert_eq!(format_tokens(1_000_000), "1.0M");
     }
 
     #[test]

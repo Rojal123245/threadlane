@@ -5,7 +5,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 use threadlane_agent::{
-    AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, SessionPlan, SessionTree,
+    AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, SessionPlan, SessionTree, TokenUsage,
 };
 
 use crate::adapters::agent_events::{adapt_agent_event, ChatAgentUpdate};
@@ -112,6 +112,8 @@ pub struct AppState {
     pub composer_text: String,
     pub session_status: Option<String>,
     pub pending_composer_messages: HashMap<String, String>,
+    pub session_token_usage: HashMap<String, TokenUsage>,
+    pub stashed_prompts: HashMap<String, String>,
 
     pub selected_model: String,
     pub reasoning_effort: ReasoningEffort,
@@ -636,6 +638,8 @@ impl AppState {
             composer_text: String::new(),
             session_status,
             pending_composer_messages: HashMap::new(),
+            session_token_usage: HashMap::new(),
+            stashed_prompts: HashMap::new(),
             selected_model,
             reasoning_effort: ReasoningEffort::default(),
             workspace_page: WorkspacePage::Chat,
@@ -652,6 +656,39 @@ impl AppState {
             session_refresh_rx,
             session_runtimes,
         }
+    }
+
+    pub fn current_session_token_usage(&self) -> TokenUsage {
+        if let Some(session_id) = &self.active_session_id {
+            if let Some(usage) = self.session_token_usage.get(session_id) {
+                return usage.clone();
+            }
+        }
+        let chars: usize = self.messages.iter().map(|m| m.content.len()).sum();
+        let approx_tokens = (chars / 4) as u32;
+        TokenUsage {
+            total_tokens: approx_tokens,
+            input_tokens: approx_tokens,
+            ..Default::default()
+        }
+    }
+
+    pub fn stash_prompt(&mut self, session_id: &str, text: String) {
+        if !text.trim().is_empty() {
+            self.stashed_prompts.insert(session_id.to_string(), text);
+        }
+    }
+
+    pub fn pop_stashed_prompt(&mut self, session_id: &str) -> Option<String> {
+        self.stashed_prompts.remove(session_id)
+    }
+
+    pub fn get_stashed_prompt(&self, session_id: &str) -> Option<&String> {
+        self.stashed_prompts.get(session_id)
+    }
+
+    pub fn clear_stashed_prompt(&mut self, session_id: &str) {
+        self.stashed_prompts.remove(session_id);
     }
 
     fn invalidate_idle_runtimes(&mut self) {
@@ -1202,6 +1239,13 @@ impl AppState {
                         }
                         ChatAgentUpdate::PlanUpdated(plan) => {
                             self.active_plan = plan;
+                        }
+                        ChatAgentUpdate::Usage(usage) => {
+                            let entry = self
+                                .session_token_usage
+                                .entry(session_id.clone())
+                                .or_default();
+                            entry.accumulate(&usage);
                         }
                         ChatAgentUpdate::Error(error) => {
                             self.messages.push(ChatMessageInfo {

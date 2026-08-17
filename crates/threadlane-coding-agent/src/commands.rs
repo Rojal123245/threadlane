@@ -1,4 +1,6 @@
+use std::path::Path;
 use threadlane_agent::{SessionTree, UnifiedAgent};
+use crate::capabilities::CapabilityCatalog;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlashCommandInfo {
@@ -30,6 +32,29 @@ pub fn builtin_commands() -> Vec<SlashCommandInfo> {
         description: description.to_string(),
     })
     .collect()
+}
+
+/// All slash commands available to the user, including built-ins and
+/// commands contributed by active extensions.
+pub fn available_slash_commands(project_root: Option<&Path>) -> Vec<SlashCommandInfo> {
+    let mut commands = builtin_commands();
+    let catalog = CapabilityCatalog::discover(project_root);
+    for record in catalog.extensions() {
+        if !record.is_effective() || !record.is_enabled() {
+            continue;
+        }
+        if let Ok(ext) = threadlane_wasi::WasiExtension::load_from_file_requiring_manifest(record.module_path()) {
+            for cmd in ext.manifest.commands {
+                if !commands.iter().any(|c| c.name == cmd.name) {
+                    commands.push(SlashCommandInfo {
+                        name: cmd.name,
+                        description: cmd.description,
+                    });
+                }
+            }
+        }
+    }
+    commands
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
