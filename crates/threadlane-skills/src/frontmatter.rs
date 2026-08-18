@@ -9,7 +9,7 @@ pub struct ParsedFrontmatter {
 }
 
 impl ParsedFrontmatter {
-    pub fn get(&self, key: &str) -> Option<&str> {
+    fn get(&self, key: &str) -> Option<&str> {
         self.metadata.get(key).map(|s| s.as_str())
     }
 

@@ -23,7 +23,7 @@ fn executor() -> Result<&'static tokio::runtime::Runtime, String> {
         .map_err(Clone::clone)
 }
 
-pub fn start_chatgpt_login(tx: Sender<ProviderAuthEvent>) -> Result<(), String> {
+pub(crate) fn start_chatgpt_login(tx: Sender<ProviderAuthEvent>) -> Result<(), String> {
     executor()?.spawn(async move {
         match threadlane_auth::openai_auth::start_device_login().await {
             Ok(response) => {
@@ -67,7 +67,7 @@ pub fn start_chatgpt_login(tx: Sender<ProviderAuthEvent>) -> Result<(), String> 
     Ok(())
 }
 
-pub fn start_antigravity_login(tx: Sender<ProviderAuthEvent>) -> Result<(), String> {
+pub(crate) fn start_antigravity_login(tx: Sender<ProviderAuthEvent>) -> Result<(), String> {
     let (verifier, challenge) = threadlane_provider::antigravity_auth::generate_pkce_pair();
     let (state, _) = threadlane_provider::antigravity_auth::generate_pkce_pair();
     let authorization_url =

@@ -1,6 +1,6 @@
 [[production]]
-package = "threadlane"
-bin = "threadlane"
+package = "threadlane-gpui"
+bin = "threadlane-gpui"
 reason = "shipped desktop application"
 
 [[override]]
@@ -63,6 +63,110 @@ reason = "exported WASI extension ABI"
 lint = "hawk::unnecessary_public"
 crate = "lsp_ext"
 item = "handle_hook"
+kind = "function"
+level = "expect"
+reason = "exported WASI extension ABI"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "goal_ext"
+item = "alloc"
+kind = "function"
+level = "expect"
+reason = "exported WASI extension ABI"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "goal_ext"
+item = "extension_info"
+kind = "function"
+level = "expect"
+reason = "exported WASI extension ABI"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "goal_ext"
+item = "execute_command"
+kind = "function"
+level = "expect"
+reason = "exported WASI extension ABI"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "goal_ext"
+item = "execute_tool"
+kind = "function"
+level = "expect"
+reason = "exported WASI extension ABI"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "goal_ext"
+item = "handle_hook"
+kind = "function"
+level = "expect"
+reason = "exported WASI extension ABI"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "debug_ext"
+item = "alloc"
+kind = "function"
+level = "expect"
+reason = "exported WASI extension ABI"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "debug_ext"
+item = "extension_info"
+kind = "function"
+level = "expect"
+reason = "exported WASI extension ABI"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "debug_ext"
+item = "execute_tool"
+kind = "function"
+level = "expect"
+reason = "exported WASI extension ABI"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "debug_ext"
+item = "execute_command"
+kind = "function"
+level = "expect"
+reason = "exported WASI extension ABI"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "web_ext"
+item = "alloc"
+kind = "function"
+level = "expect"
+reason = "exported WASI extension ABI"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "web_ext"
+item = "extension_info"
+kind = "function"
+level = "expect"
+reason = "exported WASI extension ABI"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "web_ext"
+item = "execute_tool"
+kind = "function"
+level = "expect"
+reason = "exported WASI extension ABI"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "web_ext"
+item = "execute_command"
 kind = "function"
 level = "expect"
 reason = "exported WASI extension ABI"

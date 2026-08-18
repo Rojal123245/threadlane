@@ -29,8 +29,8 @@ pub struct ProvisionedEntry {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueuedEntry {
-    pub id: String,
-    pub run_id: Option<String>,
+    pub(crate) id: String,
+    pub(crate) run_id: Option<String>,
     pub queue: QueueKind,
     #[serde(default)]
     pub priority: Option<SteerPriority>,
@@ -99,7 +99,7 @@ pub enum UsageCause {
 pub struct RetryState {
     pub attempt: u32,
     pub retry_at: u64,
-    pub reason: String,
+    pub(crate) reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -268,7 +268,7 @@ pub enum Record {
 }
 
 impl Record {
-    pub fn with_seq(self, seq: u64) -> Self {
+    pub(crate) fn with_seq(self, seq: u64) -> Self {
         match self {
             Self::OperationStarted {
                 id,
@@ -705,7 +705,7 @@ pub struct LaneState {
     #[serde(default)]
     pub facts: std::collections::BTreeMap<String, String>,
     #[serde(default)]
-    pub resume_data: std::collections::BTreeMap<String, String>,
+    pub(crate) resume_data: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

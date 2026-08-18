@@ -69,7 +69,7 @@ pub struct TerminalView {
 }
 
 impl TerminalView {
-    pub fn new(project: PathBuf, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(project: PathBuf, cx: &mut Context<Self>) -> Self {
         let (event_tx, event_rx) = mpsc::channel();
         cx.spawn(async move |this, cx| loop {
             cx.background_executor()
@@ -111,7 +111,7 @@ impl TerminalView {
     }
 
     /// Terminates the current shell and starts a fresh login-capable interactive shell.
-    pub fn restart(&mut self, cx: &mut Context<Self>) {
+    fn restart(&mut self, cx: &mut Context<Self>) {
         self.session.take();
         self.parser = vt100::Parser::new(self.rows, self.cols, SCROLLBACK_ROWS);
         self.status = None;
@@ -120,7 +120,7 @@ impl TerminalView {
     }
 
     /// Clears both the emulator scrollback and the visible screen.
-    pub fn clear(&mut self, cx: &mut Context<Self>) {
+    fn clear(&mut self, cx: &mut Context<Self>) {
         self.parser = vt100::Parser::new(self.rows, self.cols, SCROLLBACK_ROWS);
         self.status = None;
         cx.notify();

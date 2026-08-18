@@ -14,47 +14,47 @@ use std::time::Duration;
 pub struct CodingAgentConfig {
     // ── Capability / WASI ───────────────────────────────────────────────
     /// Timeout for capability calls (network, process, etc.).
-    pub capability_timeout: Duration,
+    capability_timeout: Duration,
 
     /// Maximum bytes buffered for a single capability response.
-    pub max_capability_buffer_bytes: usize,
+    max_capability_buffer_bytes: usize,
 
     /// Maximum timeout a WASI process can request (ms).
-    pub max_process_timeout_ms: u64,
+    max_process_timeout_ms: u64,
 
     /// Maximum output bytes a WASI process can produce.
-    pub max_process_output_bytes: usize,
+    max_process_output_bytes: usize,
 
     /// Maximum number of concurrently managed processes.
-    pub max_managed_processes: usize,
+    max_managed_processes: usize,
 
     /// Default recv timeout for managed processes (ms).
-    pub default_recv_timeout_ms: u64,
+    default_recv_timeout_ms: u64,
 
     /// Maximum recv timeout for managed processes (ms).
-    pub max_recv_timeout_ms: u64,
+    max_recv_timeout_ms: u64,
 
     /// Maximum stdout bytes buffered for a managed process.
-    pub max_managed_stdout_bytes: usize,
+    max_managed_stdout_bytes: usize,
 
     /// Maximum broker continuation rounds before failing with an error.
-    pub max_broker_continuation_rounds: usize,
+    max_broker_continuation_rounds: usize,
 
     // ── Subagents ───────────────────────────────────────────────────────
     /// Maximum number of tasks a subagent can accept.
-    pub max_subagent_tasks: usize,
+    max_subagent_tasks: usize,
 
     /// Maximum characters for a subagent task description.
-    pub max_subagent_task_chars: usize,
+    max_subagent_task_chars: usize,
 
     /// Maximum concurrent subagents.
-    pub subagent_concurrency_limit: usize,
+    pub(crate) subagent_concurrency_limit: usize,
 
     /// Overall timeout for a single subagent run.
-    pub subagent_timeout: Duration,
+    subagent_timeout: Duration,
 
     /// Prompt used when recovering a subagent from a checkpoint.
-    pub subagent_recovery_prompt: String,
+    subagent_recovery_prompt: String,
 }
 
 impl Default for CodingAgentConfig {

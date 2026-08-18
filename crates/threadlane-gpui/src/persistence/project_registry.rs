@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::state::AttachedProject;
 
-pub fn global_threadlane_dir() -> PathBuf {
+pub(crate) fn global_threadlane_dir() -> PathBuf {
     threadlane_coding_agent::default_global_threadlane_dir().unwrap_or_else(|| {
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
@@ -11,7 +11,7 @@ pub fn global_threadlane_dir() -> PathBuf {
     })
 }
 
-pub fn load_project_registry() -> Vec<AttachedProject> {
+pub(crate) fn load_project_registry() -> Vec<AttachedProject> {
     let path = global_threadlane_dir().join("gui").join("projects.json");
     let Ok(contents) = std::fs::read(&path) else {
         return Vec::new();
@@ -31,7 +31,7 @@ pub fn load_project_registry() -> Vec<AttachedProject> {
         .collect()
 }
 
-pub fn save_project_registry(projects: &[AttachedProject]) -> Result<(), String> {
+pub(crate) fn save_project_registry(projects: &[AttachedProject]) -> Result<(), String> {
     let dir = global_threadlane_dir().join("gui");
     std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
     let path = dir.join("projects.json");

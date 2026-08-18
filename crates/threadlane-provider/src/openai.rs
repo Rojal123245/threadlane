@@ -57,7 +57,7 @@ pub struct ToolCall {
 
 pub(crate) const OPENAI_PROMPT_CACHE_KEY_MAX_CHARS: usize = 64;
 
-pub fn clamp_prompt_cache_key(key: &str) -> String {
+pub(crate) fn clamp_prompt_cache_key(key: &str) -> String {
     key.chars()
         .take(OPENAI_PROMPT_CACHE_KEY_MAX_CHARS)
         .collect()
@@ -655,7 +655,7 @@ enum WsResult {
 }
 
 impl OpenAIClient {
-    pub fn new(api_key: String, account_id: Option<String>) -> Self {
+    pub(crate) fn new(api_key: String, account_id: Option<String>) -> Self {
         Self {
             api_key,
             account_id,
@@ -668,7 +668,7 @@ impl OpenAIClient {
         self.account_id.is_some() || self.api_key.starts_with("ey")
     }
 
-    pub async fn generate_title(&self, model: &str, prompt: &str) -> Result<String, String> {
+    pub(crate) async fn generate_title(&self, model: &str, prompt: &str) -> Result<String, String> {
         let is_codex = self.is_codex();
         let (url, payload) = if is_codex {
             (CODEX_SSE_URL, title_payload(model, prompt, true))
@@ -718,7 +718,7 @@ impl OpenAIClient {
             title_response_text(&value)
         }
     }
-    pub(crate) async fn stream_chat_completion(
+    async fn stream_chat_completion(
         &self,
         payload: Value,
         prompt_cache_key: Option<String>,

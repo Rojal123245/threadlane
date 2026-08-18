@@ -7,7 +7,7 @@ pub enum ModelProvider {
 }
 
 impl ModelProvider {
-    pub const fn icon_path(self) -> &'static str {
+    pub(crate) const fn icon_path(self) -> &'static str {
         match self {
             Self::OpenAi => "icons/providers/openai.svg",
             Self::Antigravity => "icons/providers/google.svg",
@@ -19,9 +19,9 @@ impl ModelProvider {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelOption {
-    pub id: String,
-    pub label: String,
-    pub provider: ModelProvider,
+    pub(crate) id: String,
+    pub(crate) label: String,
+    pub(crate) provider: ModelProvider,
 }
 
 const OPENAI_MODELS: &[(&str, &str)] = &[
@@ -72,7 +72,7 @@ pub fn available_models() -> Vec<ModelOption> {
     available_models_for_project(None)
 }
 
-pub fn available_models_for_project(project_root: Option<&std::path::Path>) -> Vec<ModelOption> {
+pub(crate) fn available_models_for_project(project_root: Option<&std::path::Path>) -> Vec<ModelOption> {
     let mut models = models_for_credentials(
         has_openai_credentials(),
         threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some(),
@@ -125,7 +125,7 @@ pub fn default_model() -> Option<String> {
     default_model_for_project(None)
 }
 
-pub fn default_model_for_project(project_root: Option<&std::path::Path>) -> Option<String> {
+pub(crate) fn default_model_for_project(project_root: Option<&std::path::Path>) -> Option<String> {
     available_models_for_project(project_root)
         .first()
         .map(|model| model.id.clone())
@@ -150,7 +150,7 @@ pub fn available_option(model_id: &str) -> Option<ModelOption> {
     available_option_for_project(model_id, None)
 }
 
-pub fn available_option_for_project(
+pub(crate) fn available_option_for_project(
     model_id: &str,
     project_root: Option<&std::path::Path>,
 ) -> Option<ModelOption> {
@@ -163,7 +163,7 @@ pub fn is_available(model_id: &str) -> bool {
     is_available_for_project(model_id, None)
 }
 
-pub fn is_available_for_project(model_id: &str, project_root: Option<&std::path::Path>) -> bool {
+pub(crate) fn is_available_for_project(model_id: &str, project_root: Option<&std::path::Path>) -> bool {
     available_option_for_project(model_id, project_root).is_some()
 }
 
@@ -177,7 +177,7 @@ fn has_openai_credentials() -> bool {
         || std::env::var("OPENAI_API_KEY").is_ok_and(|key| !key.trim().is_empty())
 }
 
-pub fn model_context_window(model_id: &str) -> u32 {
+pub(crate) fn model_context_window(model_id: &str) -> u32 {
     let unadorned = model_id
         .strip_prefix("antigravity/")
         .or_else(|| model_id.strip_prefix("opencode-go/"))
@@ -193,7 +193,7 @@ pub fn model_context_window(model_id: &str) -> u32 {
     }
 }
 
-pub fn format_tokens(tokens: u32) -> String {
+pub(crate) fn format_tokens(tokens: u32) -> String {
     if tokens >= 1_000_000 {
         format!("{:.1}M", tokens as f64 / 1_000_000.0)
     } else if tokens >= 1_000 {

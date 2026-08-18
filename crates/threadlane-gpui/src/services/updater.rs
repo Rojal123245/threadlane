@@ -8,7 +8,7 @@ pub enum UpdaterEvent {
     Status(UpdateStatus),
 }
 
-pub fn check(tx: Sender<UpdaterEvent>) {
+pub(crate) fn check(tx: Sender<UpdaterEvent>) {
     let _ = tx.send(UpdaterEvent::Status(UpdateStatus::Checking));
     std::thread::spawn(move || {
         let status = match threadlane_updater::check_for_update() {
@@ -20,7 +20,7 @@ pub fn check(tx: Sender<UpdaterEvent>) {
     });
 }
 
-pub fn download(info: UpdateReleaseInfo, tx: Sender<UpdaterEvent>) {
+pub(crate) fn download(info: UpdateReleaseInfo, tx: Sender<UpdaterEvent>) {
     let version = info.version.clone();
     let _ = tx.send(UpdaterEvent::Status(UpdateStatus::Downloading {
         version: version.clone(),
@@ -46,7 +46,7 @@ pub fn download(info: UpdateReleaseInfo, tx: Sender<UpdaterEvent>) {
     });
 }
 
-pub fn install(info: UpdateReleaseInfo, bytes: Arc<Vec<u8>>, tx: Sender<UpdaterEvent>) {
+pub(crate) fn install(info: UpdateReleaseInfo, bytes: Arc<Vec<u8>>, tx: Sender<UpdaterEvent>) {
     let _ = tx.send(UpdaterEvent::Status(UpdateStatus::Installing));
     std::thread::spawn(move || {
         let bytes = Arc::try_unwrap(bytes).unwrap_or_else(|bytes| (*bytes).clone());

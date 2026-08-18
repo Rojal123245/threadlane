@@ -16,12 +16,12 @@ use crate::services::sessions::{SessionRuntime, SessionRuntimeStatus};
 const CHAT_HISTORY_PAGE_SIZE: usize = 40;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AttachedProject {
-    pub path: PathBuf,
-    pub display_name: String,
-    pub attached_at: u64,
-    pub last_opened_at: u64,
+    pub(crate) path: PathBuf,
+    display_name: String,
+    attached_at: u64,
+    last_opened_at: u64,
     #[serde(default)]
-    pub last_session_id: Option<String>,
+    last_session_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,20 +33,20 @@ pub enum SessionHealth {
 
 #[derive(Clone, Debug)]
 pub struct SessionInfo {
-    pub id: String,
-    pub title: String,
-    pub work_dir: PathBuf,
-    pub session_file: PathBuf,
-    pub updated_at: u64,
-    pub health: SessionHealth,
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) work_dir: PathBuf,
+    pub(crate) session_file: PathBuf,
+    pub(crate) updated_at: u64,
+    pub(crate) health: SessionHealth,
 }
 
 #[derive(Clone, Debug)]
 pub struct ProjectInfo {
-    pub name: String,
-    pub work_dir: PathBuf,
-    pub sessions: Vec<SessionInfo>,
-    pub is_expanded: bool,
+    pub(crate) name: String,
+    pub(crate) work_dir: PathBuf,
+    pub(crate) sessions: Vec<SessionInfo>,
+    is_expanded: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,25 +60,23 @@ pub enum MessageRole {
 
 #[derive(Clone, Debug)]
 pub struct ToolActivityInfo {
-    pub id: String,
-    pub category: String,
-    pub title: String,
-    pub summary: String,
-    pub detail: String,
-    pub is_expanded: bool,
+    pub(crate) id: String,
+    pub(crate) category: String,
+    pub(crate) title: String,
+    pub(crate) summary: String,
+    pub(crate) detail: String,
+    pub(crate) is_expanded: bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct ChatMessageInfo {
-    pub id: String,
-    pub role: MessageRole,
-    pub content: String,
-    pub timestamp: String,
-    pub tool_activities: Vec<ToolActivityInfo>,
-    pub streaming: bool,
-    pub reasoning_content: Option<String>,
-    pub reasoning_expanded: bool,
-    pub advisor_note: Option<threadlane_agent::AdvisorNote>,
+    pub(crate) id: String,
+    pub(crate) role: MessageRole,
+    pub(crate) content: String,
+    pub(crate) tool_activities: Vec<ToolActivityInfo>,
+    pub(crate) streaming: bool,
+    pub(crate) reasoning_content: Option<String>,
+    pub(crate) reasoning_expanded: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -105,34 +103,33 @@ pub enum WorkspacePage {
 }
 
 pub struct AppState {
-    pub projects: Vec<ProjectInfo>,
-    pub active_work_dir: Option<PathBuf>,
-    pub active_session_id: Option<String>,
-    pub is_new_task: bool,
-    pub search_query: String,
-    pub messages: Vec<ChatMessageInfo>,
+    pub(crate) projects: Vec<ProjectInfo>,
+    pub(crate) active_work_dir: Option<PathBuf>,
+    pub(crate) active_session_id: Option<String>,
+    pub(crate) is_new_task: bool,
+    pub(crate) search_query: String,
+    pub(crate) messages: Vec<ChatMessageInfo>,
     history_session_file: Option<PathBuf>,
     history_start: usize,
     history_has_older: bool,
-    pub active_plan: SessionPlan,
-    pub is_generating: bool,
-    pub composer_text: String,
-    pub session_status: Option<String>,
-    pub pending_composer_messages: HashMap<String, String>,
-    pub session_token_usage: HashMap<String, TokenUsage>,
-    pub stashed_prompts: HashMap<String, String>,
-    pub pending_permissions: HashMap<String, threadlane_agent::PermissionRequest>,
+    pub(crate) active_plan: SessionPlan,
+    pub(crate) is_generating: bool,
+    composer_text: String,
+    pub(crate) session_status: Option<String>,
+    pending_composer_messages: HashMap<String, String>,
+    session_token_usage: HashMap<String, TokenUsage>,
+    stashed_prompts: HashMap<String, String>,
+    pub(crate) pending_permissions: HashMap<String, threadlane_agent::PermissionRequest>,
 
-    pub selected_model: String,
-    pub model_roles: threadlane_agent::ModelRoles,
-    pub reasoning_effort: ReasoningEffort,
-    pub workspace_page: WorkspacePage,
-    pub openai_key: String,
-    pub opencode_key: String,
-    pub antigravity_connected: bool,
-    pub auth_status_msg: Option<String>,
-    pub update_status: threadlane_updater::UpdateStatus,
-    pub update_notice_dismissed: bool,
+    pub(crate) selected_model: String,
+    pub(crate) model_roles: threadlane_agent::ModelRoles,
+    pub(crate) reasoning_effort: ReasoningEffort,
+    pub(crate) workspace_page: WorkspacePage,
+    pub(crate) openai_key: String,
+    pub(crate) opencode_key: String,
+    pub(crate) auth_status_msg: Option<String>,
+    pub(crate) update_status: threadlane_updater::UpdateStatus,
+    pub(crate) update_notice_dismissed: bool,
     stream_tx: Sender<ChatStreamEvent>,
     stream_rx: Receiver<ChatStreamEvent>,
     pending_stream_event: Mutex<Option<ChatStreamEvent>>,
@@ -375,12 +372,10 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                     id: format!("msg_{msg_counter}"),
                     role,
                     content,
-                    timestamp: String::new(),
                     tool_activities: Vec::new(),
                     streaming: false,
                     reasoning_content: None,
                     reasoning_expanded: false,
-                    advisor_note: None,
                 });
             }
             AgentMessage::UserWithImages { content, .. } => {
@@ -388,12 +383,10 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                     id: format!("msg_{msg_counter}"),
                     role: MessageRole::User,
                     content,
-                    timestamp: String::new(),
                     tool_activities: Vec::new(),
                     streaming: false,
                     reasoning_content: None,
                     reasoning_expanded: false,
-                    advisor_note: None,
                 });
             }
             AgentMessage::Assistant {
@@ -429,12 +422,10 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                     id: format!("msg_{msg_counter}"),
                     role: MessageRole::Assistant,
                     content: content.unwrap_or_default(),
-                    timestamp: String::new(),
                     tool_activities,
                     streaming: false,
                     reasoning_content: None,
                     reasoning_expanded: false,
-                    advisor_note: None,
                 });
             }
             AgentMessage::Tool {
@@ -477,12 +468,10 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                     id: format!("msg_{msg_counter}"),
                     role: MessageRole::Assistant,
                     content: String::new(),
-                    timestamp: String::new(),
                     tool_activities: vec![tool_info],
                     streaming: false,
                     reasoning_content: None,
                     reasoning_expanded: false,
-                    advisor_note: None,
                 });
             }
             AgentMessage::System { content } => {
@@ -497,12 +486,10 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                     id: format!("msg_{msg_counter}"),
                     role,
                     content,
-                    timestamp: String::new(),
                     tool_activities: Vec::new(),
                     streaming: false,
                     reasoning_content: None,
                     reasoning_expanded: false,
-                    advisor_note: None,
                 });
             }
             AgentMessage::Custom {
@@ -520,12 +507,10 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                         id: format!("msg_{msg_counter}"),
                         role: MessageRole::Assistant,
                         content: String::new(),
-                        timestamp: String::new(),
                         tool_activities: Vec::new(),
                         streaming: false,
                         reasoning_content: Some(text),
                         reasoning_expanded: false,
-                        advisor_note: None,
                     });
                     continue;
                 }
@@ -539,12 +524,10 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                         MessageRole::System
                     },
                     content: text,
-                    timestamp: String::new(),
                     tool_activities: Vec::new(),
                     streaming: false,
                     reasoning_content: None,
                     reasoning_expanded: false,
-                    advisor_note: None,
                 });
             }
         }
@@ -620,7 +603,7 @@ impl Default for AppState {
 }
 
 impl AppState {
-    pub fn load() -> Self {
+    pub(crate) fn load() -> Self {
         Self::load_from_registry(load_project_registry())
     }
 
@@ -682,8 +665,6 @@ impl AppState {
             .unwrap_or_default();
         let opencode_key =
             threadlane_auth::opencode_auth::load_opencode_api_key().unwrap_or_default();
-        let antigravity_connected =
-            threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some();
 
         let (stream_tx, stream_rx) = mpsc::channel();
         let (session_refresh_tx, session_refresh_requests) = mpsc::channel::<PathBuf>();
@@ -754,7 +735,6 @@ impl AppState {
             workspace_page: WorkspacePage::Chat,
             openai_key,
             opencode_key,
-            antigravity_connected,
             auth_status_msg: None,
             update_status: threadlane_updater::UpdateStatus::Idle,
             update_notice_dismissed: false,
@@ -769,7 +749,7 @@ impl AppState {
         }
     }
 
-    pub fn current_session_token_usage(&self) -> TokenUsage {
+    pub(crate) fn current_session_token_usage(&self) -> TokenUsage {
         if let Some(session_id) = &self.active_session_id {
             if let Some(usage) = self.session_token_usage.get(session_id) {
                 return usage.clone();
@@ -784,21 +764,21 @@ impl AppState {
         }
     }
 
-    pub fn stash_prompt(&mut self, session_id: &str, text: String) {
+    pub(crate) fn stash_prompt(&mut self, session_id: &str, text: String) {
         if !text.trim().is_empty() {
             self.stashed_prompts.insert(session_id.to_string(), text);
         }
     }
 
-    pub fn pop_stashed_prompt(&mut self, session_id: &str) -> Option<String> {
+    pub(crate) fn pop_stashed_prompt(&mut self, session_id: &str) -> Option<String> {
         self.stashed_prompts.remove(session_id)
     }
 
-    pub fn get_stashed_prompt(&self, session_id: &str) -> Option<&String> {
+    pub(crate) fn get_stashed_prompt(&self, session_id: &str) -> Option<&String> {
         self.stashed_prompts.get(session_id)
     }
 
-    pub fn clear_stashed_prompt(&mut self, session_id: &str) {
+    pub(crate) fn clear_stashed_prompt(&mut self, session_id: &str) {
         self.stashed_prompts.remove(session_id);
     }
 
@@ -807,11 +787,11 @@ impl AppState {
             .retain(|_, runtime| runtime.is_generating());
     }
 
-    pub fn invalidate_capability_runtimes(&mut self) {
+    pub(crate) fn invalidate_capability_runtimes(&mut self) {
         self.invalidate_idle_runtimes();
     }
 
-    pub fn save_openai_key(&mut self, key: String) -> Result<(), String> {
+    pub(crate) fn save_openai_key(&mut self, key: String) -> Result<(), String> {
         let key = key.trim().to_string();
         if !key.is_empty() {
             threadlane_auth::openai_auth::save_openai_api_key(&key)?;
@@ -827,7 +807,7 @@ impl AppState {
         Ok(())
     }
 
-    pub fn save_opencode_key(&mut self, key: String) -> Result<(), String> {
+    pub(crate) fn save_opencode_key(&mut self, key: String) -> Result<(), String> {
         let key = key.trim().to_string();
         if !key.is_empty() {
             threadlane_auth::opencode_auth::save_opencode_api_key(&key)?;
@@ -843,7 +823,7 @@ impl AppState {
         Ok(())
     }
 
-    pub fn reconcile_selected_model(&mut self) {
+    pub(crate) fn reconcile_selected_model(&mut self) {
         if !crate::model_catalog::is_available_for_project(
             &self.selected_model,
             self.active_work_dir.as_deref(),
@@ -855,7 +835,7 @@ impl AppState {
         }
     }
 
-    pub fn set_selected_model(&mut self, model: String) {
+    pub(crate) fn set_selected_model(&mut self, model: String) {
         if !crate::model_catalog::is_available_for_project(&model, self.active_work_dir.as_deref())
         {
             return;
@@ -879,16 +859,16 @@ impl AppState {
         self.auth_status_msg = Some(format!("Model switched to {model}"));
     }
 
-    pub fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
+    pub(crate) fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
         self.reasoning_effort = effort;
     }
 
-    pub fn open_settings(&mut self) {
+    pub(crate) fn open_settings(&mut self) {
         self.workspace_page = WorkspacePage::Settings;
         self.auth_status_msg = None;
     }
 
-    pub fn close_settings(&mut self) {
+    pub(crate) fn close_settings(&mut self) {
         self.workspace_page = WorkspacePage::Chat;
         self.auth_status_msg = None;
     }
@@ -897,7 +877,7 @@ impl AppState {
         let _ = self.session_refresh_tx.send(work_dir.to_path_buf());
     }
 
-    pub fn apply_session_refreshes(&mut self) -> bool {
+    pub(crate) fn apply_session_refreshes(&mut self) -> bool {
         let mut changed = false;
         for (work_dir, sessions) in self.session_refresh_rx.try_iter() {
             if let Some(project) = self
@@ -912,7 +892,7 @@ impl AppState {
         changed
     }
 
-    pub fn refresh_active_session(&mut self) {
+    fn refresh_active_session(&mut self) {
         if let (Some(work_dir), Some(session_id)) = (
             &self.active_work_dir.clone(),
             &self.active_session_id.clone(),
@@ -932,7 +912,7 @@ impl AppState {
         }
     }
 
-    pub fn begin_new_task(&mut self) {
+    pub(crate) fn begin_new_task(&mut self) {
         self.workspace_page = WorkspacePage::Chat;
         self.active_session_id = None;
         self.is_new_task = true;
@@ -951,7 +931,7 @@ impl AppState {
         }
     }
 
-    pub fn select_draft_project(&mut self, work_dir: PathBuf) {
+    pub(crate) fn select_draft_project(&mut self, work_dir: PathBuf) {
         if self
             .projects
             .iter()
@@ -977,11 +957,11 @@ impl AppState {
         self.history_start = start;
         self.history_has_older = has_older;
     }
-    pub fn has_older_messages(&self) -> bool {
+    pub(crate) fn has_older_messages(&self) -> bool {
         self.history_has_older
     }
 
-    pub fn load_older_messages(&mut self) -> usize {
+    pub(crate) fn load_older_messages(&mut self) -> usize {
         if !self.history_has_older {
             return 0;
         }
@@ -999,7 +979,7 @@ impl AppState {
         }
         added
     }
-    pub fn select_session(&mut self, work_dir: PathBuf, session_id: String) {
+    pub(crate) fn select_session(&mut self, work_dir: PathBuf, session_id: String) {
         self.workspace_page = WorkspacePage::Chat;
         self.active_work_dir = Some(work_dir.clone());
         self.active_session_id = Some(session_id.clone());
@@ -1029,7 +1009,7 @@ impl AppState {
         self.session_status = runtime_status_text(runtime.status());
     }
 
-    pub fn settle_session(&mut self, work_dir: PathBuf, session_id: String) -> Result<(), String> {
+    pub(crate) fn settle_session(&mut self, work_dir: PathBuf, session_id: String) -> Result<(), String> {
         let session_file = self.session_file(&work_dir, &session_id);
         if self
             .session_runtimes
@@ -1049,7 +1029,7 @@ impl AppState {
         Ok(())
     }
 
-    pub fn remove_session(&mut self, work_dir: PathBuf, session_id: String) -> Result<(), String> {
+    pub(crate) fn remove_session(&mut self, work_dir: PathBuf, session_id: String) -> Result<(), String> {
         let session_file = self.session_file(&work_dir, &session_id);
         if self
             .session_runtimes
@@ -1063,7 +1043,7 @@ impl AppState {
         Ok(())
     }
 
-    pub fn update_model_roles(&mut self, roles: threadlane_agent::ModelRoles) {
+    pub(crate) fn update_model_roles(&mut self, roles: threadlane_agent::ModelRoles) {
         self.model_roles = roles.clone();
         for runtime in self.session_runtimes.values() {
             let runtime = runtime.clone();
@@ -1092,7 +1072,7 @@ impl AppState {
         runtime
     }
 
-    pub fn resolve_active_permission(
+    pub(crate) fn resolve_active_permission(
         &mut self,
         request_id: &str,
         decision: threadlane_coding_agent::PermissionDecision,
@@ -1167,19 +1147,19 @@ impl AppState {
         }
     }
 
-    pub fn session_is_generating(&self, session_file: &Path) -> bool {
+    pub(crate) fn session_is_generating(&self, session_file: &Path) -> bool {
         self.session_runtimes
             .get(session_file)
             .is_some_and(|runtime| runtime.is_generating())
     }
 
-    pub fn toggle_project_expanded(&mut self, work_dir: &Path) {
+    pub(crate) fn toggle_project_expanded(&mut self, work_dir: &Path) {
         if let Some(proj) = self.projects.iter_mut().find(|p| p.work_dir == work_dir) {
             proj.is_expanded = !proj.is_expanded;
         }
     }
 
-    pub fn toggle_tool_activity(&mut self, tool_call_id: &str) {
+    pub(crate) fn toggle_tool_activity(&mut self, tool_call_id: &str) {
         if let Some(activity) = self
             .messages
             .iter_mut()
@@ -1190,7 +1170,7 @@ impl AppState {
         }
     }
 
-    pub fn attach_project(&mut self, raw_path: PathBuf) -> Result<(), String> {
+    pub(crate) fn attach_project(&mut self, raw_path: PathBuf) -> Result<(), String> {
         let canonical = std::fs::canonicalize(&raw_path).map_err(|e| e.to_string())?;
         if !canonical.is_dir() {
             return Err("Selected path is not a directory".into());
@@ -1242,7 +1222,7 @@ impl AppState {
         Ok(())
     }
 
-    pub fn create_new_session(&mut self) -> Result<String, String> {
+    fn create_new_session(&mut self) -> Result<String, String> {
         let Some(work_dir) = self.active_work_dir.clone() else {
             return Err("No active project directory".into());
         };
@@ -1290,7 +1270,7 @@ impl AppState {
         Ok(session_id)
     }
 
-    pub fn chat_stream_pending(&self) -> bool {
+    pub(crate) fn chat_stream_pending(&self) -> bool {
         let Ok(mut pending) = self.pending_stream_event.lock() else {
             return false;
         };
@@ -1300,7 +1280,7 @@ impl AppState {
         pending.is_some()
     }
 
-    pub fn drain_chat_stream(&mut self) -> bool {
+    pub(crate) fn drain_chat_stream(&mut self) -> bool {
         let first = self
             .pending_stream_event
             .lock()
@@ -1339,12 +1319,10 @@ impl AppState {
                                     id: format!("streaming-{session_id}-{}", self.messages.len()),
                                     role: MessageRole::Assistant,
                                     content: delta,
-                                    timestamp: String::new(),
                                     tool_activities: Vec::new(),
                                     streaming: true,
                                     reasoning_content: None,
                                     reasoning_expanded: false,
-                                    advisor_note: None,
                                 });
                             }
                         }
@@ -1364,12 +1342,10 @@ impl AppState {
                                     id: format!("streaming-{session_id}-{segment}"),
                                     role: MessageRole::Assistant,
                                     content: String::new(),
-                                    timestamp: String::new(),
                                     tool_activities: Vec::new(),
                                     streaming: true,
                                     reasoning_content: Some(delta),
                                     reasoning_expanded: false,
-                                    advisor_note: None,
                                 });
                             }
                         }
@@ -1395,12 +1371,10 @@ impl AppState {
                                     id: format!("streaming-{session_id}-{}", self.messages.len()),
                                     role: MessageRole::Assistant,
                                     content: String::new(),
-                                    timestamp: String::new(),
                                     tool_activities: vec![activity],
                                     streaming: true,
                                     reasoning_content: None,
                                     reasoning_expanded: false,
-                                    advisor_note: None,
                                 });
                             }
                         }
@@ -1448,12 +1422,10 @@ impl AppState {
                                 id: note_id,
                                 role: MessageRole::Advisor(note.severity),
                                 content: format!("**{}**\n\n{}", note.summary, note.details),
-                                timestamp: String::new(),
                                 tool_activities: Vec::new(),
                                 streaming: false,
                                 reasoning_content: None,
                                 reasoning_expanded: false,
-                                advisor_note: Some(note),
                             });
                         }
                         ChatAgentUpdate::ModelRolesUpdated(roles) => {
@@ -1474,12 +1446,10 @@ impl AppState {
                                 id: format!("stream-error-{session_id}"),
                                 role: MessageRole::Error,
                                 content: error.clone(),
-                                timestamp: String::new(),
                                 tool_activities: Vec::new(),
                                 streaming: false,
                                 reasoning_content: None,
                                 reasoning_expanded: false,
-                                advisor_note: None,
                             });
                             self.is_generating = false;
                             self.session_status = Some(error);
@@ -1555,14 +1525,14 @@ impl AppState {
         true
     }
 
-    pub fn active_pending_composer_message(&self) -> Option<&str> {
+    pub(crate) fn active_pending_composer_message(&self) -> Option<&str> {
         self.active_session_id
             .as_ref()
             .and_then(|session_id| self.pending_composer_messages.get(session_id))
             .map(String::as_str)
     }
 
-    pub fn stage_busy_message(&mut self, text: String) -> Result<(), String> {
+    pub(crate) fn stage_busy_message(&mut self, text: String) -> Result<(), String> {
         let text = text.trim().to_string();
         if text.is_empty() {
             return Ok(());
@@ -1578,7 +1548,7 @@ impl AppState {
         Ok(())
     }
 
-    pub fn queue_pending_message(&mut self) -> Result<(), String> {
+    pub(crate) fn queue_pending_message(&mut self) -> Result<(), String> {
         let (runtime, session_id, text) = self.pending_runtime_message()?;
         runtime
             .work_handle
@@ -1589,7 +1559,7 @@ impl AppState {
         Ok(())
     }
 
-    pub fn steer_pending_message(&mut self) -> Result<(), String> {
+    pub(crate) fn steer_pending_message(&mut self) -> Result<(), String> {
         let (runtime, session_id, text) = self.pending_runtime_message()?;
         runtime
             .work_handle
@@ -1600,7 +1570,7 @@ impl AppState {
         Ok(())
     }
 
-    pub fn dismiss_pending_message(&mut self) {
+    pub(crate) fn dismiss_pending_message(&mut self) {
         if let Some(session_id) = self.active_session_id.as_ref() {
             self.pending_composer_messages.remove(session_id);
         }
@@ -1637,21 +1607,19 @@ impl AppState {
                 id: format!("queued-user-{session_id}-{}", self.messages.len()),
                 role: MessageRole::User,
                 content: text,
-                timestamp: String::new(),
                 tool_activities: Vec::new(),
                 streaming: false,
                 reasoning_content: None,
                 reasoning_expanded: false,
-                advisor_note: None,
             });
         }
     }
 
-    pub fn send_prompt(&mut self, text: String) -> Result<(), String> {
+    pub(crate) fn send_prompt(&mut self, text: String) -> Result<(), String> {
         self.send_prompt_with_images(text, Vec::new())
     }
 
-    pub fn send_prompt_with_images(
+    pub(crate) fn send_prompt_with_images(
         &mut self,
         text: String,
         images: Vec<ImageAttachment>,
@@ -1693,12 +1661,10 @@ impl AppState {
                 content: format!(
                     "No API key configured for model `{model}`. Open Settings and save the provider credential."
                 ),
-                timestamp: String::new(),
                 tool_activities: Vec::new(),
                 streaming: false,
                 reasoning_content: None,
                 reasoning_expanded: false,
-                advisor_note: None,
             });
             return Ok(());
         }
@@ -1736,12 +1702,10 @@ impl AppState {
             } else {
                 format!("{text}\n[{} image attachment(s)]", images.len())
             },
-            timestamp: String::new(),
             tool_activities: Vec::new(),
             streaming: false,
             reasoning_content: None,
             reasoning_expanded: false,
-            advisor_note: None,
         });
 
         self.is_generating = true;
@@ -1753,7 +1717,7 @@ impl AppState {
         Ok(())
     }
 
-    pub fn cancel_generation(&mut self) -> Result<(), String> {
+    pub(crate) fn cancel_generation(&mut self) -> Result<(), String> {
         let (Some(work_dir), Some(session_id)) = (
             self.active_work_dir.as_ref(),
             self.active_session_id.as_ref(),

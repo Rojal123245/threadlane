@@ -104,7 +104,7 @@ impl ProviderClient {
         }
     }
 
-    pub fn determine_format(&self, model: &str) -> PayloadFormat {
+    fn determine_format(&self, model: &str) -> PayloadFormat {
         if is_antigravity_model(model) || is_opencode_model(model) {
             PayloadFormat::ChatCompletions
         } else if self.openai.is_codex() {

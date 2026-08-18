@@ -13,7 +13,7 @@ pub enum EffectAction {
 }
 
 impl EffectAction {
-    pub fn lane(&self) -> &str {
+    fn lane(&self) -> &str {
         match self {
             Self::AppendEntry { entry } => &entry.lane,
             Self::AppendRecord { record, .. } => record.lane(),
@@ -27,7 +27,7 @@ impl EffectAction {
         }
     }
 
-    pub fn seq(&self) -> u64 {
+    fn seq(&self) -> u64 {
         match self {
             Self::AppendEntry { entry } => entry.seq,
             Self::AppendRecord { record, .. } => record.seq(),
@@ -119,13 +119,13 @@ impl GatedEffects {
     /// Uses the same procedure-facing effects surface for production commits.
     /// The executor owns the real store/effect adapters and is called only
     /// after procedure validation has accepted the action.
-    pub fn with_executor(
+    pub(crate) fn with_executor(
         executor: impl FnMut(EffectAction) -> Result<(), ReduceError> + Send + Sync + 'static,
     ) -> Self {
         Self::with_executor_and_telemetry(executor, Arc::new(NoopTelemetry))
     }
 
-    pub fn with_executor_and_telemetry(
+    pub(crate) fn with_executor_and_telemetry(
         executor: impl FnMut(EffectAction) -> Result<(), ReduceError> + Send + Sync + 'static,
         telemetry: Arc<dyn TelemetrySink>,
     ) -> Self {
@@ -136,7 +136,7 @@ impl GatedEffects {
         }
     }
 
-    pub fn with_telemetry(telemetry: Arc<dyn TelemetrySink>) -> Self {
+    pub(crate) fn with_telemetry(telemetry: Arc<dyn TelemetrySink>) -> Self {
         Self {
             telemetry,
             ..Self::default()
@@ -187,15 +187,15 @@ impl GatedEffects {
     }
 
     /// Return the oldest parked action for one lane without blocking on other lanes.
-    pub fn peek_action_on_lane(&self, lane: &str) -> Option<&EffectAction> {
+    pub(crate) fn peek_action_on_lane(&self, lane: &str) -> Option<&EffectAction> {
         self.pending.iter().find(|action| action.lane() == lane)
     }
 
-    pub fn has_pending_on_lane(&self, lane: &str) -> bool {
+    pub(crate) fn has_pending_on_lane(&self, lane: &str) -> bool {
         self.pending.iter().any(|action| action.lane() == lane)
     }
 
-    pub fn pending_sequences(&self) -> impl Iterator<Item = u64> + '_ {
+    pub(crate) fn pending_sequences(&self) -> impl Iterator<Item = u64> + '_ {
         self.pending
             .iter()
             .map(EffectAction::seq)
@@ -235,7 +235,7 @@ impl GatedEffects {
         Ok(action)
     }
 
-    pub fn execute_action_on_lane<S: SessionStore>(
+    fn execute_action_on_lane<S: SessionStore>(
         &mut self,
         store: &mut S,
         lane: &str,
@@ -295,7 +295,7 @@ impl GatedEffects {
         Ok(completed)
     }
 
-    pub fn execute_action_with_events<S: SessionStore>(
+    pub(crate) fn execute_action_with_events<S: SessionStore>(
         &mut self,
         store: &mut S,
         hub: &mut HarnessEventHub,
@@ -331,7 +331,7 @@ impl GatedEffects {
         Ok(action)
     }
 
-    pub fn execute_action_on_lane_with_events<S: SessionStore>(
+    pub(crate) fn execute_action_on_lane_with_events<S: SessionStore>(
         &mut self,
         store: &mut S,
         hub: &mut HarnessEventHub,
@@ -379,7 +379,7 @@ impl GatedEffects {
         Ok(completed)
     }
 
-    pub fn run_to_completion_on_lane_with_events<S: SessionStore>(
+    pub(crate) fn run_to_completion_on_lane_with_events<S: SessionStore>(
         &mut self,
         store: &mut S,
         hub: &mut HarnessEventHub,
@@ -395,7 +395,7 @@ impl GatedEffects {
         Ok(completed)
     }
 
-    pub fn close(&mut self) {
+    pub(crate) fn close(&mut self) {
         self.closed = true;
         self.pending.clear();
     }

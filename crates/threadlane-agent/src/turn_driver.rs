@@ -22,10 +22,10 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 /// Captured result from one provider stream.
 #[derive(Debug, Clone)]
 pub struct ProviderStepResult {
-    pub text: String,
-    pub reasoning: String,
-    pub tool_calls: Vec<ToolCall>,
-    pub usage: TokenUsage,
+    pub(crate) text: String,
+    pub(crate) reasoning: String,
+    tool_calls: Vec<ToolCall>,
+    pub(crate) usage: TokenUsage,
 }
 
 /// Accumulates streaming deltas into a single [`ProviderStepResult`].
@@ -37,7 +37,7 @@ pub struct ProviderStepAccumulator {
 }
 
 impl ProviderStepAccumulator {
-    pub fn push(&mut self, event: &StreamEvent) -> Result<Option<ProviderStepResult>, String> {
+    pub(crate) fn push(&mut self, event: &StreamEvent) -> Result<Option<ProviderStepResult>, String> {
         match event {
             StreamEvent::ContentToken(token) => self.text.push_str(token),
             StreamEvent::ReasoningToken(token) => self.reasoning.push_str(token),
@@ -63,25 +63,25 @@ impl ProviderStepAccumulator {
         Ok(None)
     }
 
-    pub fn finish(&self) -> Result<ProviderStepResult, String> {
+    pub(crate) fn finish(&self) -> Result<ProviderStepResult, String> {
         self.result
             .clone()
             .ok_or_else(|| "provider stream ended without a final response".into())
     }
 }
 
-pub struct TurnDriver<'a> {
-    pub turn: Arc<Mutex<TurnState>>,
-    pub provider_client: ProviderClient,
-    pub provider_router: ProviderRouter,
-    pub prompt_cache_key: Option<String>,
-    pub tool_dispatcher: ToolDispatcher,
-    pub config: AgentConfig,
-    pub event_tx: broadcast::Sender<AgentEvent>,
-    pub harness_event_hub: crate::harness::HarnessEventHub,
-    pub stream_rules: Vec<(StreamRule, Regex)>,
-    pub steering_queue: &'a mut Vec<AgentMessage>,
-    pub follow_up_queue: &'a mut Vec<AgentMessage>,
+pub(crate) struct TurnDriver<'a> {
+    pub(crate) turn: Arc<Mutex<TurnState>>,
+    pub(crate) provider_client: ProviderClient,
+    pub(crate) provider_router: ProviderRouter,
+    pub(crate) prompt_cache_key: Option<String>,
+    pub(crate) tool_dispatcher: ToolDispatcher,
+    pub(crate) config: AgentConfig,
+    pub(crate) event_tx: broadcast::Sender<AgentEvent>,
+    pub(crate) harness_event_hub: crate::harness::HarnessEventHub,
+    pub(crate) stream_rules: Vec<(StreamRule, Regex)>,
+    pub(crate) steering_queue: &'a mut Vec<AgentMessage>,
+    pub(crate) follow_up_queue: &'a mut Vec<AgentMessage>,
 }
 
 impl<'a> TurnDriver<'a> {
@@ -90,7 +90,7 @@ impl<'a> TurnDriver<'a> {
         self.harness_event_hub.publish_agent_event(event);
     }
 
-    pub async fn run_turns(&mut self) {
+    pub(crate) async fn run_turns(&mut self) {
         let mut turn_number = 0;
         let mut overflow_recovery_attempted = false;
 

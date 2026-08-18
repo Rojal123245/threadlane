@@ -31,11 +31,11 @@ fn extension_manager(project_root: Option<PathBuf>) -> ExtensionManager {
     ExtensionManager::new(default_global_threadlane_dir(), project_root)
 }
 
-pub fn discover_extensions(project_root: Option<PathBuf>) -> Vec<ExtensionRecord> {
+pub(crate) fn discover_extensions(project_root: Option<PathBuf>) -> Vec<ExtensionRecord> {
     extension_manager(project_root).discover()
 }
 
-pub fn install_extension(
+pub(crate) fn install_extension(
     project_root: Option<PathBuf>,
     source: &Path,
     scope: ExtensionScope,
@@ -48,7 +48,7 @@ pub fn install_extension(
     ))
 }
 
-pub fn set_extension_enabled(
+pub(crate) fn set_extension_enabled(
     project_root: Option<PathBuf>,
     target: &ExtensionRecord,
     enabled: bool,
@@ -66,7 +66,7 @@ pub fn set_extension_enabled(
     manager.set_enabled(&current, enabled)
 }
 
-pub fn remove_extension(
+pub(crate) fn remove_extension(
     project_root: Option<PathBuf>,
     target: &ExtensionRecord,
 ) -> Result<(), String> {
@@ -83,13 +83,13 @@ pub fn remove_extension(
     manager.remove(&current)
 }
 
-pub fn discover_skills(project_root: Option<&Path>) -> Vec<SkillMetadata> {
+pub(crate) fn discover_skills(project_root: Option<&Path>) -> Vec<SkillMetadata> {
     let mut manager = SkillManager::new();
     manager.discover_skills(project_root);
     manager.list_skills()
 }
 
-pub fn set_skill_enabled(project_root: &Path, skill_id: &str, enabled: bool) -> Result<(), String> {
+pub(crate) fn set_skill_enabled(project_root: &Path, skill_id: &str, enabled: bool) -> Result<(), String> {
     SkillSettings::load(project_root).set_enabled(project_root, skill_id, enabled)
 }
 
@@ -97,7 +97,7 @@ fn acp_manager(project_root: Option<PathBuf>) -> AcpManager {
     AcpManager::new(default_global_threadlane_dir(), project_root)
 }
 
-pub fn configured_acp_agents(project_root: Option<PathBuf>) -> Vec<AcpAgentRecord> {
+pub(crate) fn configured_acp_agents(project_root: Option<PathBuf>) -> Vec<AcpAgentRecord> {
     acp_manager(project_root)
         .configs()
         .into_iter()
@@ -112,7 +112,7 @@ pub fn configured_acp_agents(project_root: Option<PathBuf>) -> Vec<AcpAgentRecor
         .collect()
 }
 
-pub fn probe_acp_agents(
+pub(crate) fn probe_acp_agents(
     project_root: Option<PathBuf>,
     tx: Sender<SettingsEvent>,
 ) -> Result<(), String> {
@@ -123,7 +123,7 @@ pub fn probe_acp_agents(
     Ok(())
 }
 
-pub fn add_acp_agent(
+pub(crate) fn add_acp_agent(
     project_root: Option<&Path>,
     scope: AcpScope,
     name: &str,
@@ -140,7 +140,7 @@ pub fn add_acp_agent(
     save_acp_scope(project_root, scope, &agents)
 }
 
-pub fn set_acp_enabled(
+pub(crate) fn set_acp_enabled(
     project_root: Option<&Path>,
     scope: AcpScope,
     id: &str,
@@ -155,7 +155,7 @@ pub fn set_acp_enabled(
     save_acp_scope(project_root, scope, &agents)
 }
 
-pub fn remove_acp_agent(
+pub(crate) fn remove_acp_agent(
     project_root: Option<&Path>,
     scope: AcpScope,
     id: &str,

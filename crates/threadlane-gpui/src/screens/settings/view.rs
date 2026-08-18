@@ -50,7 +50,7 @@ pub struct SettingsView {
 }
 
 impl SettingsView {
-    pub fn new(model: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(model: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (openai_key, opencode_key) = {
             let state = model.read(cx);
             (state.openai_key.clone(), state.opencode_key.clone())
@@ -195,6 +195,17 @@ impl SettingsView {
         }
     }
 
+    /// Renders the muted "no items" placeholder shared by the extension,
+    /// skill, and ACP agent lists.
+    fn empty_state(message: &str, colors: gpui_component::ThemeColor) -> AnyElement {
+        div()
+            .p_6()
+            .text_sm()
+            .text_color(colors.muted_foreground)
+            .child(message.to_string())
+            .into_any_element()
+    }
+
     fn render_navigation(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
         let model = self.model.clone();
@@ -299,7 +310,7 @@ impl SettingsView {
                                     .items_center()
                                     .justify_start()
                                     .gap_2()
-                                    .child(Icon::default().path("icons/hard-drive.svg"))
+                                    .child(IconName::HardDrive)
                                     .child("Extensions"),
                             )
                             .ghost()
@@ -322,7 +333,7 @@ impl SettingsView {
                                     .items_center()
                                     .justify_start()
                                     .gap_2()
-                                    .child(Icon::default().path("icons/book-open.svg"))
+                                    .child(IconName::BookOpen)
                                     .child("Skills"),
                             )
                             .ghost()
@@ -939,7 +950,7 @@ impl SettingsView {
             .gap_1()
             .child(
                 Button::new(SharedString::from(format!("{prefix}-project")))
-                    .icon(Icon::default().path("icons/folder.svg"))
+                    .icon(IconName::Folder)
                     .label("Project")
                     .ghost()
                     .selected(!self.install_globally)
@@ -950,7 +961,7 @@ impl SettingsView {
             )
             .child(
                 Button::new(SharedString::from(format!("{prefix}-global")))
-                    .icon(Icon::default().path("icons/globe.svg"))
+                    .icon(IconName::Globe)
                     .label("Global")
                     .ghost()
                     .selected(self.install_globally)
@@ -994,7 +1005,7 @@ impl SettingsView {
                             .gap_2()
                             .child(
                                 Button::new("extension-refresh")
-                                    .icon(Icon::default().path("icons/redo.svg"))
+                                    .icon(IconName::Redo)
                                     .label("Refresh")
                                     .outline()
                                     .on_click(cx.listener(|this, _event, _window, cx| {
@@ -1075,7 +1086,7 @@ impl SettingsView {
                             .items_center()
                             .justify_center()
                             .text_color(theme.muted_foreground)
-                            .child(Icon::default().path("icons/hard-drive.svg")),
+                            .child(IconName::HardDrive),
                     )
                     .child(
                         div()
@@ -1149,7 +1160,7 @@ impl SettingsView {
                             "extension-remove-{}",
                             record.id()
                         )))
-                        .icon(Icon::default().path("icons/delete.svg"))
+                        .icon(IconName::Delete)
                         .tooltip("Remove extension")
                         .ghost()
                         .w(px(32.0))
@@ -1172,13 +1183,7 @@ impl SettingsView {
                     )
             }))
             .when(self.extension_rows.is_empty(), |view| {
-                view.child(
-                    div()
-                        .p_6()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child("No WASI extensions found."),
-                )
+                view.child(Self::empty_state("No WASI extensions found.", theme))
             })
             .into_any_element()
     }
@@ -1196,7 +1201,7 @@ impl SettingsView {
             .child(
                 div().flex().justify_end().child(
                     Button::new("skills-refresh")
-                        .icon(Icon::default().path("icons/redo.svg"))
+                        .icon(IconName::Redo)
                         .label("Refresh")
                         .outline()
                         .on_click(cx.listener(|this, _event, _window, cx| {
@@ -1229,7 +1234,7 @@ impl SettingsView {
                             .items_center()
                             .justify_center()
                             .text_color(theme.muted_foreground)
-                            .child(Icon::default().path("icons/book-open.svg")),
+                            .child(IconName::BookOpen),
                     )
                     .child(
                         div()
@@ -1314,13 +1319,7 @@ impl SettingsView {
                     )
             }))
             .when(self.skill_rows.is_empty(), |view| {
-                view.child(
-                    div()
-                        .p_6()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child("No skills found."),
-                )
+                view.child(Self::empty_state("No skills found.", theme))
             })
             .into_any_element()
     }
@@ -1358,7 +1357,7 @@ impl SettingsView {
                             .gap_2()
                             .child(
                                 Button::new("acp-refresh")
-                                    .icon(Icon::default().path("icons/redo.svg"))
+                                    .icon(IconName::Redo)
                                     .label("Refresh")
                                     .outline()
                                     .on_click(cx.listener(|this, _event, _window, cx| {
@@ -1506,7 +1505,7 @@ impl SettingsView {
                     )
                     .child(
                         Button::new(SharedString::from(format!("acp-remove-{remove_id}")))
-                            .icon(Icon::default().path("icons/delete.svg"))
+                            .icon(IconName::Delete)
                             .tooltip("Remove ACP agent")
                             .ghost()
                             .w(px(32.0))
@@ -1527,13 +1526,7 @@ impl SettingsView {
                     )
             }))
             .when(self.acp_rows.is_empty(), |view| {
-                view.child(
-                    div()
-                        .p_6()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child("No ACP agents configured."),
-                )
+                view.child(Self::empty_state("No ACP agents configured.", theme))
             })
             .into_any_element()
     }

@@ -208,11 +208,67 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    fn command_palette_key_down(
+    /// Executes a command-palette action key. This is the single source of truth
+    /// for palette action dispatch, shared by keyboard activation and click.
+    fn execute_palette_action(
+        &mut self,
+        action_key: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let model = self.model.clone();
+        match action_key {
+            "new" => {
+                model.update(cx, |state, _cx| {
+                    controller::dispatch(state, AppAction::BeginNewTask);
+                });
+            }
+            "attach" => {
+                cx.spawn(async move |_this, cx| {
+                    let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await else {
+                        return;
+                    };
+                    let path = folder.path().to_path_buf();
+                    let _ = model.update(cx, |state, cx| {
+                        controller::dispatch(state, AppAction::AttachProject(path));
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+            "git" => self.open_git_dialog(cx),
+            "settings" => {
+                model.update(cx, |state, _cx| {
+                    controller::dispatch(state, AppAction::OpenSettings);
+                });
+            }
+            "sidebar" => {
+                self.sidebar_collapsed = !self.sidebar_collapsed;
+            }
+            "panel" => {
+                self.right_panel_visible = !self.right_panel_visible;
+            }
+            "goal" | "model" | "compact" => {
+                let value = if action_key == "compact" {
+                    "/compact".to_string()
+                } else {
+                    format!("/{action_key} ")
+                };
+                self.chat_list.update(cx, |chat, cx| {
+                    chat.input_state.update(cx, |input, cx| {
+                        input.set_value(value, window, cx);
+                    });
+                });
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
 
+    fn command_palette_key_down(
         &mut self,
         event: &KeyDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let key = event.keystroke.key.as_str();
@@ -255,11 +311,15 @@ impl WorkspaceView {
                 }
                 cx.stop_propagation(); cx.notify();
             }
-            "enter" if matching.len() == 1 && matching[0].2 == "new" => {
-                self.command_palette_open = false;
-                self.command_palette_selected = 0;
-                self.model.update(cx, |state, _cx| controller::dispatch(state, AppAction::BeginNewTask));
-                cx.stop_propagation(); cx.notify();
+            "enter" => {
+                if let Some((_, _, action_key)) = matching.get(self.command_palette_selected) {
+                    let action_key = *action_key;
+                    self.command_palette_open = false;
+                    self.command_palette_selected = 0;
+                    self.execute_palette_action(action_key, window, cx);
+                    cx.notify();
+                }
+                cx.stop_propagation();
             }
             _ => {}
         }
@@ -345,7 +405,13 @@ impl WorkspaceView {
             return;
         };
         let message = self.git_message_input.read(cx).value().trim().to_string();
-        if !matches!(action, GitAction::Push) && message.is_empty() {
+        // A commit is needed whenever there is staged work, or unstaged work that the
+        // "Include unstaged" toggle will stage. This applies to Push too, so "Push only"
+        // stages + commits dirty work before pushing when the toggle asks for it.
+        let needs_commit = self.git_status.as_ref().is_some_and(|status| {
+            status.staged_changes || (self.git_include_unstaged && status.unstaged_changes)
+        });
+        if needs_commit && message.is_empty() {
             self.git_feedback = Some("Enter a commit message first.".into());
             cx.notify();
             return;
@@ -364,16 +430,22 @@ impl WorkspaceView {
         let tx = self.git_event_tx.clone();
         std::thread::spawn(move || {
             let result = (|| {
-                if !matches!(action, GitAction::Push) && include_unstaged {
-                    let status = threadlane_git::inspect(&work_dir).map_err(|e| e.to_string())?;
+                let mut status = threadlane_git::inspect(&work_dir).map_err(|e| e.to_string())?;
+                if include_unstaged {
+                    let mut staged_any = false;
                     for file in status.files.iter().filter(|file| file.unstaged) {
                         threadlane_git::stage_file(&work_dir, &file.path)
                             .map_err(|e| e.to_string())?;
+                        staged_any = true;
                     }
+                    status.unstaged_changes = false;
+                    status.staged_changes |= staged_any;
                 }
-                if !matches!(action, GitAction::Push) {
-                    threadlane_git::commit_staged(&work_dir, &message)
-                        .map_err(|e| e.to_string())?;
+                // Commit whenever there is staged work left to record. This makes "Push only"
+                // honor the include-unstaged toggle: dirty files are staged above and committed
+                // here before the push below.
+                if status.staged_changes {
+                    threadlane_git::commit_staged(&work_dir, &message).map_err(|e| e.to_string())?;
                 }
                 if matches!(action, GitAction::CommitAndPush | GitAction::Push) {
                     threadlane_git::push(&work_dir).map_err(|e| e.to_string())?;
@@ -527,14 +599,15 @@ impl WorkspaceView {
         let deletions = status
             .map(|status| status.files.iter().map(|file| file.deletions).sum::<u32>())
             .unwrap_or(0);
+        let has_dirty = |status: &GitStatus| {
+            status.staged_changes || (self.git_include_unstaged && status.unstaged_changes)
+        };
         let can_commit = !self.git_busy
             && !self.git_message_pending
-            && status.is_some_and(|status| {
-                status.staged_changes || (self.git_include_unstaged && status.unstaged_changes)
-            });
+            && status.is_some_and(has_dirty);
         let can_push = !self.git_busy
             && !self.git_message_pending
-            && status.is_some_and(|status| status.ahead > 0);
+            && status.is_some_and(|status| status.ahead > 0 || has_dirty(status));
         let toggle_view = cx.entity().downgrade();
 
         Dialog::new(cx)
@@ -1010,7 +1083,6 @@ impl WorkspaceView {
                             .max_h(px(420.0))
                             .py_2()
                             .children(matching_commands.into_iter().enumerate().map(|(index, (name, desc, action_key))| {
-                                let model = self.model.clone();
                                 div()
                                     .id(SharedString::from(format!("palette-cmd-{action_key}")))
                                     .mx_2()
@@ -1044,67 +1116,8 @@ impl WorkspaceView {
                                     )
                                     .on_click(cx.listener(move |this, _event, window, cx| {
                                         this.command_palette_open = false;
-                                        match action_key {
-                                            "new" => {
-                                                model.update(cx, |state, _cx| {
-                                                    controller::dispatch(state, AppAction::BeginNewTask);
-                                                });
-                                            }
-                                            "attach" => {
-                                                let model = model.clone();
-                                                cx.spawn(async move |_this, cx| {
-                                                    let Some(folder) =
-                                                        rfd::AsyncFileDialog::new().pick_folder().await
-                                                    else {
-                                                        return;
-                                                    };
-                                                    let path = folder.path().to_path_buf();
-                                                    let _ = model.update(cx, |state, cx| {
-                                                        controller::dispatch(
-                                                            state,
-                                                            AppAction::AttachProject(path),
-                                                        );
-                                                        cx.notify();
-                                                    });
-                                                })
-                                                .detach();
-                                            }
-                                            "git" => this.open_git_dialog(cx),
-                                            "settings" => {
-                                                model.update(cx, |state, _cx| {
-                                                    controller::dispatch(state, AppAction::OpenSettings);
-                                                });
-                                            }
-                                            "sidebar" => {
-                                                this.sidebar_collapsed = !this.sidebar_collapsed;
-                                            }
-                                            "panel" => {
-                                                this.right_panel_visible = !this.right_panel_visible;
-                                            }
-                                            "goal" => {
-                                                this.chat_list.update(cx, |chat, cx| {
-                                                    chat.input_state.update(cx, |input, cx| {
-                                                        input.set_value("/goal ", window, cx);
-                                                    });
-                                                });
-                                            }
-                                            "model" => {
-                                                this.chat_list.update(cx, |chat, cx| {
-                                                    chat.input_state.update(cx, |input, cx| {
-                                                        input.set_value("/model ", window, cx);
-                                                    });
-                                                });
-                                            }
-                                            "compact" => {
-                                                this.chat_list.update(cx, |chat, cx| {
-                                                    chat.input_state.update(cx, |input, cx| {
-                                                        input.set_value("/compact", window, cx);
-                                                    });
-                                                });
-                                            }
-                                            _ => {}
-                                        }
-                                        cx.notify();
+                                        this.command_palette_selected = 0;
+                                        this.execute_palette_action(action_key, window, cx);
                                     }))
                             }))
                             .when(!session_results.is_empty(), |list| {

@@ -5,7 +5,7 @@ use crate::state::AppState;
 ///
 /// The controller is intentionally small for now. Keeping actions in one place
 /// gives us a stable seam for moving backend work out of `AppState` incrementally.
-pub fn dispatch(state: &mut AppState, action: AppAction) {
+pub(crate) fn dispatch(state: &mut AppState, action: AppAction) {
     match action {
         AppAction::AttachProject(path) => {
             let _ = state.attach_project(path);

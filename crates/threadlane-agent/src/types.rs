@@ -200,9 +200,9 @@ pub struct DeferredHandle {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubagentUsageSummary {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub total_subagents: usize,
+    input_tokens: u64,
+    output_tokens: u64,
+    total_subagents: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -318,7 +318,7 @@ impl TokenUsage {
 pub struct AgentToolCall {
     pub id: String,
     pub name: String,
-    pub arguments: String,
+    pub(crate) arguments: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -382,7 +382,7 @@ pub struct AdvisorNote {
 }
 
 impl AdvisorNote {
-    pub fn new(severity: AdvisorSeverity, summary: impl Into<String>, details: impl Into<String>) -> Self {
+    fn new(severity: AdvisorSeverity, summary: impl Into<String>, details: impl Into<String>) -> Self {
         Self {
             severity,
             summary: summary.into(),
@@ -398,12 +398,12 @@ impl AdvisorNote {
         Self::new(AdvisorSeverity::Concern, summary, details)
     }
 
-    pub fn blocker(summary: impl Into<String>, details: impl Into<String>) -> Self {
+    fn blocker(summary: impl Into<String>, details: impl Into<String>) -> Self {
         Self::new(AdvisorSeverity::Blocker, summary, details)
     }
 
     /// Formats the advisor note as prompt steering text for the task model.
-    pub fn to_steering_prompt(&self) -> String {
+    pub(crate) fn to_steering_prompt(&self) -> String {
         let tag = match self.severity {
             AdvisorSeverity::Aside => "ADVISOR NOTE (Aside)",
             AdvisorSeverity::Concern => "ADVISOR NOTE (Concern)",
@@ -447,12 +447,12 @@ pub struct TurnState {
     pub system_prompt: String,
     pub messages: Vec<AgentMessage>,
     pub model: String,
-    pub reasoning_effort: ReasoningEffort,
-    pub tools: Vec<Value>,
+    pub(crate) reasoning_effort: ReasoningEffort,
+    pub(crate) tools: Vec<Value>,
 }
 
 impl TurnState {
-    pub fn new(model: impl Into<String>, system_prompt: impl Into<String>) -> Self {
+    pub(crate) fn new(model: impl Into<String>, system_prompt: impl Into<String>) -> Self {
         Self {
             system_prompt: system_prompt.into(),
             messages: Vec::new(),

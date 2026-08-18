@@ -131,15 +131,15 @@ impl std::fmt::Display for GoalStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GoalState {
-    pub version: u32,
-    pub id: String,
-    pub objective: String,
-    pub status: GoalStatus,
-    pub token_budget: Option<u64>,
-    pub tokens_used: u64,
-    pub turns_count: u64,
-    pub created_at: u64,
-    pub updated_at: u64,
+    version: u32,
+    id: String,
+    objective: String,
+    status: GoalStatus,
+    token_budget: Option<u64>,
+    tokens_used: u64,
+    turns_count: u64,
+    created_at: u64,
+    updated_at: u64,
 }
 
 impl Default for GoalState {
@@ -160,7 +160,7 @@ impl Default for GoalState {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ExtensionState {
-    pub current_goal: Option<GoalState>,
+    current_goal: Option<GoalState>,
 }
 
 // ---------------------------------------------------------------------------
@@ -169,7 +169,7 @@ pub struct ExtensionState {
 
 /// Parses optional `--tokens <limit>` from user input.
 /// Supports `50k`, `100K`, `1M`, `50000`, etc.
-pub fn parse_token_budget(input: &str) -> Result<(String, Option<u64>), String> {
+fn parse_token_budget(input: &str) -> Result<(String, Option<u64>), String> {
     let mut parts = Vec::new();
     let mut token_budget = None;
     let mut iter = input.split_whitespace().peekable();
@@ -217,7 +217,7 @@ fn parse_budget_number(s: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("Token budget `{s}` causes integer overflow"))
 }
 
-pub fn truncate_text(text: &str, max_len: usize) -> String {
+fn truncate_text(text: &str, max_len: usize) -> String {
     let mut chars = text.chars();
     let truncated: String = chars.by_ref().take(max_len).collect();
     if chars.next().is_some() {
@@ -227,7 +227,7 @@ pub fn truncate_text(text: &str, max_len: usize) -> String {
     }
 }
 
-pub fn format_goal_status_line(goal: &GoalState) -> String {
+fn format_goal_status_line(goal: &GoalState) -> String {
     let budget_str = match goal.token_budget {
         Some(b) => format!("{}/{} tokens", goal.tokens_used, b),
         None => format!("{} tokens", goal.tokens_used),
@@ -259,7 +259,7 @@ pub fn format_goal_status_line(goal: &GoalState) -> String {
     }
 }
 
-pub fn continuation_prompt(goal: &GoalState) -> String {
+fn continuation_prompt(goal: &GoalState) -> String {
     let budget_line = match goal.token_budget {
         Some(b) => {
             let remaining = b.saturating_sub(goal.tokens_used);

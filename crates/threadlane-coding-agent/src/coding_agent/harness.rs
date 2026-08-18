@@ -29,7 +29,7 @@ impl HarnessWatch {
         &self.subscription.snapshot
     }
 
-    pub fn poll(&mut self) -> Result<Vec<HarnessEvent>, EventError> {
+    pub(crate) fn poll(&mut self) -> Result<Vec<HarnessEvent>, EventError> {
         self.hub.poll(&mut self.subscription)
     }
 }
@@ -56,11 +56,11 @@ fn harness_session_entry(path: &Path) -> HarnessSessionEntry {
         .clone()
 }
 
-pub(crate) fn harness_event_hub(path: &Path) -> HarnessEventHub {
+fn harness_event_hub(path: &Path) -> HarnessEventHub {
     harness_session_entry(path).hub
 }
 
-pub(crate) fn harness_hook_registry(path: &Path) -> HookRegistry {
+fn harness_hook_registry(path: &Path) -> HookRegistry {
     harness_session_entry(path).hooks
 }
 
@@ -1829,7 +1829,7 @@ mod tests {
             .unwrap();
 
         // Prepare an assistant attempt
-        let result_entry_id = harness.prepare_assistant_attempt(&run_id).unwrap();
+        let _result_entry_id = harness.prepare_assistant_attempt(&run_id).unwrap();
 
         // Append the assistant message
         harness
@@ -1891,7 +1891,7 @@ mod tests {
     fn reopening_produces_same_main_lane_state() {
         let (_dir, path) = temp_session();
 
-        let run_id = {
+        let _run_id = {
             let mut harness = CodingSessionHarness::open(&path).unwrap();
             let id = harness.unique_run_id("test").unwrap();
             harness

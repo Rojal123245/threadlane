@@ -10,11 +10,11 @@ pub enum HashlineAction {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HashlineEdit {
-    pub start_anchor: String,
-    pub end_anchor: Option<String>,
-    pub action: HashlineAction,
+    start_anchor: String,
+    end_anchor: Option<String>,
+    action: HashlineAction,
     #[serde(default)]
-    pub new_content: String,
+    new_content: String,
 }
 
 impl HashlineEdit {
@@ -34,7 +34,7 @@ impl HashlineEdit {
 }
 
 /// Compute a 3-character hex hash for a line of text.
-pub fn compute_line_hash(line: &str) -> String {
+fn compute_line_hash(line: &str) -> String {
     let clean = line.trim_end_matches(['\r', '\n']);
     let mut hash: u32 = 2166136261;
     for byte in clean.bytes() {
@@ -51,7 +51,7 @@ pub fn format_line_hashline(line_no: usize, line: &str) -> String {
 }
 
 /// Parse a line anchor string like `"12:a3f"` into line index (1-based) and lowercased hash.
-pub fn parse_anchor(anchor: &str) -> Result<(usize, String), String> {
+fn parse_anchor(anchor: &str) -> Result<(usize, String), String> {
     let (first, second) = anchor.split_once(':').ok_or_else(|| {
         format!(
             "Invalid anchor format '{anchor}'. Expected format 'line_number:hash' (e.g. '12:a3f')."

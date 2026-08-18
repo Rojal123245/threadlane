@@ -9,17 +9,17 @@ pub use antigravity_auth::*;
 pub use codex_auth::*;
 pub use openai_auth::*;
 pub use opencode_auth::*;
-pub use traits::AuthProvider;
+pub(crate) use traits::AuthProvider;
 
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
 
-pub(crate) fn parse_oauth_response<T: DeserializeOwned>(body: &str) -> Result<T, String> {
+fn parse_oauth_response<T: DeserializeOwned>(body: &str) -> Result<T, String> {
     serde_json::from_str(body).map_err(|_| "OAuth provider returned an invalid response".into())
 }
 
 #[cfg(test)]
-pub(crate) fn test_env_guard_lock() -> std::sync::MutexGuard<'static, ()> {
+fn test_env_guard_lock() -> std::sync::MutexGuard<'static, ()> {
     use std::sync::{Mutex, OnceLock};
 
     static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
@@ -30,7 +30,7 @@ pub(crate) fn test_env_guard_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 /// Resolves a concrete `AuthProvider` instance by provider ID.
-pub fn resolve_auth_provider(provider_id: &str) -> Option<Arc<dyn AuthProvider>> {
+fn resolve_auth_provider(provider_id: &str) -> Option<Arc<dyn AuthProvider>> {
     match provider_id.to_lowercase().as_str() {
         "openai" => Some(Arc::new(OpenAiAuthProvider)),
         "codex" => Some(Arc::new(CodexAuthProvider)),

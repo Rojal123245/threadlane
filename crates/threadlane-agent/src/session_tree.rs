@@ -52,7 +52,7 @@ fn replace_file(temp_path: &Path, destination: &Path) -> std::io::Result<()> {
     std::fs::rename(temp_path, destination)
 }
 
-pub(crate) fn session_file_lock() -> &'static Mutex<()> {
+fn session_file_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }
@@ -61,9 +61,9 @@ pub(crate) fn session_file_lock() -> &'static Mutex<()> {
 pub struct SessionNode {
     pub id: String,
     pub parent_id: Option<String>,
-    pub timestamp: u64,
+    pub(crate) timestamp: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seq: Option<u64>,
+    pub(crate) seq: Option<u64>,
     pub message: AgentMessage,
 }
 
@@ -128,7 +128,7 @@ pub struct SessionTree {
     pub file_path: Option<PathBuf>,
     /// Whether a session metadata record was present on disk. Legacy files
     /// have no metadata and retain their historical all-branches lookup rules.
-    pub metadata_present: bool,
+    metadata_present: bool,
     /// V2 harness lines are retained verbatim so legacy metadata rewrites do
     /// not discard records that the legacy tree does not model.
     v2_lines: Vec<String>,
@@ -201,7 +201,7 @@ impl SessionTree {
         self.active_node_id.as_deref()
     }
 
-    pub fn get_fact(&self, key: &str) -> Option<&str> {
+    fn get_fact(&self, key: &str) -> Option<&str> {
         self.global_facts.get(key).map(|s| s.as_str())
     }
 

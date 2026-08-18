@@ -18,7 +18,7 @@ fn subscription_starts_with_snapshot_and_has_no_live_event_gap() {
             terminate: false,
         })
         .unwrap();
-    let mut hub = HarnessEventHub::new(8);
+    let hub = HarnessEventHub::new(8);
     hub.publish(EventPayload::EntryCommitted(store.entries()[0].clone()));
     let mut subscription = hub.subscribe(&store).unwrap();
     assert_eq!(subscription.snapshot.entries.len(), 1);
@@ -107,7 +107,7 @@ fn harness_snapshot_includes_current_streaming_state() {
 #[test]
 fn slow_subscriber_receives_an_explicit_gap_instead_of_silent_loss() {
     let store = MemoryStore::new("session-1");
-    let mut hub = HarnessEventHub::new(2);
+    let hub = HarnessEventHub::new(2);
     let mut subscription = hub.subscribe(&store).unwrap();
     hub.publish(EventPayload::Fault("one".into()));
     hub.publish(EventPayload::Fault("two".into()));
@@ -120,7 +120,7 @@ fn slow_subscriber_receives_an_explicit_gap_instead_of_silent_loss() {
 
 #[test]
 fn identified_events_preserve_lane_run_and_recovery_identity() {
-    let mut hub = HarnessEventHub::new(2);
+    let hub = HarnessEventHub::new(2);
     let event = hub.publish_identified(
         EventPayload::Fault("paused".into()),
         Some("main".into()),

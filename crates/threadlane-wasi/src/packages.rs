@@ -314,7 +314,7 @@ impl ExtensionManager {
         records
     }
 
-    pub fn discover_checked(&self) -> Result<Vec<ExtensionRecord>, String> {
+    pub(crate) fn discover_checked(&self) -> Result<Vec<ExtensionRecord>, String> {
         for scope in [ExtensionScope::Global, ExtensionScope::Project] {
             let Some(extensions_root) = self.resolve_extensions_root(scope, false)? else {
                 continue;

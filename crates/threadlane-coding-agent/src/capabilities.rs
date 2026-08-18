@@ -7,7 +7,7 @@ pub struct CapabilityCatalog {
 }
 
 impl CapabilityCatalog {
-    pub fn discover(project_root: Option<&Path>) -> Self {
+    pub(crate) fn discover(project_root: Option<&Path>) -> Self {
         let global_threadlane_dir = default_global_threadlane_dir();
         Self::discover_with_roots(global_threadlane_dir.as_deref(), project_root)
     }

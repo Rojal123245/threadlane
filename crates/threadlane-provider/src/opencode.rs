@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 
 const DEFAULT_OPENCODE_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
 
-pub fn strip_opencode_prefix(model: &str) -> &str {
+fn strip_opencode_prefix(model: &str) -> &str {
     model.strip_prefix("opencode-go/").unwrap_or(model)
 }
 
@@ -20,7 +20,7 @@ pub struct OpenCodeGoClient {
 }
 
 impl OpenCodeGoClient {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             client: reqwest::Client::new(),
         }

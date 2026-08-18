@@ -85,11 +85,11 @@ pub struct WasiHookMiddleware {
     #[serde(default)]
     pub reason: Option<String>,
     #[serde(default)]
-    pub arguments: Option<Value>,
+    arguments: Option<Value>,
     #[serde(default)]
-    pub result: Option<Value>,
+    result: Option<Value>,
     #[serde(default)]
-    pub context: Option<Value>,
+    context: Option<Value>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -102,9 +102,9 @@ pub struct WasiExtensionResponse {
     #[serde(default)]
     pub continue_after_broker: bool,
     #[serde(default)]
-    pub state: Option<Value>,
+    state: Option<Value>,
     #[serde(default)]
-    pub effects: Vec<WasiLegacyEffect>,
+    effects: Vec<WasiLegacyEffect>,
     #[serde(default)]
     pub middleware: Option<WasiHookMiddleware>,
 }
@@ -113,11 +113,11 @@ pub struct WasiExtensionResponse {
 pub struct WasiExtensionInvocationResult {
     pub api_version: u32,
     pub response: WasiExtensionResponse,
-    pub broker_requests: Vec<BrokerRequest>,
+    broker_requests: Vec<BrokerRequest>,
     pub host_broker_requests: Vec<HostBrokerRequest>,
     /// Events supplied to this concrete WASM invocation.
-    pub events: Vec<WasiExtensionEvent>,
-    pub invoking_extension: String,
+    events: Vec<WasiExtensionEvent>,
+    invoking_extension: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -138,9 +138,9 @@ struct WasiStoreData {
 
 pub struct WasiExtension {
     pub manifest: WasiExtensionManifest,
-    pub file_path: Option<PathBuf>,
-    pub wasm_bytes: Vec<u8>,
-    pub engine: Engine,
+    file_path: Option<PathBuf>,
+    wasm_bytes: Vec<u8>,
+    engine: Engine,
 }
 
 impl WasiExtension {

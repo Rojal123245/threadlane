@@ -10,7 +10,7 @@ use gpui_component::scroll::ScrollableElement;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::separator::Separator;
 use gpui_component::text::{TextView, TextViewState};
-use gpui_component::{ActiveTheme, Icon, IconName, Selectable, Sizable};
+use gpui_component::{ActiveTheme, IconName, Selectable, Sizable};
 use threadlane_git::GitFile;
 
 use crate::screens::terminal::TerminalView;
@@ -32,11 +32,11 @@ impl Surface {
         }
     }
 
-    fn icon(self) -> &'static str {
+    fn icon(self) -> IconName {
         match self {
-            Self::Review => "icons/file.svg",
-            Self::Files => "icons/folder.svg",
-            Self::Terminal => "icons/square-terminal.svg",
+            Self::Review => IconName::File,
+            Self::Files => IconName::Folder,
+            Self::Terminal => IconName::SquareTerminal,
         }
     }
 }
@@ -82,7 +82,7 @@ pub struct RightPanelView {
 }
 
 impl RightPanelView {
-    pub fn new(model: Entity<AppState>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(model: Entity<AppState>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         let document_state = cx.new(|cx| TextViewState::markdown("", cx));
         let (event_tx, event_rx) = mpsc::channel();
 
@@ -142,7 +142,7 @@ impl RightPanelView {
         self.refresh_active_surface();
     }
 
-    pub fn open_review(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_review(&mut self, cx: &mut Context<Self>) {
         self.open_surface(Surface::Review, cx);
     }
 
@@ -283,7 +283,7 @@ impl RightPanelView {
                         "right-panel-tab-{}",
                         surface.label().to_lowercase()
                     )))
-                    .icon(Icon::default().path(surface.icon()))
+                    .icon(surface.icon())
                     .label(surface.label())
                     .ghost()
                     .selected(active == Some(surface))
@@ -298,7 +298,7 @@ impl RightPanelView {
             .child(div().flex_1())
             .child(
                 Button::new("right-panel-refresh")
-                    .icon(Icon::default().path("icons/redo.svg"))
+                    .icon(IconName::Redo)
                     .tooltip("Refresh surface")
                     .ghost()
                     .xsmall()
@@ -353,7 +353,7 @@ impl RightPanelView {
                                     .justify_center()
                                     .gap_2()
                                     .text_sm()
-                                    .child(Icon::default().path(surface.icon()))
+                                    .child(surface.icon())
                                     .child(
                                         div()
                                             .text_sm()
@@ -404,7 +404,7 @@ impl RightPanelView {
                                     this.close_document(cx);
                                 })),
                         )
-                        .child(Icon::default().path("icons/file.svg"))
+                        .child(IconName::File)
                         .child(
                             div()
                                 .min_w_0()
@@ -451,21 +451,19 @@ impl RightPanelView {
                     .text_color(theme.muted_foreground)
                     .hover(|row| row.bg(theme.muted))
                     .child(if entry.is_dir {
-                        Icon::default()
-                            .path(if expanded {
-                                "icons/chevron-down.svg"
-                            } else {
-                                "icons/chevron-right.svg"
-                            })
-                            .into_any_element()
+                        if expanded {
+                            IconName::ChevronDown.into_any_element()
+                        } else {
+                            IconName::ChevronRight.into_any_element()
+                        }
                     } else {
                         div().w(px(16.0)).flex_none().into_any_element()
                     })
-                    .child(Icon::default().path(if entry.is_dir {
-                        "icons/folder.svg"
+                    .child(if entry.is_dir {
+                        IconName::Folder.into_any_element()
                     } else {
-                        "icons/file.svg"
-                    }))
+                        IconName::File.into_any_element()
+                    })
                     .child(entry.name)
                     .when(entry.is_dir, |row| {
                         row.cursor_pointer().on_click(cx.listener(
@@ -596,7 +594,7 @@ impl RightPanelView {
                     .gap_2()
                     .cursor_pointer()
                     .hover(|row| row.bg(theme.muted))
-                    .child(Icon::default().path("icons/file.svg"))
+                    .child(IconName::File)
                     .child(
                         div()
                             .flex_1()

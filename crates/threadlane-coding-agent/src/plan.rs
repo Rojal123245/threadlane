@@ -287,7 +287,7 @@ impl ToolExecutor for UpdatePlanToolExecutor {
     }
 }
 
-pub(crate) const GENERATE_PLAN_TOOL_NAME: &str = "generate_plan";
+const GENERATE_PLAN_TOOL_NAME: &str = "generate_plan";
 
 
 #[derive(Deserialize)]

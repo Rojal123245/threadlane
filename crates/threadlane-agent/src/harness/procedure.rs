@@ -43,7 +43,7 @@ pub struct RetryPolicy {
 }
 
 impl RetryPolicy {
-    pub fn delay_for(self, attempt: u32) -> u64 {
+    fn delay_for(self, attempt: u32) -> u64 {
         let shift = attempt.saturating_sub(1).min(63);
         self.base_delay
             .saturating_mul(1u64 << shift)
@@ -54,7 +54,7 @@ impl RetryPolicy {
 pub struct RetryProcedure;
 
 impl RetryProcedure {
-    pub fn schedule<S: SessionStore>(
+    pub(crate) fn schedule<S: SessionStore>(
         store: &S,
         run_id: &str,
         reason: &str,
@@ -94,7 +94,7 @@ impl RetryProcedure {
         Ok(attempt)
     }
 
-    pub fn begin<S: SessionStore>(
+    pub(crate) fn begin<S: SessionStore>(
         store: &S,
         run_id: &str,
         effects: &mut GatedEffects,
@@ -120,7 +120,7 @@ impl RetryProcedure {
 }
 
 impl AssistantAttemptProcedure {
-    pub fn record_usage<S: SessionStore>(
+    pub(crate) fn record_usage<S: SessionStore>(
         store: &S,
         run_id: &str,
         usage: TokenUsage,
@@ -129,7 +129,7 @@ impl AssistantAttemptProcedure {
         Self::record_usage_with_cause(store, run_id, usage, UsageCause::Provider, effects)
     }
 
-    pub fn record_discarded_usage<S: SessionStore>(
+    pub(crate) fn record_discarded_usage<S: SessionStore>(
         store: &S,
         run_id: &str,
         usage: TokenUsage,
@@ -139,7 +139,7 @@ impl AssistantAttemptProcedure {
             .map(|_| ())
     }
 
-    pub fn record_adjustment<S: SessionStore>(
+    pub(crate) fn record_adjustment<S: SessionStore>(
         store: &S,
         run_id: &str,
         usage: TokenUsage,
@@ -198,7 +198,7 @@ impl AssistantAttemptProcedure {
         Ok(attempt)
     }
 
-    pub fn finish<S: SessionStore>(
+    pub(crate) fn finish<S: SessionStore>(
         store: &S,
         run_id: &str,
         result_entry_id: &str,
@@ -281,7 +281,7 @@ impl AssistantAttemptProcedure {
 pub struct OperationProcedure;
 
 impl OperationProcedure {
-    pub fn start<S: SessionStore>(
+    pub(crate) fn start<S: SessionStore>(
         store: &S,
         run_id: &str,
         source_leaf_id: Option<String>,
@@ -291,7 +291,7 @@ impl OperationProcedure {
         Self::start_on_lane(store, "main", run_id, source_leaf_id, intent, effects)
     }
 
-    pub fn start_on_lane<S: SessionStore>(
+    pub(crate) fn start_on_lane<S: SessionStore>(
         store: &S,
         lane_name: &str,
         run_id: &str,
@@ -344,7 +344,7 @@ impl OperationProcedure {
         Ok(())
     }
 
-    pub fn finish<S: SessionStore>(
+    pub(crate) fn finish<S: SessionStore>(
         store: &S,
         run_id: &str,
         outcome: OperationOutcome,
@@ -485,7 +485,7 @@ impl NoToolRun {
         Self::accept_on_lane(store, "main", run_id, prompt, assistant, effects)
     }
 
-    pub fn accept_on_lane<S: SessionStore>(
+    pub(crate) fn accept_on_lane<S: SessionStore>(
         store: &S,
         lane_name: &str,
         run_id: &str,
@@ -601,7 +601,7 @@ impl NoToolRun {
         Self::resume_on_lane(store, "main", run_id, prompt, assistant, effects)
     }
 
-    pub fn resume_on_lane<S: SessionStore>(
+    pub(crate) fn resume_on_lane<S: SessionStore>(
         store: &S,
         lane_name: &str,
         run_id: &str,
@@ -846,7 +846,7 @@ impl NavigationProcedure {
         Self::accept_on_lane(store, "main", run_id, target_leaf_id, summary, effects)
     }
 
-    pub fn accept_on_lane<S: SessionStore>(
+    pub(crate) fn accept_on_lane<S: SessionStore>(
         store: &S,
         lane_name: &str,
         run_id: &str,
@@ -985,7 +985,7 @@ impl CompactionProcedure {
         Self::accept_on_lane(store, "main", run_id, summary, effects)
     }
 
-    pub fn accept_on_lane<S: SessionStore>(
+    pub(crate) fn accept_on_lane<S: SessionStore>(
         store: &S,
         lane_name: &str,
         run_id: &str,
@@ -1098,7 +1098,7 @@ impl CompactionProcedure {
 pub struct QueueProcedure;
 
 impl QueueProcedure {
-    pub fn enqueue_unbound<S: SessionStore>(
+    pub(crate) fn enqueue_unbound<S: SessionStore>(
         store: &S,
         queue: QueueKind,
         target: ProvisionedEntry,
@@ -1107,7 +1107,7 @@ impl QueueProcedure {
         Self::enqueue_unbound_on_lane(store, "main", queue, target, effects)
     }
 
-    pub fn enqueue_unbound_on_lane<S: SessionStore>(
+    pub(crate) fn enqueue_unbound_on_lane<S: SessionStore>(
         store: &S,
         lane_name: &str,
         queue: QueueKind,
@@ -1161,7 +1161,7 @@ impl QueueProcedure {
         Self::enqueue_on_lane(store, "main", run_id, queue, target, effects)
     }
 
-    pub fn enqueue_on_lane<S: SessionStore>(
+    pub(crate) fn enqueue_on_lane<S: SessionStore>(
         store: &S,
         lane_name: &str,
         run_id: &str,
@@ -1215,7 +1215,7 @@ impl QueueProcedure {
         Self::cancel_on_lane(store, "main", run_id, entry_id, effects)
     }
 
-    pub fn cancel_on_lane<S: SessionStore>(
+    pub(crate) fn cancel_on_lane<S: SessionStore>(
         store: &S,
         lane_name: &str,
         run_id: &str,
@@ -1266,7 +1266,7 @@ impl QueueProcedure {
         Self::cancel_unbound_on_lane(store, "main", entry_id, effects)
     }
 
-    pub fn cancel_unbound_on_lane<S: SessionStore>(
+    pub(crate) fn cancel_unbound_on_lane<S: SessionStore>(
         store: &S,
         lane_name: &str,
         entry_id: &str,
@@ -1312,7 +1312,7 @@ impl QueueProcedure {
         Self::consume_on_lane(store, "main", run_id, entry_id, effects)
     }
 
-    pub fn consume_on_lane<S: SessionStore>(
+    pub(crate) fn consume_on_lane<S: SessionStore>(
         store: &S,
         lane_name: &str,
         run_id: &str,
@@ -1355,7 +1355,7 @@ impl QueueProcedure {
         Ok(())
     }
 
-    pub fn consume_unbound<S: SessionStore>(
+    pub(crate) fn consume_unbound<S: SessionStore>(
         store: &S,
         entry_id: &str,
         effects: &mut GatedEffects,
@@ -1363,7 +1363,7 @@ impl QueueProcedure {
         Self::consume_unbound_on_lane(store, "main", entry_id, effects)
     }
 
-    pub fn consume_unbound_on_lane<S: SessionStore>(
+    pub(crate) fn consume_unbound_on_lane<S: SessionStore>(
         store: &S,
         lane_name: &str,
         entry_id: &str,
@@ -1957,7 +1957,7 @@ impl ToolBatchProcedure {
         Ok(())
     }
 
-    pub fn finish_existing<S: SessionStore>(
+    pub(crate) fn finish_existing<S: SessionStore>(
         store: &S,
         run_id: &str,
         result: ToolResult,
@@ -2049,7 +2049,7 @@ impl ToolBatchProcedure {
         Ok(())
     }
 
-    pub fn finish_existing_batch<S: SessionStore>(
+    pub(crate) fn finish_existing_batch<S: SessionStore>(
         store: &S,
         run_id: &str,
         results: &[ToolResult],

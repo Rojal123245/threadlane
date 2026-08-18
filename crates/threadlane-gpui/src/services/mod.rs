@@ -1,4 +1,4 @@
-pub mod chat;
+pub(crate) mod chat;
 pub mod projects;
 pub mod provider_auth;
 pub mod sessions;

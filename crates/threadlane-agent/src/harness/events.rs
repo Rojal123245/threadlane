@@ -314,7 +314,7 @@ pub struct HarnessEvent {
     /// the matching [`Record::OperationStarted`].  `None` for other payloads and
     /// for finished operations whose start was not observed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operation_intent: Option<OperationIntent>,
+    operation_intent: Option<OperationIntent>,
 }
 
 /// A compatibility projection of a [`HarnessEvent`] into an [`AgentEvent`],
@@ -597,7 +597,7 @@ impl HarnessEventHub {
         event
     }
 
-    pub fn streaming_state(&self) -> Option<StreamingState> {
+    pub(crate) fn streaming_state(&self) -> Option<StreamingState> {
         self.inner
             .lock()
             .unwrap_or_else(|error| error.into_inner())
