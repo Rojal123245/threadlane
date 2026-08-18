@@ -47,6 +47,7 @@ pub struct UnifiedAgent {
     stream_rules: Vec<(crate::rules::StreamRule, regex::Regex)>,
     prompt_cache_key: Option<String>,
     allowed_tool_names: Option<HashSet<String>>,
+    provider_trace_recorder: Option<crate::provider::ProviderTraceRecorder>,
 }
 
 impl UnifiedAgent {
@@ -100,6 +101,7 @@ impl UnifiedAgent {
             stream_rules: Vec::new(),
             prompt_cache_key: None,
             allowed_tool_names: None,
+            provider_trace_recorder: None,
         })
     }
 
@@ -144,6 +146,17 @@ impl UnifiedAgent {
 
     pub fn set_prompt_cache_key(&mut self, key: Option<String>) {
         self.prompt_cache_key = key;
+    }
+
+    pub fn prompt_cache_enabled(&self) -> bool {
+        self.prompt_cache_key.is_some()
+    }
+
+    pub fn set_provider_trace_recorder(
+        &mut self,
+        recorder: Option<crate::provider::ProviderTraceRecorder>,
+    ) {
+        self.provider_trace_recorder = recorder;
     }
 
     pub fn set_model_roles(&mut self, roles: crate::types::ModelRoles) {
@@ -283,6 +296,7 @@ impl UnifiedAgent {
             config: self.config.clone(),
             event_tx: self.event_tx.clone(),
             harness_event_hub: self.harness.events().clone(),
+            provider_trace_recorder: self.provider_trace_recorder.clone(),
             stream_rules: self.stream_rules.clone(),
             steering_queue: &mut self.steering_queue,
             follow_up_queue: &mut self.follow_up_queue,

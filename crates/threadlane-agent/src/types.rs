@@ -382,7 +382,11 @@ pub struct AdvisorNote {
 }
 
 impl AdvisorNote {
-    fn new(severity: AdvisorSeverity, summary: impl Into<String>, details: impl Into<String>) -> Self {
+    fn new(
+        severity: AdvisorSeverity,
+        summary: impl Into<String>,
+        details: impl Into<String>,
+    ) -> Self {
         Self {
             severity,
             summary: summary.into(),
@@ -440,7 +444,10 @@ impl ModelRoles {
     }
 
     pub fn resolve_plan<'a>(&'a self, fallback: &'a str) -> &'a str {
-        self.plan.as_deref().or(self.task.as_deref()).unwrap_or(fallback)
+        self.plan
+            .as_deref()
+            .or(self.task.as_deref())
+            .unwrap_or(fallback)
     }
 
     pub fn resolve_advisor<'a>(&'a self, fallback: &'a str) -> &'a str {
@@ -451,7 +458,13 @@ impl ModelRoles {
         self.fallback_chain
             .iter()
             .map(String::as_str)
-            .find(|candidate| *candidate != current && !self.cooldown_models.iter().any(|cooldown| cooldown == candidate))
+            .find(|candidate| {
+                *candidate != current
+                    && !self
+                        .cooldown_models
+                        .iter()
+                        .any(|cooldown| cooldown == candidate)
+            })
     }
 }
 
@@ -480,6 +493,10 @@ pub struct TurnState {
 }
 
 impl TurnState {
+    pub fn reasoning_effort(&self) -> ReasoningEffort {
+        self.reasoning_effort
+    }
+
     pub(crate) fn new(model: impl Into<String>, system_prompt: impl Into<String>) -> Self {
         Self {
             system_prompt: system_prompt.into(),
@@ -490,7 +507,6 @@ impl TurnState {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {

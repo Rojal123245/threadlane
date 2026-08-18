@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -731,7 +731,7 @@ impl AppState {
             _ => Vec::new(),
         };
 
-        Self {
+        let mut state = Self {
             projects: project_infos,
             active_work_dir,
             is_new_task: active_session_id.is_none(),
@@ -767,7 +767,28 @@ impl AppState {
             session_runtimes,
             deferred_stream_events: HashMap::new(),
             pending_permissions: HashMap::new(),
+        };
+        if let (Some(session_id), Some(session_file)) = (
+            state.active_session_id.clone(),
+            active_session_file.as_deref(),
+        ) {
+            if let Err(error) = state.hydrate_session_projection(&session_id, session_file) {
+                state.trajectory_by_session.insert(
+                    session_id,
+                    vec![TrajectoryEntry {
+                        seq: None,
+                        run_id: None,
+                        turn: None,
+                        category: "Error".into(),
+                        summary: "Could not load durable trajectory".into(),
+                        detail: error,
+                        lane: Some("main".into()),
+                        correlation_id: None,
+                    }],
+                );
+            }
         }
+        state
     }
 
     pub(crate) fn current_session_token_usage(&self) -> TokenUsage {
@@ -1322,6 +1343,19 @@ impl AppState {
         let mut tool_starts =
             HashMap::<(String, String), (String, String, String, serde_json::Value)>::new();
         let mut tool_finishes = HashMap::<String, (String, String, String)>::new();
+        let provider_usage_keys = store
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                threadlane_agent::harness::Record::Usage {
+                    run_id: Some(run_id),
+                    attempt: Some(attempt),
+                    cause: threadlane_agent::harness::UsageCause::Provider,
+                    ..
+                } => Some((run_id.clone(), *attempt)),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
         for record in store.records() {
             use threadlane_agent::harness::Record;
             let entry = match record {
@@ -1427,6 +1461,260 @@ impl AppState {
                     }
                     None
                 }
+                Record::RunContextCaptured {
+                    seq,
+                    lane,
+                    run_id,
+                    model,
+                    provider,
+                    reasoning_effort,
+                    system_prompt,
+                    tool_schema_sha256,
+                    enabled_tool_names,
+                    ..
+                } => {
+                    let prompt_detail = match system_prompt {
+                        threadlane_agent::harness::PromptSnapshot::Full { sha256, .. } => {
+                            format!("System prompt captured (sha256 {})", sha256.as_str())
+                        }
+                        threadlane_agent::harness::PromptSnapshot::Redacted {
+                            sha256,
+                            byte_len,
+                            reason,
+                        } => format!(
+                            "System prompt redacted: {byte_len} bytes, sha256 {}, reason {}",
+                            sha256.as_str(),
+                            reason.as_str()
+                        ),
+                    };
+                    Some(TrajectoryEntry {
+                        seq: Some(*seq),
+                        run_id: Some(run_id.clone()),
+                        turn: None,
+                        category: "Context".into(),
+                        summary: format!(
+                            "{} via {} ({reasoning_effort:?})",
+                            model.as_str(),
+                            provider.as_str()
+                        ),
+                        detail: format!(
+                            "{prompt_detail}; {} tools; tool schema sha256 {}",
+                            enabled_tool_names.len(),
+                            tool_schema_sha256.as_str()
+                        ),
+                        lane: Some(lane.clone()),
+                        correlation_id: None,
+                    })
+                }
+                Record::ProviderRequestStarted {
+                    seq,
+                    lane,
+                    run_id,
+                    attempt,
+                    provider,
+                    model,
+                    request_id,
+                    ..
+                } => Some(TrajectoryEntry {
+                    seq: Some(*seq),
+                    run_id: Some(run_id.clone()),
+                    turn: Some(*attempt),
+                    category: "Provider".into(),
+                    summary: format!("{} request started", provider.as_str()),
+                    detail: format!("model {}", model.as_str()),
+                    lane: Some(lane.clone()),
+                    correlation_id: request_id.as_ref().map(|id| id.as_str().to_owned()),
+                }),
+                Record::ProviderRequestFinished {
+                    seq,
+                    lane,
+                    run_id,
+                    attempt,
+                    request_id,
+                    outcome,
+                    error,
+                    duration_ms,
+                    usage,
+                    ..
+                } => {
+                    if !provider_usage_keys.contains(&(run_id.clone(), *attempt)) {
+                        if let Some(usage) = usage {
+                            metrics.input_tokens = metrics
+                                .input_tokens
+                                .saturating_add(u64::from(usage.input_tokens));
+                            metrics.output_tokens = metrics
+                                .output_tokens
+                                .saturating_add(u64::from(usage.output_tokens));
+                            durable_usage.accumulate(usage);
+                        }
+                    }
+                    Some(TrajectoryEntry {
+                        seq: Some(*seq),
+                        run_id: Some(run_id.clone()),
+                        turn: Some(*attempt),
+                        category: "Provider".into(),
+                        summary: format!("Provider request {outcome:?}"),
+                        detail: format!(
+                            "{}{}",
+                            duration_ms
+                                .map(|duration| format!("{duration} ms"))
+                                .unwrap_or_default(),
+                            error
+                                .as_ref()
+                                .map(|error| format!(
+                                    "; {:?}, retryable {}",
+                                    error.category, error.retryable
+                                ))
+                                .unwrap_or_default()
+                        ),
+                        lane: Some(lane.clone()),
+                        correlation_id: request_id.as_ref().map(|id| id.as_str().to_owned()),
+                    })
+                }
+                Record::PermissionRequested {
+                    seq,
+                    lane,
+                    run_id,
+                    attempt,
+                    request_id,
+                    capability,
+                    scopes,
+                    detail_sha256,
+                    ..
+                } => Some(TrajectoryEntry {
+                    seq: Some(*seq),
+                    run_id: run_id.clone(),
+                    turn: *attempt,
+                    category: "Permission".into(),
+                    summary: format!("{} permission requested", capability.as_str()),
+                    detail: format!("scopes {scopes:?}; detail sha256 {}", detail_sha256.as_str()),
+                    lane: Some(lane.clone()),
+                    correlation_id: Some(request_id.as_str().to_owned()),
+                }),
+                Record::PermissionResolved {
+                    seq,
+                    lane,
+                    run_id,
+                    attempt,
+                    request_id,
+                    decision,
+                    source,
+                    remembered,
+                    ..
+                } => Some(TrajectoryEntry {
+                    seq: Some(*seq),
+                    run_id: run_id.clone(),
+                    turn: *attempt,
+                    category: "Permission".into(),
+                    summary: format!("Permission {decision:?}"),
+                    detail: format!("source {source:?}; remembered {remembered}"),
+                    lane: Some(lane.clone()),
+                    correlation_id: Some(request_id.as_str().to_owned()),
+                }),
+                Record::ToolExecutionObserved {
+                    seq,
+                    lane,
+                    run_id,
+                    attempt,
+                    tool_call_id,
+                    tool_name,
+                    executor_kind,
+                    phase,
+                    duration_ms,
+                    outcome,
+                    cancelled,
+                    ..
+                } => Some(TrajectoryEntry {
+                    seq: Some(*seq),
+                    run_id: Some(run_id.clone()),
+                    turn: *attempt,
+                    category: "Tool runtime".into(),
+                    summary: format!("{} {phase:?}", tool_name.as_str()),
+                    detail: format!(
+                        "executor {}; outcome {outcome:?}; duration {duration_ms:?} ms; cancelled {cancelled}",
+                        executor_kind.as_str()
+                    ),
+                    lane: Some(lane.clone()),
+                    correlation_id: Some(tool_call_id.as_str().to_owned()),
+                }),
+                Record::AbortObserved {
+                    seq,
+                    lane,
+                    run_id,
+                    attempt,
+                    observation,
+                    initiator,
+                    target,
+                    acknowledged,
+                    ..
+                } => Some(TrajectoryEntry {
+                    seq: Some(*seq),
+                    run_id: Some(run_id.clone()),
+                    turn: *attempt,
+                    category: "Cancellation".into(),
+                    summary: format!("{observation:?} for {target:?}"),
+                    detail: format!("initiator {initiator:?}; acknowledged {acknowledged}"),
+                    lane: Some(lane.clone()),
+                    correlation_id: None,
+                }),
+                Record::SubagentLifecycle {
+                    seq,
+                    lane,
+                    run_id,
+                    attempt,
+                    child_run_id,
+                    agent_id,
+                    subagent_lane,
+                    phase,
+                    error,
+                    ..
+                } => Some(TrajectoryEntry {
+                    seq: Some(*seq),
+                    run_id: run_id.clone(),
+                    turn: *attempt,
+                    category: "Subagent".into(),
+                    summary: format!("{} {phase:?}", agent_id.as_str()),
+                    detail: format!(
+                        "child {}; lane {}{}",
+                        child_run_id.as_str(),
+                        subagent_lane.as_str(),
+                        error
+                            .as_ref()
+                            .map(|error| format!("; {}", error.as_str()))
+                            .unwrap_or_default()
+                    ),
+                    lane: Some(lane.clone()),
+                    correlation_id: Some(child_run_id.as_str().to_owned()),
+                }),
+                Record::StreamCheckpoint {
+                    seq,
+                    lane,
+                    run_id,
+                    attempt,
+                    request_id,
+                    text,
+                    reasoning,
+                    checkpoint_index,
+                    byte_count,
+                    fingerprint,
+                    ..
+                } => Some(TrajectoryEntry {
+                    seq: Some(*seq),
+                    run_id: Some(run_id.clone()),
+                    turn: *attempt,
+                    category: "Incomplete stream".into(),
+                    summary: format!("Incomplete stream checkpoint {checkpoint_index}"),
+                    detail: format!(
+                        "{byte_count} bytes; text {} bytes; reasoning {} bytes; sha256 {}",
+                        text.as_ref().map_or(0, |text| text.as_str().len()),
+                        reasoning
+                            .as_ref()
+                            .map_or(0, |reasoning| reasoning.as_str().len()),
+                        fingerprint.as_str()
+                    ),
+                    lane: Some(lane.clone()),
+                    correlation_id: Some(request_id.as_str().to_owned()),
+                }),
                 _ => None,
             };
             if let Some(entry) = entry {
@@ -2267,6 +2555,10 @@ mod tests {
 
     #[test]
     fn app_state_startup_hydrates_complete_initial_session_history() {
+        use threadlane_agent::harness::{
+            CapabilitySnapshot, OperationIntent, PromptSnapshot, ProviderOutcome, Record,
+            SessionStore, TraceString, UsageCause,
+        };
         use threadlane_provider::openai::{ToolCall, ToolCallFunction};
 
         let unique = std::time::SystemTime::now()
@@ -2310,6 +2602,107 @@ mod tests {
             is_error: false,
             terminate: false,
         });
+        let usage = TokenUsage {
+            input_tokens: 17,
+            output_tokens: 9,
+            cache_read_tokens: 4,
+            cache_write_tokens: 2,
+            total_tokens: 32,
+        };
+        let mut store = threadlane_agent::harness::JsonlStore::open(&session_file).unwrap();
+        store
+            .append_record(Record::OperationStarted {
+                id: "run-1".into(),
+                seq: 99,
+                lane: "main".into(),
+                timestamp: 99,
+                source_leaf_id: None,
+                intent: OperationIntent::Run,
+            })
+            .unwrap();
+        store
+            .append_record(Record::StepAttempt {
+                id: "attempt-1".into(),
+                seq: 100,
+                lane: "main".into(),
+                timestamp: 100,
+                run_id: "run-1".into(),
+                attempt: 1,
+                result_entry_id: "assistant-1".into(),
+                compaction_reason: None,
+            })
+            .unwrap();
+        store
+            .append_record(Record::Usage {
+                id: "usage-1".into(),
+                seq: 101,
+                lane: "main".into(),
+                timestamp: 101,
+                run_id: Some("run-1".into()),
+                cause: UsageCause::Provider,
+                entry_id: Some("assistant-1".into()),
+                tool_call_id: None,
+                attempt: Some(1),
+                usage: usage.clone(),
+            })
+            .unwrap();
+        store
+            .append_record(Record::RunContextCaptured {
+                id: "context-1".into(),
+                seq: 102,
+                lane: "main".into(),
+                timestamp: 102,
+                run_id: "run-1".into(),
+                attempt: None,
+                model: TraceString::new("test-model").unwrap(),
+                provider: TraceString::new("openai").unwrap(),
+                reasoning_effort: ReasoningEffort::Medium,
+                prompt_cache_enabled: false,
+                work_dir: TraceString::new(work_dir.to_string_lossy()).unwrap(),
+                system_prompt: PromptSnapshot::Redacted {
+                    sha256: TraceString::new("prompt-sha").unwrap(),
+                    byte_len: 128,
+                    reason: TraceString::new("test-policy").unwrap(),
+                },
+                tool_schema_sha256: TraceString::new("tool-sha").unwrap(),
+                enabled_tool_names: vec![TraceString::new("read_file").unwrap()],
+                capabilities: CapabilitySnapshot {
+                    capabilities: vec![TraceString::new("read_file").unwrap()],
+                    fingerprint: Some(TraceString::new("capability-sha").unwrap()),
+                },
+                prompt_template_ids: Vec::new(),
+                git_head: None,
+            })
+            .unwrap();
+        store
+            .append_record(Record::ProviderRequestStarted {
+                id: "provider-start-1".into(),
+                seq: 103,
+                lane: "main".into(),
+                timestamp: 103,
+                run_id: "run-1".into(),
+                attempt: 1,
+                provider: TraceString::new("openai").unwrap(),
+                model: TraceString::new("test-model").unwrap(),
+                request_id: Some(TraceString::new("request-1").unwrap()),
+            })
+            .unwrap();
+        store
+            .append_record(Record::ProviderRequestFinished {
+                id: "provider-finish-1".into(),
+                seq: 104,
+                lane: "main".into(),
+                timestamp: 104,
+                run_id: "run-1".into(),
+                attempt: 1,
+                request_id: Some(TraceString::new("request-1").unwrap()),
+                outcome: ProviderOutcome::Completed,
+                error: None,
+                duration_ms: Some(25),
+                usage: None,
+            })
+            .unwrap();
+        drop(store);
 
         let state = AppState::load_from_registry(vec![AttachedProject {
             id: "hydration-test".into(),
@@ -2335,6 +2728,33 @@ mod tests {
         assert_eq!(messages[1].tool_activities.len(), 1);
         assert_eq!(messages[1].tool_activities[0].id, "call-read");
         assert_eq!(messages[1].tool_activities[0].detail, "file contents");
+        assert!(state.trajectory_by_session["hydration-test"]
+            .iter()
+            .any(|entry| entry.summary == "User input"));
+        assert!(state.trajectory_by_session["hydration-test"]
+            .iter()
+            .any(|entry| entry.summary == "read_file finished"));
+        let trace = &state.trajectory_by_session["hydration-test"];
+        let context_index = trace
+            .iter()
+            .position(|entry| entry.category == "Context")
+            .unwrap();
+        let provider_start_index = trace
+            .iter()
+            .position(|entry| entry.summary == "openai request started")
+            .unwrap();
+        let provider_finish_index = trace
+            .iter()
+            .position(|entry| entry.summary == "Provider request Completed")
+            .unwrap();
+        assert!(
+            context_index < provider_start_index && provider_start_index < provider_finish_index
+        );
+        assert_eq!(state.session_metrics["hydration-test"].turns, 1);
+        assert_eq!(state.session_metrics["hydration-test"].tool_calls, 1);
+        assert_eq!(state.session_metrics["hydration-test"].input_tokens, 17);
+        assert_eq!(state.session_metrics["hydration-test"].output_tokens, 9);
+        assert_eq!(state.current_session_token_usage(), usage);
 
         drop(state);
         let _ = std::fs::remove_dir_all(work_dir);

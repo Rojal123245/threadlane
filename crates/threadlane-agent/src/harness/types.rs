@@ -1,7 +1,211 @@
 use super::queue::SteerPriority;
-use crate::types::{AgentMessage, TokenUsage};
-use serde::{Deserialize, Serialize};
+use crate::types::{AgentMessage, ReasoningEffort, TokenUsage};
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+
+/// A bounded, non-secret trace label or identifier.
+///
+/// Trace producers must use this only for identifiers, categories, and short
+/// summaries that are safe to persist. Prompt text, tool arguments/results,
+/// provider response bodies, credentials, and other secret-bearing payloads
+/// must never be stored here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct TraceString(String);
+
+impl TraceString {
+    pub const MAX_BYTES: usize = 4096;
+
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        if value.len() > Self::MAX_BYTES {
+            return Err(format!("trace string exceeds {} bytes", Self::MAX_BYTES));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for TraceString {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(D::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct BoundedText(String);
+
+impl BoundedText {
+    pub const MAX_BYTES: usize = 32 * 1024;
+
+    pub fn truncated(value: &str) -> Self {
+        if value.len() <= Self::MAX_BYTES {
+            return Self(value.into());
+        }
+        let mut end = Self::MAX_BYTES;
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        Self(value[..end].into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for BoundedText {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if value.len() > Self::MAX_BYTES {
+            return Err(D::Error::custom("bounded text exceeds 32768 bytes"));
+        }
+        Ok(Self(value))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PromptSnapshot {
+    Full {
+        /// Deliberately captured resolved system prompt. Producers must apply
+        /// their configured redaction policy before constructing this variant.
+        content: String,
+        sha256: TraceString,
+    },
+    Redacted {
+        sha256: TraceString,
+        byte_len: usize,
+        reason: TraceString,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilitySnapshot {
+    /// Stable capability identifiers only. Producers should cap this list at 256 items.
+    pub capabilities: Vec<TraceString>,
+    pub fingerprint: Option<TraceString>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProviderOutcome {
+    Completed,
+    Aborted,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ErrorCategory {
+    Authentication,
+    Authorization,
+    RateLimit,
+    InvalidRequest,
+    Unavailable,
+    Timeout,
+    Transport,
+    Protocol,
+    Cancelled,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderErrorSummary {
+    pub category: ErrorCategory,
+    /// A provider-defined error code, never a response body or exception dump.
+    pub code: Option<TraceString>,
+    pub retryable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PermissionTraceScope {
+    Once,
+    Session,
+    Project,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PermissionTraceDecision {
+    Allowed,
+    Denied,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PermissionTraceSource {
+    User,
+    Policy,
+    PersistedGrant,
+    UnattendedDefault,
+    System,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ToolExecutionPhase {
+    Started,
+    Progress,
+    Finished,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ToolExecutionOutcome {
+    Succeeded,
+    Failed,
+    Cancelled,
+    Declined,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AbortObservation {
+    SignalSent,
+    ProviderNotified,
+    TaskCancelled,
+    Confirmed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AbortInitiator {
+    User,
+    Timeout,
+    Shutdown,
+    Recovery,
+    Policy,
+    System,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AbortTarget {
+    Provider,
+    Tool,
+    Subagent,
+    Scheduler,
+    ActiveRun,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SubagentLifecyclePhase {
+    Spawned,
+    Started,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StreamCheckpointKind {
+    AssistantText,
+    Reasoning,
+    ToolCall,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
@@ -264,6 +468,141 @@ pub enum Record {
         #[serde(default)]
         attempt: Option<u32>,
         usage: TokenUsage,
+    },
+    RunContextCaptured {
+        id: String,
+        seq: u64,
+        lane: String,
+        timestamp: u64,
+        run_id: String,
+        attempt: Option<u32>,
+        model: TraceString,
+        provider: TraceString,
+        reasoning_effort: ReasoningEffort,
+        prompt_cache_enabled: bool,
+        work_dir: TraceString,
+        system_prompt: PromptSnapshot,
+        tool_schema_sha256: TraceString,
+        enabled_tool_names: Vec<TraceString>,
+        capabilities: CapabilitySnapshot,
+        prompt_template_ids: Vec<TraceString>,
+        git_head: Option<TraceString>,
+    },
+    ProviderRequestStarted {
+        id: String,
+        seq: u64,
+        lane: String,
+        timestamp: u64,
+        run_id: String,
+        attempt: u32,
+        provider: TraceString,
+        model: TraceString,
+        request_id: Option<TraceString>,
+    },
+    ProviderRequestFinished {
+        id: String,
+        seq: u64,
+        lane: String,
+        timestamp: u64,
+        run_id: String,
+        attempt: u32,
+        request_id: Option<TraceString>,
+        outcome: ProviderOutcome,
+        error: Option<ProviderErrorSummary>,
+        duration_ms: Option<u64>,
+        usage: Option<TokenUsage>,
+    },
+    PermissionRequested {
+        id: String,
+        seq: u64,
+        lane: String,
+        timestamp: u64,
+        run_id: Option<String>,
+        attempt: Option<u32>,
+        request_id: TraceString,
+        capability: TraceString,
+        scopes: Vec<PermissionTraceScope>,
+        detail_sha256: TraceString,
+        source: PermissionTraceSource,
+    },
+    PermissionResolved {
+        id: String,
+        seq: u64,
+        lane: String,
+        timestamp: u64,
+        run_id: Option<String>,
+        attempt: Option<u32>,
+        request_id: TraceString,
+        decision: PermissionTraceDecision,
+        scope: Option<PermissionTraceScope>,
+        source: PermissionTraceSource,
+        remembered: bool,
+    },
+    ToolExecutionObserved {
+        id: String,
+        seq: u64,
+        lane: String,
+        timestamp: u64,
+        run_id: String,
+        attempt: Option<u32>,
+        tool_call_id: TraceString,
+        tool_name: TraceString,
+        executor_kind: TraceString,
+        phase: ToolExecutionPhase,
+        started_at_ms: Option<u64>,
+        duration_ms: Option<u64>,
+        outcome: Option<ToolExecutionOutcome>,
+        exit_code: Option<i32>,
+        cancelled: bool,
+        is_error: Option<bool>,
+        terminate: Option<bool>,
+        output_sha256: Option<TraceString>,
+        output_bytes: Option<u64>,
+    },
+    AbortObserved {
+        id: String,
+        seq: u64,
+        lane: String,
+        timestamp: u64,
+        run_id: String,
+        attempt: Option<u32>,
+        observation: AbortObservation,
+        initiator: AbortInitiator,
+        target: AbortTarget,
+        acknowledged: bool,
+        detail: Option<TraceString>,
+    },
+    SubagentLifecycle {
+        id: String,
+        seq: u64,
+        lane: String,
+        timestamp: u64,
+        run_id: Option<String>,
+        attempt: Option<u32>,
+        child_run_id: TraceString,
+        parent_tool_call_id: Option<TraceString>,
+        task_index: Option<u32>,
+        agent_id: TraceString,
+        subagent_lane: TraceString,
+        phase: SubagentLifecyclePhase,
+        result_entry_id: Option<TraceString>,
+        error: Option<TraceString>,
+    },
+    StreamCheckpoint {
+        id: String,
+        seq: u64,
+        lane: String,
+        timestamp: u64,
+        run_id: String,
+        attempt: Option<u32>,
+        request_id: TraceString,
+        assistant_entry_id: Option<TraceString>,
+        text: Option<BoundedText>,
+        reasoning: Option<BoundedText>,
+        checkpoint_index: u32,
+        byte_count: u64,
+        /// A non-reversible digest of the checkpoint content.
+        fingerprint: TraceString,
     },
 }
 
@@ -565,6 +904,60 @@ impl Record {
                 attempt,
                 usage,
             },
+            mut record @ Self::RunContextCaptured { .. } => {
+                if let Self::RunContextCaptured { seq: current, .. } = &mut record {
+                    *current = seq;
+                }
+                record
+            }
+            mut record @ Self::ProviderRequestStarted { .. } => {
+                if let Self::ProviderRequestStarted { seq: current, .. } = &mut record {
+                    *current = seq;
+                }
+                record
+            }
+            mut record @ Self::ProviderRequestFinished { .. } => {
+                if let Self::ProviderRequestFinished { seq: current, .. } = &mut record {
+                    *current = seq;
+                }
+                record
+            }
+            mut record @ Self::PermissionRequested { .. } => {
+                if let Self::PermissionRequested { seq: current, .. } = &mut record {
+                    *current = seq;
+                }
+                record
+            }
+            mut record @ Self::PermissionResolved { .. } => {
+                if let Self::PermissionResolved { seq: current, .. } = &mut record {
+                    *current = seq;
+                }
+                record
+            }
+            mut record @ Self::ToolExecutionObserved { .. } => {
+                if let Self::ToolExecutionObserved { seq: current, .. } = &mut record {
+                    *current = seq;
+                }
+                record
+            }
+            mut record @ Self::AbortObserved { .. } => {
+                if let Self::AbortObserved { seq: current, .. } = &mut record {
+                    *current = seq;
+                }
+                record
+            }
+            mut record @ Self::SubagentLifecycle { .. } => {
+                if let Self::SubagentLifecycle { seq: current, .. } = &mut record {
+                    *current = seq;
+                }
+                record
+            }
+            mut record @ Self::StreamCheckpoint { .. } => {
+                if let Self::StreamCheckpoint { seq: current, .. } = &mut record {
+                    *current = seq;
+                }
+                record
+            }
         }
     }
 
@@ -586,7 +979,16 @@ impl Record {
             | Self::WriteApplied { id, .. }
             | Self::FactSet { id, .. }
             | Self::HookResumeData { id, .. }
-            | Self::Usage { id, .. } => id,
+            | Self::Usage { id, .. }
+            | Self::RunContextCaptured { id, .. }
+            | Self::ProviderRequestStarted { id, .. }
+            | Self::ProviderRequestFinished { id, .. }
+            | Self::PermissionRequested { id, .. }
+            | Self::PermissionResolved { id, .. }
+            | Self::ToolExecutionObserved { id, .. }
+            | Self::AbortObserved { id, .. }
+            | Self::SubagentLifecycle { id, .. }
+            | Self::StreamCheckpoint { id, .. } => id,
         }
     }
 
@@ -608,7 +1010,16 @@ impl Record {
             | Self::WriteApplied { seq, .. }
             | Self::FactSet { seq, .. }
             | Self::HookResumeData { seq, .. }
-            | Self::Usage { seq, .. } => *seq,
+            | Self::Usage { seq, .. }
+            | Self::RunContextCaptured { seq, .. }
+            | Self::ProviderRequestStarted { seq, .. }
+            | Self::ProviderRequestFinished { seq, .. }
+            | Self::PermissionRequested { seq, .. }
+            | Self::PermissionResolved { seq, .. }
+            | Self::ToolExecutionObserved { seq, .. }
+            | Self::AbortObserved { seq, .. }
+            | Self::SubagentLifecycle { seq, .. }
+            | Self::StreamCheckpoint { seq, .. } => *seq,
         }
     }
 
@@ -630,7 +1041,16 @@ impl Record {
             | Self::WriteApplied { lane, .. }
             | Self::FactSet { lane, .. }
             | Self::HookResumeData { lane, .. }
-            | Self::Usage { lane, .. } => lane,
+            | Self::Usage { lane, .. }
+            | Self::RunContextCaptured { lane, .. }
+            | Self::ProviderRequestStarted { lane, .. }
+            | Self::ProviderRequestFinished { lane, .. }
+            | Self::PermissionRequested { lane, .. }
+            | Self::PermissionResolved { lane, .. }
+            | Self::ToolExecutionObserved { lane, .. }
+            | Self::AbortObserved { lane, .. }
+            | Self::SubagentLifecycle { lane, .. }
+            | Self::StreamCheckpoint { lane, .. } => lane,
         }
     }
 
@@ -649,9 +1069,19 @@ impl Record {
             | Self::QueueConsumed { run_id, .. }
             | Self::WriteDeferred { run_id, .. }
             | Self::WriteApplied { run_id, .. } => Some(run_id),
-            Self::FactSet { run_id, .. } => run_id.as_deref(),
-            Self::HookResumeData { run_id, .. } => run_id.as_deref(),
-            Self::QueueEnqueued { run_id, .. } | Self::Usage { run_id, .. } => run_id.as_deref(),
+            Self::RunContextCaptured { run_id, .. }
+            | Self::ProviderRequestStarted { run_id, .. }
+            | Self::ProviderRequestFinished { run_id, .. }
+            | Self::ToolExecutionObserved { run_id, .. }
+            | Self::AbortObserved { run_id, .. }
+            | Self::StreamCheckpoint { run_id, .. } => Some(run_id),
+            Self::FactSet { run_id, .. }
+            | Self::HookResumeData { run_id, .. }
+            | Self::QueueEnqueued { run_id, .. }
+            | Self::Usage { run_id, .. }
+            | Self::PermissionRequested { run_id, .. }
+            | Self::PermissionResolved { run_id, .. }
+            | Self::SubagentLifecycle { run_id, .. } => run_id.as_deref(),
         }
     }
 
@@ -660,7 +1090,16 @@ impl Record {
             Self::StepAttempt { attempt, .. }
             | Self::RetryScheduled { attempt, .. }
             | Self::RetryConsumed { attempt, .. } => Some(*attempt),
-            Self::Usage { attempt, .. } => *attempt,
+            Self::Usage { attempt, .. }
+            | Self::RunContextCaptured { attempt, .. }
+            | Self::PermissionRequested { attempt, .. }
+            | Self::PermissionResolved { attempt, .. }
+            | Self::ToolExecutionObserved { attempt, .. }
+            | Self::AbortObserved { attempt, .. }
+            | Self::SubagentLifecycle { attempt, .. }
+            | Self::StreamCheckpoint { attempt, .. } => *attempt,
+            Self::ProviderRequestStarted { attempt, .. }
+            | Self::ProviderRequestFinished { attempt, .. } => Some(*attempt),
             _ => None,
         }
     }

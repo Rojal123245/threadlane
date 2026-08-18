@@ -23,6 +23,7 @@ use async_trait::async_trait;
 use log::warn;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -34,8 +35,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use threadlane_agent::harness::{
     DeferredResolution, Entry as HarnessEntry, HookContext, HookKind, JsonlStore, OperationOutcome,
-    ProvisionedEntry, QueueKind, Record as HarnessRecord, Reducer, SessionStore, Snapshot,
-    ToolRecovery, ToolSpec,
+    PromptSnapshot, ProvisionedEntry, QueueKind, Record as HarnessRecord, Reducer, SessionStore,
+    Snapshot, ToolRecovery, ToolSpec,
 };
 use threadlane_agent::{
     repair_interrupted_tool_turn, AgentEvent, AgentMessage, AgentToolResult, ImageAttachment,
@@ -56,6 +57,36 @@ pub(crate) const MAX_SUBAGENT_TASK_CHARS: usize = 32_000;
 const SUBAGENT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const SUBAGENT_RECOVERY_PROMPT: &str =
     "Continue from the recovered checkpoint and finish the assigned task.";
+const MAX_PERSISTED_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn durable_prompt_snapshot(content: &str) -> PromptSnapshot {
+    let sha256 = threadlane_agent::harness::TraceString::new(sha256_hex(content.as_bytes()))
+        .expect("sha256 digest is bounded");
+    let explicitly_redacted = std::env::var("THREADLANE_REDACT_SYSTEM_PROMPTS")
+        .ok()
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
+    if explicitly_redacted || content.len() > MAX_PERSISTED_SYSTEM_PROMPT_BYTES {
+        PromptSnapshot::Redacted {
+            sha256,
+            byte_len: content.len(),
+            reason: threadlane_agent::harness::TraceString::new(if explicitly_redacted {
+                "configured_redaction"
+            } else {
+                "size_limit"
+            })
+            .expect("redaction reason is bounded"),
+        }
+    } else {
+        PromptSnapshot::Full {
+            content: content.into(),
+            sha256,
+        }
+    }
+}
 
 fn active_branch_with_detached_tool_results(tree: &SessionTree) -> Vec<AgentMessage> {
     let branch = tree.get_active_branch_messages();
@@ -214,7 +245,7 @@ fn enqueue_harness_queue(
     agent.enqueue_harness_queue(queue, content, images)
 }
 
-fn enqueue_harness_follow_up(
+pub(crate) fn enqueue_harness_follow_up(
     session_file: &Path,
     content: String,
     images: Vec<ImageAttachment>,
@@ -400,16 +431,25 @@ impl CodingAgentCancellation {
     }
 
     pub fn cancel(&self) -> Result<(), String> {
-        if let Some(path) = self.harness_session_file.as_deref() {
+        let durable_run_id = if let Some(path) = self.harness_session_file.as_deref() {
             let mut journal = HarnessJournal::open(path)?;
-            let _ = journal.request_abort();
-        }
+            journal.request_abort()?
+        } else {
+            None
+        };
         let handle = {
             let mut state = self.state.lock().map_err(|error| error.to_string())?;
             state.active.take().map(|active| active.handle)
         };
+        let acknowledged = handle.is_some();
         if let Some(handle) = handle {
             handle.abort();
+        }
+        if let (Some(path), Some(run_id)) = (
+            self.harness_session_file.as_deref(),
+            durable_run_id.as_deref(),
+        ) {
+            HarnessJournal::open(path)?.observe_abort_signal(run_id, acknowledged)?;
         }
         let _ = self.event_tx.send(AgentEvent::AgentError {
             error: "Generation cancelled".into(),
@@ -747,6 +787,36 @@ impl CodingAgent {
         self.agent.tool_dispatcher.tool_completion_recorder = recorder;
     }
 
+    fn install_run_trace_recorders(&mut self, path: PathBuf, run_id: String) {
+        let provider_path = path.clone();
+        let provider_run_id = run_id.clone();
+        self.agent
+            .set_provider_trace_recorder(Some(Arc::new(move |event| {
+                let path = provider_path.clone();
+                let run_id = provider_run_id.clone();
+                Box::pin(async move {
+                    HarnessJournal::record_provider_trace_to_path(&path, &run_id, event)
+                })
+            })));
+        let tool_path = path.clone();
+        let tool_run_id = run_id.clone();
+        self.agent.tool_dispatcher.tool_execution_trace_recorder = Some(Arc::new(move |event| {
+            let path = tool_path.clone();
+            let run_id = tool_run_id.clone();
+            Box::pin(async move {
+                HarnessJournal::record_tool_execution_to_path(&path, &run_id, event).await
+            })
+        }));
+        self.permission_handle
+            .set_trace_recorder(Some(Arc::new(move |event| {
+                let path = path.clone();
+                let run_id = run_id.clone();
+                Box::pin(async move {
+                    HarnessJournal::record_permission_trace_to_path(&path, Some(&run_id), event)
+                })
+            })));
+    }
+
     pub(crate) async fn begin_harness_run(
         &mut self,
         prompt: AgentMessage,
@@ -759,11 +829,79 @@ impl CodingAgent {
         {
             return Ok(Some(run_id));
         }
+        let turn = self.agent.get_state().await;
+        let model = self
+            .agent
+            .config()
+            .model_roles
+            .resolve_task(&turn.model)
+            .to_string();
+        let provider = self
+            .agent
+            .provider_client()
+            .provider_kind(&model)
+            .to_string();
+        let tool_definitions = self.agent.configured_tool_definitions();
+        let tool_schema = serde_json::to_vec(&tool_definitions)
+            .map_err(|error| format!("failed to serialize resolved tool schema: {error}"))?;
+        let enabled_tool_names = tool_definitions
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>();
+        let mut capabilities = enabled_tool_names
+            .iter()
+            .map(|name| format!("tool:{name}"))
+            .collect::<Vec<_>>();
+        capabilities.extend(
+            self.skills
+                .list_skills()
+                .into_iter()
+                .filter(|skill| skill.enabled && skill.is_valid)
+                .map(|skill| format!("skill:{}", skill.id)),
+        );
+        capabilities.extend(
+            self.wasi_extensions
+                .extension_manifests()
+                .into_iter()
+                .map(|extension| format!("extension:{}", extension.name)),
+        );
+        capabilities.push(format!("tool_policy:{:?}", *self.tool_policy.lock().await));
+        capabilities.sort();
+        capabilities.dedup();
+        let capability_sha256 = sha256_hex(capabilities.join("\n").as_bytes());
+        let prompt_template_ids = self
+            .prompt_templates
+            .as_ref()
+            .map(|templates| {
+                templates
+                    .iter()
+                    .map(|template| template.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let system_prompt = durable_prompt_snapshot(&turn.system_prompt);
+        let work_dir = self.work_dir.to_string_lossy().into_owned();
         let Some(journal) = self.harness.as_mut() else {
             return Ok(None);
         };
         let run_id = journal.unique_run_id("foreground")?;
         journal.begin_run(&run_id, prompt)?;
+        journal.capture_run_context(
+            &run_id,
+            "main",
+            model,
+            provider,
+            turn.reasoning_effort(),
+            self.agent.prompt_cache_enabled(),
+            work_dir,
+            system_prompt,
+            sha256_hex(&tool_schema),
+            enabled_tool_names,
+            capabilities,
+            Some(capability_sha256),
+            prompt_template_ids,
+            None,
+        )?;
         let context = HookContext {
             session_id: journal.store.session_id().to_owned(),
             lane: "main".into(),
@@ -790,6 +928,7 @@ impl CodingAgent {
         if let Some(path) = self.session_tree.file_path.clone() {
             self.session_tree = SessionTree::load_from_file(&path)
                 .map_err(|error| format!("failed to reload accepted prompt: {error}"))?;
+            self.install_run_trace_recorders(path, run_id.clone());
         }
         Ok(Some(run_id))
     }
@@ -809,6 +948,89 @@ impl CodingAgent {
         if open_run != run_id {
             return Err(format!("harness operation {run_id} is not open on main"));
         }
+        let has_context = journal.store.records().iter().any(|record| {
+            matches!(
+                record,
+                HarnessRecord::RunContextCaptured {
+                    run_id: captured_run_id,
+                    ..
+                } if captured_run_id == run_id
+            )
+        });
+        if !has_context {
+            let turn = self
+                .agent
+                .turn
+                .try_lock()
+                .map_err(|_| "adopted run context is currently locked".to_string())?;
+            let model = self
+                .agent
+                .config()
+                .model_roles
+                .resolve_task(&turn.model)
+                .to_string();
+            let provider = self
+                .agent
+                .provider_client()
+                .provider_kind(&model)
+                .to_string();
+            let tool_definitions = self.agent.configured_tool_definitions();
+            let tool_schema = serde_json::to_vec(&tool_definitions)
+                .map_err(|error| format!("failed to serialize resolved tool schema: {error}"))?;
+            let enabled_tool_names = tool_definitions
+                .iter()
+                .map(|tool| tool.name.clone())
+                .collect::<Vec<_>>();
+            let mut capabilities = enabled_tool_names
+                .iter()
+                .map(|name| format!("tool:{name}"))
+                .collect::<Vec<_>>();
+            capabilities.extend(
+                self.skills
+                    .list_skills()
+                    .into_iter()
+                    .filter(|skill| skill.enabled && skill.is_valid)
+                    .map(|skill| format!("skill:{}", skill.id)),
+            );
+            capabilities.extend(
+                self.wasi_extensions
+                    .extension_manifests()
+                    .into_iter()
+                    .map(|extension| format!("extension:{}", extension.name)),
+            );
+            if let Ok(policy) = self.tool_policy.try_lock() {
+                capabilities.push(format!("tool_policy:{policy:?}"));
+            }
+            capabilities.sort();
+            capabilities.dedup();
+            let capability_sha256 = sha256_hex(capabilities.join("\n").as_bytes());
+            let prompt_template_ids = self
+                .prompt_templates
+                .as_ref()
+                .map(|templates| {
+                    templates
+                        .iter()
+                        .map(|template| template.name.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            journal.capture_run_context(
+                run_id,
+                "main",
+                model,
+                provider,
+                turn.reasoning_effort(),
+                self.agent.prompt_cache_enabled(),
+                self.work_dir.to_string_lossy().into_owned(),
+                durable_prompt_snapshot(&turn.system_prompt),
+                sha256_hex(&tool_schema),
+                enabled_tool_names,
+                capabilities,
+                Some(capability_sha256),
+                prompt_template_ids,
+                None,
+            )?;
+        }
         if let Some(path) = self.session_tree.file_path.clone() {
             self.session_tree = SessionTree::load_from_file(&path)
                 .map_err(|error| format!("failed to refresh adopted session: {error}"))?;
@@ -816,6 +1038,7 @@ impl CodingAgent {
             if self.session_tree.nodes.contains_key(&prompt_entry_id) {
                 self.session_tree.switch_active_node(&prompt_entry_id);
             }
+            self.install_run_trace_recorders(path, run_id.into());
         }
         *self
             .harness_run_id
@@ -874,6 +1097,9 @@ impl CodingAgent {
                 *active = None;
             }
         }
+        self.agent.set_provider_trace_recorder(None);
+        self.agent.tool_dispatcher.tool_execution_trace_recorder = None;
+        self.permission_handle.set_trace_recorder(None);
         result
     }
 
@@ -1371,6 +1597,7 @@ impl CodingAgent {
             agent.event_tx.clone(),
             agent_work.clone(),
             Some(agent_runner.clone()),
+            options.session_file.clone(),
         );
         // ── Capability registry: register tools + hooks declaratively ──
         let mcp_manager = Arc::new(McpManager::new(
@@ -3494,8 +3721,9 @@ fn requires_harness_compaction_reset(
 #[cfg(test)]
 mod compaction_sync_tests {
     use super::{
-        requires_harness_compaction_reset, CodingAgent, CodingAgentOptions, CompletedSubagentLane,
-        SubagentLaneStatus,
+        durable_prompt_snapshot, requires_harness_compaction_reset, CodingAgent,
+        CodingAgentOptions, CompletedSubagentLane, SubagentLaneStatus,
+        MAX_PERSISTED_SYSTEM_PROMPT_BYTES,
     };
     use crate::system_prompt::SystemPromptConfig;
     use threadlane_agent::{harness::JsonlStore, AgentMessage};
@@ -3505,6 +3733,19 @@ mod compaction_sync_tests {
             custom_type: "compaction_summary".into(),
             payload: serde_json::json!({"summary": "older context"}),
         }
+    }
+
+    #[test]
+    fn oversized_system_prompt_is_redacted_with_a_digest() {
+        let content = "x".repeat(MAX_PERSISTED_SYSTEM_PROMPT_BYTES + 1);
+        assert!(matches!(
+            durable_prompt_snapshot(&content),
+            threadlane_agent::harness::PromptSnapshot::Redacted {
+                sha256,
+                byte_len,
+                ..
+            } if sha256.as_str().len() == 64 && byte_len == content.len()
+        ));
     }
 
     #[test]
@@ -3986,6 +4227,7 @@ async fn run_subagent_task(
         agent.event_tx.clone(),
         agent_work.clone(),
         None,
+        Some(subagent_session.clone()),
     );
     agent
         .hook_registry

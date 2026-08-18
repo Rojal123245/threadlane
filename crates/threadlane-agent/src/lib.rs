@@ -40,7 +40,9 @@ pub use loop_engine::repair_interrupted_tool_turn;
 pub use provider::{
     AssistantMessageRecorder, ChatCompletionsAdapter, CodexResponsesAdapter, ProviderAdapter,
     ProviderDiscardedUsageRecorder, ProviderHookRecorder, ProviderMessages, ProviderRouter,
-    ProviderUsageRecorder, StreamingStateRecorder, ToolCompletionRecorder, ToolIntentRecorder,
+    ProviderTraceEvent, ProviderTraceRecorder, ProviderUsageRecorder, StreamingStateRecorder,
+    ToolCompletionRecorder, ToolExecutionTraceEvent, ToolExecutionTraceRecorder,
+    ToolIntentRecorder,
 };
 pub use rules::*;
 pub use session_tree::{SessionNode, SessionTree};

@@ -124,6 +124,18 @@ impl ProviderClient {
         }
     }
 
+    pub fn provider_kind(&self, model: &str) -> &'static str {
+        if is_antigravity_model(model) {
+            "antigravity"
+        } else if is_opencode_model(model) {
+            "opencode-go"
+        } else if self.openai.is_codex() {
+            "codex"
+        } else {
+            "openai"
+        }
+    }
+
     pub async fn stream_chat_completion(
         &self,
         payload_source: impl Into<PayloadSource>,
@@ -139,7 +151,9 @@ impl ProviderClient {
         } else {
             Arc::new(self.openai.clone())
         };
-        provider.stream_chat_completion(source, prompt_cache_key, event_tx).await;
+        provider
+            .stream_chat_completion(source, prompt_cache_key, event_tx)
+            .await;
     }
 
     /// Returns true for provider errors where retrying the identical request on
@@ -168,10 +182,14 @@ impl ProviderClient {
         let mut retry = false;
         while let Some(event) = primary_rx.recv().await {
             match &event {
-                StreamEvent::ContentToken(_) | StreamEvent::ReasoningToken(_) | StreamEvent::ToolCallStart { .. } => {
+                StreamEvent::ContentToken(_)
+                | StreamEvent::ReasoningToken(_)
+                | StreamEvent::ToolCallStart { .. } => {
                     emitted_visible_output = true;
                 }
-                StreamEvent::Error(error) if !emitted_visible_output && is_quota_or_rate_limit(error) => {
+                StreamEvent::Error(error)
+                    if !emitted_visible_output && is_quota_or_rate_limit(error) =>
+                {
                     retry = true;
                     break;
                 }
@@ -400,8 +418,13 @@ mod tests {
                 tx,
             )
             .await;
-        assert!(matches!(rx.recv().await, Some(StreamEvent::ContentToken(text)) if text == "recovered"));
-        assert!(matches!(rx.recv().await, Some(StreamEvent::Finished { .. })));
+        assert!(
+            matches!(rx.recv().await, Some(StreamEvent::ContentToken(text)) if text == "recovered")
+        );
+        assert!(matches!(
+            rx.recv().await,
+            Some(StreamEvent::Finished { .. })
+        ));
         assert!(rx.recv().await.is_none());
     }
 

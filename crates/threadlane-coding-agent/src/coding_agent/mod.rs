@@ -137,6 +137,45 @@ mod tests {
         let store = JsonlStore::open(&path).unwrap();
         assert!(store.entries().iter().any(|entry| entry.id == active_leaf));
         assert!(!active_leaf.starts_with("node_"));
+        let context = store
+            .records()
+            .iter()
+            .find(|record| matches!(record, HarnessRecord::RunContextCaptured { .. }))
+            .expect("accepted run must persist its resolved context");
+        assert!(matches!(
+            context,
+            HarnessRecord::RunContextCaptured {
+                system_prompt: threadlane_agent::harness::PromptSnapshot::Full { content, .. },
+                model,
+                provider,
+                enabled_tool_names,
+                ..
+            } if !content.is_empty()
+                && !model.as_str().is_empty()
+                && !provider.as_str().is_empty()
+                && !enabled_tool_names.is_empty()
+        ));
+    }
+
+    #[test]
+    fn adopted_background_run_captures_context_before_provider_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut options = coding_agent_options(dir.path().to_path_buf());
+        options.session_file = Some(path.clone());
+        let mut agent = CodingAgent::new(options);
+        let mut harness = HarnessJournal::open(&path).unwrap();
+        harness
+            .begin_run("background-run", AgentMessage::user("prompt", vec![]))
+            .unwrap();
+
+        agent.adopt_harness_run("background-run").unwrap();
+
+        let store = JsonlStore::open(&path).unwrap();
+        assert!(store.records().iter().any(|record| matches!(
+            record,
+            HarnessRecord::RunContextCaptured { run_id, .. } if run_id == "background-run"
+        )));
     }
 
     #[test]
@@ -912,7 +951,15 @@ mod tests {
             runs.len()
         );
         let store = JsonlStore::open(&session_file).unwrap();
-        assert_eq!(store.records().len(), 16);
+        assert_eq!(store.records().len(), 24);
+        assert_eq!(
+            store
+                .records()
+                .iter()
+                .filter(|record| matches!(record, HarnessRecord::SubagentLifecycle { .. }))
+                .count(),
+            runs.len()
+        );
     }
 
     #[test]
@@ -2080,12 +2127,13 @@ mod tests {
             capability,
             tool_policy: None,
             extensions: Arc::new(WasiExtensionManager::new()),
-            work_dir,
+            work_dir: work_dir.clone(),
             event_tx,
             allowed_hosts: Arc::new(HashSet::new()),
             permissions: None,
             agent_work,
             agent_runner: None,
+            session_file: Some(work_dir.join("session.jsonl")),
             persist_tool_policy: false,
             managed_processes: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
@@ -2682,7 +2730,9 @@ mod tests {
         let extension_dir = dir.path().join(".threadlane/extensions/queue_command_ext");
         std::fs::create_dir_all(&extension_dir).unwrap();
         std::fs::write(extension_dir.join("extension.wasm"), wasm).unwrap();
-        let mut coding_agent = CodingAgent::new(coding_agent_options(dir.path().to_path_buf()));
+        let mut options = coding_agent_options(dir.path().to_path_buf());
+        options.session_file = Some(dir.path().join("session.jsonl"));
+        let mut coding_agent = CodingAgent::new(options);
         assert!(coding_agent.wasi_extensions.has_command("queue"));
         let observed = Arc::new(Mutex::new(Vec::new()));
         coding_agent.agent_work.set_test_observer(observed.clone());

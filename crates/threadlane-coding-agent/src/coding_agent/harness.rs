@@ -6,16 +6,23 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
+use crate::permission::PermissionTraceEvent;
 use threadlane_agent::harness::{
-    AgentHarness, DeferredResolution, EffectAction, Entry as HarnessEntry, EventPayload,
+    AbortInitiator, AbortObservation, AbortTarget, AgentHarness, BoundedText, CapabilitySnapshot,
+    DeferredResolution, EffectAction, Entry as HarnessEntry, ErrorCategory, EventPayload,
     HarnessEventHub, HookContext, HookKind, HookRegistry, JsonlStore, OperationOutcome,
-    Record as HarnessRecord, ReduceError, Reducer, RetryPolicy, SessionIdGenerator, SessionStore,
-    Snapshot, ToolReplaySafety as HarnessToolReplaySafety, ToolResult as HarnessToolResult,
-    ToolSpec,
+    PromptSnapshot, ProviderErrorSummary, ProviderOutcome, Record as HarnessRecord, ReduceError,
+    Reducer, RetryPolicy, SessionIdGenerator, SessionStore, Snapshot, SubagentLifecyclePhase,
+    ToolExecutionOutcome, ToolExecutionPhase, ToolReplaySafety as HarnessToolReplaySafety,
+    ToolResult as HarnessToolResult, ToolSpec, TraceString,
 };
 use threadlane_agent::session_tree::SessionTree;
-use threadlane_agent::{AgentMessage, AgentToolResult, TokenUsage};
+use threadlane_agent::{
+    AgentMessage, AgentToolResult, ProviderTraceEvent, ReasoningEffort, TokenUsage,
+    ToolExecutionTraceEvent,
+};
 
 use threadlane_agent::harness::{EventError, HarnessEvent, OperationIntent, Subscription};
 
@@ -173,6 +180,342 @@ impl CodingSessionHarness {
         journal.append_message(message)
     }
 
+    pub(crate) fn capture_run_context(
+        &mut self,
+        run_id: &str,
+        lane: &str,
+        model: String,
+        provider: String,
+        reasoning_effort: ReasoningEffort,
+        prompt_cache_enabled: bool,
+        work_dir: String,
+        system_prompt: PromptSnapshot,
+        tool_schema_sha256: String,
+        enabled_tool_names: Vec<String>,
+        capabilities: Vec<String>,
+        capability_sha256: Option<String>,
+        prompt_template_ids: Vec<String>,
+        git_head: Option<String>,
+    ) -> Result<(), String> {
+        self.refresh()?;
+        let trace = |value: String| TraceString::new(value);
+        let record = HarnessRecord::RunContextCaptured {
+            id: format!("run-context-{run_id}"),
+            seq: harness_next_seq(self.store.store()),
+            lane: lane.into(),
+            timestamp: timestamp(),
+            run_id: run_id.into(),
+            attempt: None,
+            model: trace(model)?,
+            provider: trace(provider)?,
+            reasoning_effort,
+            prompt_cache_enabled,
+            work_dir: trace(work_dir)?,
+            system_prompt,
+            tool_schema_sha256: trace(tool_schema_sha256)?,
+            enabled_tool_names: enabled_tool_names
+                .into_iter()
+                .take(256)
+                .map(TraceString::new)
+                .collect::<Result<Vec<_>, _>>()?,
+            capabilities: CapabilitySnapshot {
+                capabilities: capabilities
+                    .into_iter()
+                    .take(256)
+                    .map(TraceString::new)
+                    .collect::<Result<Vec<_>, _>>()?,
+                fingerprint: capability_sha256.map(TraceString::new).transpose()?,
+            },
+            prompt_template_ids: prompt_template_ids
+                .into_iter()
+                .take(256)
+                .map(TraceString::new)
+                .collect::<Result<Vec<_>, _>>()?,
+            git_head: git_head.map(TraceString::new).transpose()?,
+        };
+        self.store
+            .append_record_gated(record)
+            .map_err(|error| error.to_string())?;
+        self.store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn record_provider_trace_to_path(
+        path: &Path,
+        run_id: &str,
+        event: ProviderTraceEvent,
+    ) -> Result<(), String> {
+        let mut journal = Self::open(path)?;
+        journal.refresh()?;
+        let event = match event {
+            ProviderTraceEvent::AssistantReady {
+                reasoning, message, ..
+            } => {
+                if let Some(reasoning) = reasoning.filter(|reasoning| !reasoning.trim().is_empty())
+                {
+                    journal.append_message(AgentMessage::Custom {
+                        custom_type: "thinking".into(),
+                        payload: serde_json::json!({ "text": reasoning }),
+                    })?;
+                }
+                journal.append_message(message)?;
+                return Ok(());
+            }
+            event => event,
+        };
+        let seq = harness_next_seq(journal.store.store());
+        let record = match event {
+            ProviderTraceEvent::AssistantReady { .. } => unreachable!(),
+            ProviderTraceEvent::Started {
+                attempt,
+                request_id,
+                model,
+                provider,
+            } => HarnessRecord::ProviderRequestStarted {
+                id: format!("provider-start-{run_id}-{request_id}"),
+                seq,
+                lane: "main".into(),
+                timestamp: timestamp(),
+                run_id: run_id.into(),
+                attempt,
+                provider: TraceString::new(provider)?,
+                model: TraceString::new(model)?,
+                request_id: Some(TraceString::new(request_id)?),
+            },
+            ProviderTraceEvent::Checkpoint {
+                attempt,
+                request_id,
+                checkpoint_index,
+                text,
+                reasoning,
+            } => {
+                let mut digest = Sha256::new();
+                digest.update(text.as_bytes());
+                if let Some(reasoning) = reasoning.as_deref() {
+                    digest.update(reasoning.as_bytes());
+                }
+                HarnessRecord::StreamCheckpoint {
+                    id: format!("stream-checkpoint-{run_id}-{request_id}-{checkpoint_index}"),
+                    seq,
+                    lane: "main".into(),
+                    timestamp: timestamp(),
+                    run_id: run_id.into(),
+                    attempt: Some(attempt),
+                    request_id: TraceString::new(request_id)?,
+                    assistant_entry_id: None,
+                    text: (!text.is_empty()).then(|| BoundedText::truncated(&text)),
+                    reasoning: reasoning
+                        .as_deref()
+                        .filter(|reasoning| !reasoning.is_empty())
+                        .map(BoundedText::truncated),
+                    checkpoint_index,
+                    byte_count: text.len() as u64
+                        + reasoning.as_ref().map_or(0, String::len) as u64,
+                    fingerprint: TraceString::new(format!("{:x}", digest.finalize()))?,
+                }
+            }
+            ProviderTraceEvent::Finished {
+                attempt,
+                request_id,
+                outcome,
+                error,
+                duration_ms,
+                usage,
+            } => HarnessRecord::ProviderRequestFinished {
+                id: format!("provider-finish-{run_id}-{request_id}"),
+                seq,
+                lane: "main".into(),
+                timestamp: timestamp(),
+                run_id: run_id.into(),
+                attempt,
+                request_id: Some(TraceString::new(request_id)?),
+                outcome,
+                error,
+                duration_ms: Some(duration_ms),
+                usage,
+            },
+        };
+        journal
+            .store
+            .append_record_gated(record)
+            .map_err(|error| error.to_string())?;
+        journal
+            .store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn record_permission_trace_to_path(
+        path: &Path,
+        run_id: Option<&str>,
+        event: PermissionTraceEvent,
+    ) -> Result<(), String> {
+        let mut journal = Self::open(path)?;
+        journal.refresh()?;
+        let state = Reducer::reduce(journal.store.store()).map_err(|error| error.to_string())?;
+        let attempt = run_id.and_then(|_| state.lane("main").map(|lane| lane.attempts));
+        let seq = harness_next_seq(journal.store.store());
+        let record = match event {
+            PermissionTraceEvent::Requested {
+                request_id,
+                capability,
+                scopes,
+                detail_sha256,
+                source,
+            } => HarnessRecord::PermissionRequested {
+                id: format!("permission-request-{request_id}-{seq}"),
+                seq,
+                lane: "main".into(),
+                timestamp: timestamp(),
+                run_id: run_id.map(str::to_owned),
+                attempt,
+                request_id: TraceString::new(request_id)?,
+                capability: TraceString::new(capability)?,
+                scopes,
+                detail_sha256: TraceString::new(detail_sha256)?,
+                source,
+            },
+            PermissionTraceEvent::Resolved {
+                request_id,
+                decision,
+                scope,
+                source,
+                remembered,
+            } => HarnessRecord::PermissionResolved {
+                id: format!("permission-resolved-{request_id}-{seq}"),
+                seq,
+                lane: "main".into(),
+                timestamp: timestamp(),
+                run_id: run_id.map(str::to_owned),
+                attempt,
+                request_id: TraceString::new(request_id)?,
+                decision,
+                scope,
+                source,
+                remembered,
+            },
+        };
+        journal
+            .store
+            .append_record_gated(record)
+            .map_err(|error| error.to_string())?;
+        journal
+            .store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) async fn record_tool_execution_to_path(
+        path: &Path,
+        run_id: &str,
+        event: ToolExecutionTraceEvent,
+    ) -> Result<(), String> {
+        let mut journal = Self::open(path)?;
+        journal.refresh()?;
+        if let ToolExecutionTraceEvent::Started {
+            tool_call_id,
+            tool_name,
+            effective_arguments,
+            ..
+        } = &event
+        {
+            let has_intent = journal.store.records().iter().any(|record| {
+                matches!(
+                    record,
+                    HarnessRecord::ToolStarted {
+                        run_id: intent_run_id,
+                        tool_call_id: intent_call_id,
+                        ..
+                    } if intent_run_id == run_id && intent_call_id == tool_call_id
+                )
+            });
+            if !has_intent {
+                let effective_args = serde_json::from_str(effective_arguments)
+                    .unwrap_or_else(|_| Value::String(effective_arguments.clone()));
+                journal
+                    .append_tool_intent_after_hook(run_id, tool_call_id, tool_name, effective_args)
+                    .await?;
+                journal.refresh()?;
+            }
+        }
+        let state = Reducer::reduce(journal.store.store()).map_err(|error| error.to_string())?;
+        let attempt = state.lane("main").map(|lane| lane.attempts);
+        let seq = harness_next_seq(journal.store.store());
+        let record = match event {
+            ToolExecutionTraceEvent::Started {
+                tool_call_id,
+                tool_name,
+                executor_kind,
+                effective_arguments: _,
+                started_at_ms,
+            } => HarnessRecord::ToolExecutionObserved {
+                id: format!("tool-execution-start-{run_id}-{tool_call_id}-{seq}"),
+                seq,
+                lane: "main".into(),
+                timestamp: timestamp(),
+                run_id: run_id.into(),
+                attempt,
+                tool_call_id: TraceString::new(tool_call_id)?,
+                tool_name: TraceString::new(tool_name)?,
+                executor_kind: TraceString::new(executor_kind)?,
+                phase: ToolExecutionPhase::Started,
+                started_at_ms: Some(started_at_ms),
+                duration_ms: None,
+                outcome: None,
+                exit_code: None,
+                cancelled: false,
+                is_error: None,
+                terminate: None,
+                output_sha256: None,
+                output_bytes: None,
+            },
+            ToolExecutionTraceEvent::Finished {
+                tool_call_id,
+                tool_name,
+                executor_kind,
+                started_at_ms,
+                duration_ms,
+                is_error,
+                terminate,
+                output_sha256,
+                output_bytes,
+            } => HarnessRecord::ToolExecutionObserved {
+                id: format!("tool-execution-finish-{run_id}-{tool_call_id}-{seq}"),
+                seq,
+                lane: "main".into(),
+                timestamp: timestamp(),
+                run_id: run_id.into(),
+                attempt,
+                tool_call_id: TraceString::new(tool_call_id)?,
+                tool_name: TraceString::new(tool_name)?,
+                executor_kind: TraceString::new(executor_kind)?,
+                phase: ToolExecutionPhase::Finished,
+                started_at_ms: Some(started_at_ms),
+                duration_ms: Some(duration_ms),
+                outcome: Some(if is_error {
+                    ToolExecutionOutcome::Failed
+                } else {
+                    ToolExecutionOutcome::Succeeded
+                }),
+                exit_code: None,
+                cancelled: false,
+                is_error: Some(is_error),
+                terminate: Some(terminate),
+                output_sha256: Some(TraceString::new(output_sha256)?),
+                output_bytes: Some(output_bytes),
+            },
+        };
+        journal
+            .store
+            .append_record_gated(record)
+            .map_err(|error| error.to_string())?;
+        journal
+            .store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())
+    }
+
     pub(crate) async fn append_tool_intent_to_path(
         path: &Path,
         run_id: &str,
@@ -326,6 +669,55 @@ impl CodingSessionHarness {
                 attempt: 1,
                 result_entry_id: format!("entry-{}-assistant-1", identity.run_id),
                 compaction_reason: None,
+            })
+            .map_err(|error| SubagentStartError {
+                identity: Some(identity.clone()),
+                error: error.to_string(),
+            })?;
+        self.store
+            .drive_to_completion()
+            .map_err(|error| SubagentStartError {
+                identity: Some(identity.clone()),
+                error: error.to_string(),
+            })?;
+        let state = Reducer::reduce(self.store.store()).map_err(|error| SubagentStartError {
+            identity: Some(identity.clone()),
+            error: error.to_string(),
+        })?;
+        let parent_run_id = state
+            .lane("main")
+            .and_then(|lane| lane.open_operation.clone());
+        let parent_attempt = state.lane("main").map(|lane| lane.attempts);
+        let seq = harness_next_seq(self.store.store());
+        self.store
+            .append_record_gated(HarnessRecord::SubagentLifecycle {
+                id: format!("subagent-started-{}-{seq}", identity.run_id),
+                seq,
+                lane: "main".into(),
+                timestamp: timestamp(),
+                run_id: parent_run_id,
+                attempt: parent_attempt,
+                child_run_id: TraceString::new(identity.run_id.clone()).map_err(|error| {
+                    SubagentStartError {
+                        identity: Some(identity.clone()),
+                        error,
+                    }
+                })?,
+                parent_tool_call_id: None,
+                task_index: None,
+                agent_id: TraceString::new(lane_hint).map_err(|error| SubagentStartError {
+                    identity: Some(identity.clone()),
+                    error,
+                })?,
+                subagent_lane: TraceString::new(identity.lane_name.clone()).map_err(|error| {
+                    SubagentStartError {
+                        identity: Some(identity.clone()),
+                        error,
+                    }
+                })?,
+                phase: SubagentLifecyclePhase::Started,
+                result_entry_id: None,
+                error: None,
             })
             .map_err(|error| SubagentStartError {
                 identity: Some(identity.clone()),
@@ -622,6 +1014,87 @@ impl CodingSessionHarness {
             }
         }
         Ok(main_run_id)
+    }
+
+    pub(crate) fn observe_abort_signal(
+        &mut self,
+        run_id: &str,
+        acknowledged: bool,
+    ) -> Result<(), String> {
+        self.refresh()?;
+        let state = Reducer::reduce(&self.store).map_err(|error| error.to_string())?;
+        let attempt = state.lane("main").map(|lane| lane.attempts);
+        let unfinished_requests = self
+            .store
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                HarnessRecord::ProviderRequestStarted {
+                    run_id: provider_run_id,
+                    attempt,
+                    request_id: Some(request_id),
+                    ..
+                } if provider_run_id == run_id
+                    && !self.store.records().iter().any(|candidate| {
+                        matches!(
+                            candidate,
+                            HarnessRecord::ProviderRequestFinished {
+                                run_id: finished_run_id,
+                                request_id: Some(finished_request_id),
+                                ..
+                            } if finished_run_id == run_id && finished_request_id == request_id
+                        )
+                    }) =>
+                {
+                    Some((*attempt, request_id.clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for (provider_attempt, request_id) in unfinished_requests {
+            let seq = harness_next_seq(self.store.store());
+            self.store
+                .append_record_gated(HarnessRecord::ProviderRequestFinished {
+                    id: format!("provider-finish-{run_id}-{}", request_id.as_str()),
+                    seq,
+                    lane: "main".into(),
+                    timestamp: timestamp(),
+                    run_id: run_id.into(),
+                    attempt: provider_attempt,
+                    request_id: Some(request_id),
+                    outcome: ProviderOutcome::Aborted,
+                    error: Some(ProviderErrorSummary {
+                        category: ErrorCategory::Cancelled,
+                        code: TraceString::new("runtime_abort").ok(),
+                        retryable: false,
+                    }),
+                    duration_ms: None,
+                    usage: None,
+                })
+                .map_err(|error| error.to_string())?;
+            self.store
+                .drive_to_completion()
+                .map_err(|error| error.to_string())?;
+        }
+        let seq = harness_next_seq(self.store.store());
+        self.store
+            .append_record_gated(HarnessRecord::AbortObserved {
+                id: format!("abort-observed-{run_id}-{seq}"),
+                seq,
+                lane: "main".into(),
+                timestamp: timestamp(),
+                run_id: run_id.into(),
+                attempt,
+                observation: AbortObservation::SignalSent,
+                initiator: AbortInitiator::User,
+                target: AbortTarget::ActiveRun,
+                acknowledged,
+                detail: None,
+            })
+            .map_err(|error| error.to_string())?;
+        self.store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())
     }
 
     /// Reconcile an aborted operation: insert abort entry, record, and
@@ -1792,6 +2265,26 @@ impl CodingSessionHarness {
                     continue;
                 }
             }
+            if let AgentMessage::Tool { tool_call_id, .. } = msg {
+                self.refresh()?;
+                let unfinished_run_id =
+                    Reducer::reduce(self.store.store()).ok().and_then(|state| {
+                        let lane = state.lane("main")?;
+                        let run_id = lane.open_operation.as_deref()?;
+                        lane.tools
+                            .iter()
+                            .any(|tool| {
+                                tool.run_id == run_id
+                                    && tool.tool_call_id == *tool_call_id
+                                    && !tool.completed
+                            })
+                            .then(|| run_id.to_owned())
+                    });
+                if let Some(run_id) = unfinished_run_id {
+                    self.finish_tool_message(&run_id, msg)?;
+                    continue;
+                }
+            }
             self.append_synced_message(msg.clone())?;
         }
         Ok(())
@@ -1862,6 +2355,173 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
         (dir, path)
+    }
+
+    #[tokio::test]
+    async fn tool_intent_precedes_physical_execution_observation() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        harness
+            .begin_run("run-1", AgentMessage::user("prompt", vec![]))
+            .unwrap();
+        harness.prepare_assistant_attempt("run-1").unwrap();
+        CodingSessionHarness::record_provider_trace_to_path(
+            &path,
+            "run-1",
+            ProviderTraceEvent::AssistantReady {
+                attempt: 1,
+                request_id: "request-1".into(),
+                reasoning: None,
+                message: AgentMessage::Assistant {
+                    content: None,
+                    tool_calls: Some(vec![threadlane_provider::openai::ToolCall {
+                        id: "call-1".into(),
+                        r#type: "function".into(),
+                        function: threadlane_provider::openai::ToolCallFunction {
+                            name: "read_file".into(),
+                            arguments: r#"{"path":"README.md"}"#.into(),
+                        },
+                        thought_signature: None,
+                    }]),
+                    stop_reason: None,
+                    deferred_handle: None,
+                },
+            },
+        )
+        .unwrap();
+
+        CodingSessionHarness::record_tool_execution_to_path(
+            &path,
+            "run-1",
+            ToolExecutionTraceEvent::Started {
+                tool_call_id: "call-1".into(),
+                tool_name: "read_file".into(),
+                executor_kind: "builtin".into(),
+                effective_arguments: r#"{"path":"README.md"}"#.into(),
+                started_at_ms: 10,
+            },
+        )
+        .await
+        .unwrap();
+
+        let store = JsonlStore::open(&path).unwrap();
+        let intent_seq = store.records().iter().find_map(|record| match record {
+            HarnessRecord::ToolStarted { seq, .. } => Some(*seq),
+            _ => None,
+        });
+        let observed_seq = store.records().iter().find_map(|record| match record {
+            HarnessRecord::ToolExecutionObserved { seq, .. } => Some(*seq),
+            _ => None,
+        });
+        assert!(matches!(
+            (intent_seq, observed_seq),
+            (Some(intent), Some(observed)) if intent < observed
+        ));
+    }
+
+    #[test]
+    fn provider_attempt_trace_has_one_ordered_terminal_record() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        harness
+            .begin_run("run-1", AgentMessage::user("prompt", vec![]))
+            .unwrap();
+
+        CodingSessionHarness::record_provider_trace_to_path(
+            &path,
+            "run-1",
+            ProviderTraceEvent::Started {
+                attempt: 1,
+                request_id: "request-1".into(),
+                model: "test-model".into(),
+                provider: "openai".into(),
+            },
+        )
+        .unwrap();
+        CodingSessionHarness::record_provider_trace_to_path(
+            &path,
+            "run-1",
+            ProviderTraceEvent::Finished {
+                attempt: 1,
+                request_id: "request-1".into(),
+                outcome: threadlane_agent::harness::ProviderOutcome::Completed,
+                error: None,
+                duration_ms: 12,
+                usage: Some(TokenUsage {
+                    input_tokens: 3,
+                    output_tokens: 2,
+                    total_tokens: 5,
+                    ..Default::default()
+                }),
+            },
+        )
+        .unwrap();
+
+        let store = JsonlStore::open(&path).unwrap();
+        let start_seq = store.records().iter().find_map(|record| match record {
+            HarnessRecord::ProviderRequestStarted {
+                seq, request_id, ..
+            } if request_id.as_ref().map(TraceString::as_str) == Some("request-1") => Some(*seq),
+            _ => None,
+        });
+        let finishes = store
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                HarnessRecord::ProviderRequestFinished {
+                    seq,
+                    request_id,
+                    usage,
+                    ..
+                } if request_id.as_ref().map(TraceString::as_str) == Some("request-1") => {
+                    assert_eq!(usage.as_ref().map(|usage| usage.total_tokens), Some(5));
+                    Some(*seq)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(finishes.len(), 1);
+        assert!(start_seq.is_some_and(|seq| seq < finishes[0]));
+    }
+
+    #[test]
+    fn cancellation_closes_an_unfinished_provider_attempt_before_abort_observation() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        harness
+            .begin_run("run-1", AgentMessage::user("prompt", vec![]))
+            .unwrap();
+        CodingSessionHarness::record_provider_trace_to_path(
+            &path,
+            "run-1",
+            ProviderTraceEvent::Started {
+                attempt: 1,
+                request_id: "request-1".into(),
+                model: "test-model".into(),
+                provider: "openai".into(),
+            },
+        )
+        .unwrap();
+        let run_id = harness.request_abort().unwrap().unwrap();
+        harness.observe_abort_signal(&run_id, true).unwrap();
+
+        let store = JsonlStore::open(&path).unwrap();
+        let provider_finish_seq = store.records().iter().find_map(|record| match record {
+            HarnessRecord::ProviderRequestFinished {
+                seq,
+                outcome: ProviderOutcome::Aborted,
+                ..
+            } => Some(*seq),
+            _ => None,
+        });
+        let abort_observed_seq = store.records().iter().find_map(|record| match record {
+            HarnessRecord::AbortObserved { seq, .. } => Some(*seq),
+            _ => None,
+        });
+        assert!(matches!(
+            (provider_finish_seq, abort_observed_seq),
+            (Some(provider), Some(abort)) if provider < abort
+        ));
     }
 
     #[test]

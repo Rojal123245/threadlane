@@ -653,6 +653,43 @@ impl Reducer {
                     }
                     lane.attempts = *attempt;
                 }
+                Record::RunContextCaptured { run_id, .. }
+                | Record::ProviderRequestStarted { run_id, .. }
+                | Record::ProviderRequestFinished { run_id, .. }
+                | Record::ToolExecutionObserved { run_id, .. }
+                | Record::AbortObserved { run_id, .. }
+                | Record::StreamCheckpoint { run_id, .. } => {
+                    // Trace observations do not drive durable execution state. If
+                    // this lane currently has a run, however, reject accidental
+                    // cross-run attribution. Observations before a retained start
+                    // or after a retained finish remain readable for compatibility.
+                    if let Some(open_run) = lane.open_operation.as_deref() {
+                        if open_run != run_id {
+                            return Err(ReduceError::UnknownOperation(run_id.clone()));
+                        }
+                    }
+                }
+                Record::PermissionRequested {
+                    run_id: Some(run_id),
+                    ..
+                }
+                | Record::PermissionResolved {
+                    run_id: Some(run_id),
+                    ..
+                }
+                | Record::SubagentLifecycle {
+                    run_id: Some(run_id),
+                    ..
+                } => {
+                    if let Some(open_run) = lane.open_operation.as_deref() {
+                        if open_run != run_id {
+                            return Err(ReduceError::UnknownOperation(run_id.clone()));
+                        }
+                    }
+                }
+                Record::PermissionRequested { run_id: None, .. }
+                | Record::PermissionResolved { run_id: None, .. }
+                | Record::SubagentLifecycle { run_id: None, .. } => {}
             }
         }
         let mut lanes: Vec<_> = lanes.into_values().collect();

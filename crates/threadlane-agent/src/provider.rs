@@ -475,6 +475,71 @@ pub type ToolCompletionRecorder = Arc<
     dyn Fn(&str, bool) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync,
 >;
 
+#[derive(Debug, Clone)]
+pub enum ToolExecutionTraceEvent {
+    Started {
+        tool_call_id: String,
+        tool_name: String,
+        executor_kind: String,
+        effective_arguments: String,
+        started_at_ms: u64,
+    },
+    Finished {
+        tool_call_id: String,
+        tool_name: String,
+        executor_kind: String,
+        started_at_ms: u64,
+        duration_ms: u64,
+        is_error: bool,
+        terminate: bool,
+        output_sha256: String,
+        output_bytes: u64,
+    },
+}
+
+pub type ToolExecutionTraceRecorder = Arc<
+    dyn Fn(ToolExecutionTraceEvent) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>
+        + Send
+        + Sync,
+>;
+
+#[derive(Debug, Clone)]
+pub enum ProviderTraceEvent {
+    Started {
+        attempt: u32,
+        request_id: String,
+        model: String,
+        provider: String,
+    },
+    AssistantReady {
+        attempt: u32,
+        request_id: String,
+        reasoning: Option<String>,
+        message: AgentMessage,
+    },
+    Checkpoint {
+        attempt: u32,
+        request_id: String,
+        checkpoint_index: u32,
+        text: String,
+        reasoning: Option<String>,
+    },
+    Finished {
+        attempt: u32,
+        request_id: String,
+        outcome: crate::harness::ProviderOutcome,
+        error: Option<crate::harness::ProviderErrorSummary>,
+        duration_ms: u64,
+        usage: Option<TokenUsage>,
+    },
+}
+
+pub type ProviderTraceRecorder = Arc<
+    dyn Fn(ProviderTraceEvent) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>
+        + Send
+        + Sync,
+>;
+
 pub type ProviderUsageRecorder = Arc<
     dyn Fn(TokenUsage) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync,
 >;

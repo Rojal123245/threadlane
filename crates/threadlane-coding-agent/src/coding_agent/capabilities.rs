@@ -371,6 +371,7 @@ pub(crate) fn build_broker_dispatcher(
     event_tx: tokio::sync::broadcast::Sender<AgentEvent>,
     agent_work: AgentWorkScheduler,
     agent_runner: Option<AgentRunner>,
+    session_file: Option<PathBuf>,
 ) -> (
     Arc<CapabilityDispatcher>,
     ManagedProcessRegistry,
@@ -404,6 +405,7 @@ pub(crate) fn build_broker_dispatcher(
                 permissions: Some(permissions.clone()),
                 agent_work: agent_work.clone(),
                 agent_runner: agent_runner.clone(),
+                session_file: session_file.clone(),
                 persist_tool_policy,
                 managed_processes: managed_processes.clone(),
             }),
@@ -536,13 +538,20 @@ pub(crate) fn create_after_tool_hook_handler(
                     .and_then(|value| value.get("path").and_then(Value::as_str).map(str::to_owned))
                     .is_some_and(|path| path.ends_with(".rs"));
             if is_successful_rust_write {
-                let path = serde_json::from_str::<Value>(context.tool_arguments.as_deref().unwrap_or("{}"))
-                    .ok()
-                    .and_then(|value| value.get("path").and_then(Value::as_str).map(str::to_owned))
-                    .unwrap_or_default();
-                if let Some(result) = run_lsp_diagnostics_after_write(&extensions, &broker_dispatcher, &path).await {
+                let path = serde_json::from_str::<Value>(
+                    context.tool_arguments.as_deref().unwrap_or("{}"),
+                )
+                .ok()
+                .and_then(|value| value.get("path").and_then(Value::as_str).map(str::to_owned))
+                .unwrap_or_default();
+                if let Some(result) =
+                    run_lsp_diagnostics_after_write(&extensions, &broker_dispatcher, &path).await
+                {
                     match result {
-                        Ok(diagnostics) => effect.append_content = Some(format!("[LSP Diagnostics]\n{diagnostics}")),
+                        Ok(diagnostics) => {
+                            effect.append_content =
+                                Some(format!("[LSP Diagnostics]\n{diagnostics}"))
+                        }
                         Err(error) => warn!("post-write lsp diagnostics failed: {error}"),
                     }
                 }
@@ -594,7 +603,9 @@ pub(crate) async fn run_lsp_diagnostics_after_write(
             return Some(Ok(message));
         }
         if continuation_rounds >= MAX_BROKER_CONTINUATION_ROUNDS {
-            return Some(Err("lsp_diagnostics exceeded broker continuation limit".into()));
+            return Some(Err(
+                "lsp_diagnostics exceeded broker continuation limit".into()
+            ));
         }
         let dispatch = match broker_dispatcher
             .dispatch_envelopes(invocation.host_broker_requests)
