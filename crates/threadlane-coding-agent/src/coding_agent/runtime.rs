@@ -629,6 +629,40 @@ impl CodingAgentWorkHandle {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessCompositionSnapshot {
+    pub active_lane: String,
+    pub session_file: Option<String>,
+    pub model: String,
+    pub provider: String,
+    pub skills: Vec<String>,
+    pub extensions: Vec<String>,
+    pub sandbox_policy: String,
+}
+
+impl HarnessCompositionSnapshot {
+    pub fn from_options(options: &CodingAgentOptions) -> Self {
+        let provider = if options.model.starts_with("antigravity/") {
+            "antigravity"
+        } else if options.model.starts_with("opencode-go/") {
+            "opencode-go"
+        } else if options.model.starts_with("acp/") {
+            "acp"
+        } else {
+            "openai"
+        };
+        Self {
+            active_lane: "main".into(),
+            session_file: options.session_file.as_ref().map(|path| path.display().to_string()),
+            model: options.model.clone(),
+            provider: provider.into(),
+            skills: Vec::new(),
+            extensions: Vec::new(),
+            sandbox_policy: "workspace-scoped capabilities".into(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct CodingAgentOptions {
     pub api_key: String,
@@ -1514,6 +1548,10 @@ impl CodingAgent {
             // Persist new provider messages through the canonical session
             // harness, then reload the session tree from the updated file.
             if let Some(harness) = self.harness.as_mut() {
+                if let Err(error) = harness.assert_model_visible(&state_messages) {
+                    self.harness_journal_error = Some(error);
+                    return;
+                }
                 if let Err(error) = harness.sync_messages(&state_messages) {
                     self.harness_journal_error = Some(error);
                 }

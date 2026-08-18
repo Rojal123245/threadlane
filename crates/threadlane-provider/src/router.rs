@@ -18,6 +18,15 @@ pub fn is_opencode_model(model: &str) -> bool {
     model.starts_with(OPENCODE_MODEL_PREFIX)
 }
 
+pub fn is_quota_or_rate_limit(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("429")
+        || error.contains("rate limit")
+        || error.contains("rate_limit")
+        || error.contains("quota")
+        || error.contains("too many requests")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PayloadFormat {
     ChatCompletions,
@@ -122,7 +131,6 @@ impl ProviderClient {
     ) {
         let source = payload_source.into();
         let model = source.model().to_string();
-
         let provider: Arc<dyn crate::traits::ModelProvider> = if is_antigravity_model(&model) {
             Arc::new(self.antigravity.clone())
         } else if is_opencode_model(&model) {
@@ -130,10 +138,13 @@ impl ProviderClient {
         } else {
             Arc::new(self.openai.clone())
         };
+        provider.stream_chat_completion(source, prompt_cache_key, event_tx).await;
+    }
 
-        provider
-            .stream_chat_completion(source, prompt_cache_key, event_tx)
-            .await;
+    /// Returns true for provider errors where retrying the identical request on
+    /// a configured fallback is safe (before any output was emitted).
+    pub fn is_quota_or_rate_limit(error: &str) -> bool {
+        is_quota_or_rate_limit(error)
     }
 
     pub async fn fetch_deferred(
@@ -309,6 +320,14 @@ impl ProviderClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_retryable_quota_and_rate_limit_errors() {
+        assert!(is_quota_or_rate_limit("HTTP 429 Too Many Requests"));
+        assert!(is_quota_or_rate_limit("quota exhausted"));
+        assert!(is_quota_or_rate_limit("rate_limit_exceeded"));
+        assert!(!is_quota_or_rate_limit("HTTP 401 unauthorized"));
+    }
 
     #[test]
     fn routes_only_prefixed_models_to_antigravity() {

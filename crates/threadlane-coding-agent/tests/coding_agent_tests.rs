@@ -99,6 +99,7 @@ async fn roles_command_updates_task_plan_and_advisor_roles() {
         plan: Some("plan-model".into()),
         advisor: None,
         advisor_enabled: true,
+        ..Default::default()
     });
 }
 

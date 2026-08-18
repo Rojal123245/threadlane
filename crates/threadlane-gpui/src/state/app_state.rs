@@ -1159,6 +1159,23 @@ impl AppState {
         }
     }
 
+    pub(crate) fn accept_edit_proposal(&mut self, proposal_id: &str) -> Result<(), String> {
+        let work_dir = self
+            .active_work_dir
+            .as_deref()
+            .ok_or_else(|| "Select a project before accepting an edit proposal".to_string())?;
+        let response = threadlane_tools::execute_tool_in_workspace(
+            "accept_edit",
+            &serde_json::json!({ "proposal_id": proposal_id }).to_string(),
+            work_dir,
+        );
+        if response.starts_with("Error:") {
+            return Err(response);
+        }
+        self.session_status = Some(response);
+        Ok(())
+    }
+
     pub(crate) fn toggle_tool_activity(&mut self, tool_call_id: &str) {
         if let Some(activity) = self
             .messages

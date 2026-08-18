@@ -5,3 +5,6 @@ edition = "2021"
 description = "Project-local Git operations and status parsing for threadlane agent"
 
 [dependencies]
+
+[dev-dependencies]
+tempfile = "3.8"

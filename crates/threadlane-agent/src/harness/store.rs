@@ -88,6 +88,22 @@ pub trait SessionStore {
     fn preferred_leaf(&self, _lane: &str) -> Option<String> {
         None
     }
+    /// Return the durable model context for one lane's currently selected branch.
+    /// Operation records and entries from other lanes are excluded.
+    fn model_history(&self, lane: &str) -> Result<Vec<Entry>, ReduceError>
+    where
+        Self: Sized,
+    {
+        let state = super::Reducer::reduce(self)?;
+        let leaf_id = self
+            .preferred_leaf(lane)
+            .or_else(|| state.lane(lane).and_then(|lane| lane.leaf_id.clone()));
+        Ok(self
+            .branch(leaf_id.as_deref(), usize::MAX)
+            .into_iter()
+            .filter(|entry| entry.lane == lane)
+            .collect())
+    }
     fn branch(&self, leaf_id: Option<&str>, limit: usize) -> Vec<Entry> {
         if limit == 0 {
             return Vec::new();

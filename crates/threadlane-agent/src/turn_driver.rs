@@ -93,6 +93,8 @@ impl<'a> TurnDriver<'a> {
     pub(crate) async fn run_turns(&mut self) {
         let mut turn_number = 0;
         let mut overflow_recovery_attempted = false;
+        let mut stream_rule_recovery_attempted = false;
+        let mut provider_fallback_attempted = false;
 
         loop {
             turn_number += 1;
@@ -123,7 +125,16 @@ impl<'a> TurnDriver<'a> {
                 // The session model is the user-facing base selection. The Task
                 // role is the model that actually drives execution, including
                 // queued turns and session switches.
-                self.config.model_roles.resolve_task(&turn.model).to_string()
+                let task = self.config.model_roles.resolve_task(&turn.model);
+                if provider_fallback_attempted {
+                    self.config
+                        .model_roles
+                        .fallback_after(task)
+                        .unwrap_or(task)
+                        .to_string()
+                } else {
+                    task.to_string()
+                }
             };
             let (stream_tx, mut stream_rx) = mpsc::channel(100);
             let client = self.provider_client.clone();
@@ -166,13 +177,29 @@ impl<'a> TurnDriver<'a> {
             let mut captured_tool_calls: Vec<ToolCall> = Vec::new();
             let mut provider_step = ProviderStepAccumulator::default();
             let mut monitor = StreamRuleMonitor::new(self.stream_rules.clone(), &self.config);
+            let mut stream_rule_matched = false;
 
             while let Some(evt) = stream_rx.recv().await {
                 let _ = provider_step.push(&evt);
                 match evt {
                     StreamEvent::ContentToken(token) => {
                         current_text.push_str(&token);
-                        if monitor.push_chunk(&token).is_some() {
+                        if let Some(matched) = monitor.push_chunk(&token) {
+                            log::warn!("stream rule '{}' matched; aborting current response", matched.rule_id);
+                            self.emit_event(AgentEvent::MessageEnd {
+                                message: AgentMessage::Assistant {
+                                    content: None,
+                                    tool_calls: None,
+                                    stop_reason: Some("stream_rule_abort".into()),
+                                    deferred_handle: None,
+                                },
+                            });
+                            self.turn.lock().await.messages.push(AgentMessage::user(
+                                format!("System reminder from rule '{}': {}", matched.rule_name, matched.reminder),
+                                Vec::new(),
+                            ));
+                            monitor.reset();
+                            stream_rule_matched = true;
                             break;
                         }
                         self.emit_event(AgentEvent::MessageUpdate {
@@ -211,10 +238,36 @@ impl<'a> TurnDriver<'a> {
                             overflow_recovery_attempted = true;
                             continue;
                         }
+                        if !provider_fallback_attempted
+                            && current_text.is_empty()
+                            && threadlane_provider::router::is_quota_or_rate_limit(&err)
+                        {
+                            provider_fallback_attempted = true;
+                            let fallback = self.config.model_roles.fallback_after(&model);
+                            let reminder = match fallback {
+                                Some(fallback) => format!("System: primary provider is rate-limited; retry this identical turn using fallback model {fallback}."),
+                                None => "System: primary provider is rate-limited; retry this identical turn using the configured fallback route.".into(),
+                            };
+                            self.turn.lock().await.messages.push(AgentMessage::user(reminder, Vec::new()));
+                            continue;
+                        }
                         self.emit_event(AgentEvent::AgentError { error: err });
                         return;
                     }
                 }
+            }
+
+            if stream_rule_matched {
+                if stream_rule_recovery_attempted {
+                    self.emit_event(AgentEvent::AgentError {
+                        error: "stream rule matched again after corrective retry".into(),
+                    });
+                    return;
+                }
+                stream_rule_recovery_attempted = true;
+                // Do not persist or emit the partial completion. The injected reminder
+                // already entered canonical turn state; continue creates the corrected retry.
+                continue;
             }
 
             if current_text.trim().is_empty() && captured_tool_calls.is_empty() {

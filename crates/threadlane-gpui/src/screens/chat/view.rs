@@ -467,6 +467,12 @@ impl ChatListView {
         let tool_call_id = activity.id.clone();
         let has_detail = !activity.detail.trim().is_empty();
         let row_id = SharedString::from(activity.id.clone());
+        let proposal_id = activity
+            .detail
+            .split("proposal_id=")
+            .nth(1)
+            .and_then(|value| value.split_whitespace().next())
+            .map(str::to_owned);
 
         div()
             .w_full()
@@ -532,13 +538,36 @@ impl ChatListView {
                             .text_color(theme.muted_foreground)
                             .child(activity.summary.clone()),
                     )
+                    .children(proposal_id.as_ref().map(|proposal_id| {
+                        let model = self.model.clone();
+                        let proposal_id = proposal_id.clone();
+                        div()
+                            .id(SharedString::from(format!("accept-edit-{proposal_id}")))
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .bg(theme.primary)
+                            .text_xs()
+                            .text_color(theme.primary_foreground)
+                            .child("Accept")
+                            .on_click(move |_event, _window, cx| {
+                                model.update(cx, |state, cx| {
+                                    controller::dispatch(
+                                        state,
+                                        AppAction::AcceptEditProposal(proposal_id.clone()),
+                                    );
+                                    cx.notify();
+                                });
+                            })
+                    }))
                     .children(has_detail.then(|| {
                         div()
                             .flex_none()
                             .text_xs()
                             .text_color(theme.muted_foreground)
                             .child(if activity.is_expanded { "⌄" } else { "›" })
-                    })),
+                    }))
             )
             .children(activity.is_expanded.then(|| {
                 div()

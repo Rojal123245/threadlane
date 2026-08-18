@@ -5,6 +5,16 @@ use threadlane_gpui::screens::workspace::WorkspaceView;
 use threadlane_gpui::theme;
 
 fn main() {
+    if std::env::args().any(|arg| arg == "--dump-config") {
+        println!("active_lane=main");
+        println!("session_file=<resolved per workspace>");
+        println!("model=<selected model>");
+        println!("provider=selected model router");
+        println!("skills=project-and-global discovery");
+        println!("extensions=global-and-project WASI modules");
+        println!("sandbox=workspace-scoped capabilities");
+        return;
+    }
     env_logger::init();
 
     let app = gpui_platform::application().with_assets(Assets);

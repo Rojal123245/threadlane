@@ -1777,6 +1777,25 @@ impl CodingSessionHarness {
         }
         Ok(())
     }
+    pub(crate) fn assert_model_visible(&mut self, messages: &[AgentMessage]) -> Result<(), String> {
+        self.refresh()?;
+        let logged = self
+            .store
+            .model_history("main")
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|entry| entry.message)
+            .collect::<Vec<_>>();
+        let mut cursor = 0usize;
+        for message in messages.iter().filter(|message| !matches!(message, AgentMessage::System { .. })) {
+            let Some(offset) = logged[cursor..].iter().position(|candidate| candidate == message) else {
+                return Err(format!("model-visible message is not logged: {message:?}"));
+            };
+            cursor += offset + 1;
+        }
+        Ok(())
+    }
+
     /// Run hooks of the given kind for the main lane.
     pub(crate) async fn run_hooks(&self, kind: HookKind, context: &HookContext) {
         for failure in self.store.hooks().run(kind, context).await {

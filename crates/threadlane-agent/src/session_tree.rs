@@ -472,11 +472,13 @@ impl SessionTree {
         parent_leaf_id: Option<&str>,
         messages: Vec<AgentMessage>,
     ) -> Result<Vec<String>, String> {
-        if parent_leaf_id.is_some_and(|id| !self.nodes.contains_key(id)) {
-            return Err(format!(
-                "Parent session node '{}' not found",
-                parent_leaf_id.unwrap()
-            ));
+        if let Some(parent_leaf_id) = parent_leaf_id {
+            if !self.nodes.contains_key(parent_leaf_id) {
+                return Err(format!(
+                    "Parent session node '{}' not found",
+                    parent_leaf_id
+                ));
+            }
         }
         let mut next = self.clone();
         let active_node_id = next.active_node_id.clone();
@@ -635,13 +637,13 @@ impl SessionTree {
         else {
             return false;
         };
-        let previous = self
-            .nodes
-            .get(&node_id)
-            .map(|node| node.message.clone())
-            .unwrap();
+        let Some(previous) = self.nodes.get(&node_id).map(|node| node.message.clone()) else {
+            return false;
+        };
         {
-            let node = self.nodes.get_mut(&node_id).unwrap();
+            let Some(node) = self.nodes.get_mut(&node_id) else {
+                return false;
+            };
             if let AgentMessage::Tool {
                 content: current_content,
                 is_error: current_is_error,
@@ -654,7 +656,9 @@ impl SessionTree {
         }
         if let Some(path) = self.file_path.clone() {
             if self.save_transactionally(&path).is_err() {
-                self.nodes.get_mut(&node_id).unwrap().message = previous;
+                if let Some(node) = self.nodes.get_mut(&node_id) {
+                    node.message = previous;
+                }
                 return false;
             }
         }

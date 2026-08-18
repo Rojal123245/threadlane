@@ -320,6 +320,23 @@ fn create_worktree(work_dir: &Path, path: &Path, branch: &str) -> Result<(), Git
     Ok(())
 }
 
+/// Describe changed paths in dependency-friendly groups for atomic commit planning.
+/// Source files are emitted before generated/lock files, and lock files are excluded.
+pub fn atomic_commit_groups(work_dir: &Path) -> Result<Vec<Vec<String>>, GitError> {
+    let status = inspect(work_dir)?;
+    let mut paths = status
+        .files
+        .into_iter()
+        .map(|file| file.path)
+        .filter(|path| !path.ends_with("Cargo.lock") && !path.ends_with("package-lock.json"))
+        .collect::<Vec<_>>();
+    paths.sort_by_key(|path| {
+        let generated = path.contains("/target/") || path.ends_with(".generated.rs");
+        (generated, path.clone())
+    });
+    Ok(paths.into_iter().map(|path| vec![path]).collect())
+}
+
 pub fn commit_staged(work_dir: &Path, message: &str) -> Result<(), GitError> {
     let message = message.trim();
     if message.is_empty() {
@@ -510,6 +527,7 @@ mod tests {
     use super::*;
     use std::fs;
     use std::process::Command;
+    use tempfile::tempdir;
 
     fn run_git(work_dir: &Path, args: &[&str]) {
         let output = Command::new("git")
@@ -613,6 +631,21 @@ mod tests {
             ),
             Some("https://github.com/owner/repo/compare/main...enhancements?expand=1".to_owned())
         );
+    }
+
+    #[test]
+    fn atomic_commit_groups_exclude_locks_and_order_sources_first() {
+        let dir = tempdir().unwrap();
+        run_git(dir.path(), &["init", "-q"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-qm", "initial"]);
+        std::fs::write(dir.path().join("src.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(dir.path().join("Cargo.lock"), "lock\n").unwrap();
+        let groups = atomic_commit_groups(dir.path()).unwrap();
+        assert_eq!(groups, vec![vec!["src.rs".to_string()]]);
     }
 
     #[test]
