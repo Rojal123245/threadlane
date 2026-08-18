@@ -106,7 +106,29 @@ pub fn substitute_args(content: &str, args: &[String]) -> String {
 }
 
 fn eval_braced_expr(expr: &str, args: &[String], all_args: &str) -> String {
-    // 1. Check for slicing: @:N or @:N:L
+    // 1. Check for defaults: TARGET:-DEFAULT. This must run before the
+    //    `@:` slicing branch, otherwise `@:-none` is misread as a slice
+    //    (`@:` + `-none` → empty string) instead of the `@` target with a
+    //    `none` default.
+    if let Some((target, default_val)) = expr.split_once(":-") {
+        let val = match target {
+            "@" | "ARGUMENTS" => {
+                if all_args.is_empty() {
+                    None
+                } else {
+                    Some(all_args.to_string())
+                }
+            }
+            num_str => num_str
+                .parse::<usize>()
+                .ok()
+                .filter(|&n| n > 0 && n <= args.len())
+                .map(|n| args[n - 1].clone()),
+        };
+        return val.unwrap_or_else(|| default_val.to_string());
+    }
+
+    // 2. Check for slicing: @:N or @:N:L
     if let Some(slice_spec) = expr.strip_prefix("@:") {
         let parts: Vec<&str> = slice_spec.split(':').collect();
         let start_idx = parts
@@ -126,25 +148,6 @@ fn eval_braced_expr(expr: &str, args: &[String], all_args: &str) -> String {
             }
         }
         return args[start_0..].join(" ");
-    }
-
-    // 2. Check for defaults: TARGET:-DEFAULT
-    if let Some((target, default_val)) = expr.split_once(":-") {
-        let val = match target {
-            "@" | "ARGUMENTS" => {
-                if all_args.is_empty() {
-                    None
-                } else {
-                    Some(all_args.to_string())
-                }
-            }
-            num_str => num_str
-                .parse::<usize>()
-                .ok()
-                .filter(|&n| n > 0 && n <= args.len())
-                .map(|n| args[n - 1].clone()),
-        };
-        return val.unwrap_or_else(|| default_val.to_string());
     }
 
     // Fallback: evaluate basic expression inside braces
@@ -343,14 +346,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "TODO: fix bug in default slicing for @:-default"]
     fn test_defaults_at_symbol_bug() {
         let empty_args: Vec<String> = vec![];
         let content_all_default = "Args: ${@:-none}";
         let result_all_default = substitute_args(content_all_default, &empty_args);
-
-        // BUG: In the current implementation `eval_braced_expr` treats `@:-none` as slicing `@:` with value `-none`,
-        // returning an empty string. The expected output is "none".
         assert_eq!(result_all_default, "Args: none");
     }
 
