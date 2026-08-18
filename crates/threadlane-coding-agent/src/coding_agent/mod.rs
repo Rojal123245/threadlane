@@ -22,11 +22,6 @@ pub(crate) use runtime::{
 // Re-export test-only types.
 pub(crate) use broker::*;
 pub use harness::*;
-#[cfg(test)]
-pub(crate) use runtime::{
-    AgentWorkObserver, DeterministicSubagentToolExecutor, SubagentBoundaryObserver,
-    SubagentObserverState,
-};
 
 #[cfg(test)]
 mod tests {
@@ -39,13 +34,13 @@ mod tests {
     use serde_json::Value;
     use std::collections::{HashMap, HashSet};
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration as StdDuration, Instant};
-    use std::{fs, path::Path};
+    use std::fs;
     use threadlane_agent::harness::{
         AgentHarness, HookContext, HookEffect, HookHandler, HookKind, JsonlStore, OperationIntent,
-        OperationOutcome, QueueKind, Record, Reducer, SessionStore, Snapshot, ToolReplaySafety,
+        OperationOutcome, QueueKind, Record, Reducer, SessionStore,
         ToolResult as HarnessToolResult,
     };
     use threadlane_wasi::{
@@ -55,8 +50,7 @@ mod tests {
     // tests were written against the HarnessRecord name previously in scope.
     type HarnessRecord = Record;
     use threadlane_agent::{
-        AgentEvent, AgentMessage, AgentToolDefinition, ImageAttachment, SessionTree, TokenUsage,
-        ToolExecutor,
+        AgentEvent, AgentMessage, ImageAttachment, SessionTree, TokenUsage, ToolExecutor,
     };
     use tokio::sync::broadcast;
     use tokio::time::Duration;

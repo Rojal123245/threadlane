@@ -1505,7 +1505,7 @@ fn md5_hash(input: &str) -> String {
 mod tests {
     use super::*;
     use std::time::Duration;
-    use threadlane_agent::harness::{AgentHarness, JsonlStore};
+    use threadlane_agent::harness::JsonlStore;
     use threadlane_agent::harness::{
         OperationIntent, OperationOutcome, QueueKind as HarnessQueueKind, Record as HarnessRecord,
         SessionStore,

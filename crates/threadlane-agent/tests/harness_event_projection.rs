@@ -2,8 +2,8 @@ use serde_json::json;
 use threadlane_agent::events::AgentEvent;
 use threadlane_agent::harness::{
     AgentHarness, Entry, EventPayload, HarnessEventHub, MemoryStore, OperationIntent,
-    OperationOutcome, ProjectedAgentEvent, ProvisionedEntry, QueueKind, QueuedEntry, Record,
-    SessionStore, StreamingState, ToolReplaySafety,
+    OperationOutcome, ProjectedAgentEvent, ProvisionedEntry, QueueKind, Record, StreamingState,
+    ToolReplaySafety,
 };
 use threadlane_agent::AgentMessage;
 

@@ -73,12 +73,10 @@ pub struct ChatMessageInfo {
     pub(crate) id: String,
     pub(crate) role: MessageRole,
     pub(crate) content: String,
-    timestamp: String,
     pub(crate) tool_activities: Vec<ToolActivityInfo>,
     pub(crate) streaming: bool,
     pub(crate) reasoning_content: Option<String>,
     pub(crate) reasoning_expanded: bool,
-    advisor_note: Option<threadlane_agent::AdvisorNote>,
 }
 
 #[derive(Clone, Debug)]
@@ -129,7 +127,6 @@ pub struct AppState {
     pub(crate) workspace_page: WorkspacePage,
     pub(crate) openai_key: String,
     pub(crate) opencode_key: String,
-    antigravity_connected: bool,
     pub(crate) auth_status_msg: Option<String>,
     pub(crate) update_status: threadlane_updater::UpdateStatus,
     pub(crate) update_notice_dismissed: bool,
@@ -375,12 +372,10 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                     id: format!("msg_{msg_counter}"),
                     role,
                     content,
-                    timestamp: String::new(),
                     tool_activities: Vec::new(),
                     streaming: false,
                     reasoning_content: None,
                     reasoning_expanded: false,
-                    advisor_note: None,
                 });
             }
             AgentMessage::UserWithImages { content, .. } => {
@@ -388,12 +383,10 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                     id: format!("msg_{msg_counter}"),
                     role: MessageRole::User,
                     content,
-                    timestamp: String::new(),
                     tool_activities: Vec::new(),
                     streaming: false,
                     reasoning_content: None,
                     reasoning_expanded: false,
-                    advisor_note: None,
                 });
             }
             AgentMessage::Assistant {
@@ -429,12 +422,10 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                     id: format!("msg_{msg_counter}"),
                     role: MessageRole::Assistant,
                     content: content.unwrap_or_default(),
-                    timestamp: String::new(),
                     tool_activities,
                     streaming: false,
                     reasoning_content: None,
                     reasoning_expanded: false,
-                    advisor_note: None,
                 });
             }
             AgentMessage::Tool {
@@ -477,12 +468,10 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                     id: format!("msg_{msg_counter}"),
                     role: MessageRole::Assistant,
                     content: String::new(),
-                    timestamp: String::new(),
                     tool_activities: vec![tool_info],
                     streaming: false,
                     reasoning_content: None,
                     reasoning_expanded: false,
-                    advisor_note: None,
                 });
             }
             AgentMessage::System { content } => {
@@ -497,12 +486,10 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                     id: format!("msg_{msg_counter}"),
                     role,
                     content,
-                    timestamp: String::new(),
                     tool_activities: Vec::new(),
                     streaming: false,
                     reasoning_content: None,
                     reasoning_expanded: false,
-                    advisor_note: None,
                 });
             }
             AgentMessage::Custom {
@@ -520,12 +507,10 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                         id: format!("msg_{msg_counter}"),
                         role: MessageRole::Assistant,
                         content: String::new(),
-                        timestamp: String::new(),
                         tool_activities: Vec::new(),
                         streaming: false,
                         reasoning_content: Some(text),
                         reasoning_expanded: false,
-                        advisor_note: None,
                     });
                     continue;
                 }
@@ -539,12 +524,10 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                         MessageRole::System
                     },
                     content: text,
-                    timestamp: String::new(),
                     tool_activities: Vec::new(),
                     streaming: false,
                     reasoning_content: None,
                     reasoning_expanded: false,
-                    advisor_note: None,
                 });
             }
         }
@@ -682,8 +665,6 @@ impl AppState {
             .unwrap_or_default();
         let opencode_key =
             threadlane_auth::opencode_auth::load_opencode_api_key().unwrap_or_default();
-        let antigravity_connected =
-            threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some();
 
         let (stream_tx, stream_rx) = mpsc::channel();
         let (session_refresh_tx, session_refresh_requests) = mpsc::channel::<PathBuf>();
@@ -754,7 +735,6 @@ impl AppState {
             workspace_page: WorkspacePage::Chat,
             openai_key,
             opencode_key,
-            antigravity_connected,
             auth_status_msg: None,
             update_status: threadlane_updater::UpdateStatus::Idle,
             update_notice_dismissed: false,
@@ -1339,12 +1319,10 @@ impl AppState {
                                     id: format!("streaming-{session_id}-{}", self.messages.len()),
                                     role: MessageRole::Assistant,
                                     content: delta,
-                                    timestamp: String::new(),
                                     tool_activities: Vec::new(),
                                     streaming: true,
                                     reasoning_content: None,
                                     reasoning_expanded: false,
-                                    advisor_note: None,
                                 });
                             }
                         }
@@ -1364,12 +1342,10 @@ impl AppState {
                                     id: format!("streaming-{session_id}-{segment}"),
                                     role: MessageRole::Assistant,
                                     content: String::new(),
-                                    timestamp: String::new(),
                                     tool_activities: Vec::new(),
                                     streaming: true,
                                     reasoning_content: Some(delta),
                                     reasoning_expanded: false,
-                                    advisor_note: None,
                                 });
                             }
                         }
@@ -1395,12 +1371,10 @@ impl AppState {
                                     id: format!("streaming-{session_id}-{}", self.messages.len()),
                                     role: MessageRole::Assistant,
                                     content: String::new(),
-                                    timestamp: String::new(),
                                     tool_activities: vec![activity],
                                     streaming: true,
                                     reasoning_content: None,
                                     reasoning_expanded: false,
-                                    advisor_note: None,
                                 });
                             }
                         }
@@ -1448,12 +1422,10 @@ impl AppState {
                                 id: note_id,
                                 role: MessageRole::Advisor(note.severity),
                                 content: format!("**{}**\n\n{}", note.summary, note.details),
-                                timestamp: String::new(),
                                 tool_activities: Vec::new(),
                                 streaming: false,
                                 reasoning_content: None,
                                 reasoning_expanded: false,
-                                advisor_note: Some(note),
                             });
                         }
                         ChatAgentUpdate::ModelRolesUpdated(roles) => {
@@ -1474,12 +1446,10 @@ impl AppState {
                                 id: format!("stream-error-{session_id}"),
                                 role: MessageRole::Error,
                                 content: error.clone(),
-                                timestamp: String::new(),
                                 tool_activities: Vec::new(),
                                 streaming: false,
                                 reasoning_content: None,
                                 reasoning_expanded: false,
-                                advisor_note: None,
                             });
                             self.is_generating = false;
                             self.session_status = Some(error);
@@ -1637,12 +1607,10 @@ impl AppState {
                 id: format!("queued-user-{session_id}-{}", self.messages.len()),
                 role: MessageRole::User,
                 content: text,
-                timestamp: String::new(),
                 tool_activities: Vec::new(),
                 streaming: false,
                 reasoning_content: None,
                 reasoning_expanded: false,
-                advisor_note: None,
             });
         }
     }
@@ -1693,12 +1661,10 @@ impl AppState {
                 content: format!(
                     "No API key configured for model `{model}`. Open Settings and save the provider credential."
                 ),
-                timestamp: String::new(),
                 tool_activities: Vec::new(),
                 streaming: false,
                 reasoning_content: None,
                 reasoning_expanded: false,
-                advisor_note: None,
             });
             return Ok(());
         }
@@ -1736,12 +1702,10 @@ impl AppState {
             } else {
                 format!("{text}\n[{} image attachment(s)]", images.len())
             },
-            timestamp: String::new(),
             tool_activities: Vec::new(),
             streaming: false,
             reasoning_content: None,
             reasoning_expanded: false,
-            advisor_note: None,
         });
 
         self.is_generating = true;
