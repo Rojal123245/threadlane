@@ -53,6 +53,7 @@ pub struct ChatListView {
     last_session_key: Option<(std::path::PathBuf, String)>,
     initial_scroll_frames: u8,
     older_load_pending: bool,
+    show_trajectory: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -186,6 +187,7 @@ impl ChatListView {
             last_session_key: None,
             initial_scroll_frames: 0,
             older_load_pending: false,
+            show_trajectory: false,
             _subscriptions: vec![sub1, sub2],
         }
     }
@@ -292,15 +294,19 @@ impl ChatListView {
                 .unwrap_or_else(|| "New task".to_string())
         };
         let theme = cx.theme().colors;
+        let export_model = self.model.clone();
 
         div()
             .h(px(48.0))
             .flex_none()
             .flex()
-            .items_start()
-            .pt(px(9.0))
+            .items_center()
+            .gap_1()
+            .px_4()
             .pl(self.header_left_padding)
-            .pr_4()
+            // The workspace owns the rightmost 76px for environment and panel
+            // icon buttons rendered as absolute overlays.
+            .pr(px(88.0))
             .border_b_1()
             .border_color(theme.title_bar_border)
             .bg(theme.title_bar)
@@ -312,7 +318,47 @@ impl ChatListView {
                     .line_height(px(18.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.foreground)
-                    .child(active_title),
+                    .child(active_title)
+                    .flex_1(),
+            )
+            .child(
+                Button::new("export-session-log")
+                    .ghost()
+                    .small()
+                    .child("Export log")
+                    .on_click(move |_event, _window, cx| {
+                        let source = export_model.read(cx).active_session_file();
+                        let export_model = export_model.clone();
+                        cx.spawn(async move |cx| {
+                            let Some(source) = source else {
+                                let _ = export_model.update(cx, |state, cx| {
+                                    state.session_status = Some("No active canonical session log to export.".into());
+                                    cx.notify();
+                                });
+                                return;
+                            };
+                            let default_name = source.file_name().and_then(|name| name.to_str()).unwrap_or("threadlane-session.jsonl").to_owned();
+                            let Some(destination) = rfd::AsyncFileDialog::new().set_file_name(&default_name).save_file().await else { return; };
+                            let result = std::fs::copy(&source, destination.path());
+                            let _ = export_model.update(cx, |state, cx| {
+                                state.session_status = Some(match result {
+                                    Ok(_) => format!("Exported canonical session log to {}", destination.path().display()),
+                                    Err(error) => format!("Could not export session log: {error}"),
+                                });
+                                cx.notify();
+                            });
+                        }).detach();
+                    }),
+            )
+            .child(
+                Button::new("toggle-trajectory")
+                    .ghost()
+                    .small()
+                    .child(if self.show_trajectory { "Chat" } else { "Trajectory" })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_trajectory = !this.show_trajectory;
+                        cx.notify();
+                    })),
             )
     }
 
@@ -691,6 +737,28 @@ impl ChatListView {
                     ),
             )
             .into_any_element()
+    }
+
+    fn render_trajectory(&self, cx: &mut Context<Self>) -> AnyElement {
+        let entries = self.model.read(cx).active_trajectory().to_vec();
+        let theme = cx.theme().colors;
+        if entries.is_empty() {
+            return div().flex_1().flex().items_center().justify_center()
+                .text_sm().text_color(theme.muted_foreground)
+                .child("No canonical trajectory events have been observed in this session yet.")
+                .into_any_element();
+        }
+        div().id("session-trajectory").w_full().flex_1().min_h_0().overflow_y_scroll().py_4()
+            .child(div().w_full().max_w(px(CHAT_CONTENT_MAX_WIDTH)).mx_auto().gap_2().flex().flex_col().children(
+                entries.into_iter().enumerate().map(|(index, entry)| {
+                    div().id(SharedString::from(format!("trajectory-{index}"))).p_3().rounded_md().border_1()
+                        .border_color(theme.border).bg(theme.secondary)
+                        .child(div().text_xs().text_color(theme.primary).child(entry.category))
+                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(entry.summary))
+                        .when(!entry.detail.is_empty(), |this| this.child(div().mt_1().text_xs().text_color(theme.muted_foreground).child(entry.detail)))
+                        .when_some(entry.lane, |this, lane| this.child(div().mt_1().text_xs().text_color(theme.muted_foreground).child(format!("Lane: {lane}"))))
+                })
+            )).into_any_element()
     }
 
     fn render_transcript_rows(
@@ -1347,6 +1415,8 @@ impl ChatListView {
                 state.active_session_id.clone(),
             )
         };
+        let metrics = self.model.read(cx).active_session_metrics();
+        let lane_count = self.model.read(cx).active_trajectory().iter().filter_map(|entry| entry.lane.as_deref()).collect::<std::collections::HashSet<_>>().len();
         let has_prompt =
             !self.input_state.read(cx).value().trim().is_empty() || !self.pasted_images.is_empty();
         let project_root = self.model.read(cx).active_work_dir.clone();
@@ -1877,6 +1947,27 @@ impl ChatListView {
             .pb_2()
             .bg(theme.background)
             .children(pending_preview)
+            .when(
+                metrics.turns > 0 || metrics.tool_calls > 0 || metrics.input_tokens > 0 || metrics.output_tokens > 0 || lane_count > 0,
+                |this| this.child(
+                    div()
+                        .w_full()
+                        .max_w(px(1000.0))
+                        .mx_auto()
+                        .pb_2()
+                        .px_1()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(format!(
+                            "{} turns · {} tool calls · {} input / {} output tokens · {} subagent lanes",
+                            metrics.turns,
+                            metrics.tool_calls,
+                            metrics.input_tokens,
+                            metrics.output_tokens,
+                            lane_count,
+                        )),
+                ),
+            )
             .child(
                 div()
                     .w_full()
@@ -2053,7 +2144,9 @@ impl Render for ChatListView {
             .min_h_0()
             .bg(theme.background)
             .child(self.render_header(cx))
-            .child(if is_new_task {
+            .child(if self.show_trajectory {
+                self.render_trajectory(cx)
+            } else if is_new_task {
                 self.render_new_task(cx)
             } else if messages.is_empty() {
                 div()

@@ -11,8 +11,8 @@ pub(crate) use runtime::{
 };
 pub use runtime::{
     cancel_open_subagent_operations, AgentRunTask, CodingAgent, CodingAgentCancellation,
-    CodingAgentOptions, CodingAgentWorkHandle, SubagentCancellationGuard, SubagentInnerTool,
-    SubagentInnerToolData, SubagentResult, SubagentSessionData,
+    CodingAgentOptions, CodingAgentWorkHandle, HarnessCompositionSnapshot, SubagentCancellationGuard,
+    SubagentInnerTool, SubagentInnerToolData, SubagentResult, SubagentSessionData,
 };
 #[cfg(test)]
 pub(crate) use runtime::{

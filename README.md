@@ -39,7 +39,7 @@ Threadlane combines a GPU-accelerated desktop interface with a capable coding-ag
 
 | Capability | What it provides |
 | --- | --- |
-| Native GPUI Desktop UI | Streaming chat, Markdown, tool activity, reasoning states, image attachments, keyboard-first controls, and native terminal integration. |
+| Native GPUI Desktop UI | Streaming chat, Markdown, tool activity, reasoning states, image attachments, keyboard-first controls, native terminal integration, and a canonical-session Trajectory view. |
 | Multi-project workspace | Attached-project registry, project switching, isolated drafts, persistent sessions, archive/delete actions, and automatic titles. |
 | Coding tools | Workspace-scoped file reading and writing, directory inspection, pattern search, and bounded command execution. |
 | Skills and commands | Global and project-local skill discovery with searchable slash-command completion. |
@@ -144,6 +144,14 @@ For an attached Git project, the composer shows the current branch with checkout
 4. Review streamed reasoning summaries and tool activity in the conversation.
 5. Use `/` to discover built-in commands, installed skills, and extension commands.
 6. Stop an active generation at any time; the submitted draft and attachments are restored when applicable.
+7. Use **Trajectory** in the session header to inspect canonical turn, tool, subagent, recovery, and rule events observed during the active session.
+8. Use **Export log** to save an exact copy of the active session's canonical JSONL record; this is the durable recovery/debug artifact, not a generated transcript.
+
+### Session visibility
+
+The chat view includes a session-scoped plan tracker above the composer. It is restored from persisted `session_plan` records and never mixes project-wide background tasks into the current conversation plan. The composer also reports observed turns, tool calls, token totals, and subagent-lane count. These are derived from agent events available to the desktop; unavailable timing/cache metrics are intentionally not fabricated.
+
+The **Trajectory** view is a read-only presentation of canonical agent events observed while the desktop has the session open. It includes turn boundaries, tool activity, subagent lifecycle/recovery, errors, and stream-rule triggers. Exporting a session log copies the canonical JSONL chosen by the user and does not create a second operation log.
 
 ## Slash Commands
 

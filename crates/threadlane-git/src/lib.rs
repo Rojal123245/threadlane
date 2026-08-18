@@ -337,6 +337,40 @@ pub fn atomic_commit_groups(work_dir: &Path) -> Result<Vec<Vec<String>>, GitErro
     Ok(paths.into_iter().map(|path| vec![path]).collect())
 }
 
+/// Stages and commits each planned atomic group. If any group fails, newly
+/// staged paths are reset so a caller can review and retry without an accidental
+/// combined commit. Previously created commits are intentionally retained.
+pub fn commit_atomic_groups(work_dir: &Path, message_prefix: &str) -> Result<Vec<Vec<String>>, GitError> {
+    let groups = atomic_commit_groups(work_dir)?;
+    if groups.is_empty() {
+        return Ok(groups);
+    }
+    let prefix = message_prefix.trim();
+    if prefix.is_empty() {
+        return Err(GitError {
+            work_dir: work_dir.to_path_buf(),
+            message: "commit message prefix cannot be empty".into(),
+        });
+    }
+    for (index, group) in groups.iter().enumerate() {
+        let paths = group.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut add_args = vec!["add", "--"];
+        add_args.extend(paths);
+        if let Err(error) = command(work_dir, &add_args) {
+            let _ = command(work_dir, &["reset"]);
+            return Err(error);
+        }
+        if let Err(error) = command(
+            work_dir,
+            &["commit", "-m", &format!("{prefix} ({}/{})", index + 1, groups.len())],
+        ) {
+            let _ = command(work_dir, &["reset"]);
+            return Err(error);
+        }
+    }
+    Ok(groups)
+}
+
 pub fn commit_staged(work_dir: &Path, message: &str) -> Result<(), GitError> {
     let message = message.trim();
     if message.is_empty() {
@@ -646,6 +680,23 @@ mod tests {
         std::fs::write(dir.path().join("Cargo.lock"), "lock\n").unwrap();
         let groups = atomic_commit_groups(dir.path()).unwrap();
         assert_eq!(groups, vec![vec!["src.rs".to_string()]]);
+    }
+
+    #[test]
+    fn atomic_commit_execution_creates_one_commit_per_group() {
+        let dir = tempdir().unwrap();
+        run_git(dir.path(), &["init", "-q"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        std::fs::write(dir.path().join("initial.txt"), "initial\n").unwrap();
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-qm", "initial"]);
+        std::fs::write(dir.path().join("first.rs"), "fn first() {}\n").unwrap();
+        std::fs::write(dir.path().join("second.rs"), "fn second() {}\n").unwrap();
+        let groups = commit_atomic_groups(dir.path(), "atomic changes").unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(command(dir.path(), &["rev-list", "--count", "HEAD"]).unwrap().trim(), "3");
+        assert!(!inspect(dir.path()).unwrap().has_changes);
     }
 
     #[test]

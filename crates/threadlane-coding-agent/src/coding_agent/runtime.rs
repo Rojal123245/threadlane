@@ -661,6 +661,26 @@ impl HarnessCompositionSnapshot {
             sandbox_policy: "workspace-scoped capabilities".into(),
         }
     }
+
+    pub fn resolved(
+        options: &CodingAgentOptions,
+        skills: &SkillRegistry,
+        extensions: &WasiExtensionManager,
+    ) -> Self {
+        let mut snapshot = Self::from_options(options);
+        snapshot.skills = skills
+            .list_skills()
+            .into_iter()
+            .filter(|skill| skill.enabled && skill.is_valid)
+            .map(|skill| skill.id)
+            .collect();
+        snapshot.extensions = extensions
+            .extension_manifests()
+            .into_iter()
+            .map(|extension| extension.name)
+            .collect();
+        snapshot
+    }
 }
 
 #[derive(Clone)]
@@ -699,7 +719,6 @@ pub struct CodingAgent {
     harness_run_id: Arc<std::sync::Mutex<Option<String>>>,
     cancellation: CodingAgentCancellation,
     pub(crate) interrupted_subagent_recovery: InterruptedSubagentRecoveryState,
-    config: crate::config::CodingAgentConfig,
     #[cfg(test)]
     subagent_work_observer: SubagentObserverState,
     #[cfg(test)]
@@ -1404,7 +1423,6 @@ impl CodingAgent {
             harness_run_id,
             cancellation,
             interrupted_subagent_recovery,
-            config: coding_config,
             #[cfg(test)]
             subagent_work_observer,
             #[cfg(test)]

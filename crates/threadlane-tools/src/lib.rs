@@ -374,8 +374,11 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
                 Some(path) if path.starts_with("agent://") => {
                     return read_virtual_agent(workspace_root, &path[8..]);
                 }
-                Some(path) if path.starts_with("pr://") || path.starts_with("issue://") => {
-                    return format!("Virtual reference '{}' requires an approved repository provider.", path);
+                Some(path) if path.starts_with("pr://") => {
+                    return virtual_read::github(workspace_root, "pr", &path[5..]);
+                }
+                Some(path) if path.starts_with("issue://") => {
+                    return virtual_read::github(workspace_root, "issue", &path[8..]);
                 }
                 Some(p) => p,
                 None => return "Error: 'path' parameter is required".into(),

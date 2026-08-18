@@ -267,7 +267,7 @@ pub struct LoadedSkill {
 }
 
 impl SkillRegistry {
-    fn list_skills(&self) -> Vec<SkillMetadata> {
+    pub fn list_skills(&self) -> Vec<SkillMetadata> {
         sorted_metadata(self.records.values().map(|record| record.metadata.clone()))
     }
 

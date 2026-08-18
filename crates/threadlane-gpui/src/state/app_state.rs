@@ -69,6 +69,22 @@ pub struct ToolActivityInfo {
 }
 
 #[derive(Clone, Debug)]
+pub struct TrajectoryEntry {
+    pub(crate) category: String,
+    pub(crate) summary: String,
+    pub(crate) detail: String,
+    pub(crate) lane: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SessionMetricsInfo {
+    pub(crate) turns: usize,
+    pub(crate) tool_calls: usize,
+    pub(crate) input_tokens: u64,
+    pub(crate) output_tokens: u64,
+}
+
+#[derive(Clone, Debug)]
 pub struct ChatMessageInfo {
     pub(crate) id: String,
     pub(crate) role: MessageRole,
@@ -118,6 +134,8 @@ pub struct AppState {
     pub(crate) session_status: Option<String>,
     pending_composer_messages: HashMap<String, String>,
     session_token_usage: HashMap<String, TokenUsage>,
+    trajectory_by_session: HashMap<String, Vec<TrajectoryEntry>>,
+    session_metrics: HashMap<String, SessionMetricsInfo>,
     stashed_prompts: HashMap<String, String>,
     pub(crate) pending_permissions: HashMap<String, threadlane_agent::PermissionRequest>,
 
@@ -728,6 +746,8 @@ impl AppState {
             session_status,
             pending_composer_messages: HashMap::new(),
             session_token_usage: HashMap::new(),
+            trajectory_by_session: HashMap::new(),
+            session_metrics: HashMap::new(),
             stashed_prompts: HashMap::new(),
             selected_model,
             model_roles: threadlane_agent::ModelRoles::default(),
@@ -998,6 +1018,7 @@ impl AppState {
             self.deferred_stream_events.remove(&session_id);
         }
         let runtime = self.ensure_session_runtime(work_dir, session_file.clone());
+        self.hydrate_session_projection(&session_id, &session_file);
         let (messages, start, has_older) = load_session_message_page(&session_file, usize::MAX);
         self.messages = messages;
         self.history_session_file = Some(session_file.clone());
@@ -1287,6 +1308,70 @@ impl AppState {
         Ok(session_id)
     }
 
+    fn hydrate_session_projection(&mut self, session_id: &str, session_file: &Path) {
+        let Ok(store) = threadlane_agent::harness::JsonlStore::open_read_only(session_file) else {
+            return;
+        };
+        let mut trajectory = Vec::new();
+        let mut metrics = SessionMetricsInfo::default();
+        for record in store.records() {
+            use threadlane_agent::harness::Record;
+            let entry = match record {
+                Record::OperationStarted { lane, intent, .. } => Some(("Operation", format!("{intent:?} started"), String::new(), lane.clone())),
+                Record::OperationFinished { lane, outcome, error, .. } => Some(("Operation", format!("Operation {outcome:?}"), error.clone().unwrap_or_default(), lane.clone())),
+                Record::StepAttempt { lane, attempt, .. } => { metrics.turns = metrics.turns.saturating_add(1); Some(("Step", format!("Step attempt {attempt}"), String::new(), lane.clone())) }
+                Record::RetryScheduled { lane, attempt, reason, .. } => Some(("Retry", format!("Retry {attempt} scheduled"), reason.clone(), lane.clone())),
+                Record::ToolStarted { lane, tool_name, effective_args, .. } => { metrics.tool_calls = metrics.tool_calls.saturating_add(1); Some(("Tool", format!("{tool_name} started"), effective_args.to_string(), lane.clone())) }
+                Record::ToolFinished { lane, tool_call_id, .. } => Some(("Tool", "Tool finished".into(), tool_call_id.clone(), lane.clone())),
+                Record::Usage { usage, .. } => { metrics.input_tokens = metrics.input_tokens.saturating_add(u64::from(usage.input_tokens)); metrics.output_tokens = metrics.output_tokens.saturating_add(u64::from(usage.output_tokens)); None }
+                _ => None,
+            };
+            if let Some((category, summary, detail, lane)) = entry {
+                trajectory.push(TrajectoryEntry { category: category.into(), summary, detail, lane: Some(lane) });
+            }
+        }
+        self.trajectory_by_session.insert(session_id.into(), trajectory);
+        self.session_metrics.insert(session_id.into(), metrics);
+    }
+
+    fn record_trajectory(&mut self, session_id: &str, event: &AgentEvent) {
+        let entry = match event {
+            AgentEvent::TurnStart { turn_number } => Some(("Turn", format!("Turn {turn_number} started"), String::new(), None)),
+            AgentEvent::TurnEnd { turn_number, tool_results } => Some(("Turn", format!("Turn {turn_number} finished"), format!("{} tool result(s)", tool_results.len()), None)),
+            AgentEvent::ToolExecutionStart { tool_call_id, name, arguments } => Some(("Tool", format!("{name} started"), format!("{tool_call_id}\n{arguments}"), None)),
+            AgentEvent::ToolExecutionEnd { tool_call_id, name, result } => Some(("Tool", format!("{name} {}", if result.is_error { "failed" } else { "finished" }), format!("{tool_call_id}\n{}", result.content), None)),
+            AgentEvent::SubagentQueued { task_index, agent, task, .. } => Some(("Subagent", format!("{agent} queued"), format!("Task {task_index}: {task}"), Some(agent.clone()))),
+            AgentEvent::SubagentStarted { journal_run_id, task_index, .. } => Some(("Subagent", format!("Subagent {task_index} started"), journal_run_id.clone(), Some(journal_run_id.clone()))),
+            AgentEvent::SubagentFinished { journal_run_id, task_index, succeeded, error, .. } => Some(("Subagent", format!("Subagent {task_index} {}", if *succeeded { "finished" } else { "failed" }), error.clone().unwrap_or_else(|| journal_run_id.clone()), Some(journal_run_id.clone()))),
+            AgentEvent::SubagentRecovery { run_id, status, detail } => Some(("Recovery", format!("{status:?}"), detail.clone().unwrap_or_else(|| run_id.clone()), Some(run_id.clone()))),
+            AgentEvent::AgentError { error } => Some(("Error", "Agent error".into(), error.clone(), None)),
+            AgentEvent::StreamRuleTriggered { rule_name, reminder, .. } => Some(("Rule", format!("{rule_name} triggered"), reminder.clone(), None)),
+            _ => None,
+        };
+        if let Some((category, summary, detail, lane)) = entry {
+            self.trajectory_by_session.entry(session_id.into()).or_default().push(TrajectoryEntry {
+                category: category.into(), summary, detail, lane,
+            });
+        }
+    }
+
+    pub(crate) fn active_session_file(&self) -> Option<PathBuf> {
+        let session_id = self.active_session_id.as_deref()?;
+        self.projects
+            .iter()
+            .flat_map(|project| project.sessions.iter())
+            .find(|session| session.id == session_id)
+            .map(|session| session.session_file.clone())
+    }
+
+    pub(crate) fn active_trajectory(&self) -> &[TrajectoryEntry] {
+        self.active_session_id.as_ref().and_then(|id| self.trajectory_by_session.get(id)).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    pub(crate) fn active_session_metrics(&self) -> SessionMetricsInfo {
+        self.active_session_id.as_ref().and_then(|id| self.session_metrics.get(id)).cloned().unwrap_or_default()
+    }
+
     pub(crate) fn chat_stream_pending(&self) -> bool {
         let Ok(mut pending) = self.pending_stream_event.lock() else {
             return false;
@@ -1322,6 +1407,17 @@ impl AppState {
                 ChatStreamEvent::Agent { session_id, event }
                     if self.active_session_id.as_deref() == Some(&session_id) =>
                 {
+                    self.record_trajectory(&session_id, &event);
+                    let metrics = self.session_metrics.entry(session_id.clone()).or_default();
+                    match &event {
+                        AgentEvent::TurnStart { .. } => metrics.turns = metrics.turns.saturating_add(1),
+                        AgentEvent::ToolExecutionStart { .. } => metrics.tool_calls = metrics.tool_calls.saturating_add(1),
+                        AgentEvent::AgentEnd { usage } => {
+                            metrics.input_tokens = metrics.input_tokens.saturating_add(u64::from(usage.input_tokens));
+                            metrics.output_tokens = metrics.output_tokens.saturating_add(u64::from(usage.output_tokens));
+                        }
+                        _ => {}
+                    }
                     match adapt_agent_event(event) {
                         ChatAgentUpdate::TextDelta(delta) => {
                             let stream_prefix = format!("streaming-{session_id}-");
@@ -1846,6 +1942,71 @@ mod tests {
 
         drop(state);
         let _ = std::fs::remove_dir_all(work_dir);
+    }
+
+    #[test]
+    fn trajectory_projection_is_session_scoped_and_preserves_tool_details() {
+        let mut state = AppState::load_from_registry(Vec::new());
+        state.record_trajectory(
+            "session-a",
+            &AgentEvent::ToolExecutionStart {
+                tool_call_id: "call-1".into(),
+                name: "read_file".into(),
+                arguments: r#"{"path":"src/lib.rs"}"#.into(),
+            },
+        );
+        state.record_trajectory(
+            "session-b",
+            &AgentEvent::SubagentQueued {
+                run_id: 7,
+                task_index: 2,
+                agent: "reviewer".into(),
+                task: "Review the patch".into(),
+            },
+        );
+        assert_eq!(state.trajectory_by_session["session-a"].len(), 1);
+        assert_eq!(state.trajectory_by_session["session-a"][0].category, "Tool");
+        assert!(state.trajectory_by_session["session-a"][0].detail.contains("src/lib.rs"));
+        assert_eq!(state.trajectory_by_session["session-b"][0].lane.as_deref(), Some("reviewer"));
+    }
+
+    #[test]
+    fn accepting_a_staged_edit_proposal_updates_the_active_project_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+        let file = work_dir.join("note.txt");
+        std::fs::write(&file, "before\n").unwrap();
+        let proposal = threadlane_tools::execute_tool_in_workspace(
+            "edit_file_hashline",
+            &serde_json::json!({
+                "path": "note.txt",
+                "interactive": true,
+                "edits": [{"start_anchor":"1:f3e", "end_anchor":"1:f3e", "action":"replace", "new_content":"after"}]
+            }).to_string(),
+            &work_dir,
+        );
+        assert!(proposal.starts_with("Proposed edit"), "{proposal}");
+        let proposal_id = proposal
+            .split('\'')
+            .nth(1)
+            .expect("interactive edit returns proposal id");
+        let mut state = AppState::load_from_registry(Vec::new());
+        state.active_work_dir = Some(work_dir);
+        state.accept_edit_proposal(proposal_id).unwrap();
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "after\n");
+        assert!(state.session_status.as_deref().unwrap_or_default().contains("Accepted"));
+    }
+
+    #[test]
+    fn accepting_an_unknown_edit_proposal_does_not_mutate_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+        let file = work_dir.join("note.txt");
+        std::fs::write(&file, "unchanged\n").unwrap();
+        let mut state = AppState::load_from_registry(Vec::new());
+        state.active_work_dir = Some(work_dir);
+        assert!(state.accept_edit_proposal("missing-proposal").is_err());
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "unchanged\n");
     }
 
     #[test]

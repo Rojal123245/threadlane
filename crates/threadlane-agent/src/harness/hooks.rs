@@ -41,6 +41,8 @@ pub struct HookContext {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HookEffect {
     pub override_content: Option<String>,
+    /// Appended to an already successful tool result without replacing it.
+    pub append_content: Option<String>,
     pub override_is_error: Option<bool>,
     pub terminate: Option<bool>,
 }
@@ -141,6 +143,9 @@ impl HookRegistry {
                 Ok(effect) => {
                     if effect.override_content.is_some() {
                         run.effect.override_content = effect.override_content;
+                    }
+                    if effect.append_content.is_some() {
+                        run.effect.append_content = effect.append_content;
                     }
                     if effect.override_is_error.is_some() {
                         run.effect.override_is_error = effect.override_is_error;

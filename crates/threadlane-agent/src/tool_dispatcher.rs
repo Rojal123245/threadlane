@@ -537,6 +537,12 @@ impl ToolDispatcher {
         if let Some(content) = hook_run.effect.override_content {
             final_result.content = content;
         }
+        if let Some(content) = hook_run.effect.append_content {
+            if !content.trim().is_empty() {
+                final_result.content.push_str("\n\n");
+                final_result.content.push_str(&content);
+            }
+        }
         if let Some(is_error) = hook_run.effect.override_is_error {
             final_result.is_error = is_error;
         }

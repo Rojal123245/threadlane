@@ -527,6 +527,26 @@ pub(crate) fn create_after_tool_hook_handler(
                 "WASI tool broker error",
             )
             .await;
+            let mut effect = HookEffect::default();
+            let tool_name = context.tool_name.as_deref().unwrap_or("");
+            let is_successful_rust_write = !context.tool_result_is_error.unwrap_or(false)
+                && matches!(tool_name, "write_file" | "edit_file_hashline")
+                && serde_json::from_str::<Value>(context.tool_arguments.as_deref().unwrap_or("{}"))
+                    .ok()
+                    .and_then(|value| value.get("path").and_then(Value::as_str).map(str::to_owned))
+                    .is_some_and(|path| path.ends_with(".rs"));
+            if is_successful_rust_write {
+                let path = serde_json::from_str::<Value>(context.tool_arguments.as_deref().unwrap_or("{}"))
+                    .ok()
+                    .and_then(|value| value.get("path").and_then(Value::as_str).map(str::to_owned))
+                    .unwrap_or_default();
+                if let Some(result) = run_lsp_diagnostics_after_write(&extensions, &broker_dispatcher, &path).await {
+                    match result {
+                        Ok(diagnostics) => effect.append_content = Some(format!("[LSP Diagnostics]\n{diagnostics}")),
+                        Err(error) => warn!("post-write lsp diagnostics failed: {error}"),
+                    }
+                }
+            }
             for response in extensions
                 .execute_hook_with_broker_requests("after_tool_call", &arguments.to_string())
             {
@@ -547,9 +567,48 @@ pub(crate) fn create_after_tool_hook_handler(
                     Err(error) => warn!("WASI after-tool hook error: {error}"),
                 }
             }
-            Ok(HookEffect::default())
+            Ok(effect)
         })
     })
+}
+
+pub(crate) async fn run_lsp_diagnostics_after_write(
+    extensions: &WasiExtensionManager,
+    broker_dispatcher: &Arc<CapabilityDispatcher>,
+    path: &str,
+) -> Option<Result<String, String>> {
+    let args = serde_json::json!({ "path": path }).to_string();
+    let mut continuation_rounds = 0;
+    loop {
+        let invocation = extensions.execute_tool_with_broker_requests("lsp_diagnostics", &args)?;
+        let invocation = match invocation {
+            Ok(invocation) => invocation,
+            Err(error) => return Some(Err(error)),
+        };
+        if let Some(error) = invocation.response.error {
+            return Some(Err(error));
+        }
+        let continue_after_broker = invocation.response.continue_after_broker;
+        let message = invocation.response.message.unwrap_or_default();
+        if invocation.host_broker_requests.is_empty() {
+            return Some(Ok(message));
+        }
+        if continuation_rounds >= MAX_BROKER_CONTINUATION_ROUNDS {
+            return Some(Err("lsp_diagnostics exceeded broker continuation limit".into()));
+        }
+        let dispatch = match broker_dispatcher
+            .dispatch_envelopes(invocation.host_broker_requests)
+            .await
+        {
+            Ok(dispatch) => dispatch,
+            Err(error) => return Some(Err(error.message)),
+        };
+        extensions.enqueue_broker_results(dispatch.operation_results);
+        if !continue_after_broker {
+            return Some(Ok(message));
+        }
+        continuation_rounds += 1;
+    }
 }
 
 pub(crate) struct BrokerAwareWasiToolExecutor {

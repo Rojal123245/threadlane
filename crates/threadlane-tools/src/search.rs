@@ -66,6 +66,41 @@ fn simple_glob(pattern: &str, value: &str) -> bool {
 mod tests {
     use super::grep_search;
     use std::fs;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    #[derive(Debug)]
+    struct SearchBenchmark {
+        in_process: Duration,
+        rg: Option<Duration>,
+        in_process_matches: usize,
+        rg_matches: Option<usize>,
+    }
+
+    fn warm_run_benchmark(root: &std::path::Path, pattern: &str) -> SearchBenchmark {
+        // Warm filesystem and executable caches outside the measurements.
+        let _ = grep_search(root, pattern, None).unwrap();
+        let _ = Command::new("rg").args(["--", pattern, "."]).current_dir(root).output();
+        let start = Instant::now();
+        let in_process = grep_search(root, pattern, None).unwrap();
+        let in_process_elapsed = start.elapsed();
+        let rg_start = Instant::now();
+        let rg = Command::new("rg").args(["--", pattern, "."]).current_dir(root).output();
+        let rg_elapsed = rg_start.elapsed();
+        let (rg, rg_matches) = match rg {
+            Ok(output) if output.status.success() => {
+                let text = String::from_utf8_lossy(&output.stdout);
+                (Some(rg_elapsed), Some(text.lines().count()))
+            }
+            _ => (None, None),
+        };
+        SearchBenchmark {
+            in_process: in_process_elapsed,
+            rg,
+            in_process_matches: in_process.lines().filter(|line| *line != "No matches found.").count(),
+            rg_matches,
+        }
+    }
 
     #[test]
     fn searches_without_shelling_out() {
@@ -74,5 +109,26 @@ mod tests {
         fs::write(dir.path().join("two.txt"), "needle\n").unwrap();
         let result = grep_search(dir.path(), "needle", Some("*.rs")).unwrap();
         assert_eq!(result, "one.rs:1:needle");
+    }
+
+    #[test]
+    #[ignore = "measurement harness; run with -- --ignored --nocapture"]
+    fn warm_run_benchmark_against_rg() {
+        let dir = tempfile::tempdir().unwrap();
+        for index in 0..200 {
+            fs::write(
+                dir.path().join(format!("file-{index}.txt")),
+                format!("line\nneedle {index}\nline\n"),
+            )
+            .unwrap();
+        }
+        let result = warm_run_benchmark(dir.path(), "needle");
+        println!(
+            "in_process={:?} matches={}; rg={:?} matches={:?}",
+            result.in_process, result.in_process_matches, result.rg, result.rg_matches
+        );
+        if let Some(rg_matches) = result.rg_matches {
+            assert_eq!(result.in_process_matches, rg_matches);
+        }
     }
 }
