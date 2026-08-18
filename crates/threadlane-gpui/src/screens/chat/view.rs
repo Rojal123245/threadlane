@@ -1761,7 +1761,7 @@ impl ChatListView {
                         .gap_2()
                         .flex_1()
                         .min_w_0()
-                        .child(Icon::default().path("icons/file.svg"))
+                        .child(IconName::File)
                         .child(
                             div()
                                 .text_xs()
@@ -1817,7 +1817,7 @@ impl ChatListView {
             let do_stash_model = self.model.clone();
             let do_stash_session_id = active_session_id.clone();
             Button::new("stash-prompt-btn")
-                .icon(Icon::default().path("icons/folder.svg"))
+                .icon(IconName::Folder)
                 .tooltip("Stash draft")
                 .ghost()
                 .small()
