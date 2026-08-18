@@ -99,13 +99,6 @@ struct Response {
 }
 
 impl Response {
-    fn ok(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            ..Default::default()
-        }
-    }
-
     fn error(message: impl Into<String>) -> Self {
         let message = message.into();
         Self {
