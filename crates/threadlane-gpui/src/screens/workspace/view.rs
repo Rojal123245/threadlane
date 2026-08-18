@@ -4,13 +4,22 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::dialog::{
+    Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+};
 use gpui_component::input::{Input, InputState};
+use gpui_component::scroll::ScrollableElement;
 use gpui_component::spinner::Spinner;
 use gpui_component::switch::Switch;
 use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable};
+
+
+actions!(threadlane_workspace, [ToggleCommandPalette]);
 use threadlane_git::GitStatus;
 
+use crate::app::actions::AppAction;
+use crate::app::controller;
 use crate::screens::chat::ChatListView;
 use crate::screens::right_panel::RightPanelView;
 use crate::screens::settings::SettingsView;
@@ -18,6 +27,14 @@ use crate::screens::sidebar::SidebarView;
 use crate::services::updater::{self, UpdaterEvent};
 use crate::state::{AppState, WorkspacePage};
 use threadlane_updater::UpdateStatus;
+
+
+pub fn init(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("cmd-k", ToggleCommandPalette, None),
+        KeyBinding::new("ctrl-k", ToggleCommandPalette, None),
+    ]);
+}
 
 enum GitAction {
     Commit,
@@ -56,6 +73,10 @@ pub struct WorkspaceView {
     sidebar_collapsed: bool,
     right_panel_visible: bool,
     environment_open: bool,
+    command_palette_open: bool,
+    command_palette_selected: usize,
+    command_palette_scroll_handle: ScrollHandle,
+    command_palette_input: Entity<InputState>,
     git_dialog_open: bool,
     git_include_unstaged: bool,
     git_busy: bool,
@@ -78,6 +99,9 @@ impl WorkspaceView {
         let right_panel = cx.new(|cx| RightPanelView::new(model.clone(), window, cx));
         let git_message_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Commit message"));
+        let command_palette_scroll_handle = ScrollHandle::new();
+        let command_palette_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Type a command or search sessions…"));
         let (git_event_tx, git_event_rx) = mpsc::channel();
         let (updater_tx, updater_rx) = mpsc::channel();
 
@@ -87,7 +111,7 @@ impl WorkspaceView {
         }
 
         let model_clone = model.clone();
-        cx.new(|cx| {
+        let view = cx.new(|cx| {
             let sub = cx.observe(&model_clone, |_this: &mut Self, _model, cx| {
                 cx.notify();
             });
@@ -98,10 +122,12 @@ impl WorkspaceView {
                     .await;
                 let git_events = git_event_rx.try_iter().collect::<Vec<_>>();
                 let updater_events = updater_rx.try_iter().collect::<Vec<_>>();
-                if git_events.is_empty() && updater_events.is_empty() {
-                    continue;
-                }
                 let _ = this.update(cx, |this, cx| {
+                    this.model.update(cx, |state, cx| {
+                        if state.apply_session_refreshes() {
+                            cx.notify();
+                        }
+                    });
                     for event in git_events {
                         this.apply_git_event(event, cx);
                     }
@@ -126,6 +152,10 @@ impl WorkspaceView {
                 sidebar_collapsed: false,
                 right_panel_visible: false,
                 environment_open: false,
+                command_palette_open: false,
+                command_palette_selected: 0,
+                command_palette_input,
+                command_palette_scroll_handle,
                 git_dialog_open: false,
                 git_include_unstaged: true,
                 git_busy: false,
@@ -138,7 +168,28 @@ impl WorkspaceView {
                 updater_tx,
                 _subscriptions: vec![sub],
             }
-        })
+        });
+
+        let view_handle = view.downgrade();
+        let shortcut_subscription = cx.intercept_keystrokes(move |event, window, cx| {
+            let keystroke = &event.keystroke;
+            if keystroke.key.eq_ignore_ascii_case("k")
+                && (keystroke.modifiers.platform || keystroke.modifiers.control)
+                && !keystroke.modifiers.alt
+                && !keystroke.modifiers.shift
+            {
+                if let Some(view) = view_handle.upgrade() {
+                    view.update(cx, |view, cx| {
+                        view.toggle_command_palette(&ToggleCommandPalette, window, cx);
+                    });
+                    cx.stop_propagation();
+                }
+            }
+        });
+        view.update(cx, |view, _cx| {
+            view._subscriptions.push(shortcut_subscription);
+        });
+        view
     }
 
     fn open_git_dialog(&mut self, cx: &mut Context<Self>) {
@@ -146,6 +197,72 @@ impl WorkspaceView {
         self.git_feedback = None;
         self.refresh_git_status(cx);
         cx.notify();
+    }
+
+    fn toggle_command_palette(&mut self, _: &ToggleCommandPalette, window: &mut Window, cx: &mut Context<Self>) {
+        self.command_palette_open = !self.command_palette_open;
+        self.command_palette_selected = 0;
+        if self.command_palette_open {
+            self.command_palette_input.update(cx, |input, cx| input.focus(window, cx));
+        }
+        cx.notify();
+    }
+
+    fn command_palette_key_down(
+
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = event.keystroke.key.as_str();
+        if !self.command_palette_open {
+            return;
+        }
+        if key.eq_ignore_ascii_case("escape") {
+            self.command_palette_open = false;
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        let query = self.command_palette_input.read(cx).value().trim().to_lowercase();
+        let commands = [
+            ("New Task", "Start a fresh session", "new"),
+            ("Add Project", "Attach a project folder to your workspace", "attach"),
+            ("Goal Planning (/goal)", "Autonomous goal loop extension", "goal"),
+            ("Model Selection (/model)", "Switch model or provider", "model"),
+            ("Compact History (/compact)", "Compact context conversation", "compact"),
+            ("Git Review & Commit", "Review changed files and commit", "git"),
+            ("Toggle Sidebar", "Show or hide your projects and tasks", "sidebar"),
+            ("Toggle Right Panel", "Show review / files / terminal", "panel"),
+            ("Settings", "Configure API keys and providers", "settings"),
+        ];
+        let matching: Vec<_> = commands.iter().filter(|(name, desc, _)| {
+            query.is_empty() || name.to_lowercase().contains(&query) || desc.to_lowercase().contains(&query)
+        }).collect();
+        match key.to_ascii_lowercase().as_str() {
+            "arrowdown" | "down" => {
+                if !matching.is_empty() {
+                    self.command_palette_selected = (self.command_palette_selected + 1) % matching.len();
+                    self.command_palette_scroll_handle.scroll_to_item(self.command_palette_selected);
+                }
+                cx.stop_propagation(); cx.notify();
+            }
+            "arrowup" | "up" => {
+                if !matching.is_empty() {
+                    self.command_palette_selected = self.command_palette_selected.checked_sub(1).unwrap_or(matching.len() - 1);
+                    self.command_palette_scroll_handle.scroll_to_item(self.command_palette_selected);
+                }
+                cx.stop_propagation(); cx.notify();
+            }
+            "enter" if matching.len() == 1 && matching[0].2 == "new" => {
+                self.command_palette_open = false;
+                self.command_palette_selected = 0;
+                self.model.update(cx, |state, _cx| controller::dispatch(state, AppAction::BeginNewTask));
+                cx.stop_propagation(); cx.notify();
+            }
+            _ => {}
+        }
     }
 
     fn refresh_git_status(&mut self, cx: &App) {
@@ -420,29 +537,18 @@ impl WorkspaceView {
             && status.is_some_and(|status| status.ahead > 0);
         let toggle_view = cx.entity().downgrade();
 
-        div()
-            .absolute()
-            .top_0()
-            .right_0()
-            .bottom_0()
-            .left_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgba(0x00000099))
+        Dialog::new(cx)
+            .w(px(440.0))
+            .overlay(true)
+            .overlay_closable(false)
+            .close_button(false)
             .child(
                 div()
-                    .w(px(440.0))
-                    .rounded_xl()
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.background)
-                    .shadow_lg()
-                    .overflow_hidden()
                     .flex()
                     .flex_col()
                     .child(
-                        div()
+                        DialogHeader::new()
+                            .relative()
                             .px_5()
                             .pt_5()
                             .pb_4()
@@ -467,13 +573,13 @@ impl WorkspaceView {
                                     .flex_col()
                                     .gap_1()
                                     .child(
-                                        div()
+                                        DialogTitle::new()
                                             .text_lg()
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .child("Commit changes"),
                                     )
                                     .child(
-                                        div()
+                                        DialogDescription::new()
                                             .text_xs()
                                             .text_color(theme.muted_foreground)
                                             .child(format!("On branch {branch}")),
@@ -481,10 +587,14 @@ impl WorkspaceView {
                             )
                             .child(
                                 Button::new("git-dialog-close")
+                                    .absolute()
+                                    .top(px(16.0))
+                                    .right(px(16.0))
                                     .icon(IconName::Close)
                                     .tooltip("Close")
                                     .ghost()
                                     .xsmall()
+                                    .disabled(self.git_busy)
                                     .on_click(cx.listener(|this, _event, _window, cx| {
                                         if !this.git_busy {
                                             this.git_dialog_open = false;
@@ -538,7 +648,7 @@ impl WorkspaceView {
                             ),
                     )
                     .child(
-                        div()
+                        DialogContent::new()
                             .px_5()
                             .pb_5()
                             .flex()
@@ -558,7 +668,9 @@ impl WorkspaceView {
                                     .child(
                                         Button::new("git-generate-message")
                                             .when(self.git_message_pending, |button| {
-                                                button.child(Spinner::new().xsmall()).label("Generating…")
+                                                button
+                                                    .child(Spinner::new().xsmall())
+                                                    .label("Generating…")
                                             })
                                             .when(!self.git_message_pending, |button| {
                                                 button.label("Generate")
@@ -625,7 +737,7 @@ impl WorkspaceView {
                             })),
                     )
                     .child(
-                        div()
+                        DialogFooter::new()
                             .border_t_1()
                             .border_color(theme.border)
                             .bg(theme.title_bar)
@@ -798,6 +910,270 @@ impl WorkspaceView {
                 .into_any_element(),
         )
     }
+
+    fn render_command_palette(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().colors;
+        let query = self.command_palette_input.read(cx).value().trim().to_lowercase();
+        let model = self.model.clone();
+        let state = model.read(cx);
+
+        let mut session_results = Vec::new();
+        for project in &state.projects {
+            for session in &project.sessions {
+                if query.is_empty()
+                    || session.title.to_lowercase().contains(&query)
+                    || project.name.to_lowercase().contains(&query)
+                {
+                    session_results.push((
+                        project.work_dir.clone(),
+                        session.id.clone(),
+                        session.title.clone(),
+                        project.name.clone(),
+                    ));
+                }
+            }
+        }
+
+        let commands = [
+            ("New Task", "Start a fresh session", "new"),
+            ("Add Project", "Attach a project folder to your workspace", "attach"),
+            ("Goal Planning (/goal)", "Autonomous goal loop extension", "goal"),
+            ("Model Selection (/model)", "Switch model or provider", "model"),
+            ("Compact History (/compact)", "Compact context conversation", "compact"),
+            ("Git Review & Commit", "Review changed files and commit", "git"),
+            ("Toggle Sidebar", "Show or hide your projects and tasks", "sidebar"),
+            ("Toggle Right Panel", "Show review / files / terminal", "panel"),
+            ("Settings", "Configure API keys and providers", "settings"),
+        ];
+
+        let matching_commands: Vec<_> = commands
+            .into_iter()
+            .filter(|(name, desc, _)| {
+                query.is_empty()
+                    || name.to_lowercase().contains(&query)
+                    || desc.to_lowercase().contains(&query)
+            })
+            .collect();
+
+        div()
+            .id("command-palette-backdrop")
+            .absolute()
+            .inset_0()
+            .bg(hsla(0.0, 0.0, 0.0, 0.5))
+            .flex()
+            .items_start()
+            .justify_center()
+            .pt(px(80.0))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _event, _window, cx| {
+                    this.command_palette_open = false;
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .id("command-palette-modal")
+                    .w(px(560.0))
+                    .max_h(px(480.0))
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.title_bar)
+                    .shadow_lg()
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
+                    .on_mouse_down(MouseButton::Left, |_event, _window, _cx| {})
+                    .child(
+                        div()
+                            .p_3()
+                            .border_b_1()
+                            .border_color(theme.border)
+                            .child(Input::new(&self.command_palette_input).appearance(false)),
+                    )
+                    .child(
+                        div()
+                            .px_3()
+                            .py_1()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.muted_foreground)
+                            .child("Commands & Actions"),
+                    )
+                    .child(
+                        div()
+                            .id("command-palette-results")
+                            .track_scroll(&self.command_palette_scroll_handle)
+                            .overflow_y_scroll()
+                            .vertical_scrollbar(&self.command_palette_scroll_handle)
+                            .max_h(px(420.0))
+                            .py_2()
+                            .children(matching_commands.into_iter().enumerate().map(|(index, (name, desc, action_key))| {
+                                let model = self.model.clone();
+                                div()
+                                    .id(SharedString::from(format!("palette-cmd-{action_key}")))
+                                    .mx_2()
+                                    .my_0p5()
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_lg()
+                                    .hover(|style| style.bg(theme.list_hover))
+                                    .when(index == self.command_palette_selected, |style| style.bg(theme.list_hover))
+                                    .cursor_pointer()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_0p5()
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .child(name),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(theme.muted_foreground)
+                                                    .child(desc),
+                                            ),
+                                    )
+                                    .on_click(cx.listener(move |this, _event, window, cx| {
+                                        this.command_palette_open = false;
+                                        match action_key {
+                                            "new" => {
+                                                model.update(cx, |state, _cx| {
+                                                    controller::dispatch(state, AppAction::BeginNewTask);
+                                                });
+                                            }
+                                            "attach" => {
+                                                let model = model.clone();
+                                                cx.spawn(async move |_this, cx| {
+                                                    let Some(folder) =
+                                                        rfd::AsyncFileDialog::new().pick_folder().await
+                                                    else {
+                                                        return;
+                                                    };
+                                                    let path = folder.path().to_path_buf();
+                                                    let _ = model.update(cx, |state, cx| {
+                                                        controller::dispatch(
+                                                            state,
+                                                            AppAction::AttachProject(path),
+                                                        );
+                                                        cx.notify();
+                                                    });
+                                                })
+                                                .detach();
+                                            }
+                                            "git" => this.open_git_dialog(cx),
+                                            "settings" => {
+                                                model.update(cx, |state, _cx| {
+                                                    controller::dispatch(state, AppAction::OpenSettings);
+                                                });
+                                            }
+                                            "sidebar" => {
+                                                this.sidebar_collapsed = !this.sidebar_collapsed;
+                                            }
+                                            "panel" => {
+                                                this.right_panel_visible = !this.right_panel_visible;
+                                            }
+                                            "goal" => {
+                                                this.chat_list.update(cx, |chat, cx| {
+                                                    chat.input_state.update(cx, |input, cx| {
+                                                        input.set_value("/goal ", window, cx);
+                                                    });
+                                                });
+                                            }
+                                            "model" => {
+                                                this.chat_list.update(cx, |chat, cx| {
+                                                    chat.input_state.update(cx, |input, cx| {
+                                                        input.set_value("/model ", window, cx);
+                                                    });
+                                                });
+                                            }
+                                            "compact" => {
+                                                this.chat_list.update(cx, |chat, cx| {
+                                                    chat.input_state.update(cx, |input, cx| {
+                                                        input.set_value("/compact", window, cx);
+                                                    });
+                                                });
+                                            }
+                                            _ => {}
+                                        }
+                                        cx.notify();
+                                    }))
+                            }))
+                            .when(!session_results.is_empty(), |list| {
+                                list.child(
+                                    div()
+                                        .mt_2()
+                                        .px_3()
+                                        .py_1()
+                                        .text_xs()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(theme.muted_foreground)
+                                        .child("Sessions"),
+                                )
+                                .children(session_results.into_iter().take(8).map(
+                                    |(work_dir, session_id, title, project)| {
+                                        let model = self.model.clone();
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "palette-session-{session_id}"
+                                            )))
+                                            .mx_2()
+                                            .my_0p5()
+                                            .px_3()
+                                            .py_2()
+                                            .rounded_lg()
+                                            .hover(|style| style.bg(theme.list_hover))
+                                            .cursor_pointer()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap_0p5()
+                                                    .child(
+                                                        div()
+                                                            .text_sm()
+                                                            .font_weight(FontWeight::MEDIUM)
+                                                            .child(title),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(theme.muted_foreground)
+                                                            .child(project),
+                                                    ),
+                                            )
+                                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                                this.command_palette_open = false;
+                                                let work_dir = work_dir.clone();
+                                                let session_id = session_id.clone();
+                                                model.update(cx, |state, _cx| {
+                                                    controller::dispatch(
+                                                        state,
+                                                        AppAction::SelectSession {
+                                                            work_dir,
+                                                            session_id,
+                                                        },
+                                                    );
+                                                });
+                                                cx.notify();
+                                            }))
+                                    },
+                                ))
+                            }),
+                    ),
+            )
+    }
 }
 
 impl Render for WorkspaceView {
@@ -819,6 +1195,8 @@ impl Render for WorkspaceView {
             .flex()
             .w_full()
             .h_full()
+            .on_key_down(cx.listener(Self::command_palette_key_down))
+            .on_action(cx.listener(Self::toggle_command_palette))
             .bg(theme.background)
             .children(
                 (workspace_page == WorkspacePage::Chat && !self.sidebar_collapsed)
@@ -847,6 +1225,25 @@ impl Render for WorkspaceView {
                     .into_any_element(),
                 WorkspacePage::Settings => self.settings.clone().into_any_element(),
             })
+            .children((workspace_page == WorkspacePage::Chat).then(|| {
+                Button::new("command-palette-btn")
+                    .icon(IconName::SquareTerminal)
+                    .tooltip("Command Palette (Cmd+K)")
+                    .ghost()
+                    .selected(self.command_palette_open)
+                    .xsmall()
+                    .absolute()
+                    .top(px(9.0))
+                    .right(px(84.0))
+                    .on_click(cx.listener(|this, _event, window, cx| {
+                        this.command_palette_open = !this.command_palette_open;
+                        this.command_palette_selected = 0;
+                        if this.command_palette_open {
+                            this.command_palette_input.update(cx, |input, cx| input.focus(window, cx));
+                        }
+                        cx.notify();
+                    }))
+            }))
             .children((workspace_page == WorkspacePage::Chat).then(|| {
                 Button::new("environment-menu")
                     .icon(IconName::Info)
@@ -908,6 +1305,7 @@ impl Render for WorkspaceView {
                     .then(|| self.render_environment_popover(cx)),
             )
             .children(self.git_dialog_open.then(|| self.render_git_dialog(cx)))
+            .children(self.command_palette_open.then(|| self.render_command_palette(cx)))
             .children(self.render_update_notice(cx))
     }
 }

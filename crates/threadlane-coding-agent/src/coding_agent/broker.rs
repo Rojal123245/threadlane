@@ -1,4 +1,5 @@
 use crate::extension_broker::{BrokerError, BrokerRequest, CapabilityHandler};
+use crate::permission::{PermissionDecision, PermissionManager};
 use crate::policy::ToolPolicy;
 use async_trait::async_trait;
 use serde_json::Value;
@@ -54,6 +55,7 @@ pub(crate) struct HostCapabilityHandler {
     pub(crate) work_dir: PathBuf,
     pub(crate) event_tx: tokio::sync::broadcast::Sender<AgentEvent>,
     pub(crate) allowed_hosts: Arc<std::collections::HashSet<String>>,
+    pub(crate) permissions: Option<Arc<PermissionManager>>,
     pub(crate) agent_work: AgentWorkScheduler,
     pub(crate) agent_runner: Option<AgentRunner>,
     pub(crate) persist_tool_policy: bool,
@@ -735,6 +737,8 @@ impl HostCapabilityHandler {
     }
 
     async fn handle_network_async(&self, request: &BrokerRequest) -> Result<Value, BrokerError> {
+        use futures::StreamExt as _;
+
         if request.operation != "http" {
             return unknown_operation(self.capability, &request.operation);
         }
@@ -745,30 +749,84 @@ impl HostCapabilityHandler {
             .get("body")
             .and_then(Value::as_str)
             .ok_or_else(|| invalid_argument("missing argument `body`"))?;
-        let (host, port, path) = parse_http_url(url)?;
-        if !self.allowed_hosts.contains(host) {
+        let parsed = reqwest::Url::parse(url).map_err(|_| invalid_argument("invalid URL"))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(invalid_argument(
+                "only http:// and https:// URLs are supported",
+            ));
+        }
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| invalid_argument("URL is missing a host"))?
+            .to_ascii_lowercase();
+        let approved = self.allowed_hosts.contains(&host)
+            || self
+                .permissions
+                .as_ref()
+                .is_some_and(|permissions| permissions.network_host_is_approved(&host));
+        let decision = if approved {
+            PermissionDecision::AllowOnce
+        } else if let Some(permissions) = &self.permissions {
+            permissions.request_network_host(&host, url).await
+        } else {
+            PermissionDecision::Deny
+        };
+        if decision == PermissionDecision::Deny {
             return Err(BrokerError {
                 code: "host_denied".into(),
-                message: format!("Network host `{host}` is not allowed"),
+                message: format!("Network access to `{host}` was denied"),
             });
         }
-        let host = host.to_string();
-        let request = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        let method = reqwest::Method::from_bytes(method.as_bytes())
+            .map_err(|_| invalid_argument("invalid HTTP method"))?;
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(host_error)?;
         let result = timeout(CAPABILITY_TIMEOUT, async move {
-            let mut stream = tokio::net::TcpStream::connect((host.as_str(), port))
+            let response = client
+                .request(method, parsed.clone())
+                .header(reqwest::header::USER_AGENT, "Threadlane/0.1")
+                .body(body.to_owned())
+                .send()
                 .await
                 .map_err(host_error)?;
-            tokio::io::AsyncWriteExt::write_all(&mut stream, request.as_bytes())
-                .await
-                .map_err(host_error)?;
-            let response = read_limited(
-                &mut stream,
-                "network_response_too_large",
-                "network response",
-                MAX_CAPABILITY_BUFFER_BYTES,
-            )
-            .await?;
-            String::from_utf8(response).map_err(|_| invalid_argument("response was not UTF-8"))
+            let status = response.status().as_u16();
+            let content_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_owned();
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            let mut bytes = Vec::new();
+            let mut stream = response.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(host_error)?;
+                if bytes.len().saturating_add(chunk.len()) > MAX_CAPABILITY_BUFFER_BYTES {
+                    return Err(BrokerError {
+                        code: "network_response_too_large".into(),
+                        message: format!(
+                            "network response exceeded {MAX_CAPABILITY_BUFFER_BYTES} bytes"
+                        ),
+                    });
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            let body =
+                String::from_utf8(bytes).map_err(|_| invalid_argument("response was not UTF-8"))?;
+            serde_json::to_string(&serde_json::json!({
+                "url": parsed.as_str(),
+                "status": status,
+                "content_type": content_type,
+                "location": location,
+                "body": body,
+            }))
+            .map_err(|error| internal_error(error.to_string()))
         })
         .await
         .map_err(|_| timeout_error("network.http"))??;
@@ -968,19 +1026,4 @@ fn resolve_work_path(work_dir: &Path, relative: &str) -> Result<PathBuf, BrokerE
         return Err(invalid_argument("path escapes work_dir"));
     }
     Ok(checked)
-}
-fn parse_http_url(url: &str) -> Result<(&str, u16, String), BrokerError> {
-    let rest = url
-        .strip_prefix("http://")
-        .ok_or_else(|| invalid_argument("only http:// URLs are supported"))?;
-    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
-    let (host, port) = authority
-        .rsplit_once(':')
-        .map_or((authority, 80), |(host, port)| {
-            (host, port.parse().unwrap_or(0))
-        });
-    if host.is_empty() || port == 0 {
-        return Err(invalid_argument("invalid URL"));
-    }
-    Ok((host, port, format!("/{path}")))
 }

@@ -7,6 +7,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::scroll::ScrollableElement;
+use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::separator::Separator;
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::{ActiveTheme, Icon, IconName, Selectable, Sizable};
@@ -174,8 +175,8 @@ impl RightPanelView {
                 let _ = tx.send(PanelEvent::FilesLoaded { project, entries });
             }
             Surface::Review => {
-                let (files, error) = match threadlane_git::inspect(&project) {
-                    Ok(status) => (status.files, None),
+                let (files, error) = match threadlane_git::inspect_files(&project) {
+                    Ok(files) => (files, None),
                     Err(error) => (Vec::new(), Some(error.to_string())),
                 };
                 let _ = tx.send(PanelEvent::ReviewLoaded {
@@ -376,6 +377,7 @@ impl RightPanelView {
 
     fn render_files(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().colors;
+        let project = self.project.clone();
         if let Some(title) = &self.document_title {
             return div()
                 .flex_1()
@@ -430,6 +432,8 @@ impl RightPanelView {
             .py_2()
             .children(self.files.iter().cloned().map(|entry| {
                 let relative_path = entry.relative_path.clone();
+                let context_path = relative_path.clone();
+                let absolute_path = project.as_ref().map(|root| root.join(&relative_path).display().to_string());
                 let folder_path = relative_path.clone();
                 let file_path = relative_path.clone();
                 let expanded = self.expanded_paths.contains(&relative_path);
@@ -477,6 +481,28 @@ impl RightPanelView {
                             },
                         ))
                     })
+                    .context_menu({
+                        let path = context_path.clone();
+                        let absolute_path = absolute_path.clone();
+                        move |menu, _window, _cx| {
+                            let text = path.clone();
+                            let menu = menu.item(PopupMenuItem::new("Copy Relative Path").on_click(
+                                move |_event, _window, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                                },
+                            ));
+                            if let Some(absolute_path) = absolute_path.clone() {
+                                let text = absolute_path;
+                                menu.item(PopupMenuItem::new("Copy Absolute Path").on_click(
+                                    move |_event, _window, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                                    },
+                                ))
+                            } else {
+                                menu
+                            }
+                        }
+                    })
             }))
             .into_any_element()
     }
@@ -496,14 +522,69 @@ impl RightPanelView {
         if self.review_files.is_empty() {
             return self.render_empty("No changes", "The working tree is clean.", cx);
         }
+        let total_additions: u32 = self.review_files.iter().map(|f| f.additions).sum();
+        let total_deletions: u32 = self.review_files.iter().map(|f| f.deletions).sum();
+        let summary_header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(theme.border)
+            .bg(theme.muted.opacity(0.3))
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(format!(
+                        "{} changed {}",
+                        self.review_files.len(),
+                        if self.review_files.len() == 1 {
+                            "file"
+                        } else {
+                            "files"
+                        }
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.success)
+                            .child(format!("+{total_additions}")),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.danger)
+                            .child(format!("-{total_deletions}")),
+                    ),
+            );
+
         div()
             .flex_1()
             .min_h_0()
-            .overflow_y_scrollbar()
-            .py_2()
-            .children(self.review_files.iter().cloned().map(|file| {
+            .flex()
+            .flex_col()
+            .child(summary_header)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .py_2()
+                    .children(self.review_files.iter().cloned().map(|file| {
                 let path = file.path.clone();
+                        let absolute_path = self.project.as_ref().map(|root| root.join(&path).display().to_string());
                 let status = file.status_char().to_string();
+                let context_path = path.clone();
                 div()
                     .id(SharedString::from(format!("review-file-{path}")))
                     .h(px(36.0))
@@ -547,7 +628,30 @@ impl RightPanelView {
                     .on_click(cx.listener(move |this, _event, _window, _cx| {
                         this.open_diff(path.clone());
                     }))
-            }))
+                    .context_menu({
+                        let path = context_path.clone();
+                        let absolute_path = absolute_path.clone();
+                        move |menu, _window, _cx| {
+                            let text = path.clone();
+                            let menu = menu.item(PopupMenuItem::new("Copy Relative Path").on_click(
+                                move |_event, _window, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                                },
+                            ));
+                            if let Some(absolute_path) = absolute_path.clone() {
+                                let text = absolute_path;
+                                menu.item(PopupMenuItem::new("Copy Absolute Path").on_click(
+                                    move |_event, _window, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                                    },
+                                ))
+                            } else {
+                                menu
+                            }
+                        }
+                    })
+                }))
+            )
             .into_any_element()
     }
 

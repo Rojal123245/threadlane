@@ -6,6 +6,7 @@ use std::time::Duration;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::scroll::ScrollableElement;
+use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::{ActiveTheme, Sizable};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
@@ -256,6 +257,7 @@ impl Render for TerminalView {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| self.project.display().to_string());
+        let terminal_text = self.screen_text();
 
         div()
             .size_full()
@@ -304,7 +306,18 @@ impl Render for TerminalView {
                     .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                         focus_handle.focus(window, cx);
                     })
-                    .child(self.screen_text()),
+                    .child(terminal_text.clone())
+                    .context_menu({
+                        let text = terminal_text.clone();
+                        move |menu, _window, _cx| {
+                            let output = text.clone();
+                            menu.item(PopupMenuItem::new("Copy Terminal Output").on_click(
+                                move |_event, _window, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(output.clone()));
+                                },
+                            ))
+                        }
+                    }),
             )
     }
 }

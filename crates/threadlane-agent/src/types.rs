@@ -356,6 +356,92 @@ impl AgentToolResult {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdvisorSeverity {
+    Aside,
+    Concern,
+    Blocker,
+}
+
+impl AdvisorSeverity {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Aside => "aside",
+            Self::Concern => "concern",
+            Self::Blocker => "blocker",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdvisorNote {
+    pub severity: AdvisorSeverity,
+    pub summary: String,
+    pub details: String,
+}
+
+impl AdvisorNote {
+    pub fn new(severity: AdvisorSeverity, summary: impl Into<String>, details: impl Into<String>) -> Self {
+        Self {
+            severity,
+            summary: summary.into(),
+            details: details.into(),
+        }
+    }
+
+    pub fn aside(summary: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::new(AdvisorSeverity::Aside, summary, details)
+    }
+
+    pub fn concern(summary: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::new(AdvisorSeverity::Concern, summary, details)
+    }
+
+    pub fn blocker(summary: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::new(AdvisorSeverity::Blocker, summary, details)
+    }
+
+    /// Formats the advisor note as prompt steering text for the task model.
+    pub fn to_steering_prompt(&self) -> String {
+        let tag = match self.severity {
+            AdvisorSeverity::Aside => "ADVISOR NOTE (Aside)",
+            AdvisorSeverity::Concern => "ADVISOR NOTE (Concern)",
+            AdvisorSeverity::Blocker => "ADVISOR NOTE (CRITICAL BLOCKER)",
+        };
+        format!(
+            "[{tag}]: {}\n{}\nPlease review this advisor feedback: course-correct your next step or explain why this is intentional.",
+            self.summary, self.details
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ModelRoles {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advisor: Option<String>,
+    #[serde(default)]
+    pub advisor_enabled: bool,
+}
+
+impl ModelRoles {
+    pub fn resolve_task<'a>(&'a self, fallback: &'a str) -> &'a str {
+        self.task.as_deref().unwrap_or(fallback)
+    }
+
+    pub fn resolve_plan<'a>(&'a self, fallback: &'a str) -> &'a str {
+        self.plan.as_deref().or(self.task.as_deref()).unwrap_or(fallback)
+    }
+
+    pub fn resolve_advisor<'a>(&'a self, fallback: &'a str) -> &'a str {
+        self.advisor.as_deref().unwrap_or(fallback)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TurnState {
     pub system_prompt: String,
@@ -374,5 +460,42 @@ impl TurnState {
             reasoning_effort: ReasoningEffort::default(),
             tools: Vec::new(),
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_roles_resolve_each_specialized_role_with_fallbacks() {
+        let roles = ModelRoles {
+            task: Some("task-model".into()),
+            plan: None,
+            advisor: Some("advisor-model".into()),
+            advisor_enabled: true,
+        };
+
+        assert_eq!(roles.resolve_task("base-model"), "task-model");
+        assert_eq!(roles.resolve_plan("base-model"), "task-model");
+        assert_eq!(roles.resolve_advisor("base-model"), "advisor-model");
+    }
+
+    #[test]
+    fn model_roles_are_backward_compatible_when_deserialized_without_fields() {
+        let roles: ModelRoles = serde_json::from_str("{}").expect("default role config");
+        assert_eq!(roles, ModelRoles::default());
+        assert_eq!(roles.resolve_task("base-model"), "base-model");
+        assert_eq!(roles.resolve_plan("base-model"), "base-model");
+        assert_eq!(roles.resolve_advisor("base-model"), "base-model");
+    }
+
+    #[test]
+    fn blocker_feedback_is_explicitly_marked_for_task_steering() {
+        let prompt = AdvisorNote::blocker("Unsafe change", "Stop and verify the path guard.")
+            .to_steering_prompt();
+        assert!(prompt.contains("CRITICAL BLOCKER"));
+        assert!(prompt.contains("Stop and verify the path guard."));
     }
 }

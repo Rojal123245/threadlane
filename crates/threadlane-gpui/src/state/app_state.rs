@@ -3,13 +3,17 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::UNIX_EPOCH;
-use threadlane_agent::{AgentEvent, AgentMessage, SessionTree};
+use std::time::{SystemTime, UNIX_EPOCH};
+use threadlane_agent::{
+    AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, SessionPlan, SessionTree,
+    TokenUsage,
+};
 
 use crate::adapters::agent_events::{adapt_agent_event, ChatAgentUpdate};
 use crate::persistence::{load_project_registry, save_project_registry};
 use crate::services::sessions::{SessionRuntime, SessionRuntimeStatus};
 
+const CHAT_HISTORY_PAGE_SIZE: usize = 40;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AttachedProject {
     pub path: PathBuf,
@@ -50,6 +54,7 @@ pub enum MessageRole {
     User,
     Assistant,
     System,
+    Advisor(threadlane_agent::AdvisorSeverity),
     Error,
 }
 
@@ -58,6 +63,7 @@ pub struct ToolActivityInfo {
     pub id: String,
     pub category: String,
     pub title: String,
+    pub summary: String,
     pub detail: String,
     pub is_expanded: bool,
 }
@@ -69,6 +75,10 @@ pub struct ChatMessageInfo {
     pub content: String,
     pub timestamp: String,
     pub tool_activities: Vec<ToolActivityInfo>,
+    pub streaming: bool,
+    pub reasoning_content: Option<String>,
+    pub reasoning_expanded: bool,
+    pub advisor_note: Option<threadlane_agent::AdvisorNote>,
 }
 
 #[derive(Clone, Debug)]
@@ -101,12 +111,21 @@ pub struct AppState {
     pub is_new_task: bool,
     pub search_query: String,
     pub messages: Vec<ChatMessageInfo>,
+    history_session_file: Option<PathBuf>,
+    history_start: usize,
+    history_has_older: bool,
+    pub active_plan: SessionPlan,
     pub is_generating: bool,
     pub composer_text: String,
     pub session_status: Option<String>,
     pub pending_composer_messages: HashMap<String, String>,
+    pub session_token_usage: HashMap<String, TokenUsage>,
+    pub stashed_prompts: HashMap<String, String>,
+    pub pending_permissions: HashMap<String, threadlane_agent::PermissionRequest>,
 
     pub selected_model: String,
+    pub model_roles: threadlane_agent::ModelRoles,
+    pub reasoning_effort: ReasoningEffort,
     pub workspace_page: WorkspacePage,
     pub openai_key: String,
     pub opencode_key: String,
@@ -117,9 +136,22 @@ pub struct AppState {
     stream_tx: Sender<ChatStreamEvent>,
     stream_rx: Receiver<ChatStreamEvent>,
     pending_stream_event: Mutex<Option<ChatStreamEvent>>,
+    session_refresh_tx: Sender<PathBuf>,
+    session_refresh_rx: Receiver<(PathBuf, Vec<SessionInfo>)>,
     session_runtimes: HashMap<PathBuf, Arc<SessionRuntime>>,
+    deferred_stream_events: HashMap<String, Vec<ChatStreamEvent>>,
 }
 
+#[derive(Default)]
+struct SessionDiscoveryCache {
+    entries: HashMap<PathBuf, SessionDiscoveryCacheEntry>,
+}
+
+struct SessionDiscoveryCacheEntry {
+    len: u64,
+    modified: Option<SystemTime>,
+    info: SessionInfo,
+}
 fn file_mtime(path: &Path) -> u64 {
     std::fs::metadata(path)
         .and_then(|m| m.modified())
@@ -170,6 +202,14 @@ fn extract_session_title(tree: &SessionTree, fallback_id: &str) -> String {
 }
 
 pub fn discover_sessions_in_project(work_dir: &Path) -> Vec<SessionInfo> {
+    let mut cache = SessionDiscoveryCache::default();
+    discover_sessions_in_project_cached(work_dir, &mut cache)
+}
+
+fn discover_sessions_in_project_cached(
+    work_dir: &Path,
+    cache: &mut SessionDiscoveryCache,
+) -> Vec<SessionInfo> {
     let sessions_dir = work_dir.join(".threadlane/sessions");
     let Ok(entries) = std::fs::read_dir(&sessions_dir) else {
         return Vec::new();
@@ -178,47 +218,64 @@ pub fn discover_sessions_in_project(work_dir: &Path) -> Vec<SessionInfo> {
     let canonical_work_dir =
         std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
     let mut sessions = Vec::new();
+    let mut seen_paths = std::collections::HashSet::new();
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-            continue;
-        }
-        if path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.ends_with(".harness.jsonl"))
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl")
+            || path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".harness.jsonl"))
         {
             continue;
         }
-        let id = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "session".into());
-
-        let (title, health, updated_at) = match SessionTree::load_from_file(&path) {
-            Ok(tree) => {
-                let title = extract_session_title(&tree, &id);
-                let updated_at = file_mtime(&path);
-                (title, SessionHealth::Healthy, updated_at)
+        seen_paths.insert(path.clone());
+        let metadata = std::fs::metadata(&path).ok();
+        let len = metadata.as_ref().map_or(0, |metadata| metadata.len());
+        let modified = metadata.and_then(|metadata| metadata.modified().ok());
+        let info = match cache.entries.get(&path) {
+            Some(cached) if cached.len == len && cached.modified == modified => cached.info.clone(),
+            _ => {
+                let id = path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "session".into());
+                let (title, health, updated_at) = match SessionTree::load_from_file(&path) {
+                    Ok(tree) => (
+                        extract_session_title(&tree, &id),
+                        SessionHealth::Healthy,
+                        file_mtime(&path),
+                    ),
+                    Err(_) => (
+                        "Unreadable session".to_string(),
+                        SessionHealth::Warning,
+                        file_mtime(&path),
+                    ),
+                };
+                let info = SessionInfo {
+                    id,
+                    title,
+                    work_dir: canonical_work_dir.clone(),
+                    session_file: path.clone(),
+                    updated_at,
+                    health,
+                };
+                cache.entries.insert(
+                    path.clone(),
+                    SessionDiscoveryCacheEntry {
+                        len,
+                        modified,
+                        info: info.clone(),
+                    },
+                );
+                info
             }
-            Err(_) => (
-                "Unreadable session".to_string(),
-                SessionHealth::Warning,
-                file_mtime(&path),
-            ),
         };
-
-        sessions.push(SessionInfo {
-            id,
-            title,
-            work_dir: canonical_work_dir.clone(),
-            session_file: path,
-            updated_at,
-            health,
-        });
+        sessions.push(info);
     }
 
+    cache.entries.retain(|path, _| seen_paths.contains(path));
     sessions.sort_by(|a, b| {
         b.updated_at
             .cmp(&a.updated_at)
@@ -227,11 +284,22 @@ pub fn discover_sessions_in_project(work_dir: &Path) -> Vec<SessionInfo> {
     sessions
 }
 
-pub fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
-    let Ok(tree) = SessionTree::load_from_file(session_file) else {
-        return Vec::new();
-    };
+pub fn load_session_plan(session_file: &Path) -> SessionPlan {
+    SessionTree::load_from_file(session_file)
+        .map(|tree| tree.plan().clone())
+        .unwrap_or_default()
+}
 
+pub fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
+    load_session_message_page(session_file, usize::MAX).0
+}
+
+fn load_session_projection(
+    session_file: &Path,
+) -> (SessionPlan, Vec<ChatMessageInfo>, usize, bool) {
+    let Ok(tree) = SessionTree::load_from_file(session_file) else {
+        return (SessionPlan::default(), Vec::new(), 0, false);
+    };
     let agent_messages = {
         let branch = tree.get_active_branch_messages();
         if branch.is_empty() {
@@ -240,8 +308,50 @@ pub fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
             branch
         }
     };
+    let projected = project_agent_messages(agent_messages);
+    let end = projected.len();
+    let start = end.saturating_sub(CHAT_HISTORY_PAGE_SIZE);
+    (
+        tree.plan().clone(),
+        projected[start..end].to_vec(),
+        start,
+        start > 0,
+    )
+}
 
-    project_agent_messages(agent_messages)
+fn load_session_message_page(
+    session_file: &Path,
+    end: usize,
+) -> (Vec<ChatMessageInfo>, usize, bool) {
+    let Ok(tree) = SessionTree::load_from_file(session_file) else {
+        return (Vec::new(), 0, false);
+    };
+    let agent_messages = {
+        let branch = tree.get_active_branch_messages();
+        if branch.is_empty() {
+            tree.get_persisted_messages()
+        } else {
+            branch
+        }
+    };
+    let projected = project_agent_messages(agent_messages);
+    let end = end.min(projected.len());
+    let start = end.saturating_sub(CHAT_HISTORY_PAGE_SIZE);
+    (projected[start..end].to_vec(), start, start > 0)
+}
+
+fn tool_activity_summary(name: &str, arguments: &str) -> String {
+    let display_name = name.replace('_', " ");
+    let Ok(arguments) = serde_json::from_str::<serde_json::Value>(arguments) else {
+        return display_name;
+    };
+    let context = ["path", "file_path", "regex", "query", "glob", "command"]
+        .iter()
+        .find_map(|key| arguments.get(key).and_then(|value| value.as_str()));
+    context
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("{display_name} {value}"))
+        .unwrap_or(display_name)
 }
 
 fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageInfo> {
@@ -252,12 +362,25 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
         msg_counter += 1;
         match msg {
             AgentMessage::User { content } => {
+                let role = if content.starts_with("[ADVISOR NOTE (Aside)]") {
+                    MessageRole::Advisor(threadlane_agent::AdvisorSeverity::Aside)
+                } else if content.starts_with("[ADVISOR NOTE (Concern)]") {
+                    MessageRole::Advisor(threadlane_agent::AdvisorSeverity::Concern)
+                } else if content.starts_with("[ADVISOR NOTE (CRITICAL BLOCKER)]") {
+                    MessageRole::Advisor(threadlane_agent::AdvisorSeverity::Blocker)
+                } else {
+                    MessageRole::User
+                };
                 result.push(ChatMessageInfo {
                     id: format!("msg_{msg_counter}"),
-                    role: MessageRole::User,
+                    role,
                     content,
                     timestamp: String::new(),
                     tool_activities: Vec::new(),
+                    streaming: false,
+                    reasoning_content: None,
+                    reasoning_expanded: false,
+                    advisor_note: None,
                 });
             }
             AgentMessage::UserWithImages { content, .. } => {
@@ -267,6 +390,10 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                     content,
                     timestamp: String::new(),
                     tool_activities: Vec::new(),
+                    streaming: false,
+                    reasoning_content: None,
+                    reasoning_expanded: false,
+                    advisor_note: None,
                 });
             }
             AgentMessage::Assistant {
@@ -276,7 +403,7 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
             } => {
                 let mut tool_activities = Vec::new();
                 if let Some(calls) = tool_calls {
-                    for (i, call) in calls.iter().enumerate() {
+                    for call in calls {
                         let category = match call.function.name.as_str() {
                             "write_file"
                             | "replace_file_content"
@@ -289,8 +416,9 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                         let detail = call.function.arguments.clone();
                         let title = call.function.name.clone();
                         tool_activities.push(ToolActivityInfo {
-                            id: format!("tool_{msg_counter}_{i}"),
+                            id: call.id.clone(),
                             category,
+                            summary: tool_activity_summary(&title, &detail),
                             title,
                             detail,
                             is_expanded: false,
@@ -303,6 +431,10 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                     content: content.unwrap_or_default(),
                     timestamp: String::new(),
                     tool_activities,
+                    streaming: false,
+                    reasoning_content: None,
+                    reasoning_expanded: false,
+                    advisor_note: None,
                 });
             }
             AgentMessage::Tool {
@@ -317,9 +449,20 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                 } else {
                     "Result".into()
                 };
+                if let Some(activity) = result
+                    .iter_mut()
+                    .rev()
+                    .flat_map(|message| message.tool_activities.iter_mut().rev())
+                    .find(|activity| activity.id == tool_call_id)
+                {
+                    activity.category = category;
+                    activity.detail = content;
+                    continue;
+                }
                 let tool_info = ToolActivityInfo {
                     id: tool_call_id,
                     category,
+                    summary: tool_activity_summary(&name, ""),
                     title: name,
                     detail: content,
                     is_expanded: false,
@@ -336,6 +479,10 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                     content: String::new(),
                     timestamp: String::new(),
                     tool_activities: vec![tool_info],
+                    streaming: false,
+                    reasoning_content: None,
+                    reasoning_expanded: false,
+                    advisor_note: None,
                 });
             }
             AgentMessage::System { content } => {
@@ -352,18 +499,38 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                     content,
                     timestamp: String::new(),
                     tool_activities: Vec::new(),
+                    streaming: false,
+                    reasoning_content: None,
+                    reasoning_expanded: false,
+                    advisor_note: None,
                 });
             }
             AgentMessage::Custom {
                 custom_type,
                 payload,
             } => {
-                let is_error_type = custom_type == "error" || custom_type == "agent_error";
-                let err_msg = payload
-                    .get("error")
-                    .and_then(|v| v.as_str())
+                let text = payload
+                    .get("text")
+                    .or_else(|| payload.get("error"))
+                    .and_then(|value| value.as_str())
                     .map(ToString::to_string)
                     .unwrap_or_else(|| payload.to_string());
+                if custom_type == "thinking" {
+                    result.push(ChatMessageInfo {
+                        id: format!("msg_{msg_counter}"),
+                        role: MessageRole::Assistant,
+                        content: String::new(),
+                        timestamp: String::new(),
+                        tool_activities: Vec::new(),
+                        streaming: false,
+                        reasoning_content: Some(text),
+                        reasoning_expanded: false,
+                        advisor_note: None,
+                    });
+                    continue;
+                }
+
+                let is_error_type = custom_type == "error" || custom_type == "agent_error";
                 result.push(ChatMessageInfo {
                     id: format!("msg_{msg_counter}"),
                     role: if is_error_type {
@@ -371,9 +538,13 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                     } else {
                         MessageRole::System
                     },
-                    content: err_msg,
+                    content: text,
                     timestamp: String::new(),
                     tool_activities: Vec::new(),
+                    streaming: false,
+                    reasoning_content: None,
+                    reasoning_expanded: false,
+                    advisor_note: None,
                 });
             }
         }
@@ -424,8 +595,11 @@ fn coding_agent_options(
     work_dir: PathBuf,
     session_file: PathBuf,
     model: String,
+    model_roles: threadlane_agent::ModelRoles,
 ) -> threadlane_coding_agent::CodingAgentOptions {
     let (api_key, account_id) = provider_credentials(&model);
+    let mut agent_config = threadlane_agent::AgentConfig::default();
+    agent_config.model_roles = model_roles;
 
     threadlane_coding_agent::CodingAgentOptions {
         api_key,
@@ -434,7 +608,7 @@ fn coding_agent_options(
         work_dir,
         session_file: Some(session_file),
         system_prompt: Default::default(),
-        agent_config: None,
+        agent_config: Some(agent_config),
         coding_config: None,
     }
 }
@@ -447,8 +621,10 @@ impl Default for AppState {
 
 impl AppState {
     pub fn load() -> Self {
-        let mut registry_projects = load_project_registry();
+        Self::load_from_registry(load_project_registry())
+    }
 
+    fn load_from_registry(mut registry_projects: Vec<AttachedProject>) -> Self {
         if registry_projects.is_empty() {
             if let Ok(curr) = std::env::current_dir().and_then(std::fs::canonicalize) {
                 let display_name = curr
@@ -510,20 +686,43 @@ impl AppState {
             threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some();
 
         let (stream_tx, stream_rx) = mpsc::channel();
+        let (session_refresh_tx, session_refresh_requests) = mpsc::channel::<PathBuf>();
+        let (session_refresh_results_tx, session_refresh_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut discovery_cache = SessionDiscoveryCache::default();
+            while let Ok(work_dir) = session_refresh_requests.recv() {
+                let sessions = discover_sessions_in_project_cached(&work_dir, &mut discovery_cache);
+                if session_refresh_results_tx
+                    .send((work_dir, sessions))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
         let mut selected_model =
             crate::model_catalog::default_model_for_project(active_work_dir.as_deref())
                 .unwrap_or_default();
 
+        let model_roles = threadlane_agent::ModelRoles::default();
         let mut session_runtimes = HashMap::new();
         let mut session_status = None;
+        let (active_plan, initial_messages, initial_history_start, initial_history_has_older) =
+            active_session_file
+                .as_deref()
+                .map(load_session_projection)
+                .unwrap_or_default();
+        let history_start = initial_history_start;
+        let history_has_older = initial_history_has_older;
         let messages = match (active_work_dir.as_ref(), active_session_file.as_ref()) {
             (Some(work_dir), Some(session_file)) => {
                 let runtime = SessionRuntime::new(coding_agent_options(
                     work_dir.clone(),
                     session_file.clone(),
                     selected_model.clone(),
+                    model_roles.clone(),
                 ));
-                let messages = project_agent_messages(runtime.initial_messages.clone());
+                let messages = initial_messages.clone();
                 selected_model = runtime.selected_model.clone();
                 session_status = runtime_status_text(runtime.status());
                 session_runtimes.insert(session_file.clone(), runtime);
@@ -539,11 +738,19 @@ impl AppState {
             active_session_id,
             search_query: String::new(),
             messages,
+            history_session_file: active_session_file.clone(),
+            history_start,
+            history_has_older,
+            active_plan,
             is_generating: false,
             composer_text: String::new(),
             session_status,
             pending_composer_messages: HashMap::new(),
+            session_token_usage: HashMap::new(),
+            stashed_prompts: HashMap::new(),
             selected_model,
+            model_roles: threadlane_agent::ModelRoles::default(),
+            reasoning_effort: ReasoningEffort::default(),
             workspace_page: WorkspacePage::Chat,
             openai_key,
             opencode_key,
@@ -554,8 +761,45 @@ impl AppState {
             stream_tx,
             stream_rx,
             pending_stream_event: Mutex::new(None),
+            session_refresh_tx,
+            session_refresh_rx,
             session_runtimes,
+            deferred_stream_events: HashMap::new(),
+            pending_permissions: HashMap::new(),
         }
+    }
+
+    pub fn current_session_token_usage(&self) -> TokenUsage {
+        if let Some(session_id) = &self.active_session_id {
+            if let Some(usage) = self.session_token_usage.get(session_id) {
+                return usage.clone();
+            }
+        }
+        let chars: usize = self.messages.iter().map(|m| m.content.len()).sum();
+        let approx_tokens = (chars / 4) as u32;
+        TokenUsage {
+            total_tokens: approx_tokens,
+            input_tokens: approx_tokens,
+            ..Default::default()
+        }
+    }
+
+    pub fn stash_prompt(&mut self, session_id: &str, text: String) {
+        if !text.trim().is_empty() {
+            self.stashed_prompts.insert(session_id.to_string(), text);
+        }
+    }
+
+    pub fn pop_stashed_prompt(&mut self, session_id: &str) -> Option<String> {
+        self.stashed_prompts.remove(session_id)
+    }
+
+    pub fn get_stashed_prompt(&self, session_id: &str) -> Option<&String> {
+        self.stashed_prompts.get(session_id)
+    }
+
+    pub fn clear_stashed_prompt(&mut self, session_id: &str) {
+        self.stashed_prompts.remove(session_id);
     }
 
     fn invalidate_idle_runtimes(&mut self) {
@@ -635,6 +879,10 @@ impl AppState {
         self.auth_status_msg = Some(format!("Model switched to {model}"));
     }
 
+    pub fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
+        self.reasoning_effort = effort;
+    }
+
     pub fn open_settings(&mut self) {
         self.workspace_page = WorkspacePage::Settings;
         self.auth_status_msg = None;
@@ -645,6 +893,25 @@ impl AppState {
         self.auth_status_msg = None;
     }
 
+    fn request_session_refresh(&self, work_dir: &Path) {
+        let _ = self.session_refresh_tx.send(work_dir.to_path_buf());
+    }
+
+    pub fn apply_session_refreshes(&mut self) -> bool {
+        let mut changed = false;
+        for (work_dir, sessions) in self.session_refresh_rx.try_iter() {
+            if let Some(project) = self
+                .projects
+                .iter_mut()
+                .find(|project| project.work_dir == work_dir)
+            {
+                project.sessions = sessions;
+                changed = true;
+            }
+        }
+        changed
+    }
+
     pub fn refresh_active_session(&mut self) {
         if let (Some(work_dir), Some(session_id)) = (
             &self.active_work_dir.clone(),
@@ -653,10 +920,15 @@ impl AppState {
             let session_file = work_dir
                 .join(".threadlane/sessions")
                 .join(format!("{session_id}.jsonl"));
-            self.messages = load_session_messages(&session_file);
-            if let Some(proj) = self.projects.iter_mut().find(|p| &p.work_dir == work_dir) {
-                proj.sessions = discover_sessions_in_project(work_dir);
+            let is_generating = self
+                .session_runtimes
+                .get(&session_file)
+                .is_some_and(|runtime| runtime.is_generating());
+            if !is_generating {
+                self.replace_visible_history(&session_file);
+                self.active_plan = load_session_plan(&session_file);
             }
+            self.request_session_refresh(work_dir);
         }
     }
 
@@ -665,6 +937,11 @@ impl AppState {
         self.active_session_id = None;
         self.is_new_task = true;
         self.messages.clear();
+        self.history_session_file = None;
+        self.history_start = 0;
+        self.history_has_older = false;
+        self.active_plan = SessionPlan::default();
+        self.is_generating = false;
         self.session_status = None;
         if self.active_work_dir.is_none() {
             self.active_work_dir = self
@@ -684,10 +961,44 @@ impl AppState {
             self.active_session_id = None;
             self.is_new_task = true;
             self.messages.clear();
+            self.history_session_file = None;
+            self.history_start = 0;
+            self.history_has_older = false;
+            self.active_plan = SessionPlan::default();
+            self.is_generating = false;
             self.session_status = None;
         }
     }
 
+    fn replace_visible_history(&mut self, session_file: &Path) {
+        let (messages, start, has_older) = load_session_message_page(session_file, usize::MAX);
+        self.messages = messages;
+        self.history_session_file = Some(session_file.to_path_buf());
+        self.history_start = start;
+        self.history_has_older = has_older;
+    }
+    pub fn has_older_messages(&self) -> bool {
+        self.history_has_older
+    }
+
+    pub fn load_older_messages(&mut self) -> usize {
+        if !self.history_has_older {
+            return 0;
+        }
+        let Some(session_file) = self.history_session_file.as_deref() else {
+            return 0;
+        };
+        let (older, start, has_older) = load_session_message_page(session_file, self.history_start);
+        let added = older.len();
+        if added > 0 {
+            self.messages.splice(0..0, older);
+            self.history_start = start;
+            self.history_has_older = has_older;
+        } else {
+            self.history_has_older = false;
+        }
+        added
+    }
     pub fn select_session(&mut self, work_dir: PathBuf, session_id: String) {
         self.workspace_page = WorkspacePage::Chat;
         self.active_work_dir = Some(work_dir.clone());
@@ -695,13 +1006,24 @@ impl AppState {
         self.is_new_task = false;
 
         let session_file = self.session_file(&work_dir, &session_id);
-        let existed = self.session_runtimes.contains_key(&session_file);
+        let completed_while_away =
+            self.deferred_stream_events
+                .get(&session_id)
+                .is_some_and(|events| {
+                    events
+                        .iter()
+                        .any(|event| matches!(event, ChatStreamEvent::Finished { .. }))
+                });
+        if completed_while_away {
+            self.deferred_stream_events.remove(&session_id);
+        }
         let runtime = self.ensure_session_runtime(work_dir, session_file.clone());
-        self.messages = if existed {
-            load_session_messages(&session_file)
-        } else {
-            project_agent_messages(runtime.initial_messages.clone())
-        };
+        let (messages, start, has_older) = load_session_message_page(&session_file, usize::MAX);
+        self.messages = messages;
+        self.history_session_file = Some(session_file.clone());
+        self.history_start = start;
+        self.history_has_older = has_older;
+        self.active_plan = load_session_plan(&session_file);
         self.is_generating = runtime.is_generating();
         self.selected_model = runtime.selected_model.clone();
         self.session_status = runtime_status_text(runtime.status());
@@ -741,6 +1063,17 @@ impl AppState {
         Ok(())
     }
 
+    pub fn update_model_roles(&mut self, roles: threadlane_agent::ModelRoles) {
+        self.model_roles = roles.clone();
+        for runtime in self.session_runtimes.values() {
+            let runtime = runtime.clone();
+            let roles = roles.clone();
+            tokio::spawn(async move {
+                runtime.set_model_roles(roles).await;
+            });
+        }
+    }
+
     fn ensure_session_runtime(
         &mut self,
         work_dir: PathBuf,
@@ -753,9 +1086,32 @@ impl AppState {
             work_dir,
             session_file.clone(),
             self.selected_model.clone(),
+            self.model_roles.clone(),
         ));
         self.session_runtimes.insert(session_file, runtime.clone());
         runtime
+    }
+
+    pub fn resolve_active_permission(
+        &mut self,
+        request_id: &str,
+        decision: threadlane_coding_agent::PermissionDecision,
+    ) -> bool {
+        let Some(session_id) = self.active_session_id.clone() else {
+            return false;
+        };
+        let Some(work_dir) = self.active_work_dir.clone() else {
+            return false;
+        };
+        let session_file = self.session_file(&work_dir, &session_id);
+        let resolved = self
+            .session_runtimes
+            .get(&session_file)
+            .is_some_and(|runtime| runtime.resolve_permission(request_id, decision));
+        if resolved {
+            self.pending_permissions.remove(&session_id);
+        }
+        resolved
     }
 
     fn session_file(&self, work_dir: &Path, session_id: &str) -> PathBuf {
@@ -797,6 +1153,9 @@ impl AppState {
         self.active_session_id = None;
         self.is_new_task = true;
         self.messages.clear();
+        self.active_plan = SessionPlan::default();
+        self.is_generating = false;
+        self.session_status = None;
         let next_session = self
             .projects
             .iter()
@@ -808,9 +1167,26 @@ impl AppState {
         }
     }
 
+    pub fn session_is_generating(&self, session_file: &Path) -> bool {
+        self.session_runtimes
+            .get(session_file)
+            .is_some_and(|runtime| runtime.is_generating())
+    }
+
     pub fn toggle_project_expanded(&mut self, work_dir: &Path) {
         if let Some(proj) = self.projects.iter_mut().find(|p| p.work_dir == work_dir) {
             proj.is_expanded = !proj.is_expanded;
+        }
+    }
+
+    pub fn toggle_tool_activity(&mut self, tool_call_id: &str) {
+        if let Some(activity) = self
+            .messages
+            .iter_mut()
+            .flat_map(|message| message.tool_activities.iter_mut())
+            .find(|activity| activity.id == tool_call_id)
+        {
+            activity.is_expanded = !activity.is_expanded;
         }
     }
 
@@ -860,6 +1236,8 @@ impl AppState {
         self.active_session_id = None;
         self.is_new_task = true;
         self.messages.clear();
+        self.active_plan = SessionPlan::default();
+        self.is_generating = false;
         self.session_status = None;
         Ok(())
     }
@@ -928,8 +1306,14 @@ impl AppState {
             .lock()
             .ok()
             .and_then(|mut pending| pending.take());
-        let events = first
+        let deferred = self
+            .active_session_id
+            .as_ref()
+            .and_then(|session_id| self.deferred_stream_events.remove(session_id))
+            .unwrap_or_default();
+        let events = deferred
             .into_iter()
+            .chain(first)
             .chain(self.stream_rx.try_iter())
             .collect::<Vec<_>>();
         if events.is_empty() {
@@ -943,54 +1327,50 @@ impl AppState {
                 {
                     match adapt_agent_event(event) {
                         ChatAgentUpdate::TextDelta(delta) => {
+                            let stream_prefix = format!("streaming-{session_id}-");
                             if let Some(message) = self.messages.last_mut().filter(|message| {
                                 message.role == MessageRole::Assistant
-                                    && message.id == format!("streaming-{session_id}")
+                                    && message.id.starts_with(&stream_prefix)
+                                    && message.tool_activities.is_empty()
                             }) {
                                 message.content.push_str(&delta);
                             } else {
                                 self.messages.push(ChatMessageInfo {
-                                    id: format!("streaming-{session_id}"),
+                                    id: format!("streaming-{session_id}-{}", self.messages.len()),
                                     role: MessageRole::Assistant,
                                     content: delta,
                                     timestamp: String::new(),
                                     tool_activities: Vec::new(),
+                                    streaming: true,
+                                    reasoning_content: None,
+                                    reasoning_expanded: false,
+                                    advisor_note: None,
                                 });
                             }
                         }
                         ChatAgentUpdate::ReasoningDelta(delta) => {
-                            let activity_id = format!("reasoning-{session_id}");
-                            if let Some(activity) = self
+                            if let Some(message) = self
                                 .messages
-                                .iter_mut()
-                                .rev()
-                                .flat_map(|message| message.tool_activities.iter_mut().rev())
-                                .find(|activity| activity.id == activity_id)
+                                .last_mut()
+                                .filter(|m| m.role == MessageRole::Assistant && m.streaming)
                             {
-                                activity.detail.push_str(&delta);
-                            } else {
-                                let activity = ToolActivityInfo {
-                                    id: activity_id,
-                                    category: "Thinking".into(),
-                                    title: "Reasoning".into(),
-                                    detail: delta,
-                                    is_expanded: false,
-                                };
-                                if let Some(message) = self
-                                    .messages
-                                    .last_mut()
-                                    .filter(|message| message.role == MessageRole::Assistant)
-                                {
-                                    message.tool_activities.push(activity);
-                                } else {
-                                    self.messages.push(ChatMessageInfo {
-                                        id: format!("streaming-{session_id}"),
-                                        role: MessageRole::Assistant,
-                                        content: String::new(),
-                                        timestamp: String::new(),
-                                        tool_activities: vec![activity],
-                                    });
+                                match &mut message.reasoning_content {
+                                    Some(content) => content.push_str(&delta),
+                                    None => message.reasoning_content = Some(delta),
                                 }
+                            } else {
+                                let segment = self.messages.len();
+                                self.messages.push(ChatMessageInfo {
+                                    id: format!("streaming-{session_id}-{segment}"),
+                                    role: MessageRole::Assistant,
+                                    content: String::new(),
+                                    timestamp: String::new(),
+                                    tool_activities: Vec::new(),
+                                    streaming: true,
+                                    reasoning_content: Some(delta),
+                                    reasoning_expanded: false,
+                                    advisor_note: None,
+                                });
                             }
                         }
                         ChatAgentUpdate::ToolStarted {
@@ -1001,23 +1381,26 @@ impl AppState {
                             let activity = ToolActivityInfo {
                                 id: tool_call_id,
                                 category: "Working".into(),
+                                summary: tool_activity_summary(&name, &arguments),
                                 title: name,
                                 detail: arguments,
                                 is_expanded: false,
                             };
-                            if let Some(message) = self
-                                .messages
-                                .last_mut()
-                                .filter(|message| message.role == MessageRole::Assistant)
-                            {
+                            if let Some(message) = self.messages.last_mut().filter(|message| {
+                                message.role == MessageRole::Assistant && message.content.is_empty()
+                            }) {
                                 message.tool_activities.push(activity);
                             } else {
                                 self.messages.push(ChatMessageInfo {
-                                    id: format!("streaming-{session_id}"),
+                                    id: format!("streaming-{session_id}-{}", self.messages.len()),
                                     role: MessageRole::Assistant,
                                     content: String::new(),
                                     timestamp: String::new(),
                                     tool_activities: vec![activity],
+                                    streaming: true,
+                                    reasoning_content: None,
+                                    reasoning_expanded: false,
+                                    advisor_note: None,
                                 });
                             }
                         }
@@ -1055,6 +1438,37 @@ impl AppState {
                                 activity.detail = content;
                             }
                         }
+                        ChatAgentUpdate::PlanUpdated(plan) => {
+                            self.active_plan = plan;
+                        }
+                        ChatAgentUpdate::AdvisorNote(note) => {
+                            let note_id =
+                                format!("advisor-note-{session_id}-{}", self.messages.len());
+                            self.messages.push(ChatMessageInfo {
+                                id: note_id,
+                                role: MessageRole::Advisor(note.severity),
+                                content: format!("**{}**\n\n{}", note.summary, note.details),
+                                timestamp: String::new(),
+                                tool_activities: Vec::new(),
+                                streaming: false,
+                                reasoning_content: None,
+                                reasoning_expanded: false,
+                                advisor_note: Some(note),
+                            });
+                        }
+                        ChatAgentUpdate::ModelRolesUpdated(roles) => {
+                            self.model_roles = roles;
+                        }
+                        ChatAgentUpdate::Usage(usage) => {
+                            let entry = self
+                                .session_token_usage
+                                .entry(session_id.clone())
+                                .or_default();
+                            entry.accumulate(&usage);
+                        }
+                        ChatAgentUpdate::PermissionRequested(request) => {
+                            self.pending_permissions.insert(session_id.clone(), request);
+                        }
                         ChatAgentUpdate::Error(error) => {
                             self.messages.push(ChatMessageInfo {
                                 id: format!("stream-error-{session_id}"),
@@ -1062,6 +1476,10 @@ impl AppState {
                                 content: error.clone(),
                                 timestamp: String::new(),
                                 tool_activities: Vec::new(),
+                                streaming: false,
+                                reasoning_content: None,
+                                reasoning_expanded: false,
+                                advisor_note: None,
                             });
                             self.is_generating = false;
                             self.session_status = Some(error);
@@ -1073,8 +1491,20 @@ impl AppState {
                     session_id,
                     session_file,
                 } => {
+                    if self.active_session_id.as_deref() != Some(&session_id) {
+                        self.deferred_stream_events
+                            .entry(session_id.clone())
+                            .or_default()
+                            .push(ChatStreamEvent::Finished {
+                                session_id,
+                                session_file,
+                            });
+                        continue;
+                    }
                     if self.active_session_id.as_deref() == Some(&session_id) {
-                        self.messages = load_session_messages(&session_file);
+                        self.pending_permissions.remove(&session_id);
+                        self.replace_visible_history(&session_file);
+                        self.active_plan = load_session_plan(&session_file);
                         self.is_generating = false;
                         self.session_status = self
                             .session_runtimes
@@ -1096,13 +1526,7 @@ impl AppState {
                         .and_then(Path::parent)
                         .and_then(Path::parent)
                     {
-                        if let Some(project) = self
-                            .projects
-                            .iter_mut()
-                            .find(|project| project.work_dir == work_dir)
-                        {
-                            project.sessions = discover_sessions_in_project(work_dir);
-                        }
+                        self.request_session_refresh(work_dir);
                     }
                 }
                 ChatStreamEvent::TitleGenerated {
@@ -1114,19 +1538,18 @@ impl AppState {
                         .and_then(Path::parent)
                         .and_then(Path::parent)
                     {
-                        if let Some(project) = self
-                            .projects
-                            .iter_mut()
-                            .find(|project| project.work_dir == work_dir)
-                        {
-                            project.sessions = discover_sessions_in_project(work_dir);
-                        }
+                        self.request_session_refresh(work_dir);
                     }
                     if self.active_session_id.as_deref() == Some(&session_id) {
                         self.refresh_active_session();
                     }
                 }
-                ChatStreamEvent::Agent { .. } => {}
+                ChatStreamEvent::Agent { session_id, event } => {
+                    self.deferred_stream_events
+                        .entry(session_id.clone())
+                        .or_default()
+                        .push(ChatStreamEvent::Agent { session_id, event });
+                }
             }
         }
         true
@@ -1216,13 +1639,25 @@ impl AppState {
                 content: text,
                 timestamp: String::new(),
                 tool_activities: Vec::new(),
+                streaming: false,
+                reasoning_content: None,
+                reasoning_expanded: false,
+                advisor_note: None,
             });
         }
     }
 
     pub fn send_prompt(&mut self, text: String) -> Result<(), String> {
+        self.send_prompt_with_images(text, Vec::new())
+    }
+
+    pub fn send_prompt_with_images(
+        &mut self,
+        text: String,
+        images: Vec<ImageAttachment>,
+    ) -> Result<(), String> {
         let text = text.trim().to_string();
-        if text.is_empty() {
+        if text.is_empty() && images.is_empty() {
             return Ok(());
         }
 
@@ -1260,6 +1695,10 @@ impl AppState {
                 ),
                 timestamp: String::new(),
                 tool_activities: Vec::new(),
+                streaming: false,
+                reasoning_content: None,
+                reasoning_expanded: false,
+                advisor_note: None,
             });
             return Ok(());
         }
@@ -1269,6 +1708,8 @@ impl AppState {
             runtime,
             session_id.clone(),
             text.clone(),
+            images.clone(),
+            self.reasoning_effort,
             self.stream_tx.clone(),
         )?;
         if !threadlane_provider::router::is_antigravity_model(&model) {
@@ -1288,17 +1729,26 @@ impl AppState {
         self.messages.push(ChatMessageInfo {
             id: format!("pending-user-{session_id}-{}", self.messages.len()),
             role: MessageRole::User,
-            content: text,
+            content: if images.is_empty() {
+                text
+            } else if text.is_empty() {
+                format!("[{} image attachment(s)]", images.len())
+            } else {
+                format!("{text}\n[{} image attachment(s)]", images.len())
+            },
             timestamp: String::new(),
             tool_activities: Vec::new(),
+            streaming: false,
+            reasoning_content: None,
+            reasoning_expanded: false,
+            advisor_note: None,
         });
+
         self.is_generating = true;
         self.session_status = Some("Working…".into());
 
-        // Refresh project sessions & reload messages
-        if let Some(proj) = self.projects.iter_mut().find(|p| p.work_dir == work_dir) {
-            proj.sessions = discover_sessions_in_project(&work_dir);
-        }
+        // Refresh project sessions without blocking the UI thread.
+        self.request_session_refresh(&work_dir);
         self.composer_text.clear();
         Ok(())
     }
@@ -1320,5 +1770,194 @@ impl AppState {
         self.is_generating = false;
         self.session_status = Some("Generation cancelled".into());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persisted_thinking_message_projects_as_reasoning_content() {
+        let messages = project_agent_messages(vec![AgentMessage::Custom {
+            custom_type: "thinking".into(),
+            payload: serde_json::json!({"text": "Planning codebase inspection"}),
+        }]);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, MessageRole::Assistant);
+        assert!(messages[0].content.is_empty());
+        assert_eq!(
+            messages[0].reasoning_content.as_deref(),
+            Some("Planning codebase inspection")
+        );
+        assert!(messages[0].tool_activities.is_empty());
+    }
+
+    #[test]
+    fn app_state_startup_hydrates_complete_initial_session_history() {
+        use threadlane_provider::openai::{ToolCall, ToolCallFunction};
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let work_dir = std::env::temp_dir().join(format!(
+            "threadlane-gpui-session-hydration-{}-{unique}",
+            std::process::id()
+        ));
+        let session_file = work_dir.join(".threadlane/sessions/hydration-test.jsonl");
+        std::fs::create_dir_all(session_file.parent().unwrap()).unwrap();
+
+        let mut tree = SessionTree::new("hydration-test");
+        tree.file_path = Some(session_file.clone());
+        tree.add_message(AgentMessage::User {
+            content: "Inspect the project".into(),
+        });
+        tree.add_message(AgentMessage::Custom {
+            custom_type: "thinking".into(),
+            payload: serde_json::json!({"text": "Reading the relevant files"}),
+        });
+        tree.add_message(AgentMessage::Assistant {
+            content: Some("The issue is fixed.".into()),
+            tool_calls: Some(vec![ToolCall {
+                id: "call-read".into(),
+                r#type: "function".into(),
+                function: ToolCallFunction {
+                    name: "read_file".into(),
+                    arguments: r#"{"path":"src/main.rs"}"#.into(),
+                },
+                thought_signature: None,
+            }]),
+            stop_reason: None,
+            deferred_handle: None,
+        });
+        tree.add_message(AgentMessage::Tool {
+            tool_call_id: "call-read".into(),
+            name: "read_file".into(),
+            content: "file contents".into(),
+            is_error: false,
+            terminate: false,
+        });
+
+        let state = AppState::load_from_registry(vec![AttachedProject {
+            path: work_dir.clone(),
+            display_name: "hydration-test".into(),
+            attached_at: 0,
+            last_opened_at: 0,
+            last_session_id: Some("hydration-test".into()),
+        }]);
+
+        assert_eq!(state.active_session_id.as_deref(), Some("hydration-test"));
+        assert_eq!(state.active_work_dir.as_deref(), Some(work_dir.as_path()));
+        assert!(!state.is_new_task);
+        let messages = &state.messages;
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(
+            messages[1].reasoning_content.as_deref(),
+            Some("Reading the relevant files")
+        );
+        assert_eq!(messages[2].content, "The issue is fixed.");
+        assert_eq!(messages[2].tool_activities.len(), 1);
+        assert_eq!(messages[2].tool_activities[0].id, "call-read");
+        assert_eq!(messages[2].tool_activities[0].detail, "file contents");
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(work_dir);
+    }
+
+    #[test]
+    fn inactive_session_stream_events_replay_after_switching_back() {
+        let mut state = AppState::load_from_registry(Vec::new());
+        state.messages.clear();
+        state.active_session_id = Some("foreground-session".into());
+        state.is_new_task = false;
+
+        for event in [
+            AgentEvent::MessageUpdate {
+                text_delta: None,
+                reasoning_delta: Some("reasoning while away".into()),
+                tool_call_name: None,
+            },
+            AgentEvent::MessageUpdate {
+                text_delta: Some("generated while away".into()),
+                reasoning_delta: None,
+                tool_call_name: None,
+            },
+            AgentEvent::ToolExecutionStart {
+                tool_call_id: "call-away".into(),
+                name: "read_file".into(),
+                arguments: r#"{"path":"src/main.rs"}"#.into(),
+            },
+            AgentEvent::ToolExecutionUpdate {
+                tool_call_id: "call-away".into(),
+                partial_result: "tool output while away".into(),
+            },
+        ] {
+            state
+                .stream_tx
+                .send(ChatStreamEvent::Agent {
+                    session_id: "background-session".into(),
+                    event,
+                })
+                .unwrap();
+        }
+
+        assert!(state.drain_chat_stream());
+        assert!(state.messages.is_empty());
+        assert_eq!(state.deferred_stream_events.len(), 1);
+
+        state.active_session_id = Some("background-session".into());
+        assert!(state.drain_chat_stream());
+        assert_eq!(state.messages.len(), 2);
+        assert_eq!(state.messages[0].content, "generated while away");
+        assert_eq!(
+            state.messages[0].reasoning_content.as_deref(),
+            Some("reasoning while away")
+        );
+        assert!(state.messages[0].streaming);
+        assert_eq!(state.messages[1].tool_activities.len(), 1);
+        assert_eq!(state.messages[1].tool_activities[0].id, "call-away");
+        assert_eq!(
+            state.messages[1].tool_activities[0].detail,
+            "tool output while away"
+        );
+        assert!(state.deferred_stream_events.is_empty());
+    }
+    #[test]
+    fn session_message_page_returns_newest_window_and_older_cursor() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "threadlane-gpui-history-page-{}-{unique}",
+            std::process::id()
+        ));
+        let path = root.join("session.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut tree = SessionTree::new("paged");
+        tree.file_path = Some(path.clone());
+        for index in 0..45 {
+            tree.add_message(AgentMessage::User {
+                content: format!("message-{index}"),
+            });
+        }
+
+        let (messages, start, has_older) = load_session_message_page(&path, usize::MAX);
+        assert_eq!(messages.len(), CHAT_HISTORY_PAGE_SIZE);
+        assert_eq!(messages.first().unwrap().content, "message-5");
+        assert_eq!(messages.last().unwrap().content, "message-44");
+        assert_eq!(start, 5);
+        assert!(has_older);
+
+        let (older, older_start, has_more) = load_session_message_page(&path, start);
+        assert_eq!(older.len(), 5);
+        assert_eq!(older.first().unwrap().content, "message-0");
+        assert_eq!(older_start, 0);
+        assert!(!has_more);
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

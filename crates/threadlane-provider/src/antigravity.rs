@@ -553,6 +553,11 @@ fn resolve_runtime_model(model_id: &str, effort: &str) -> String {
     }
     let model = model_id.strip_prefix("antigravity/").unwrap_or(model_id);
     match model {
+        "gemini-3.7-flash" => match effort {
+            "medium" => "gemini-3.7-flash-medium",
+            "high" | "xhigh" => "gemini-3.7-flash-high",
+            _ => "gemini-3.7-flash-low",
+        },
         "gemini-3.6-flash" => match effort {
             "medium" => "gemini-3.6-flash-medium",
             "high" | "xhigh" => "gemini-3.6-flash-high",
@@ -1272,6 +1277,14 @@ mod tests {
 
     #[test]
     fn maps_public_models_and_reasoning_effort() {
+        assert_eq!(
+            resolve_runtime_model("antigravity/gemini-3.7-flash", "medium"),
+            "gemini-3.7-flash-medium"
+        );
+        assert_eq!(
+            resolve_runtime_model("antigravity/gemini-3.7-flash", "high"),
+            "gemini-3.7-flash-high"
+        );
         assert_eq!(
             resolve_runtime_model("antigravity/gemini-3.6-flash", "medium"),
             "gemini-3.6-flash-medium"

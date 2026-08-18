@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::Write;
 use tempfile::tempdir;
-use threadlane_agent::{AgentConfig, AgentMessage, SessionTree, UnifiedAgent};
+use threadlane_agent::{AgentMessage, ModelRoles, SessionTree, UnifiedAgent};
 use threadlane_coding_agent::{
     execute_slash_command, parse_slash_command, CommandAction, ProjectContext,
 };
@@ -54,6 +54,54 @@ async fn compact_command_stays_in_current_session() {
         .any(|message| threadlane_agent::compaction_summary_text(message).is_some()));
 }
 
+
+#[tokio::test]
+async fn roles_command_updates_task_plan_and_advisor_roles() {
+    let tmp = tempdir().unwrap();
+    let session_file = tmp.path().join("roles.jsonl");
+    let mut agent = UnifiedAgent::new(
+        "fake",
+        None,
+        "base-model",
+        &session_file,
+        threadlane_agent::AgentConfig::default(),
+    )
+    .unwrap();
+    let mut tree = SessionTree::new("roles_session");
+
+    let output = execute_slash_command(
+        CommandAction::Roles("task=task-model".into()),
+        &mut agent,
+        &mut tree,
+    )
+    .await;
+    assert!(output.contains("Task model role set to: task-model"));
+    assert_eq!(agent.model_roles().resolve_task("base-model"), "task-model");
+
+    execute_slash_command(
+        CommandAction::Roles("plan=plan-model".into()),
+        &mut agent,
+        &mut tree,
+    )
+    .await;
+    execute_slash_command(
+        CommandAction::Advisor("on".into()),
+        &mut agent,
+        &mut tree,
+    )
+    .await;
+    assert_eq!(agent.model_roles().resolve_plan("base-model"), "plan-model");
+    assert!(agent.model_roles().advisor_enabled);
+
+    let configured = agent.model_roles().clone();
+    assert_eq!(configured, ModelRoles {
+        task: Some("task-model".into()),
+        plan: Some("plan-model".into()),
+        advisor: None,
+        advisor_enabled: true,
+    });
+}
+
 #[test]
 fn test_slash_command_parsing() {
     // Happy paths for existing commands
@@ -96,10 +144,23 @@ fn test_slash_command_parsing() {
         Some(CommandAction::PromptTemplate("tpl arg1 arg2".to_string()))
     );
 
+    assert_eq!(
+        parse_slash_command("/plan my objective"),
+        Some(CommandAction::Plan("my objective".to_string()))
+    );
+    assert_eq!(
+        parse_slash_command("/advisor on"),
+        Some(CommandAction::Advisor("on".to_string()))
+    );
+    assert_eq!(
+        parse_slash_command("/roles plan=gpt-4o"),
+        Some(CommandAction::Roles("plan=gpt-4o".to_string()))
+    );
+
     // Unknown commands
     assert_eq!(
-        parse_slash_command("/plan"),
-        Some(CommandAction::Unknown("plan".to_string()))
+        parse_slash_command("/unknown_cmd"),
+        Some(CommandAction::Unknown("unknown_cmd".to_string()))
     );
     assert_eq!(
         parse_slash_command("/todos"),

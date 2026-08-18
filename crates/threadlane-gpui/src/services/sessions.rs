@@ -4,9 +4,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use threadlane_agent::AgentMessage;
 use threadlane_coding_agent::{
     CodingAgent, CodingAgentCancellation, CodingAgentOptions, CodingAgentWorkHandle,
+    PermissionDecision, PermissionHandle,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,9 +21,9 @@ pub struct SessionRuntime {
     pub agent: Arc<tokio::sync::Mutex<CodingAgent>>,
     pub cancellation: CodingAgentCancellation,
     pub work_handle: CodingAgentWorkHandle,
+    pub permission_handle: PermissionHandle,
     pub session_file: PathBuf,
     pub selected_model: String,
-    pub initial_messages: Vec<AgentMessage>,
     is_generating: AtomicBool,
     status: Mutex<SessionRuntimeStatus>,
 }
@@ -38,14 +38,8 @@ impl SessionRuntime {
         let agent = CodingAgent::new(options);
         let cancellation = agent.cancellation_handle();
         let work_handle = agent.work_handle();
-        let initial_messages = {
-            let branch = agent.session_tree.get_active_branch_messages();
-            if branch.is_empty() {
-                agent.session_tree.get_persisted_messages()
-            } else {
-                branch
-            }
-        };
+        let permission_handle = agent.permission_handle();
+        permission_handle.set_interactive(true);
         let status = if let Some(error) = agent.harness_error() {
             SessionRuntimeStatus::Error(error.to_owned())
         } else if agent.has_interrupted_work() {
@@ -60,9 +54,9 @@ impl SessionRuntime {
             agent: Arc::new(tokio::sync::Mutex::new(agent)),
             cancellation,
             work_handle,
+            permission_handle,
             session_file,
             selected_model,
-            initial_messages,
             is_generating: AtomicBool::new(false),
             status: Mutex::new(status),
         })
@@ -89,6 +83,11 @@ impl SessionRuntime {
         Ok(())
     }
 
+    pub async fn set_model_roles(&self, roles: threadlane_agent::ModelRoles) {
+        let mut agent = self.agent.lock().await;
+        agent.set_model_roles(roles);
+    }
+
     pub(crate) fn finish_generation(&self, error: Option<String>) {
         self.is_generating.store(false, Ordering::SeqCst);
         if let Ok(mut status) = self.status.lock() {
@@ -96,6 +95,10 @@ impl SessionRuntime {
                 .map(SessionRuntimeStatus::Error)
                 .unwrap_or(SessionRuntimeStatus::Ready);
         }
+    }
+
+    pub fn resolve_permission(&self, request_id: &str, decision: PermissionDecision) -> bool {
+        self.permission_handle.resolve(request_id, decision)
     }
 
     pub fn cancel(&self) -> Result<(), String> {

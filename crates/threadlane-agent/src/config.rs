@@ -3,6 +3,7 @@
 //! All tunable parameters for the agent execution loop, compaction, and
 //! stream rules live here rather than as scattered `const` items.
 
+use crate::types::ModelRoles;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -36,6 +37,11 @@ pub struct AgentConfig {
     /// Default system prompt used when none is explicitly set.
     pub default_system_prompt: String,
 
+    // ── Model Roles ─────────────────────────────────────────────────────
+    /// Assigned models for specialized roles (Task, Plan, Advisor).
+    #[serde(default)]
+    pub model_roles: ModelRoles,
+
     // ── Tool Execution ──────────────────────────────────────────────────
     /// Timeout for individual tool executions. `None` means no timeout.
     pub tool_execution_timeout: Option<Duration>,
@@ -58,6 +64,7 @@ impl Default for AgentConfig {
             estimated_image_tokens: 1_200,
             stream_rule_max_window_bytes: 4096,
             default_system_prompt: "You are threadlane AI coding agent.".into(),
+            model_roles: ModelRoles::default(),
             tool_execution_timeout: None,
             max_tool_output_bytes: None,
             event_channel_capacity: 500,
@@ -115,6 +122,11 @@ impl AgentConfigBuilder {
 
     pub fn default_system_prompt(mut self, value: impl Into<String>) -> Self {
         self.config.default_system_prompt = value.into();
+        self
+    }
+
+    pub fn model_roles(mut self, value: ModelRoles) -> Self {
+        self.config.model_roles = value;
         self
     }
 

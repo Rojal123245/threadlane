@@ -653,6 +653,7 @@ pub struct CodingAgent {
     pub(crate) agent_runner: AgentRunner,
     pub(crate) broker_dispatcher: Arc<CapabilityDispatcher>,
     pub(crate) managed_processes: ManagedProcessRegistry,
+    pub(crate) permission_handle: crate::permission::PermissionHandle,
     pub(crate) agent_work: AgentWorkScheduler,
     pub(crate) mcp_manager: Arc<McpManager>,
     pub(crate) plan_store: SessionPlanStore,
@@ -672,6 +673,10 @@ pub struct CodingAgent {
 }
 
 impl CodingAgent {
+    pub fn permission_handle(&self) -> crate::permission::PermissionHandle {
+        self.permission_handle.clone()
+    }
+
     pub(crate) fn set_tool_intent_recorder(
         &mut self,
         recorder: Option<threadlane_agent::ToolIntentRecorder>,
@@ -962,6 +967,14 @@ impl CodingAgent {
 
     pub fn set_credentials(&mut self, api_key: String, account_id: Option<String>) {
         self.agent.set_credentials(api_key, account_id);
+    }
+
+    pub fn set_model_roles(&mut self, roles: threadlane_agent::ModelRoles) {
+        self.agent.set_model_roles(roles);
+    }
+
+    pub fn model_roles(&self) -> &threadlane_agent::ModelRoles {
+        self.agent.model_roles()
     }
 
     pub async fn replay_safe_tools(
@@ -1255,7 +1268,7 @@ impl CodingAgent {
                 }))
             })
         });
-        let (broker_dispatcher, managed_processes) = build_broker_dispatcher(
+        let (broker_dispatcher, managed_processes, permission_handle) = build_broker_dispatcher(
             tool_policy.clone(),
             wasi_extensions.clone(),
             true,
@@ -1279,7 +1292,11 @@ impl CodingAgent {
         registry.register(Box::new(PlanCapability {
             plan_store: plan_store.clone(),
             event_tx: agent.event_tx.clone(),
+            provider_client: agent.provider_client().clone(),
+            turn: agent.turn.clone(),
+            config: agent.config().clone(),
         }));
+
         registry.register(Box::new(WasiCapability {
             extensions: wasi_extensions.clone(),
             broker_dispatcher: broker_dispatcher.clone(),
@@ -1341,6 +1358,7 @@ impl CodingAgent {
             agent_runner,
             broker_dispatcher,
             managed_processes,
+            permission_handle,
             agent_work,
             mcp_manager,
             plan_store,
@@ -1492,9 +1510,6 @@ impl CodingAgent {
             .filter(|message| !matches!(message, AgentMessage::System { .. }))
             .collect();
 
-        // V2 commits assistant and tool entries from the loop-engine
-        // recorders. Re-running the legacy prefix diff here can dispatch hooks
-        // twice and makes the UI tree a second persistence path.
         if harness_persists_messages {
             // Persist new provider messages through the canonical session
             // harness, then reload the session tree from the updated file.
@@ -1508,6 +1523,13 @@ impl CodingAgent {
                     Ok(tree) => self.session_tree = tree,
                     Err(error) => warn!("Failed to reload V2 session tree: {error}"),
                 }
+            }
+            if let Some(last_assistant) = state_messages
+                .iter()
+                .rev()
+                .find(|message| matches!(message, AgentMessage::Assistant { .. }))
+            {
+                self.dispatch_assistant_hook(last_assistant).await;
             }
             return;
         }
@@ -3069,6 +3091,75 @@ impl CodingAgent {
                             .map(|_| format!("Session name set to: {name}")),
                     );
                 }
+                if let CommandAction::Plan(objective) = &cmd_action {
+                    let task_prompt = objective.trim();
+                    if task_prompt.is_empty() {
+                        return Some(Ok("Usage: /plan <task objective> - generate an implementation plan with the Plan model.".into()));
+                    }
+                    let client = threadlane_provider::router::ProviderClient::new(
+                        self.agent.api_key.clone(),
+                        self.agent.account_id.clone(),
+                    );
+                    let active_model = self
+                        .session_tree
+                        .model
+                        .clone()
+                        .unwrap_or_else(|| "gpt-4o".into());
+                    let plan_model = self
+                        .agent
+                        .model_roles()
+                        .resolve_plan(&active_model)
+                        .to_string();
+                    match crate::plan::generate_plan_with_model(&client, &plan_model, task_prompt)
+                        .await
+                    {
+                        Ok(plan) => {
+                            if let Err(error) = self.plan_store.replace(plan.clone()) {
+                                return Some(Err(format!("Failed to save plan: {error}")));
+                            }
+                            let _ = self
+                                .agent
+                                .event_tx
+                                .send(AgentEvent::PlanUpdated { plan: plan.clone() });
+                            let mut msg = format!(
+                                "Generated implementation plan with model `{}`:\n",
+                                plan_model
+                            );
+                            if let Some(exp) = &plan.explanation {
+                                msg.push_str(&format!("\n> {}\n\n", exp));
+                            }
+                            for (i, item) in plan.items.iter().enumerate() {
+                                let status_icon = match item.status {
+                                    threadlane_agent::PlanItemStatus::Completed => "[x]",
+                                    threadlane_agent::PlanItemStatus::InProgress => "[>]",
+                                    threadlane_agent::PlanItemStatus::Pending => "[ ]",
+                                };
+                                msg.push_str(&format!(
+                                    "{}. {} {}\n",
+                                    i + 1,
+                                    status_icon,
+                                    item.step
+                                ));
+                            }
+                            return Some(Ok(msg));
+                        }
+                        Err(error) => return Some(Err(format!("Plan generation failed: {error}"))),
+                    }
+                }
+                if matches!(
+                    cmd_action,
+                    CommandAction::Advisor(_) | CommandAction::Roles(_)
+                ) {
+                    let output =
+                        execute_slash_command(cmd_action, &mut self.agent, &mut self.session_tree)
+                            .await;
+                    let roles = self.agent.model_roles().clone();
+                    let _ = self
+                        .agent
+                        .event_tx
+                        .send(AgentEvent::ModelRolesUpdated { roles });
+                    return Some(Ok(output));
+                }
                 let output =
                     execute_slash_command(cmd_action, &mut self.agent, &mut self.session_tree)
                         .await;
@@ -3650,7 +3741,7 @@ async fn run_subagent_task(
         },
     ));
     let agent_work = AgentWorkScheduler::default();
-    let broker_dispatcher = build_broker_dispatcher(
+    let (broker_dispatcher, _, _) = build_broker_dispatcher(
         policy.clone(),
         context.extensions.clone(),
         false,
@@ -3658,8 +3749,7 @@ async fn run_subagent_task(
         agent.event_tx.clone(),
         agent_work.clone(),
         None,
-    )
-    .0;
+    );
     agent
         .hook_registry
         .register(

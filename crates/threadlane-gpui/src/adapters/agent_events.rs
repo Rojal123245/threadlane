@@ -1,6 +1,6 @@
-//! Provider-neutral agent event projection for GPUI chat state.
-
-use threadlane_agent::AgentEvent;
+use threadlane_agent::{
+    AdvisorNote, AgentEvent, ModelRoles, PermissionRequest, SessionPlan, TokenUsage,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChatAgentUpdate {
@@ -20,12 +20,18 @@ pub enum ChatAgentUpdate {
         content: String,
         is_error: bool,
     },
+    PlanUpdated(SessionPlan),
+    AdvisorNote(AdvisorNote),
+    ModelRolesUpdated(ModelRoles),
+    Usage(TokenUsage),
     Error(String),
+    PermissionRequested(PermissionRequest),
     Ignore,
 }
 
 pub fn adapt_agent_event(event: AgentEvent) -> ChatAgentUpdate {
     match event {
+        AgentEvent::AgentEnd { usage } => ChatAgentUpdate::Usage(usage),
         AgentEvent::MessageUpdate {
             text_delta: Some(delta),
             ..
@@ -59,7 +65,13 @@ pub fn adapt_agent_event(event: AgentEvent) -> ChatAgentUpdate {
             content: result.content,
             is_error: result.is_error,
         },
+        AgentEvent::PlanUpdated { plan } => ChatAgentUpdate::PlanUpdated(plan),
+        AgentEvent::AdvisorNote { note } => ChatAgentUpdate::AdvisorNote(note),
+        AgentEvent::ModelRolesUpdated { roles } => ChatAgentUpdate::ModelRolesUpdated(roles),
         AgentEvent::AgentError { error } => ChatAgentUpdate::Error(error),
+        AgentEvent::PermissionRequested { request } => {
+            ChatAgentUpdate::PermissionRequested(request)
+        }
         _ => ChatAgentUpdate::Ignore,
     }
 }
@@ -76,5 +88,21 @@ mod tests {
             tool_call_name: None,
         });
         assert_eq!(update, ChatAgentUpdate::TextDelta("hello".into()));
+    }
+
+    #[test]
+    fn plan_update_preserves_the_canonical_session_plan() {
+        let plan = SessionPlan {
+            explanation: Some("Ship incrementally".into()),
+            items: vec![threadlane_agent::PlanItem {
+                step: "Inspect the UI".into(),
+                status: threadlane_agent::PlanItemStatus::InProgress,
+            }],
+        };
+
+        assert_eq!(
+            adapt_agent_event(AgentEvent::PlanUpdated { plan: plan.clone() }),
+            ChatAgentUpdate::PlanUpdated(plan)
+        );
     }
 }

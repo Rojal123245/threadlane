@@ -1,3 +1,3 @@
 mod view;
 
-pub use view::WorkspaceView;
+pub use view::{init, WorkspaceView};

@@ -1,3 +1,3 @@
 mod view;
 
-pub use view::ChatListView;
+pub use view::{init, ChatListView};

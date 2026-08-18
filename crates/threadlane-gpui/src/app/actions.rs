@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use threadlane_agent::{ImageAttachment, ReasoningEffort};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppAction {
     AttachProject(PathBuf),
@@ -19,14 +21,21 @@ pub enum AppAction {
     BeginNewTask,
     SelectDraftProject(PathBuf),
     SendPrompt(String),
+    SendPromptWithImages {
+        text: String,
+        images: Vec<ImageAttachment>,
+    },
     StageBusyMessage(String),
     QueuePendingMessage,
     SteerPendingMessage,
     DismissPendingMessage,
+    ToggleToolActivity(String),
     CancelGeneration,
     SelectModel(String),
+    SelectReasoningEffort(ReasoningEffort),
     OpenSettings,
     CloseSettings,
     SaveOpenAiKey(String),
     SaveOpenCodeKey(String),
+    ToggleReasoningExpanded(String),
 }

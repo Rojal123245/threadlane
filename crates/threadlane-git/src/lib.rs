@@ -194,9 +194,14 @@ fn parse_status(_work_dir: &Path, porcelain: &str) -> GitStatus {
     status
 }
 
-pub fn inspect(work_dir: &Path) -> Result<GitStatus, GitError> {
+pub fn inspect_files(work_dir: &Path) -> Result<Vec<GitFile>, GitError> {
     let porcelain = command(work_dir, &["status", "--porcelain=v1", "-b", "-z"])?;
     let mut status = parse_status(work_dir, &porcelain);
+    apply_numstats(work_dir, &mut status);
+    Ok(status.files)
+}
+
+fn apply_numstats(work_dir: &Path, status: &mut GitStatus) {
     let numstat_output = command(work_dir, &["diff", "HEAD", "--numstat"])
         .or_else(|_| command(work_dir, &["diff", "--numstat"]));
     let mut numstats = std::collections::HashMap::new();
@@ -206,8 +211,7 @@ pub fn inspect(work_dir: &Path) -> Result<GitStatus, GitError> {
             if parts.len() >= 3 {
                 let add = parts[0].parse::<u32>().unwrap_or(0);
                 let del = parts[1].parse::<u32>().unwrap_or(0);
-                let path = parts[2].trim().to_string();
-                numstats.insert(path, (add, del));
+                numstats.insert(parts[2].trim().to_owned(), (add, del));
             }
         }
     }
@@ -222,14 +226,26 @@ pub fn inspect(work_dir: &Path) -> Result<GitStatus, GitError> {
             }
         }
     }
+}
+
+pub fn inspect(work_dir: &Path) -> Result<GitStatus, GitError> {
+    let porcelain = command(work_dir, &["status", "--porcelain=v1", "-b", "-z"])?;
+    let mut status = parse_status(work_dir, &porcelain);
+    apply_numstats(work_dir, &mut status);
     status.branches = command(
         work_dir,
         &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
     )?
     .lines()
+    .map(str::trim)
     .filter(|branch| !branch.is_empty())
     .map(str::to_owned)
     .collect();
+    if let Some(current_branch) = status.branch.as_ref() {
+        if !status.branches.iter().any(|branch| branch == current_branch) {
+            status.branches.push(current_branch.clone());
+        }
+    }
     status.remote = command(work_dir, &["config", "--get", "remote.origin.url"])
         .ok()
         .map(|remote| remote.trim().to_owned())

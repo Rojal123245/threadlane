@@ -20,19 +20,26 @@ pub fn dispatch(state: &mut AppState, action: AppAction) {
             work_dir,
             session_id,
         } => {
-            let _ = state.settle_session(work_dir, session_id);
+            if let Err(error) = state.settle_session(work_dir, session_id) {
+                state.session_status = Some(error);
+            }
         }
         AppAction::RemoveSession {
             work_dir,
             session_id,
         } => {
-            let _ = state.remove_session(work_dir, session_id);
+            if let Err(error) = state.remove_session(work_dir, session_id) {
+                state.session_status = Some(error);
+            }
         }
         AppAction::ToggleProject(path) => state.toggle_project_expanded(&path),
         AppAction::BeginNewTask => state.begin_new_task(),
         AppAction::SelectDraftProject(path) => state.select_draft_project(path),
         AppAction::SendPrompt(text) => {
             let _ = state.send_prompt(text);
+        }
+        AppAction::SendPromptWithImages { text, images } => {
+            let _ = state.send_prompt_with_images(text, images);
         }
         AppAction::StageBusyMessage(text) => {
             let _ = state.stage_busy_message(text);
@@ -44,10 +51,12 @@ pub fn dispatch(state: &mut AppState, action: AppAction) {
             let _ = state.steer_pending_message();
         }
         AppAction::DismissPendingMessage => state.dismiss_pending_message(),
+        AppAction::ToggleToolActivity(tool_call_id) => state.toggle_tool_activity(&tool_call_id),
         AppAction::CancelGeneration => {
             let _ = state.cancel_generation();
         }
         AppAction::SelectModel(model) => state.set_selected_model(model),
+        AppAction::SelectReasoningEffort(effort) => state.set_reasoning_effort(effort),
         AppAction::OpenSettings => state.open_settings(),
         AppAction::CloseSettings => state.close_settings(),
         AppAction::SaveOpenAiKey(key) => {
@@ -55,6 +64,11 @@ pub fn dispatch(state: &mut AppState, action: AppAction) {
         }
         AppAction::SaveOpenCodeKey(key) => {
             let _ = state.save_opencode_key(key);
+        }
+        AppAction::ToggleReasoningExpanded(msg_id) => {
+            if let Some(message) = state.messages.iter_mut().find(|m| m.id == msg_id) {
+                message.reasoning_expanded = !message.reasoning_expanded;
+            }
         }
     }
 }

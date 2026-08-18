@@ -8,6 +8,7 @@ pub mod config;
 pub mod context;
 pub mod error;
 pub mod extension_broker;
+pub mod permission;
 mod plan;
 pub mod policy;
 pub mod prompt_templates;
@@ -33,11 +34,13 @@ pub use coding_agent::{
     CodingAgentCancellation, CodingAgentOptions, CodingAgentWorkHandle, HarnessWatch,
 };
 pub use commands::{
-    builtin_commands, execute_slash_command, parse_slash_command, CommandAction, SlashCommandInfo,
+    available_slash_commands, builtin_commands, execute_slash_command, parse_slash_command,
+    CommandAction, SlashCommandInfo,
 };
 pub use config::{CodingAgentConfig, CodingAgentConfigBuilder};
 pub use context::{ProjectContext, ProjectInstruction};
 pub use error::CodingAgentError;
+pub use permission::{PermissionDecision, PermissionHandle};
 pub use policy::ToolPolicy;
 pub use prompt_templates::{
     expand_prompt_template, load_prompt_templates, parse_command_args, substitute_args,

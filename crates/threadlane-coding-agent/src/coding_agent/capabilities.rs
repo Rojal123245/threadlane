@@ -6,7 +6,8 @@ use crate::agents::{discover_agents, AgentScope};
 use crate::extension_broker::{
     BrokerError, CapabilityDispatcher, HostBrokerRequest, BROKER_API_VERSION,
 };
-use crate::plan::{SessionPlanStore, UpdatePlanToolExecutor};
+use crate::permission::{PermissionHandle, PermissionManager};
+use crate::plan::{GeneratePlanToolExecutor, SessionPlanStore, UpdatePlanToolExecutor};
 use crate::policy::ToolPolicy;
 use async_trait::async_trait;
 use log::warn;
@@ -16,8 +17,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use threadlane_agent::harness::{HookContext, HookEffect, HookHandler, HookKind};
 use threadlane_agent::Capability;
-use threadlane_agent::{AgentEvent, AgentToolCall, AgentToolDefinition, ToolExecutor};
+use threadlane_agent::{
+    AgentConfig, AgentEvent, AgentToolCall, AgentToolDefinition, ToolExecutor, TurnState,
+};
 use threadlane_mcp::{McpManager, McpToolExecutor};
+use threadlane_provider::router::ProviderClient;
 use threadlane_skills::{LoadSkillToolExecutor, SkillRegistry};
 use threadlane_wasi::WasiExtensionManager;
 use tokio::sync::broadcast;
@@ -57,16 +61,28 @@ impl Capability for SubagentCapability {
 pub(crate) struct PlanCapability {
     pub(crate) plan_store: SessionPlanStore,
     pub(crate) event_tx: broadcast::Sender<AgentEvent>,
+    pub(crate) provider_client: ProviderClient,
+    pub(crate) turn: Arc<tokio::sync::Mutex<TurnState>>,
+    pub(crate) config: AgentConfig,
 }
 impl Capability for PlanCapability {
     fn id(&self) -> &str {
         "plan"
     }
     fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
-        vec![Arc::new(UpdatePlanToolExecutor::new(
-            self.plan_store.clone(),
-            self.event_tx.clone(),
-        ))]
+        vec![
+            Arc::new(UpdatePlanToolExecutor::new(
+                self.plan_store.clone(),
+                self.event_tx.clone(),
+            )),
+            Arc::new(GeneratePlanToolExecutor::new(
+                self.plan_store.clone(),
+                self.event_tx.clone(),
+                self.provider_client.clone(),
+                self.turn.clone(),
+                self.config.clone(),
+            )),
+        ]
     }
 }
 
@@ -355,7 +371,11 @@ pub(crate) fn build_broker_dispatcher(
     event_tx: tokio::sync::broadcast::Sender<AgentEvent>,
     agent_work: AgentWorkScheduler,
     agent_runner: Option<AgentRunner>,
-) -> (Arc<CapabilityDispatcher>, ManagedProcessRegistry) {
+) -> (
+    Arc<CapabilityDispatcher>,
+    ManagedProcessRegistry,
+    PermissionHandle,
+) {
     let allowed_hosts: Arc<HashSet<String>> = Arc::new(
         std::env::var("THREADLANE_NETWORK_ALLOW_HOSTS")
             .unwrap_or_default()
@@ -365,6 +385,8 @@ pub(crate) fn build_broker_dispatcher(
             .map(str::to_ascii_lowercase)
             .collect(),
     );
+    let permissions = Arc::new(PermissionManager::new(work_dir.clone(), event_tx.clone()));
+    let permission_handle = permissions.handle();
     let mut dispatcher = CapabilityDispatcher::new();
     let managed_processes = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     for capability in [
@@ -379,6 +401,7 @@ pub(crate) fn build_broker_dispatcher(
                 work_dir: work_dir.clone(),
                 event_tx: event_tx.clone(),
                 allowed_hosts: allowed_hosts.clone(),
+                permissions: Some(permissions.clone()),
                 agent_work: agent_work.clone(),
                 agent_runner: agent_runner.clone(),
                 persist_tool_policy,
@@ -386,7 +409,7 @@ pub(crate) fn build_broker_dispatcher(
             }),
         );
     }
-    (Arc::new(dispatcher), managed_processes)
+    (Arc::new(dispatcher), managed_processes, permission_handle)
 }
 
 pub(crate) async fn dispatch_hook_requests(

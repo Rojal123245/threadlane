@@ -5,11 +5,9 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::alert::{Alert, AlertVariant};
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::group_box::GroupBox;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
-use gpui_component::separator::Separator;
 use gpui_component::switch::Switch;
 use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::text::TextView;
@@ -631,9 +629,10 @@ impl SettingsView {
         } else {
             model_picker
         };
+        let task_model_options = model_options.clone();
         let model_picker = model_picker.dropdown_menu(move |menu, _window, _cx| {
             let mut menu = menu;
-            for option in model_options.iter().cloned() {
+            for option in task_model_options.iter().cloned() {
                 let selected = option.id == picker_selected_model;
                 let id = option.id.to_string();
                 let model = picker_model.clone();
@@ -650,6 +649,106 @@ impl SettingsView {
             }
             menu
         });
+
+        let (plan_model_id, advisor_model_id, advisor_enabled) = {
+            let state = self.model.read(cx);
+            (
+                state.model_roles.plan.clone().unwrap_or_else(|| selected_model.clone()),
+                state.model_roles.advisor.clone().unwrap_or_else(|| selected_model.clone()),
+                state.model_roles.advisor_enabled,
+            )
+        };
+
+        let plan_option = crate::model_catalog::available_option_for_project(
+            &plan_model_id,
+            project_root.as_deref(),
+        );
+        let plan_model_label = plan_option
+            .as_ref()
+            .map(|option| option.label.clone())
+            .unwrap_or_else(|| "Default (same as Task)".to_string());
+        let plan_picker_model = model.clone();
+        let plan_picker_selected = plan_model_id.clone();
+        let plan_model_options = model_options.clone();
+        let plan_picker = Button::new("settings-plan-model-picker")
+            .label(plan_model_label)
+            .dropdown_caret(true)
+            .outline()
+            .disabled(!has_models);
+        let plan_picker = if let Some(option) = plan_option.as_ref() {
+            plan_picker.icon(Icon::default().path(option.provider.icon_path()))
+        } else {
+            plan_picker
+        };
+        let plan_picker = plan_picker.dropdown_menu(move |menu, _window, _cx| {
+            let mut menu = menu;
+            for option in plan_model_options.iter().cloned() {
+                let selected = option.id == plan_picker_selected;
+                let id = option.id.to_string();
+                let model = plan_picker_model.clone();
+                menu = menu.item(
+                    PopupMenuItem::new(option.label)
+                        .icon(Icon::default().path(option.provider.icon_path()))
+                        .checked(selected)
+                        .on_click(move |_event, _window, cx| {
+                            model.update(cx, |state, cx| {
+                                let mut roles = state.model_roles.clone();
+                                roles.plan = Some(id.clone());
+                                state.update_model_roles(roles);
+                                cx.notify();
+                            });
+                        }),
+                );
+            }
+            menu
+        });
+
+        let advisor_option = crate::model_catalog::available_option_for_project(
+            &advisor_model_id,
+            project_root.as_deref(),
+        );
+        let advisor_model_label = advisor_option
+            .as_ref()
+            .map(|option| option.label.clone())
+            .unwrap_or_else(|| "Default (same as Task)".to_string());
+        let advisor_picker_model = model.clone();
+        let advisor_picker_selected = advisor_model_id.clone();
+        let advisor_model_options = model_options.clone();
+        let advisor_picker = Button::new("settings-advisor-model-picker")
+            .label(advisor_model_label)
+            .dropdown_caret(true)
+            .outline()
+            .disabled(!has_models);
+        let advisor_picker = if let Some(option) = advisor_option.as_ref() {
+            advisor_picker.icon(Icon::default().path(option.provider.icon_path()))
+        } else {
+            advisor_picker
+        };
+        let advisor_picker = advisor_picker.dropdown_menu(move |menu, _window, _cx| {
+            let mut menu = menu;
+            for option in advisor_model_options.iter().cloned() {
+                let selected = option.id == advisor_picker_selected;
+                let id = option.id.to_string();
+                let model = advisor_picker_model.clone();
+                menu = menu.item(
+                    PopupMenuItem::new(option.label)
+                        .icon(Icon::default().path(option.provider.icon_path()))
+                        .checked(selected)
+                        .on_click(move |_event, _window, cx| {
+                            model.update(cx, |state, cx| {
+                                let mut roles = state.model_roles.clone();
+                                roles.advisor = Some(id.clone());
+                                state.update_model_roles(roles);
+                                cx.notify();
+                            });
+                        }),
+                );
+            }
+            menu
+        });
+
+
+        let advisor_toggle_model = model.clone();
 
         div()
             .mt_5()
@@ -699,17 +798,122 @@ impl SettingsView {
                                     .text_sm()
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme.foreground)
-                                    .child("Default model"),
+                                    .child("Task Model (Execution)"),
                             )
                             .child(
                                 div()
                                     .mt_1()
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
-                                    .child("Used when starting a new task."),
+                                    .child("Main coding model used for executing tools and code modifications."),
                             ),
                     )
                     .child(model_picker),
+            )
+            .child(
+                div()
+                    .py_4()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .flex()
+                    .items_center()
+                    .gap_6()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.foreground)
+                                    .child("Plan Model (Architecture)"),
+                            )
+                            .child(
+                                div()
+                                    .mt_1()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("High-reasoning model used for /plan breakdown and architecture decomposition."),
+                            ),
+                    )
+                    .child(plan_picker),
+            )
+            .child(
+                div()
+                    .py_4()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .flex()
+                    .items_center()
+                    .gap_6()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.foreground)
+                                    .child("Advisor Model (Reviewer)"),
+                            )
+                            .child(
+                                div()
+                                    .mt_1()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("Secondary model paired to review turns and catch blockers."),
+                            ),
+                    )
+                    .child(advisor_picker),
+            )
+            .child(
+                div()
+                    .py_4()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .flex()
+                    .items_center()
+                    .gap_6()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.foreground)
+                                    .child("Advisor Turn-Watcher"),
+                            )
+                            .child(
+                                div()
+                                    .mt_1()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("Runs the advisor model on every turn to inject inline asides, concerns, and blockers."),
+                            ),
+                    )
+                    .child(
+                        Switch::new("settings-advisor-toggle")
+                            .checked(advisor_enabled)
+                            .tooltip(if advisor_enabled {
+                                "Disable advisor turn watcher"
+                            } else {
+                                "Enable advisor turn watcher"
+                            })
+                            .on_click(move |checked, _window, cx| {
+                                let checked = *checked;
+                                advisor_toggle_model.update(cx, |state, cx| {
+                                    let mut roles = state.model_roles.clone();
+                                    roles.advisor_enabled = checked;
+                                    state.update_model_roles(roles);
+                                    cx.notify();
+                                });
+                            }),
+
+                    ),
             )
             .child(self.render_key_row(
                 "OpenAI API key",
@@ -725,6 +929,7 @@ impl SettingsView {
                 AppAction::SaveOpenCodeKey,
                 cx,
             ))
+
             .into_any_element()
     }
 
@@ -757,7 +962,7 @@ impl SettingsView {
             .into_any_element()
     }
 
-    fn render_capability_status(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_capability_status(&self, _cx: &mut Context<Self>) -> Option<AnyElement> {
         self.capability_status.clone().map(|status| {
             Alert::new("capability-status-alert", status)
                 .title("Notice")

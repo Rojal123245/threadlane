@@ -953,3 +953,100 @@ fn extension_state_write_contains_unsafe_extension_name() {
         .to_string_lossy()
         .starts_with(".encoded-"));
 }
+
+#[test]
+fn goal_extension_manifest_declares_tools_commands_hooks_and_capabilities() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let path = root.join(".threadlane/extensions/goal_ext.wasm");
+    let extension = WasiExtension::load_from_file(&path).unwrap_or_else(|error| {
+        panic!(
+            "load deployed goal extension at {} (run scripts/build_extensions.sh): {error}",
+            path.display()
+        )
+    });
+
+    assert_eq!(extension.manifest.api_version, 2);
+    assert_eq!(extension.manifest.name, "goal_ext");
+    assert_eq!(extension.manifest.capabilities, vec!["agent", "ui"]);
+    assert_eq!(
+        extension
+            .manifest
+            .commands
+            .iter()
+            .map(|command| command.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["goal"]
+    );
+    assert_eq!(
+        extension
+            .manifest
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["get_goal", "update_goal", "create_goal"]
+    );
+    assert_eq!(extension.manifest.hooks, vec!["assistant_message"]);
+}
+
+#[test]
+fn goal_extension_command_and_tool_workflow() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let path = root.join(".threadlane/extensions/goal_ext.wasm");
+    let extension = WasiExtension::load_from_file(&path).unwrap();
+    let manager = WasiExtensionManager::new();
+    manager.register_extension(extension).unwrap();
+
+    // 1. Run /goal command to activate a goal
+    let cmd_res = manager
+        .execute_command_with_effects("goal", "implement feature X --tokens 50k")
+        .unwrap()
+        .unwrap();
+
+    assert!(cmd_res.message.contains("Goal activated"));
+    assert_eq!(cmd_res.host_broker_requests.len(), 3);
+    assert_eq!(cmd_res.host_broker_requests[0].request.capability, "ui");
+    assert_eq!(cmd_res.host_broker_requests[1].request.capability, "ui");
+    assert_eq!(cmd_res.host_broker_requests[2].request.capability, "agent");
+    assert_eq!(cmd_res.host_broker_requests[2].request.operation, "request_turn");
+
+    // 2. Call get_goal tool
+    let get_res = manager
+        .execute_tool_with_broker_requests("get_goal", "{}")
+        .unwrap()
+        .unwrap();
+    assert!(get_res.response.message.unwrap().contains("implement feature X"));
+
+    // 3. Trigger assistant_message hook -> schedules continuation turn
+    let hook_args = serde_json::json!({
+        "content": "Step 1 finished",
+        "tool_calls": []
+    });
+    let hook_res = manager
+        .execute_hook_with_effects("assistant_message", &hook_args.to_string())
+        .pop()
+        .unwrap()
+        .unwrap();
+    assert_eq!(hook_res.response.message.unwrap(), "continuation turn scheduled");
+    assert!(hook_res.host_broker_requests.iter().any(|r| r.request.operation == "request_turn"));
+
+    // 4. Assistant calls update_goal with status complete
+    let update_args = serde_json::json!({
+        "status": "complete",
+        "evidence": "Tests passed"
+    });
+    let update_res = manager
+        .execute_tool_with_broker_requests("update_goal", &update_args.to_string())
+        .unwrap()
+        .unwrap();
+    assert!(update_res.response.message.unwrap().contains("Goal successfully marked complete"));
+
+    // 5. Subsequent assistant_message hook recognizes goal is complete and does not request more turns
+    let final_hook_res = manager
+        .execute_hook_with_effects("assistant_message", &hook_args.to_string())
+        .pop()
+        .unwrap()
+        .unwrap();
+    assert_eq!(final_hook_res.response.message.unwrap(), "goal status is complete");
+    assert!(!final_hook_res.host_broker_requests.iter().any(|r| r.request.operation == "request_turn"));
+}
