@@ -1669,11 +1669,11 @@ impl ChatListView {
         };
         let context_tooltip = format!(
             "Context window\n{} of {} tokens ({:.1}%)\nInput: {} • Output: {}",
-            token_usage.total_tokens,
-            context_max,
+            crate::model_catalog::format_tokens(token_usage.total_tokens),
+            crate::model_catalog::format_tokens(context_max),
             percent,
-            token_usage.input_tokens,
-            token_usage.output_tokens
+            crate::model_catalog::format_tokens(token_usage.input_tokens),
+            crate::model_catalog::format_tokens(token_usage.output_tokens)
         );
         let context_meter = div()
             .id("context-meter-badge")

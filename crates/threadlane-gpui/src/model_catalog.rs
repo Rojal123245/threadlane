@@ -193,7 +193,7 @@ pub(crate) fn model_context_window(model_id: &str) -> u32 {
     }
 }
 
-fn format_tokens(tokens: u32) -> String {
+pub(crate) fn format_tokens(tokens: u32) -> String {
     if tokens >= 1_000_000 {
         format!("{:.1}M", tokens as f64 / 1_000_000.0)
     } else if tokens >= 1_000 {
