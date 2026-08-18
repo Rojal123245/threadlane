@@ -11,6 +11,7 @@ pub mod extension_broker;
 pub mod permission;
 mod plan;
 pub mod policy;
+pub mod project_registry;
 pub mod prompt_templates;
 pub mod supervisor;
 pub mod system_prompt;
@@ -40,13 +41,14 @@ pub use config::{CodingAgentConfig, CodingAgentConfigBuilder};
 pub use context::{ProjectContext, ProjectInstruction};
 pub use permission::{PermissionDecision, PermissionHandle};
 pub use policy::ToolPolicy;
+pub use project_registry::{
+    load_project_registry, register_project, save_project_registry, select_project, ProjectRecord,
+};
 pub use prompt_templates::{
     expand_prompt_template, load_prompt_templates, parse_command_args, substitute_args,
     PromptTemplate,
 };
-pub use supervisor::{
-    HarnessSupervisor, ProjectRecord, TaskAgentEvent, TaskKind, TaskRecord, TaskStatus,
-};
+pub use supervisor::{HarnessSupervisor, TaskAgentEvent, TaskKind, TaskRecord, TaskStatus};
 pub use system_prompt::SystemPromptConfig;
 pub use threadlane_agent::{Capability, CapabilityRegistry};
 pub use threadlane_mcp::*;

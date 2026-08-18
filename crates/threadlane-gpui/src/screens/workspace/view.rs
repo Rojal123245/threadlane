@@ -487,7 +487,9 @@ impl WorkspaceView {
         let theme = cx.theme().colors;
 
         div()
+            .id("environment-popover")
             .absolute()
+            .on_mouse_down(MouseButton::Left, |_event, _window, _cx| {})
             .top(px(48.0))
             .right(px(44.0))
             .w(px(276.0))
@@ -1313,6 +1315,21 @@ impl Render for WorkspaceView {
                         cx.notify();
                     }))
             }))
+            .children(
+                (workspace_page == WorkspacePage::Chat && self.environment_open).then(|| {
+                    div()
+                        .id("environment-backdrop")
+                        .absolute()
+                        .inset_0()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _event, _window, cx| {
+                                this.environment_open = false;
+                                cx.notify();
+                            }),
+                        )
+                }),
+            )
             .children(
                 (workspace_page == WorkspacePage::Chat && self.environment_open)
                     .then(|| self.render_environment_popover(cx)),

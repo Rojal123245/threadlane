@@ -239,7 +239,7 @@ impl CodingSessionHarness {
             } else {
                 format!("{base_lane}-{attempt_idx}")
             };
-            let identity = SubagentLaneIdentity {
+            let mut identity = SubagentLaneIdentity {
                 lane_name: lane_name.clone(),
                 run_id: run_id.clone(),
                 source_leaf_id: source_leaf_id.map(str::to_owned),
@@ -275,6 +275,7 @@ impl CodingSessionHarness {
                             error: retry_err.to_string(),
                         });
                     }
+                    identity.source_leaf_id = None;
                 } else {
                     return Err(SubagentStartError {
                         identity: None,
@@ -1500,11 +1501,32 @@ impl CodingSessionHarness {
             .iter()
             .find(|lane| lane.open_operation.as_deref() == Some(run_id))
             .ok_or_else(|| format!("harness operation {run_id} is not open"))?;
+        let parent_id = if spec.index == 0 {
+            assistant_entry_id.to_string()
+        } else {
+            state
+                .lanes
+                .iter()
+                .flat_map(|lane| lane.tools.iter())
+                .find(|tool| {
+                    tool.run_id == run_id
+                        && tool.assistant_entry_id == assistant_entry_id
+                        && tool.tool_index + 1 == spec.index
+                })
+                .filter(|tool| {
+                    self.store
+                        .entries()
+                        .iter()
+                        .any(|entry| entry.id == tool.result_entry_id)
+                })
+                .map(|tool| tool.result_entry_id.clone())
+                .unwrap_or_else(|| assistant_entry_id.to_string())
+        };
         let seq = self.next_seq();
         self.store
             .append_entry_gated(HarnessEntry {
                 id: spec.result_entry_id.clone(),
-                parent_id: Some(assistant_entry_id.into()),
+                parent_id: Some(parent_id),
                 lane: lane.name.clone(),
                 seq,
                 timestamp: timestamp(),
@@ -1760,11 +1782,9 @@ impl CodingSessionHarness {
             if matches!(msg, AgentMessage::System { .. }) {
                 continue;
             }
-            // Only persist non-user messages; user prompts are handled by
-            // begin_run/accept_prompt.
-            if msg.is_user() {
-                continue;
-            }
+            // Initial prompts are already present through begin_run, while
+            // queued/steered/generated user messages may exist only in the
+            // provider transcript. Occurrence matching handles both cases.
             let key = format!("{:?}", msg);
             if let Some(count) = existing.get_mut(&key) {
                 if *count > 0 {
@@ -1785,20 +1805,24 @@ impl CodingSessionHarness {
             .into_iter()
             .map(|entry| entry.message)
             .collect::<Vec<_>>();
-        let mut cursor = 0usize;
-        for message in messages
+        let expected = messages
             .iter()
             .filter(|message| !matches!(message, AgentMessage::System { .. }))
-        {
-            let Some(offset) = logged[cursor..]
-                .iter()
-                .position(|candidate| candidate == message)
-            else {
-                return Err(format!("model-visible message is not logged: {message:?}"));
-            };
-            cursor += offset + 1;
+            .cloned()
+            .collect::<Vec<_>>();
+        if logged == expected {
+            return Ok(());
         }
-        Ok(())
+        let mismatch = logged
+            .iter()
+            .zip(expected.iter())
+            .position(|(logged, expected)| logged != expected)
+            .unwrap_or_else(|| logged.len().min(expected.len()));
+        Err(format!(
+            "model-visible history diverges at index {mismatch}: durable_count={}, provider_count={}",
+            logged.len(),
+            expected.len()
+        ))
     }
 
     /// Run hooks of the given kind for the main lane.
@@ -1838,6 +1862,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
         (dir, path)
+    }
+
+    #[test]
+    fn invalid_subagent_source_is_not_retained_for_passive_commit() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+
+        let identity = harness
+            .start_subagent_lane("worker", "inspect", Some("node_69"))
+            .unwrap();
+
+        assert!(identity.source_leaf_id.is_none());
+        assert!(harness.store.records().iter().any(|record| matches!(
+            record,
+            HarnessRecord::OperationStarted {
+                lane,
+                source_leaf_id: None,
+                ..
+            } if lane == &identity.lane_name
+        )));
     }
 
     // ── No-tool prompt: one OperationStarted + one StepAttempt + one
@@ -2123,6 +2167,50 @@ mod tests {
             entry_count_before,
             "sync_messages should not create duplicate entries"
         );
+    }
+
+    #[test]
+    fn sync_messages_persists_provider_visible_queued_user_messages() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        let run_id = harness.unique_run_id("test").unwrap();
+        let initial = AgentMessage::user("initial", vec![]);
+        let queued = AgentMessage::user("queued follow-up", vec![]);
+
+        harness.begin_run(&run_id, initial.clone()).unwrap();
+        harness
+            .sync_messages(&[initial.clone(), queued.clone()])
+            .unwrap();
+        harness
+            .assert_model_visible(&[initial, queued.clone()])
+            .unwrap();
+
+        assert!(harness
+            .store
+            .model_history("main")
+            .unwrap()
+            .iter()
+            .any(|entry| entry.message == queued));
+    }
+
+    #[test]
+    fn model_visibility_rejects_extra_durable_messages() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        let run_id = harness.unique_run_id("test").unwrap();
+        let prompt = AgentMessage::user("inspect", vec![]);
+        let extra = AgentMessage::Assistant {
+            content: Some("stale response".into()),
+            tool_calls: None,
+            stop_reason: Some("end_turn".into()),
+            deferred_handle: None,
+        };
+
+        harness.begin_run(&run_id, prompt.clone()).unwrap();
+        harness.sync_messages(&[prompt.clone(), extra]).unwrap();
+
+        let error = harness.assert_model_visible(&[prompt]).unwrap_err();
+        assert!(error.contains("durable_count=2, provider_count=1"));
     }
 
     #[test]

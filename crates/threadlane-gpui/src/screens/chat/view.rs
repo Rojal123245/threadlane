@@ -26,7 +26,6 @@ actions!(threadlane_composer, [PasteClipboard]);
 const INPUT_KEY_CONTEXT: &str = "Input";
 
 const CHAT_CONTENT_MAX_WIDTH: f32 = 1040.0;
-const AGENT_CONTENT_MAX_WIDTH: f32 = 760.0;
 const USER_BUBBLE_MAX_WIDTH: f32 = 680.0;
 
 pub fn init(cx: &mut App) {
@@ -681,7 +680,6 @@ impl ChatListView {
                 div()
                     .w_full()
                     .min_w_0()
-                    .max_w(px(AGENT_CONTENT_MAX_WIDTH))
                     .flex()
                     .flex_col()
                     .children((hidden_count > 0).then(|| {
@@ -721,7 +719,6 @@ impl ChatListView {
                 div()
                     .w_full()
                     .min_w_0()
-                    .max_w(px(AGENT_CONTENT_MAX_WIDTH))
                     .flex()
                     .items_center()
                     .gap_2()
@@ -1444,7 +1441,6 @@ impl ChatListView {
                         div()
                             .w_full()
                             .min_w_0()
-                            .max_w(px(AGENT_CONTENT_MAX_WIDTH))
                             .flex()
                             .flex_col()
                             .gap_2()
@@ -1545,7 +1541,6 @@ impl ChatListView {
 
                 div().w_full().flex().justify_center().my_2().px_4().child(
                     div()
-                        .max_w(px(AGENT_CONTENT_MAX_WIDTH))
                         .w_full()
                         .p_3()
                         .rounded_lg()
@@ -1587,7 +1582,6 @@ impl ChatListView {
             }
             MessageRole::Error => div().flex().justify_center().my_2().px_4().child(
                 div()
-                    .max_w(px(AGENT_CONTENT_MAX_WIDTH))
                     .w_full()
                     .p_3()
                     .rounded_lg()

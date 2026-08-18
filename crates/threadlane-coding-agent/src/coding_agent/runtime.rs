@@ -747,7 +747,10 @@ impl CodingAgent {
         self.agent.tool_dispatcher.tool_completion_recorder = recorder;
     }
 
-    async fn begin_harness_run(&mut self, prompt: AgentMessage) -> Result<Option<String>, String> {
+    pub(crate) async fn begin_harness_run(
+        &mut self,
+        prompt: AgentMessage,
+    ) -> Result<Option<String>, String> {
         if let Some(run_id) = self
             .harness_run_id
             .lock()
@@ -784,6 +787,10 @@ impl CodingAgent {
             .harness_run_id
             .lock()
             .map_err(|_| "Harness run state is unavailable".to_string())? = Some(run_id.clone());
+        if let Some(path) = self.session_tree.file_path.clone() {
+            self.session_tree = SessionTree::load_from_file(&path)
+                .map_err(|error| format!("failed to reload accepted prompt: {error}"))?;
+        }
         Ok(Some(run_id))
     }
 
@@ -817,7 +824,7 @@ impl CodingAgent {
         Ok(())
     }
 
-    async fn finish_harness_run(
+    pub(crate) async fn finish_harness_run(
         &mut self,
         run_id: Option<&str>,
         outcome: OperationOutcome,
@@ -826,6 +833,20 @@ impl CodingAgent {
         let (Some(journal), Some(run_id)) = (self.harness.as_mut(), run_id) else {
             return Ok(());
         };
+        if matches!(
+            outcome,
+            OperationOutcome::Failed | OperationOutcome::Aborted
+        ) {
+            if let Some(message) = error
+                .as_deref()
+                .filter(|message| !message.trim().is_empty())
+            {
+                journal.append_message(AgentMessage::Custom {
+                    custom_type: "agent_error".into(),
+                    payload: serde_json::json!({ "error": message }),
+                })?;
+            }
+        }
         let result = journal.finish_run(run_id, outcome, error);
         if result.is_ok() {
             let context = HookContext {
@@ -858,12 +879,30 @@ impl CodingAgent {
 
     fn append_command_message(&mut self, message: AgentMessage) -> Result<(), String> {
         if let Some(journal) = self.harness.as_mut() {
-            journal.append_message(message.clone())?;
-            self.session_tree.add_message_in_memory(message);
+            journal.append_message(message)?;
+            if let Some(path) = self.session_tree.file_path.clone() {
+                self.session_tree = SessionTree::load_from_file(&path)
+                    .map_err(|error| format!("failed to reload command message: {error}"))?;
+            }
         } else {
             self.session_tree.add_message(message);
         }
         Ok(())
+    }
+
+    fn prompt_parent_leaf(
+        &mut self,
+        message: AgentMessage,
+        harness_persisted: bool,
+    ) -> Option<String> {
+        if !harness_persisted {
+            return Some(self.session_tree.add_message(message));
+        }
+        let leaf = self.session_tree.active_node_id().map(str::to_owned);
+        if self.session_tree.get_active_branch_messages().last() != Some(&message) {
+            warn!("Persisted prompt is not the active session leaf; subagents will use the canonical active leaf");
+        }
+        leaf
     }
 
     async fn compact_history_with_harness(&mut self) -> Result<bool, String> {
@@ -1576,6 +1615,44 @@ impl CodingAgent {
             .collect();
 
         if harness_persists_messages {
+            let durable_messages = self
+                .harness
+                .as_ref()
+                .and_then(|harness| harness.store.model_history("main").ok())
+                .map(|entries| {
+                    entries
+                        .into_iter()
+                        .map(|entry| entry.message)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if requires_harness_compaction_reset(&durable_messages, &state_messages) {
+                let summary = state_messages
+                    .iter()
+                    .find_map(threadlane_agent::compaction_summary_text)
+                    .expect("compaction reset requires a summary")
+                    .to_owned();
+                let retained_tail = compaction_retained_tail(&state_messages);
+                if let Err(error) = self.persist_harness_compaction(&summary, &retained_tail) {
+                    self.harness_journal_error = Some(error);
+                    return;
+                }
+                if let Some(path) = self.session_tree.file_path.clone() {
+                    match SessionTree::load_from_file(&path) {
+                        Ok(tree) => self.session_tree = tree,
+                        Err(error) => warn!("Failed to reload compacted session: {error}"),
+                    }
+                }
+                if let Some(last_assistant) = state_messages
+                    .iter()
+                    .rev()
+                    .find(|message| matches!(message, AgentMessage::Assistant { .. }))
+                {
+                    self.dispatch_assistant_hook(last_assistant).await;
+                }
+                return;
+            }
+
             // Persist new provider messages through the canonical session
             // harness, then reload the session tree from the updated file.
             if let Some(harness) = self.harness.as_mut() {
@@ -1670,11 +1747,7 @@ impl CodingAgent {
 
         for message in state_messages.into_iter().skip(start_index) {
             self.dispatch_assistant_hook(&message).await;
-            if harness_persists_messages {
-                self.session_tree.add_message_in_memory(message.clone());
-            } else {
-                self.session_tree.add_message(message.clone());
-            }
+            self.session_tree.add_message(message.clone());
         }
     }
 
@@ -2816,14 +2889,11 @@ impl CodingAgent {
                             Ok(run_id) => run_id,
                             Err(error) => return Some(Err(format!("Harness Error: {error}"))),
                         };
-                        let parent_leaf = if harness_run_id.is_some() {
-                            self.session_tree
-                                .add_message_in_memory(AgentMessage::user(input, images.clone()))
-                        } else {
-                            self.session_tree
-                                .add_message(AgentMessage::user(input, images.clone()))
-                        };
-                        *self.dispatch_parent_leaf.lock().unwrap() = Some(parent_leaf);
+                        let parent_leaf = self.prompt_parent_leaf(
+                            AgentMessage::user(input, images.clone()),
+                            harness_run_id.is_some(),
+                        );
+                        *self.dispatch_parent_leaf.lock().unwrap() = parent_leaf;
                         self.agent
                             .prompt_message(AgentMessage::user(prompt, images.clone()))
                             .await;
@@ -2888,14 +2958,11 @@ impl CodingAgent {
                         }
                     }
                 }
-                let parent_leaf = if harness_run_id.is_some() {
-                    self.session_tree
-                        .add_message_in_memory(AgentMessage::user(input, images.clone()))
-                } else {
-                    self.session_tree
-                        .add_message(AgentMessage::user(input, images.clone()))
-                };
-                *self.dispatch_parent_leaf.lock().unwrap() = Some(parent_leaf);
+                let parent_leaf = self.prompt_parent_leaf(
+                    AgentMessage::user(input, images.clone()),
+                    harness_run_id.is_some(),
+                );
+                *self.dispatch_parent_leaf.lock().unwrap() = parent_leaf;
                 let result = match (self.agent_runner)(vec![task], false, None).await {
                     Ok(result) => result,
                     Err(err) => {
@@ -2948,7 +3015,16 @@ impl CodingAgent {
                     }
                 }
                 if harness_run_id.is_some() {
-                    self.session_tree.add_message_in_memory(assistant);
+                    if let Some(path) = self.session_tree.file_path.clone() {
+                        match SessionTree::load_from_file(&path) {
+                            Ok(tree) => self.session_tree = tree,
+                            Err(error) => {
+                                return Some(Err(format!(
+                                    "Harness Error: failed to reload subagent response: {error}"
+                                )))
+                            }
+                        }
+                    }
                 } else {
                     self.session_tree.add_message(assistant);
                 }
@@ -2975,14 +3051,11 @@ impl CodingAgent {
                     Ok(run_id) => run_id,
                     Err(error) => return Some(Err(format!("Harness Error: {error}"))),
                 };
-                let parent_leaf = if harness_run_id.is_some() {
-                    self.session_tree
-                        .add_message_in_memory(AgentMessage::user(input, images.clone()))
-                } else {
-                    self.session_tree
-                        .add_message(AgentMessage::user(input, images.clone()))
-                };
-                *self.dispatch_parent_leaf.lock().unwrap() = Some(parent_leaf);
+                let parent_leaf = self.prompt_parent_leaf(
+                    AgentMessage::user(input, images.clone()),
+                    harness_run_id.is_some(),
+                );
+                *self.dispatch_parent_leaf.lock().unwrap() = parent_leaf;
                 return match res {
                     Ok(result) => {
                         let message = if result.message.is_empty() {
@@ -3283,30 +3356,8 @@ impl CodingAgent {
                 return Some(Err(message));
             }
         };
-        let parent_leaf = if self
-            .session_tree
-            .get_active_branch_messages()
-            .last()
-            .is_some_and(|message| message == &msg)
-        {
-            self.session_tree
-                .active_node_id()
-                .map(str::to_owned)
-                .unwrap_or_else(|| {
-                    if harness_run_id.is_some() {
-                        self.session_tree.add_message_in_memory(msg.clone())
-                    } else {
-                        self.session_tree.add_message(msg.clone())
-                    }
-                })
-        } else {
-            if harness_run_id.is_some() {
-                self.session_tree.add_message_in_memory(msg.clone())
-            } else {
-                self.session_tree.add_message(msg.clone())
-            }
-        };
-        *self.dispatch_parent_leaf.lock().unwrap() = Some(parent_leaf);
+        let parent_leaf = self.prompt_parent_leaf(msg.clone(), harness_run_id.is_some());
+        *self.dispatch_parent_leaf.lock().unwrap() = parent_leaf;
         if let (Some(run_id), Some(harness)) = (harness_run_id.as_deref(), self.harness.as_mut()) {
             if let Err(error) = harness.prepare_assistant_attempt(run_id) {
                 let _ = self
@@ -3427,6 +3478,122 @@ impl CodingAgent {
         }
 
         None
+    }
+}
+
+fn requires_harness_compaction_reset(
+    durable_messages: &[AgentMessage],
+    state_messages: &[AgentMessage],
+) -> bool {
+    state_messages
+        .iter()
+        .any(|message| threadlane_agent::compaction_summary_text(message).is_some())
+        && !state_messages.starts_with(durable_messages)
+}
+
+#[cfg(test)]
+mod compaction_sync_tests {
+    use super::{
+        requires_harness_compaction_reset, CodingAgent, CodingAgentOptions, CompletedSubagentLane,
+        SubagentLaneStatus,
+    };
+    use crate::system_prompt::SystemPromptConfig;
+    use threadlane_agent::{harness::JsonlStore, AgentMessage};
+
+    fn summary() -> AgentMessage {
+        AgentMessage::Custom {
+            custom_type: "compaction_summary".into(),
+            payload: serde_json::json!({"summary": "older context"}),
+        }
+    }
+
+    #[test]
+    fn in_loop_compaction_requires_a_durable_branch_reset() {
+        let durable = vec![
+            AgentMessage::user("old prompt", vec![]),
+            AgentMessage::Assistant {
+                content: Some("old response".into()),
+                tool_calls: None,
+                stop_reason: None,
+                deferred_handle: None,
+            },
+        ];
+        let state = vec![summary(), AgentMessage::user("current prompt", vec![])];
+
+        assert!(requires_harness_compaction_reset(&durable, &state));
+    }
+
+    #[test]
+    fn already_persisted_compaction_uses_normal_incremental_sync() {
+        let durable = vec![summary(), AgentMessage::user("current prompt", vec![])];
+        let mut state = durable.clone();
+        state.push(AgentMessage::Assistant {
+            content: Some("new response".into()),
+            tool_calls: None,
+            stop_reason: None,
+            deferred_handle: None,
+        });
+
+        assert!(!requires_harness_compaction_reset(&durable, &state));
+    }
+
+    #[tokio::test]
+    async fn invalid_compatibility_source_does_not_break_delayed_passive_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut agent = CodingAgent::new(CodingAgentOptions {
+            api_key: "test-key".into(),
+            account_id: None,
+            model: "test-model".into(),
+            work_dir: dir.path().to_path_buf(),
+            session_file: Some(path.clone()),
+            system_prompt: SystemPromptConfig::default(),
+            agent_config: None,
+            coding_config: None,
+        });
+        agent
+            .begin_harness_run(AgentMessage::user("prompt", vec![]))
+            .await
+            .unwrap();
+
+        let identity = agent
+            .harness
+            .as_mut()
+            .unwrap()
+            .start_subagent_lane("worker", "inspect", Some("node_69"))
+            .unwrap();
+        assert!(identity.source_leaf_id.is_none());
+        agent
+            .completed_subagent_lanes
+            .lock()
+            .unwrap()
+            .push(CompletedSubagentLane {
+                lane_name: identity.lane_name,
+                run_id: identity.run_id,
+                parent_leaf_id: identity.source_leaf_id,
+                task: "inspect".into(),
+                agent: "worker".into(),
+                status: SubagentLaneStatus::Completed,
+                messages: vec![AgentMessage::Assistant {
+                    content: Some("done".into()),
+                    tool_calls: None,
+                    stop_reason: Some("end_turn".into()),
+                    deferred_handle: None,
+                }],
+                error: None,
+            });
+
+        agent.commit_completed_subagent_lanes().unwrap();
+
+        let store = JsonlStore::open(&path).unwrap();
+        assert!(store.entries().iter().any(|entry| matches!(
+            &entry.message,
+            AgentMessage::Custom { custom_type, .. } if custom_type == "subagent_lane"
+        )));
+        assert!(store
+            .entries()
+            .iter()
+            .all(|entry| entry.parent_id.as_deref() != Some("node_69")));
     }
 }
 

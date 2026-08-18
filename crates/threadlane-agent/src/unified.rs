@@ -162,7 +162,6 @@ impl UnifiedAgent {
         &self.config
     }
 
-
     /// Returns a clone of the in-memory turn state (for subagent context).
     pub fn state_clone(&self) -> Arc<Mutex<TurnState>> {
         self.turn.clone()
@@ -396,8 +395,15 @@ impl UnifiedAgent {
         self.turn.lock().await.reasoning_effort = effort;
     }
 
-    /// Resumes a pending turn (no-op in unified agent).
-    pub async fn resume_pending_turn(&mut self) {}
+    /// Resumes provider/tool execution from the current durable conversation
+    /// without appending a duplicate user prompt.
+    pub async fn resume_pending_turn(&mut self) {
+        let _ = self.event_tx.send(AgentEvent::AgentStart);
+        self.run_turns().await;
+        let _ = self.event_tx.send(AgentEvent::AgentEnd {
+            usage: TokenUsage::default(),
+        });
+    }
 
     /// Fetches a deferred response.
     pub async fn fetch_deferred(

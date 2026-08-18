@@ -11,8 +11,9 @@ pub(crate) use runtime::{
 };
 pub use runtime::{
     cancel_open_subagent_operations, AgentRunTask, CodingAgent, CodingAgentCancellation,
-    CodingAgentOptions, CodingAgentWorkHandle, HarnessCompositionSnapshot, SubagentCancellationGuard,
-    SubagentInnerTool, SubagentInnerToolData, SubagentResult, SubagentSessionData,
+    CodingAgentOptions, CodingAgentWorkHandle, HarnessCompositionSnapshot,
+    SubagentCancellationGuard, SubagentInnerTool, SubagentInnerToolData, SubagentResult,
+    SubagentSessionData,
 };
 #[cfg(test)]
 pub(crate) use runtime::{
@@ -33,11 +34,11 @@ mod tests {
     use crate::system_prompt::SystemPromptConfig;
     use serde_json::Value;
     use std::collections::{HashMap, HashSet};
+    use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration as StdDuration, Instant};
-    use std::fs;
     use threadlane_agent::harness::{
         AgentHarness, HookContext, HookEffect, HookHandler, HookKind, JsonlStore, OperationIntent,
         OperationOutcome, QueueKind, Record, Reducer, SessionStore,
@@ -83,6 +84,59 @@ mod tests {
             .records()
             .windows(2)
             .all(|pair| pair[0].seq() < pair[1].seq()));
+    }
+
+    #[tokio::test]
+    async fn failed_run_persists_an_error_message_for_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut options = coding_agent_options(dir.path().to_path_buf());
+        options.session_file = Some(path.clone());
+        let mut agent = CodingAgent::new(options);
+        let run_id = agent
+            .begin_harness_run(AgentMessage::user("prompt", vec![]))
+            .await
+            .unwrap()
+            .unwrap();
+
+        agent
+            .finish_harness_run(
+                Some(&run_id),
+                OperationOutcome::Failed,
+                Some("provider failed".into()),
+            )
+            .await
+            .unwrap();
+
+        let store = JsonlStore::open(&path).unwrap();
+        assert!(store.entries().iter().any(|entry| {
+            matches!(
+                &entry.message,
+                AgentMessage::Custom { custom_type, payload }
+                    if custom_type == "agent_error"
+                        && payload.get("error").and_then(Value::as_str)
+                            == Some("provider failed")
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn accepted_harness_prompt_uses_its_canonical_entry_as_active_leaf() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut options = coding_agent_options(dir.path().to_path_buf());
+        options.session_file = Some(path.clone());
+        let mut agent = CodingAgent::new(options);
+
+        agent
+            .begin_harness_run(AgentMessage::user("prompt", vec![]))
+            .await
+            .unwrap();
+
+        let active_leaf = agent.session_tree.active_node_id().unwrap();
+        let store = JsonlStore::open(&path).unwrap();
+        assert!(store.entries().iter().any(|entry| entry.id == active_leaf));
+        assert!(!active_leaf.starts_with("node_"));
     }
 
     #[test]

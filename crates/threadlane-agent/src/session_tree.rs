@@ -148,6 +148,22 @@ impl SessionTree {
             })
             .max()
             .unwrap_or(0);
+        for line in &self.v2_lines {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+                let seq = value
+                    .get("seq")
+                    .and_then(serde_json::Value::as_u64)
+                    .or_else(|| {
+                        value
+                            .as_object()
+                            .and_then(|object| object.values().next())
+                            .and_then(|record| record.get("seq"))
+                            .and_then(serde_json::Value::as_u64)
+                    })
+                    .unwrap_or(0);
+                max_seq = max_seq.max(seq);
+            }
+        }
         if let Some(path) = &self.file_path {
             for suffix in ["harness.jsonl"] {
                 let sidecar = path.with_extension(suffix);
@@ -469,24 +485,53 @@ impl SessionTree {
         parent_leaf_id: Option<&str>,
         messages: Vec<AgentMessage>,
     ) -> Result<Vec<String>, String> {
+        let Some(path) = self.file_path.clone() else {
+            return self.append_passive_branch_in_memory(parent_leaf_id, messages);
+        };
+        let parent_leaf_id = parent_leaf_id.map(str::to_owned);
+        let (next, created) = crate::harness::with_session_writer_gate(&path, || {
+            // Rebase while holding the same writer gate as canonical harness
+            // appends so a stale passive branch cannot erase or overlap them.
+            let mut next = Self::load_from_file(&path)?;
+            if let Some(parent_leaf_id) = parent_leaf_id.as_deref() {
+                if !next.nodes.contains_key(parent_leaf_id) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("Parent session node '{parent_leaf_id}' not found"),
+                    ));
+                }
+            }
+            let active_node_id = next.active_node_id.clone();
+            let created = next
+                .append_passive_branch_in_memory(parent_leaf_id.as_deref(), messages)
+                .map_err(std::io::Error::other)?;
+            next.active_node_id = active_node_id;
+            next.append_nodes_and_metadata_to_file(&path, &created)?;
+            Ok((next, created))
+        })
+        .map_err(|error| format!("Failed to persist passive branch: {error}"))?;
+        *self = next;
+        Ok(created)
+    }
+
+    pub fn append_passive_branch_in_memory(
+        &mut self,
+        parent_leaf_id: Option<&str>,
+        messages: Vec<AgentMessage>,
+    ) -> Result<Vec<String>, String> {
         if let Some(parent_leaf_id) = parent_leaf_id {
             if !self.nodes.contains_key(parent_leaf_id) {
-                return Err(format!(
-                    "Parent session node '{}' not found",
-                    parent_leaf_id
-                ));
+                return Err(format!("Parent session node '{parent_leaf_id}' not found"));
             }
         }
-        let mut next = self.clone();
-        let active_node_id = next.active_node_id.clone();
+        let active_node_id = self.active_node_id.clone();
         let mut parent_id = parent_leaf_id.map(str::to_owned);
         let mut created = Vec::with_capacity(messages.len());
-
         for message in messages {
-            let mut next_id = next.nodes.len() + 1;
+            let mut next_id = self.nodes.len() + 1;
             let node_id = loop {
                 let candidate = format!("node_{next_id}");
-                if !next.nodes.contains_key(&candidate) {
+                if !self.nodes.contains_key(&candidate) {
                     break candidate;
                 }
                 next_id += 1;
@@ -498,33 +543,16 @@ impl SessionTree {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs(),
-                seq: Some(next.next_persisted_seq()),
+                seq: Some(self.next_persisted_seq()),
                 message,
             };
-            next.nodes.insert(node_id.clone(), node);
-            next.node_order.push(node_id.clone());
+            self.nodes.insert(node_id.clone(), node);
+            self.node_order.push(node_id.clone());
             parent_id = Some(node_id.clone());
             created.push(node_id);
         }
-        next.active_node_id = active_node_id;
-
-        if let Some(path) = next.file_path.clone() {
-            next.save_transactionally(&path)
-                .map_err(|error| format!("Failed to persist passive branch: {error}"))?;
-        }
-        *self = next;
+        self.active_node_id = active_node_id;
         Ok(created)
-    }
-
-    pub fn append_passive_branch_in_memory(
-        &mut self,
-        parent_leaf_id: Option<&str>,
-        messages: Vec<AgentMessage>,
-    ) -> Result<Vec<String>, String> {
-        let path = self.file_path.take();
-        let result = self.append_passive_branch(parent_leaf_id, messages);
-        self.file_path = path;
-        result
     }
 
     /// Replaces the active context with a new root branch while retaining old
@@ -790,8 +818,24 @@ impl SessionTree {
         path: &Path,
         node: &SessionNode,
     ) -> std::io::Result<()> {
+        self.append_nodes_and_metadata_to_file(path, std::slice::from_ref(&node.id))
+    }
+
+    fn append_nodes_and_metadata_to_file(
+        &self,
+        path: &Path,
+        node_ids: &[String],
+    ) -> std::io::Result<()> {
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-        writeln!(file, "{}", serde_json::to_string(node)?)?;
+        for node_id in node_ids {
+            let node = self.nodes.get(node_id).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("session node '{node_id}' disappeared before persistence"),
+                )
+            })?;
+            writeln!(file, "{}", serde_json::to_string(node)?)?;
+        }
         let metadata = SessionRecord::Metadata {
             session_id: Some(self.session_id.clone()),
             name: self.name.clone(),
@@ -1275,6 +1319,49 @@ mod tests {
             .any(|record| record.id() == "run-1"));
         assert_eq!(reopened.tree().name.as_deref(), Some("Named safely"));
         assert!(!path.with_extension("harness.jsonl").exists());
+    }
+
+    #[test]
+    fn passive_branch_sequence_advances_past_canonical_harness_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut tree = SessionTree::new("session");
+        tree.file_path = Some(path.clone());
+        let root = tree.add_message(AgentMessage::user("root", Vec::new()));
+        // The passive writer snapshots the tree before a harness writer appends.
+        let mut loaded = SessionTree::load_from_file(&path).unwrap();
+
+        let mut store = crate::harness::JsonlStore::open(&path).unwrap();
+        store
+            .append_record(crate::harness::Record::OperationStarted {
+                id: "run-1".into(),
+                seq: 2,
+                lane: "main".into(),
+                timestamp: 2,
+                source_leaf_id: Some(root.clone()),
+                intent: crate::harness::OperationIntent::Run,
+            })
+            .unwrap();
+        drop(store);
+
+        let created = loaded
+            .append_passive_branch(
+                Some(&root),
+                vec![AgentMessage::Assistant {
+                    content: Some("child".into()),
+                    tool_calls: None,
+                    stop_reason: Some("end_turn".into()),
+                    deferred_handle: None,
+                }],
+            )
+            .unwrap();
+
+        assert_eq!(loaded.nodes[&created[0]].seq, Some(3));
+        let reopened = crate::harness::JsonlStore::open(&path).unwrap();
+        assert!(reopened
+            .records()
+            .iter()
+            .any(|record| record.id() == "run-1"));
     }
 
     #[test]
