@@ -653,7 +653,10 @@ impl HarnessCompositionSnapshot {
         };
         Self {
             active_lane: "main".into(),
-            session_file: options.session_file.as_ref().map(|path| path.display().to_string()),
+            session_file: options
+                .session_file
+                .as_ref()
+                .map(|path| path.display().to_string()),
             model: options.model.clone(),
             provider: provider.into(),
             skills: Vec::new(),
@@ -1474,6 +1477,16 @@ impl CodingAgent {
         self.harness_journal_error.as_deref()
     }
 
+    /// Returns the fully built system prompt used by this runtime when the
+    /// agent state is not currently locked by an active turn.
+    pub fn system_prompt_snapshot(&self) -> Option<String> {
+        self.agent
+            .turn
+            .try_lock()
+            .ok()
+            .map(|state| state.system_prompt.clone())
+    }
+
     pub(crate) fn watch_harness(&mut self) -> Result<Option<HarnessWatch>, String> {
         let Some(journal) = self.harness.as_mut() else {
             return Ok(None);
@@ -1566,12 +1579,13 @@ impl CodingAgent {
             // Persist new provider messages through the canonical session
             // harness, then reload the session tree from the updated file.
             if let Some(harness) = self.harness.as_mut() {
-                if let Err(error) = harness.assert_model_visible(&state_messages) {
+                if let Err(error) = harness.sync_messages(&state_messages) {
                     self.harness_journal_error = Some(error);
                     return;
                 }
-                if let Err(error) = harness.sync_messages(&state_messages) {
+                if let Err(error) = harness.assert_model_visible(&state_messages) {
                     self.harness_journal_error = Some(error);
+                    return;
                 }
             }
             if let Some(path) = self.session_tree.file_path.clone() {

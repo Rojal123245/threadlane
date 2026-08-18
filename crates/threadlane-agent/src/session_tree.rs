@@ -270,9 +270,6 @@ impl SessionTree {
         let previous_name = self.name.clone();
         self.name = Some(name.clone());
         if let Some(path) = self.file_path.clone() {
-            // Reload while holding the same process-wide lock used by node
-            // appends. This closes the read/replace window: nodes appended by
-            // the normal agent turn are included in the title rewrite.
             let _guard = session_file_lock()
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
@@ -284,7 +281,7 @@ impl SessionTree {
                 }
             };
             latest.name = Some(name);
-            let result = latest.save_transactionally(&path);
+            let result = latest.append_metadata_to_file(&path);
             if result.is_ok() {
                 *self = latest;
             } else {
@@ -328,7 +325,7 @@ impl SessionTree {
         };
         latest.model = Some(model);
         latest.metadata_present = true;
-        let result = latest.save_transactionally(&path);
+        let result = latest.append_metadata_to_file(&path);
         if result.is_ok() {
             *self = latest;
         } else {
@@ -381,7 +378,7 @@ impl SessionTree {
             return Ok(false);
         }
         latest.title_attempted = true;
-        latest.save_transactionally(&path)?;
+        latest.append_metadata_to_file(&path)?;
         *self = latest;
         Ok(true)
     }
@@ -777,7 +774,6 @@ impl SessionTree {
         Ok(())
     }
     fn append_metadata_to_file(&self, path: &Path) -> std::io::Result<()> {
-        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
         let metadata = SessionRecord::Metadata {
             session_id: Some(self.session_id.clone()),
             name: self.name.clone(),
@@ -786,8 +782,7 @@ impl SessionTree {
             model: self.model.clone(),
             parent_session_id: self.parent_session_id.clone(),
         };
-        writeln!(file, "{}", serde_json::to_string(&metadata)?)?;
-        Ok(())
+        crate::harness::append_session_json_line(path, &metadata)
     }
 
     fn append_node_and_metadata_to_file(
@@ -838,7 +833,21 @@ impl SessionTree {
                     ));
                 }
             };
-            if serde_json::from_value::<crate::harness::Record>(value.clone()).is_ok() {
+            if let Ok(record) = serde_json::from_value::<crate::harness::Record>(value.clone()) {
+                if let crate::harness::Record::FactSet {
+                    run_id: None,
+                    key,
+                    value,
+                    ..
+                } = record
+                {
+                    tree.global_facts.insert(key.clone(), value.clone());
+                    match key.as_str() {
+                        "model" => tree.model = Some(value),
+                        "name" => tree.name = Some(value),
+                        _ => {}
+                    }
+                }
                 tree.v2_lines.push(l.to_owned());
                 continue;
             }
@@ -1221,7 +1230,7 @@ mod tests {
     }
 
     #[test]
-    fn set_name_rewrites_file_atomically() {
+    fn set_name_appends_latest_metadata() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
         let mut tree = SessionTree::new("session");
@@ -1234,6 +1243,38 @@ mod tests {
         let loaded = SessionTree::load_from_file(&path).unwrap();
         assert_eq!(loaded.name.as_deref(), Some("A useful title"));
         assert_eq!(loaded.nodes.len(), 1);
+    }
+
+    #[test]
+    fn stale_metadata_update_does_not_discard_canonical_harness_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut stale_tree = SessionTree::new("session");
+        stale_tree.file_path = Some(path.clone());
+        stale_tree.add_message(AgentMessage::user("Help", Vec::new()));
+
+        let mut store = crate::harness::JsonlStore::open(&path).unwrap();
+        store
+            .append_record(crate::harness::Record::OperationStarted {
+                id: "run-1".into(),
+                seq: 2,
+                lane: "main".into(),
+                timestamp: 2,
+                source_leaf_id: None,
+                intent: crate::harness::OperationIntent::Run,
+            })
+            .unwrap();
+        drop(store);
+
+        stale_tree.set_name("Named safely".into()).unwrap();
+
+        let reopened = crate::harness::JsonlStore::open(&path).unwrap();
+        assert!(reopened
+            .records()
+            .iter()
+            .any(|record| record.id() == "run-1"));
+        assert_eq!(reopened.tree().name.as_deref(), Some("Named safely"));
+        assert!(!path.with_extension("harness.jsonl").exists());
     }
 
     #[test]

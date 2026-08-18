@@ -7,14 +7,14 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::hover_card::HoverCard;
-use gpui_component::input::{InputEvent, Textarea, TextareaState};
+use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::theme::ActiveTheme;
 use gpui_component::tooltip::Tooltip;
-use gpui_component::{Disableable, Icon, IconName, Sizable};
+use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable};
 
 use crate::app::{actions::AppAction, controller};
 use crate::state::{AppState, ChatMessageInfo, MessageRole, ToolActivityInfo};
@@ -44,6 +44,7 @@ pub struct ChatListView {
     pub(crate) input_state: Entity<TextareaState>,
     pub(crate) header_left_padding: Pixels,
     scroll_handle: ScrollHandle,
+    trajectory_scroll_handle: ScrollHandle,
     expanded_activity_groups: HashSet<String>,
     markdown_states: HashMap<String, (String, Entity<TextViewState>)>,
     pasted_images: Vec<ImageAttachment>,
@@ -54,12 +55,22 @@ pub struct ChatListView {
     initial_scroll_frames: u8,
     older_load_pending: bool,
     show_trajectory: bool,
+    trajectory_search: String,
+    trajectory_search_input: Entity<InputState>,
+    trajectory_category: Option<String>,
+    trajectory_lane: Option<String>,
+    selected_trajectory_seq: Option<u64>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl ChatListView {
-    pub(crate) fn new(model: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        model: Entity<AppState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let scroll_handle = ScrollHandle::new();
+        let trajectory_scroll_handle = ScrollHandle::new();
         let input_state = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder("Do anything...")
@@ -67,6 +78,9 @@ impl ChatListView {
                 .submit_on_enter(true)
                 .soft_wrap(true)
         });
+
+        let trajectory_search_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search trajectory…"));
 
         let sub1 = cx.observe(&model, |_this, _model, cx| {
             cx.notify();
@@ -173,11 +187,17 @@ impl ChatListView {
         })
         .detach();
 
+        let sub3 = cx.observe(&trajectory_search_input, |this, input, cx| {
+            this.trajectory_search = input.read(cx).value().to_string();
+            cx.notify();
+        });
+
         Self {
             model,
             input_state,
             header_left_padding: px(14.0),
             scroll_handle,
+            trajectory_scroll_handle,
             expanded_activity_groups: HashSet::new(),
             markdown_states: HashMap::new(),
             pasted_images: Vec::new(),
@@ -188,7 +208,12 @@ impl ChatListView {
             initial_scroll_frames: 0,
             older_load_pending: false,
             show_trajectory: false,
-            _subscriptions: vec![sub1, sub2],
+            trajectory_search: String::new(),
+            trajectory_search_input,
+            trajectory_category: None,
+            trajectory_lane: None,
+            selected_trajectory_seq: None,
+            _subscriptions: vec![sub1, sub2, sub3],
         }
     }
 
@@ -294,72 +319,65 @@ impl ChatListView {
                 .unwrap_or_else(|| "New task".to_string())
         };
         let theme = cx.theme().colors;
-        let export_model = self.model.clone();
 
         div()
-            .h(px(48.0))
+            .h(px(52.0))
             .flex_none()
             .flex()
             .items_center()
-            .gap_1()
+            .gap_3()
             .px_4()
             .pl(self.header_left_padding)
-            // The workspace owns the rightmost 76px for environment and panel
-            // icon buttons rendered as absolute overlays.
-            .pr(px(88.0))
+            // The workspace owns the rightmost 120px for command palette,
+            // environment, and panel buttons rendered as absolute overlays.
+            .pr(px(128.0))
             .border_b_1()
             .border_color(theme.title_bar_border)
             .bg(theme.title_bar)
             .child(
                 div()
                     .min_w_0()
+                    .max_w(px(360.0))
                     .truncate()
                     .text_size(px(13.0))
                     .line_height(px(18.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.foreground)
-                    .child(active_title)
-                    .flex_1(),
+                    .child(active_title),
             )
             .child(
-                Button::new("export-session-log")
-                    .ghost()
-                    .small()
-                    .child("Export log")
-                    .on_click(move |_event, _window, cx| {
-                        let source = export_model.read(cx).active_session_file();
-                        let export_model = export_model.clone();
-                        cx.spawn(async move |cx| {
-                            let Some(source) = source else {
-                                let _ = export_model.update(cx, |state, cx| {
-                                    state.session_status = Some("No active canonical session log to export.".into());
-                                    cx.notify();
-                                });
-                                return;
-                            };
-                            let default_name = source.file_name().and_then(|name| name.to_str()).unwrap_or("threadlane-session.jsonl").to_owned();
-                            let Some(destination) = rfd::AsyncFileDialog::new().set_file_name(&default_name).save_file().await else { return; };
-                            let result = std::fs::copy(&source, destination.path());
-                            let _ = export_model.update(cx, |state, cx| {
-                                state.session_status = Some(match result {
-                                    Ok(_) => format!("Exported canonical session log to {}", destination.path().display()),
-                                    Err(error) => format!("Could not export session log: {error}"),
-                                });
+                div()
+                    .h(px(28.0))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .p(px(2.0))
+                    .rounded_md()
+                    .bg(theme.muted.opacity(0.5))
+                    .child(
+                        Button::new("trajectory-tab-chat")
+                            .ghost()
+                            .xsmall()
+                            .selected(!self.show_trajectory)
+                            .label("Chat")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show_trajectory = false;
                                 cx.notify();
-                            });
-                        }).detach();
-                    }),
+                            })),
+                    )
+                    .child(
+                        Button::new("trajectory-tab-events")
+                            .ghost()
+                            .xsmall()
+                            .selected(self.show_trajectory)
+                            .label("Trajectory")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show_trajectory = true;
+                                cx.notify();
+                            })),
+                    ),
             )
-            .child(
-                Button::new("toggle-trajectory")
-                    .ghost()
-                    .small()
-                    .child(if self.show_trajectory { "Chat" } else { "Trajectory" })
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.show_trajectory = !this.show_trajectory;
-                        cx.notify();
-                    })),
-            )
+            .child(div().flex_1())
     }
 
     /// Renders the 16px status circle used for a plan step: a bordered ✓ for
@@ -613,7 +631,7 @@ impl ChatListView {
                             .text_xs()
                             .text_color(theme.muted_foreground)
                             .child(if activity.is_expanded { "⌄" } else { "›" })
-                    }))
+                    })),
             )
             .children(activity.is_expanded.then(|| {
                 div()
@@ -740,25 +758,442 @@ impl ChatListView {
     }
 
     fn render_trajectory(&self, cx: &mut Context<Self>) -> AnyElement {
-        let entries = self.model.read(cx).active_trajectory().to_vec();
+        let all_entries = self.model.read(cx).active_trajectory().to_vec();
+        let mut categories = all_entries
+            .iter()
+            .map(|entry| entry.category.clone())
+            .collect::<Vec<_>>();
+        categories.sort();
+        categories.dedup();
+        let mut lane_latest = std::collections::BTreeMap::<String, String>::new();
+        for entry in &all_entries {
+            if let Some(lane) = &entry.lane {
+                lane_latest.insert(lane.clone(), entry.summary.clone());
+            }
+        }
+        let lanes = lane_latest.keys().cloned().collect::<Vec<_>>();
+        let query = self.trajectory_search.to_lowercase();
+        let entries = all_entries
+            .iter()
+            .filter(|entry| {
+                self.trajectory_category
+                    .as_ref()
+                    .is_none_or(|category| &entry.category == category)
+                    && self
+                        .trajectory_lane
+                        .as_ref()
+                        .is_none_or(|lane| entry.lane.as_ref() == Some(lane))
+                    && (query.is_empty()
+                        || [
+                            entry.category.as_str(),
+                            entry.summary.as_str(),
+                            entry.detail.as_str(),
+                            entry.lane.as_deref().unwrap_or(""),
+                            entry.correlation_id.as_deref().unwrap_or(""),
+                        ]
+                        .iter()
+                        .any(|value| value.to_lowercase().contains(&query)))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         let theme = cx.theme().colors;
         if entries.is_empty() {
-            return div().flex_1().flex().items_center().justify_center()
-                .text_sm().text_color(theme.muted_foreground)
+            return div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .text_color(theme.muted_foreground)
                 .child("No canonical trajectory events have been observed in this session yet.")
                 .into_any_element();
         }
-        div().id("session-trajectory").w_full().flex_1().min_h_0().overflow_y_scroll().py_4()
-            .child(div().w_full().max_w(px(CHAT_CONTENT_MAX_WIDTH)).mx_auto().gap_2().flex().flex_col().children(
-                entries.into_iter().enumerate().map(|(index, entry)| {
-                    div().id(SharedString::from(format!("trajectory-{index}"))).p_3().rounded_md().border_1()
-                        .border_color(theme.border).bg(theme.secondary)
-                        .child(div().text_xs().text_color(theme.primary).child(entry.category))
-                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(entry.summary))
-                        .when(!entry.detail.is_empty(), |this| this.child(div().mt_1().text_xs().text_color(theme.muted_foreground).child(entry.detail)))
-                        .when_some(entry.lane, |this, lane| this.child(div().mt_1().text_xs().text_color(theme.muted_foreground).child(format!("Lane: {lane}"))))
+        let selected_entry = self
+            .selected_trajectory_seq
+            .and_then(|seq| all_entries.iter().find(|entry| entry.seq == Some(seq)))
+            .cloned();
+        let mut rows = Vec::new();
+        let mut previous_turn = None;
+        for (index, entry) in entries.into_iter().enumerate() {
+            if entry.turn != previous_turn {
+                if let Some(turn) = entry.turn {
+                    rows.push(
+                        div()
+                            .h(px(22.0))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .border_b_1()
+                            .border_color(theme.border.opacity(0.5))
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(format!("Turn {turn}"))
+                            .into_any_element(),
+                    );
+                }
+                previous_turn = entry.turn;
+            }
+            let seq = entry.seq;
+            let selected = seq.is_some() && seq == self.selected_trajectory_seq;
+            let preview = if entry.detail.trim().is_empty() {
+                entry.summary.clone()
+            } else {
+                format!("{}  {}", entry.summary, entry.detail.replace('\n', " "))
+            };
+            let view = cx.entity().clone();
+            rows.push(
+                div()
+                    .id(SharedString::from(format!("trajectory-{index}")))
+                    .h(px(34.0))
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .border_b_1()
+                    .border_color(theme.border.opacity(0.45))
+                    .cursor_pointer()
+                    .when(selected, |this| {
+                        this.bg(theme.accent.opacity(0.16))
+                            .border_l_2()
+                            .border_color(theme.accent)
+                    })
+                    .hover(|style| style.bg(theme.muted.opacity(0.65)))
+                    .child(div().size(px(6.0)).flex_none().rounded_full().bg(
+                        if entry.category == "Tool" {
+                            theme.warning
+                        } else if entry.category == "Error" {
+                            theme.danger
+                        } else {
+                            theme.primary
+                        },
+                    ))
+                    .child(
+                        div()
+                            .w(px(74.0))
+                            .flex_none()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.muted_foreground)
+                            .child(entry.category.to_uppercase()),
+                    )
+                    .child(div().min_w_0().flex_1().text_sm().truncate().child(preview))
+                    .children(entry.lane.clone().map(|lane| {
+                        div()
+                            .max_w(px(110.0))
+                            .truncate()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(lane)
+                    }))
+                    .children(seq.map(|seq| {
+                        div()
+                            .w(px(52.0))
+                            .text_right()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(format!("#{seq}"))
+                    }))
+                    .on_click(move |_, _, cx| {
+                        view.update(cx, |this, cx| {
+                            this.selected_trajectory_seq = seq;
+                            cx.notify();
+                        })
+                    })
+                    .into_any_element(),
+            );
+        }
+        let inspector = selected_entry.map(|entry| {
+            let close_view = cx.entity().clone();
+            let metadata = [
+                entry.seq.map(|value| ("Sequence", format!("#{value}"))),
+                entry.turn.map(|value| ("Turn", value.to_string())),
+                entry.run_id.clone().map(|value| ("Run", value)),
+                entry.lane.clone().map(|value| ("Lane", value)),
+                entry.correlation_id.clone().map(|value| ("Call", value)),
+            ]
+            .into_iter()
+            .flatten();
+            div()
+                .w(px(390.0))
+                .min_w(px(300.0))
+                .h_full()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .border_l_1()
+                .border_color(theme.border)
+                .bg(theme.secondary)
+                .child(
+                    div()
+                        .h(px(44.0))
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .child(
+                            div()
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .bg(theme.accent.opacity(0.18))
+                                .text_xs()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(entry.category.to_uppercase()),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .truncate()
+                                .text_sm()
+                                .child(entry.summary.clone()),
+                        )
+                        .child(
+                            Button::new("close-trajectory-inspector")
+                                .ghost()
+                                .xsmall()
+                                .label("×")
+                                .on_click(move |_, _, cx| {
+                                    close_view.update(cx, |this, cx| {
+                                        this.selected_trajectory_seq = None;
+                                        cx.notify();
+                                    })
+                                }),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scrollbar()
+                        .p_4()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        .child(div().flex().flex_col().gap_2().children(metadata.map(
+                            |(label, value)| {
+                                div()
+                                    .flex()
+                                    .gap_2()
+                                    .text_sm()
+                                    .child(
+                                        div()
+                                            .w(px(82.0))
+                                            .flex_none()
+                                            .text_color(theme.muted_foreground)
+                                            .child(label),
+                                    )
+                                    .child(div().min_w_0().flex_1().child(value))
+                            },
+                        )))
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.muted_foreground)
+                                .child("DETAIL"),
+                        )
+                        .child(div().text_sm().child(if entry.detail.is_empty() {
+                            "No additional detail".into()
+                        } else {
+                            entry.detail
+                        })),
+                )
+        });
+        let overview_lane = |label: &'static str, category: &'static str, color: Hsla| {
+            let markers = all_entries
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| match category {
+                    "Input" => matches!(entry.category.as_str(), "Input" | "Context" | "Queue"),
+                    "Model" => matches!(
+                        entry.category.as_str(),
+                        "Operation" | "Step" | "Retry" | "Turn" | "Error"
+                    ),
+                    _ => entry.category == "Tool",
                 })
-            )).into_any_element()
+                .map(|(index, _)| {
+                    let position = index * 48 / all_entries.len().max(1);
+                    (position, color)
+                })
+                .collect::<HashMap<_, _>>();
+            div()
+                .h(px(18.0))
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .w(px(48.0))
+                        .flex_none()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .h(px(12.0))
+                        .flex()
+                        .items_end()
+                        .gap(px(2.0))
+                        .children((0..48).map(|index| {
+                            div()
+                                .flex_1()
+                                .h(if markers.contains_key(&index) {
+                                    px(10.0)
+                                } else {
+                                    px(2.0)
+                                })
+                                .rounded_sm()
+                                .bg(markers
+                                    .get(&index)
+                                    .copied()
+                                    .unwrap_or(theme.border.opacity(0.35)))
+                        })),
+                )
+        };
+        let overview = div()
+            .h(px(58.0))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .px_3()
+            .py_1()
+            .border_b_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .child(overview_lane("Input", "Input", theme.success))
+            .child(overview_lane("Model", "Model", theme.primary))
+            .child(overview_lane("Tools", "Tools", theme.warning));
+        let category_label = self
+            .trajectory_category
+            .clone()
+            .unwrap_or_else(|| "All events".into());
+        let lane_label = self
+            .trajectory_lane
+            .clone()
+            .unwrap_or_else(|| format!("{} lanes", lanes.len()));
+        let category_view = cx.entity().clone();
+        let lane_view = cx.entity().clone();
+        let toolbar = div()
+            .h(px(38.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_3()
+            .border_b_1()
+            .border_color(theme.border)
+            .bg(theme.secondary)
+            .child(
+                Button::new("trajectory-category-filter")
+                    .ghost()
+                    .small()
+                    .label(category_label)
+                    .dropdown_caret(true)
+                    .dropdown_menu(move |menu, _, _| {
+                        let all_view = category_view.clone();
+                        let mut menu = menu.item(PopupMenuItem::new("All events").on_click(
+                            move |_, _, cx| {
+                                all_view.update(cx, |this, cx| {
+                                    this.trajectory_category = None;
+                                    cx.notify();
+                                });
+                            },
+                        ));
+                        for category in categories.clone() {
+                            let selected = category.clone();
+                            let view = category_view.clone();
+                            menu = menu.item(PopupMenuItem::new(category).on_click(
+                                move |_, _, cx| {
+                                    view.update(cx, |this, cx| {
+                                        this.trajectory_category = Some(selected.clone());
+                                        cx.notify();
+                                    });
+                                },
+                            ));
+                        }
+                        menu
+                    }),
+            )
+            .child(
+                Button::new("trajectory-lane-filter")
+                    .ghost()
+                    .small()
+                    .label(lane_label)
+                    .dropdown_caret(true)
+                    .dropdown_menu(move |menu, _, _| {
+                        let all_view = lane_view.clone();
+                        let mut menu =
+                            menu.item(PopupMenuItem::new("All lanes").on_click(move |_, _, cx| {
+                                all_view.update(cx, |this, cx| {
+                                    this.trajectory_lane = None;
+                                    cx.notify();
+                                });
+                            }));
+                        for lane in lanes.clone() {
+                            let selected = lane.clone();
+                            let view = lane_view.clone();
+                            let latest = lane_latest.get(&lane).cloned().unwrap_or_default();
+                            menu = menu.item(
+                                PopupMenuItem::new(format!("{lane} — {latest}")).on_click(
+                                    move |_, _, cx| {
+                                        view.update(cx, |this, cx| {
+                                            this.trajectory_lane = Some(selected.clone());
+                                            cx.notify();
+                                        });
+                                    },
+                                ),
+                            );
+                        }
+                        menu
+                    }),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .w(px(280.0))
+                    .h(px(32.0))
+                    .px_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.background)
+                    .child(Input::new(&self.trajectory_search_input).appearance(false)),
+            );
+        div()
+            .id("session-trajectory")
+            .w_full()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(overview)
+            .child(toolbar)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .child(
+                        div()
+                            .id("trajectory-events-scroll")
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .track_scroll(&self.trajectory_scroll_handle)
+                            .overflow_y_scroll()
+                            .vertical_scrollbar(&self.trajectory_scroll_handle)
+                            .child(div().w_full().children(rows)),
+                    )
+                    .children(inspector),
+            )
+            .into_any_element()
     }
 
     fn render_transcript_rows(
@@ -1416,7 +1851,14 @@ impl ChatListView {
             )
         };
         let metrics = self.model.read(cx).active_session_metrics();
-        let lane_count = self.model.read(cx).active_trajectory().iter().filter_map(|entry| entry.lane.as_deref()).collect::<std::collections::HashSet<_>>().len();
+        let lane_count = self
+            .model
+            .read(cx)
+            .active_trajectory()
+            .iter()
+            .filter_map(|entry| entry.lane.as_deref())
+            .collect::<std::collections::HashSet<_>>()
+            .len();
         let has_prompt =
             !self.input_state.read(cx).value().trim().is_empty() || !self.pasted_images.is_empty();
         let project_root = self.model.read(cx).active_work_dir.clone();
@@ -2083,7 +2525,7 @@ impl ChatListView {
 }
 
 impl Render for ChatListView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (messages, is_new_task, active_plan, session_key, has_older) = {
             let state = self.model.read(cx);
             (
@@ -2100,6 +2542,13 @@ impl Render for ChatListView {
         if session_key != self.last_session_key {
             self.last_session_key = session_key;
             self.initial_scroll_frames = 6;
+            self.trajectory_category = None;
+            self.trajectory_lane = None;
+            self.selected_trajectory_seq = None;
+            self.trajectory_search.clear();
+            self.trajectory_search_input.update(cx, |state, cx| {
+                state.set_value("", window, cx);
+            });
         }
         if self.initial_scroll_frames > 0 {
             self.scroll_handle.scroll_to_bottom();
@@ -2182,8 +2631,16 @@ impl Render for ChatListView {
                     )
                     .into_any_element()
             })
-            .children(self.render_plan_tracker(&active_plan, cx))
-            .children(self.render_permission_prompt(cx))
-            .child(self.render_composer(cx))
+            .children(
+                (!self.show_trajectory)
+                    .then(|| self.render_plan_tracker(&active_plan, cx))
+                    .flatten(),
+            )
+            .children(
+                (!self.show_trajectory)
+                    .then(|| self.render_permission_prompt(cx))
+                    .flatten(),
+            )
+            .children((!self.show_trajectory).then(|| self.render_composer(cx)))
     }
 }

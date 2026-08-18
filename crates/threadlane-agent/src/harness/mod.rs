@@ -22,6 +22,7 @@ pub use events::{
 pub use hooks::{
     HookContext, HookEffect, HookFailure, HookHandler, HookKind, HookRegistry, HookRun,
 };
+pub(crate) use jsonl::append_session_json_line;
 pub use jsonl::JsonlStore;
 pub use memory::MemoryStore;
 pub use procedure::{

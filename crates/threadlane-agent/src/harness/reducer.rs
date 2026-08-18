@@ -506,6 +506,21 @@ impl Reducer {
                             "tool completion has no persisted result entry".into(),
                         ));
                     };
+                    let previous_result_parent = (tool.tool_index > 0)
+                        .then(|| {
+                            lane.tools
+                                .iter()
+                                .find(|candidate| {
+                                    candidate.run_id == *run_id
+                                        && candidate.assistant_entry_id == tool.assistant_entry_id
+                                        && candidate.tool_index + 1 == tool.tool_index
+                                })
+                                .map(|candidate| candidate.result_entry_id.as_str())
+                        })
+                        .flatten();
+                    let parent_matches = result_entry.parent_id.as_deref()
+                        == Some(tool.assistant_entry_id.as_str())
+                        || result_entry.parent_id.as_deref() == previous_result_parent;
                     if !matches!(
                         &result_entry.message,
                         crate::types::AgentMessage::Tool {
@@ -513,8 +528,7 @@ impl Reducer {
                             name,
                             ..
                         } if entry_call_id == tool_call_id && name == &tool.tool_name
-                    ) || result_entry.parent_id.as_deref()
-                        != Some(tool.assistant_entry_id.as_str())
+                    ) || !parent_matches
                         || result_entry.terminate != *terminate
                     {
                         return Err(ReduceError::InvalidRecord(
@@ -574,8 +588,21 @@ impl Reducer {
                     }
                     lane.attempts = *attempt;
                     lane.retry = None;
-                    if entry_ids.contains(result_entry_id.as_str()) {
-                        lane.leaf_id = Some(result_entry_id.clone());
+                    if let Some(result_entry) = store
+                        .entries()
+                        .iter()
+                        .find(|entry| entry.id == *result_entry_id)
+                    {
+                        let current_seq = lane.leaf_id.as_deref().and_then(|current_id| {
+                            store
+                                .entries()
+                                .iter()
+                                .find(|entry| entry.id == current_id)
+                                .map(|entry| entry.seq)
+                        });
+                        if current_seq.is_none_or(|current_seq| result_entry.seq >= current_seq) {
+                            lane.leaf_id = Some(result_entry_id.clone());
+                        }
                     }
                 }
                 Record::RetryScheduled {

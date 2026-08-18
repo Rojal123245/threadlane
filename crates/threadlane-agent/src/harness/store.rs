@@ -95,9 +95,10 @@ pub trait SessionStore {
         Self: Sized,
     {
         let state = super::Reducer::reduce(self)?;
-        let leaf_id = self
-            .preferred_leaf(lane)
-            .or_else(|| state.lane(lane).and_then(|lane| lane.leaf_id.clone()));
+        let leaf_id = state
+            .lane(lane)
+            .and_then(|lane| lane.leaf_id.clone())
+            .or_else(|| self.preferred_leaf(lane));
         Ok(self
             .branch(leaf_id.as_deref(), usize::MAX)
             .into_iter()

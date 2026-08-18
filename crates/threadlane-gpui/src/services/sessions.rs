@@ -24,6 +24,8 @@ pub struct SessionRuntime {
     permission_handle: PermissionHandle,
     pub(crate) session_file: PathBuf,
     pub(crate) selected_model: String,
+    pub(crate) system_prompt: String,
+    pub(crate) harness_error: Option<String>,
     is_generating: AtomicBool,
     status: Mutex<SessionRuntimeStatus>,
 }
@@ -40,8 +42,10 @@ impl SessionRuntime {
         let work_handle = agent.work_handle();
         let permission_handle = agent.permission_handle();
         permission_handle.set_interactive(true);
-        let status = if let Some(error) = agent.harness_error() {
-            SessionRuntimeStatus::Error(error.to_owned())
+        let system_prompt = agent.system_prompt_snapshot().unwrap_or_default();
+        let harness_error = agent.harness_error().map(str::to_owned);
+        let status = if let Some(error) = &harness_error {
+            SessionRuntimeStatus::Error(error.clone())
         } else if agent.has_interrupted_work() {
             SessionRuntimeStatus::Interrupted
         } else {
@@ -57,6 +61,8 @@ impl SessionRuntime {
             permission_handle,
             session_file,
             selected_model,
+            system_prompt,
+            harness_error,
             is_generating: AtomicBool::new(false),
             status: Mutex::new(status),
         })
@@ -97,7 +103,11 @@ impl SessionRuntime {
         }
     }
 
-    pub(crate) fn resolve_permission(&self, request_id: &str, decision: PermissionDecision) -> bool {
+    pub(crate) fn resolve_permission(
+        &self,
+        request_id: &str,
+        decision: PermissionDecision,
+    ) -> bool {
         self.permission_handle.resolve(request_id, decision)
     }
 
@@ -132,6 +142,7 @@ mod tests {
 
         assert_eq!(runtime.session_file, session_file);
         assert!(runtime.session_file.exists());
+        assert!(runtime.system_prompt.contains("Current working directory:"));
         assert!(!runtime
             .session_file
             .with_file_name("session.harness.jsonl")

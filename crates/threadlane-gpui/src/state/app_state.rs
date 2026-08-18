@@ -68,12 +68,16 @@ pub struct ToolActivityInfo {
     pub(crate) is_expanded: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct TrajectoryEntry {
+    pub(crate) seq: Option<u64>,
+    pub(crate) run_id: Option<String>,
+    pub(crate) turn: Option<u32>,
     pub(crate) category: String,
     pub(crate) summary: String,
     pub(crate) detail: String,
     pub(crate) lane: Option<String>,
+    pub(crate) correlation_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1014,11 +1018,33 @@ impl AppState {
                         .iter()
                         .any(|event| matches!(event, ChatStreamEvent::Finished { .. }))
                 });
-        if completed_while_away {
-            self.deferred_stream_events.remove(&session_id);
-        }
+        let completed_events = completed_while_away
+            .then(|| self.deferred_stream_events.remove(&session_id))
+            .flatten()
+            .unwrap_or_default();
         let runtime = self.ensure_session_runtime(work_dir, session_file.clone());
-        self.hydrate_session_projection(&session_id, &session_file);
+        if !self.trajectory_by_session.contains_key(&session_id) {
+            if let Err(error) = self.hydrate_session_projection(&session_id, &session_file) {
+                self.trajectory_by_session.insert(
+                    session_id.clone(),
+                    vec![TrajectoryEntry {
+                        seq: None,
+                        run_id: None,
+                        turn: None,
+                        category: "Error".into(),
+                        summary: "Could not load durable trajectory".into(),
+                        detail: error,
+                        lane: Some("main".into()),
+                        correlation_id: None,
+                    }],
+                );
+            }
+        }
+        for event in completed_events {
+            if let ChatStreamEvent::Agent { event, .. } = event {
+                self.record_trajectory(&session_id, &event);
+            }
+        }
         let (messages, start, has_older) = load_session_message_page(&session_file, usize::MAX);
         self.messages = messages;
         self.history_session_file = Some(session_file.clone());
@@ -1030,7 +1056,11 @@ impl AppState {
         self.session_status = runtime_status_text(runtime.status());
     }
 
-    pub(crate) fn settle_session(&mut self, work_dir: PathBuf, session_id: String) -> Result<(), String> {
+    pub(crate) fn settle_session(
+        &mut self,
+        work_dir: PathBuf,
+        session_id: String,
+    ) -> Result<(), String> {
         let session_file = self.session_file(&work_dir, &session_id);
         if self
             .session_runtimes
@@ -1050,7 +1080,11 @@ impl AppState {
         Ok(())
     }
 
-    pub(crate) fn remove_session(&mut self, work_dir: PathBuf, session_id: String) -> Result<(), String> {
+    pub(crate) fn remove_session(
+        &mut self,
+        work_dir: PathBuf,
+        session_id: String,
+    ) -> Result<(), String> {
         let session_file = self.session_file(&work_dir, &session_id);
         if self
             .session_runtimes
@@ -1075,7 +1109,7 @@ impl AppState {
         }
     }
 
-    fn ensure_session_runtime(
+    pub(crate) fn ensure_session_runtime(
         &mut self,
         work_dir: PathBuf,
         session_file: PathBuf,
@@ -1308,68 +1342,371 @@ impl AppState {
         Ok(session_id)
     }
 
-    fn hydrate_session_projection(&mut self, session_id: &str, session_file: &Path) {
-        let Ok(store) = threadlane_agent::harness::JsonlStore::open_read_only(session_file) else {
-            return;
-        };
-        let mut trajectory = Vec::new();
+    fn hydrate_session_projection(
+        &mut self,
+        session_id: &str,
+        session_file: &Path,
+    ) -> Result<(), String> {
+        let store = threadlane_agent::harness::JsonlStore::open_read_only(session_file)
+            .map_err(|error| error.to_string())?;
+        let mut trajectory: Vec<TrajectoryEntry> = Vec::new();
         let mut metrics = SessionMetricsInfo::default();
+        let entries_by_id = store
+            .entries()
+            .iter()
+            .map(|entry| (entry.id.as_str(), &entry.message))
+            .collect::<HashMap<_, _>>();
+        let mut tool_rows = HashMap::<String, usize>::new();
         for record in store.records() {
             use threadlane_agent::harness::Record;
             let entry = match record {
-                Record::OperationStarted { lane, intent, .. } => Some(("Operation", format!("{intent:?} started"), String::new(), lane.clone())),
-                Record::OperationFinished { lane, outcome, error, .. } => Some(("Operation", format!("Operation {outcome:?}"), error.clone().unwrap_or_default(), lane.clone())),
-                Record::StepAttempt { lane, attempt, .. } => { metrics.turns = metrics.turns.saturating_add(1); Some(("Step", format!("Step attempt {attempt}"), String::new(), lane.clone())) }
-                Record::RetryScheduled { lane, attempt, reason, .. } => Some(("Retry", format!("Retry {attempt} scheduled"), reason.clone(), lane.clone())),
-                Record::ToolStarted { lane, tool_name, effective_args, .. } => { metrics.tool_calls = metrics.tool_calls.saturating_add(1); Some(("Tool", format!("{tool_name} started"), effective_args.to_string(), lane.clone())) }
-                Record::ToolFinished { lane, tool_call_id, .. } => Some(("Tool", "Tool finished".into(), tool_call_id.clone(), lane.clone())),
-                Record::Usage { usage, .. } => { metrics.input_tokens = metrics.input_tokens.saturating_add(u64::from(usage.input_tokens)); metrics.output_tokens = metrics.output_tokens.saturating_add(u64::from(usage.output_tokens)); None }
+                Record::OperationStarted {
+                    seq,
+                    lane,
+                    id,
+                    intent,
+                    ..
+                } => Some(TrajectoryEntry {
+                    seq: Some(*seq),
+                    run_id: Some(id.clone()),
+                    turn: None,
+                    category: "Operation".into(),
+                    summary: format!("{intent:?} started"),
+                    detail: String::new(),
+                    lane: Some(lane.clone()),
+                    correlation_id: None,
+                }),
+                Record::OperationFinished {
+                    seq,
+                    lane,
+                    run_id,
+                    outcome,
+                    error,
+                    ..
+                } => Some(TrajectoryEntry {
+                    seq: Some(*seq),
+                    run_id: Some(run_id.clone()),
+                    turn: None,
+                    category: "Operation".into(),
+                    summary: format!("Operation {outcome:?}"),
+                    detail: error.clone().unwrap_or_default(),
+                    lane: Some(lane.clone()),
+                    correlation_id: None,
+                }),
+                Record::StepAttempt {
+                    seq,
+                    lane,
+                    run_id,
+                    attempt,
+                    ..
+                } => {
+                    metrics.turns = metrics.turns.saturating_add(1);
+                    Some(TrajectoryEntry {
+                        seq: Some(*seq),
+                        run_id: Some(run_id.clone()),
+                        turn: Some(*attempt),
+                        category: "Step".into(),
+                        summary: format!("Step attempt {attempt}"),
+                        detail: String::new(),
+                        lane: Some(lane.clone()),
+                        correlation_id: None,
+                    })
+                }
+                Record::RetryScheduled {
+                    seq,
+                    lane,
+                    run_id,
+                    attempt,
+                    reason,
+                    ..
+                } => Some(TrajectoryEntry {
+                    seq: Some(*seq),
+                    run_id: Some(run_id.clone()),
+                    turn: Some(*attempt),
+                    category: "Retry".into(),
+                    summary: format!("Retry {attempt} scheduled"),
+                    detail: reason.clone(),
+                    lane: Some(lane.clone()),
+                    correlation_id: None,
+                }),
+                Record::ToolStarted {
+                    seq,
+                    lane,
+                    run_id,
+                    tool_call_id,
+                    tool_name,
+                    effective_args,
+                    ..
+                } => {
+                    metrics.tool_calls = metrics.tool_calls.saturating_add(1);
+                    tool_rows.insert(tool_call_id.clone(), trajectory.len());
+                    Some(TrajectoryEntry {
+                        seq: Some(*seq),
+                        run_id: Some(run_id.clone()),
+                        turn: None,
+                        category: "Tool".into(),
+                        summary: format!("{tool_name} running"),
+                        detail: effective_args.to_string(),
+                        lane: Some(lane.clone()),
+                        correlation_id: Some(tool_call_id.clone()),
+                    })
+                }
+                Record::ToolFinished {
+                    tool_call_id,
+                    result_entry_id,
+                    ..
+                } => {
+                    if let Some(index) = tool_rows.get(tool_call_id).copied() {
+                        if let Some(AgentMessage::Tool {
+                            name,
+                            content,
+                            is_error,
+                            ..
+                        }) = entries_by_id.get(result_entry_id.as_str()).copied()
+                        {
+                            trajectory[index].summary =
+                                format!("{name} {}", if *is_error { "failed" } else { "finished" });
+                            trajectory[index].detail = content.clone();
+                        } else {
+                            trajectory[index].summary = "Tool finished".into();
+                        }
+                    }
+                    None
+                }
+                Record::Usage { usage, .. } => {
+                    metrics.input_tokens = metrics
+                        .input_tokens
+                        .saturating_add(u64::from(usage.input_tokens));
+                    metrics.output_tokens = metrics
+                        .output_tokens
+                        .saturating_add(u64::from(usage.output_tokens));
+                    None
+                }
                 _ => None,
             };
-            if let Some((category, summary, detail, lane)) = entry {
-                trajectory.push(TrajectoryEntry { category: category.into(), summary, detail, lane: Some(lane) });
+            if let Some(entry) = entry {
+                trajectory.push(entry);
             }
         }
-        self.trajectory_by_session.insert(session_id.into(), trajectory);
+        for entry in store.entries() {
+            if let AgentMessage::Tool {
+                tool_call_id,
+                name,
+                content,
+                is_error,
+                ..
+            } = &entry.message
+            {
+                if !tool_rows.contains_key(tool_call_id) {
+                    trajectory.push(TrajectoryEntry {
+                        seq: Some(entry.seq),
+                        run_id: None,
+                        turn: None,
+                        category: "Tool".into(),
+                        summary: format!(
+                            "{name} {}",
+                            if *is_error { "failed" } else { "finished" }
+                        ),
+                        detail: content.clone(),
+                        lane: Some(entry.lane.clone()),
+                        correlation_id: Some(tool_call_id.clone()),
+                    });
+                }
+                continue;
+            }
+            let projected = match &entry.message {
+                AgentMessage::User { content } | AgentMessage::UserWithImages { content, .. } => {
+                    Some(("Input", "User input", content.clone()))
+                }
+                AgentMessage::Assistant {
+                    content: Some(content),
+                    ..
+                } if !content.trim().is_empty() => {
+                    Some(("Assistant", "Assistant response", content.clone()))
+                }
+                AgentMessage::Custom {
+                    custom_type,
+                    payload,
+                } if matches!(custom_type.as_str(), "thinking" | "goal_round") => {
+                    Some(("Context", custom_type.as_str(), payload.to_string()))
+                }
+                _ => None,
+            };
+            if let Some((category, summary, detail)) = projected {
+                trajectory.push(TrajectoryEntry {
+                    seq: Some(entry.seq),
+                    run_id: None,
+                    turn: None,
+                    category: category.into(),
+                    summary: summary.into(),
+                    detail,
+                    lane: Some(entry.lane.clone()),
+                    correlation_id: None,
+                });
+            }
+        }
+        trajectory.sort_by_key(|entry| entry.seq.unwrap_or(u64::MAX));
+        self.trajectory_by_session
+            .insert(session_id.into(), trajectory);
         self.session_metrics.insert(session_id.into(), metrics);
+        Ok(())
     }
 
     fn record_trajectory(&mut self, session_id: &str, event: &AgentEvent) {
         let entry = match event {
-            AgentEvent::TurnStart { turn_number } => Some(("Turn", format!("Turn {turn_number} started"), String::new(), None)),
-            AgentEvent::TurnEnd { turn_number, tool_results } => Some(("Turn", format!("Turn {turn_number} finished"), format!("{} tool result(s)", tool_results.len()), None)),
-            AgentEvent::ToolExecutionStart { tool_call_id, name, arguments } => Some(("Tool", format!("{name} started"), format!("{tool_call_id}\n{arguments}"), None)),
-            AgentEvent::ToolExecutionEnd { tool_call_id, name, result } => Some(("Tool", format!("{name} {}", if result.is_error { "failed" } else { "finished" }), format!("{tool_call_id}\n{}", result.content), None)),
-            AgentEvent::SubagentQueued { task_index, agent, task, .. } => Some(("Subagent", format!("{agent} queued"), format!("Task {task_index}: {task}"), Some(agent.clone()))),
-            AgentEvent::SubagentStarted { journal_run_id, task_index, .. } => Some(("Subagent", format!("Subagent {task_index} started"), journal_run_id.clone(), Some(journal_run_id.clone()))),
-            AgentEvent::SubagentFinished { journal_run_id, task_index, succeeded, error, .. } => Some(("Subagent", format!("Subagent {task_index} {}", if *succeeded { "finished" } else { "failed" }), error.clone().unwrap_or_else(|| journal_run_id.clone()), Some(journal_run_id.clone()))),
-            AgentEvent::SubagentRecovery { run_id, status, detail } => Some(("Recovery", format!("{status:?}"), detail.clone().unwrap_or_else(|| run_id.clone()), Some(run_id.clone()))),
-            AgentEvent::AgentError { error } => Some(("Error", "Agent error".into(), error.clone(), None)),
-            AgentEvent::StreamRuleTriggered { rule_name, reminder, .. } => Some(("Rule", format!("{rule_name} triggered"), reminder.clone(), None)),
+            AgentEvent::TurnStart { turn_number } => Some((
+                "Turn",
+                format!("Turn {turn_number} started"),
+                String::new(),
+                None,
+            )),
+            AgentEvent::TurnEnd {
+                turn_number,
+                tool_results,
+            } => Some((
+                "Turn",
+                format!("Turn {turn_number} finished"),
+                format!("{} tool result(s)", tool_results.len()),
+                None,
+            )),
+            AgentEvent::ToolExecutionStart {
+                tool_call_id,
+                name,
+                arguments,
+            } => Some((
+                "Tool",
+                format!("{name} started"),
+                format!("{tool_call_id}\n{arguments}"),
+                None,
+            )),
+            AgentEvent::ToolExecutionEnd {
+                tool_call_id,
+                name,
+                result,
+            } => Some((
+                "Tool",
+                format!(
+                    "{name} {}",
+                    if result.is_error {
+                        "failed"
+                    } else {
+                        "finished"
+                    }
+                ),
+                format!("{tool_call_id}\n{}", result.content),
+                None,
+            )),
+            AgentEvent::SubagentQueued {
+                task_index,
+                agent,
+                task,
+                ..
+            } => Some((
+                "Subagent",
+                format!("{agent} queued"),
+                format!("Task {task_index}: {task}"),
+                Some(agent.clone()),
+            )),
+            AgentEvent::SubagentStarted {
+                journal_run_id,
+                task_index,
+                ..
+            } => Some((
+                "Subagent",
+                format!("Subagent {task_index} started"),
+                journal_run_id.clone(),
+                Some(journal_run_id.clone()),
+            )),
+            AgentEvent::SubagentFinished {
+                journal_run_id,
+                task_index,
+                succeeded,
+                error,
+                ..
+            } => Some((
+                "Subagent",
+                format!(
+                    "Subagent {task_index} {}",
+                    if *succeeded { "finished" } else { "failed" }
+                ),
+                error.clone().unwrap_or_else(|| journal_run_id.clone()),
+                Some(journal_run_id.clone()),
+            )),
+            AgentEvent::SubagentRecovery {
+                run_id,
+                status,
+                detail,
+            } => Some((
+                "Recovery",
+                format!("{status:?}"),
+                detail.clone().unwrap_or_else(|| run_id.clone()),
+                Some(run_id.clone()),
+            )),
+            AgentEvent::AgentError { error } => {
+                Some(("Error", "Agent error".into(), error.clone(), None))
+            }
+            AgentEvent::StreamRuleTriggered {
+                rule_name,
+                reminder,
+                ..
+            } => Some((
+                "Rule",
+                format!("{rule_name} triggered"),
+                reminder.clone(),
+                None,
+            )),
             _ => None,
         };
         if let Some((category, summary, detail, lane)) = entry {
-            self.trajectory_by_session.entry(session_id.into()).or_default().push(TrajectoryEntry {
-                category: category.into(), summary, detail, lane,
-            });
+            self.trajectory_by_session
+                .entry(session_id.into())
+                .or_default()
+                .push(TrajectoryEntry {
+                    seq: None,
+                    run_id: lane.clone(),
+                    turn: match event {
+                        AgentEvent::TurnStart { turn_number }
+                        | AgentEvent::TurnEnd { turn_number, .. } => {
+                            u32::try_from(*turn_number).ok()
+                        }
+                        _ => None,
+                    },
+                    category: category.into(),
+                    summary,
+                    detail,
+                    lane,
+                    correlation_id: match event {
+                        AgentEvent::ToolExecutionStart { tool_call_id, .. }
+                        | AgentEvent::ToolExecutionEnd { tool_call_id, .. } => {
+                            Some(tool_call_id.clone())
+                        }
+                        _ => None,
+                    },
+                });
         }
     }
 
-    pub(crate) fn active_session_file(&self) -> Option<PathBuf> {
-        let session_id = self.active_session_id.as_deref()?;
-        self.projects
-            .iter()
-            .flat_map(|project| project.sessions.iter())
-            .find(|session| session.id == session_id)
-            .map(|session| session.session_file.clone())
+    pub(crate) fn active_trajectory(&self) -> &[TrajectoryEntry] {
+        self.active_session_id
+            .as_ref()
+            .and_then(|id| self.trajectory_by_session.get(id))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
-    pub(crate) fn active_trajectory(&self) -> &[TrajectoryEntry] {
-        self.active_session_id.as_ref().and_then(|id| self.trajectory_by_session.get(id)).map(Vec::as_slice).unwrap_or(&[])
+    pub(crate) fn session_trajectory(&self, session_id: &str) -> &[TrajectoryEntry] {
+        self.trajectory_by_session
+            .get(session_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     pub(crate) fn active_session_metrics(&self) -> SessionMetricsInfo {
-        self.active_session_id.as_ref().and_then(|id| self.session_metrics.get(id)).cloned().unwrap_or_default()
+        self.active_session_id
+            .as_ref()
+            .and_then(|id| self.session_metrics.get(id))
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub(crate) fn chat_stream_pending(&self) -> bool {
@@ -1410,11 +1747,19 @@ impl AppState {
                     self.record_trajectory(&session_id, &event);
                     let metrics = self.session_metrics.entry(session_id.clone()).or_default();
                     match &event {
-                        AgentEvent::TurnStart { .. } => metrics.turns = metrics.turns.saturating_add(1),
-                        AgentEvent::ToolExecutionStart { .. } => metrics.tool_calls = metrics.tool_calls.saturating_add(1),
+                        AgentEvent::TurnStart { .. } => {
+                            metrics.turns = metrics.turns.saturating_add(1)
+                        }
+                        AgentEvent::ToolExecutionStart { .. } => {
+                            metrics.tool_calls = metrics.tool_calls.saturating_add(1)
+                        }
                         AgentEvent::AgentEnd { usage } => {
-                            metrics.input_tokens = metrics.input_tokens.saturating_add(u64::from(usage.input_tokens));
-                            metrics.output_tokens = metrics.output_tokens.saturating_add(u64::from(usage.output_tokens));
+                            metrics.input_tokens = metrics
+                                .input_tokens
+                                .saturating_add(u64::from(usage.input_tokens));
+                            metrics.output_tokens = metrics
+                                .output_tokens
+                                .saturating_add(u64::from(usage.output_tokens));
                         }
                         _ => {}
                     }
@@ -1791,6 +2136,26 @@ impl AppState {
             self.reasoning_effort,
             self.stream_tx.clone(),
         )?;
+        let prompt_detail = if images.is_empty() {
+            text.clone()
+        } else if text.is_empty() {
+            format!("[{} image attachment(s)]", images.len())
+        } else {
+            format!("{text}\n[{} image attachment(s)]", images.len())
+        };
+        self.trajectory_by_session
+            .entry(session_id.clone())
+            .or_default()
+            .push(TrajectoryEntry {
+                seq: None,
+                run_id: None,
+                turn: None,
+                category: "Input".into(),
+                summary: "User input".into(),
+                detail: prompt_detail.clone(),
+                lane: Some("main".into()),
+                correlation_id: None,
+            });
         if !threadlane_provider::router::is_antigravity_model(&model) {
             crate::services::chat::spawn_session_title(
                 session_file,
@@ -1808,13 +2173,7 @@ impl AppState {
         self.messages.push(ChatMessageInfo {
             id: format!("pending-user-{session_id}-{}", self.messages.len()),
             role: MessageRole::User,
-            content: if images.is_empty() {
-                text
-            } else if text.is_empty() {
-                format!("[{} image attachment(s)]", images.len())
-            } else {
-                format!("{text}\n[{} image attachment(s)]", images.len())
-            },
+            content: prompt_detail,
             tool_activities: Vec::new(),
             streaming: false,
             reasoning_content: None,
@@ -1945,6 +2304,120 @@ mod tests {
     }
 
     #[test]
+    fn session_switch_preserves_live_trajectory_and_applies_deferred_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+        let session_id = "live-session".to_string();
+        let session_file = work_dir
+            .join(".threadlane/sessions")
+            .join(format!("{session_id}.jsonl"));
+        std::fs::create_dir_all(session_file.parent().unwrap()).unwrap();
+        std::fs::write(&session_file, "").unwrap();
+
+        let mut state = AppState::load_from_registry(Vec::new());
+        state.projects.push(ProjectInfo {
+            name: "project".into(),
+            work_dir: work_dir.clone(),
+            sessions: vec![SessionInfo {
+                id: session_id.clone(),
+                title: "Live".into(),
+                work_dir: work_dir.clone(),
+                session_file: session_file.clone(),
+                updated_at: 0,
+                health: SessionHealth::Working,
+            }],
+            is_expanded: true,
+        });
+        state.trajectory_by_session.insert(
+            session_id.clone(),
+            vec![TrajectoryEntry {
+                seq: None,
+                run_id: None,
+                turn: None,
+                category: "Tool".into(),
+                summary: "live tool".into(),
+                detail: String::new(),
+                lane: Some("main".into()),
+                correlation_id: Some("call-1".into()),
+            }],
+        );
+        state.deferred_stream_events.insert(
+            session_id.clone(),
+            vec![
+                ChatStreamEvent::Agent {
+                    session_id: session_id.clone(),
+                    event: AgentEvent::TurnStart { turn_number: 2 },
+                },
+                ChatStreamEvent::Finished {
+                    session_id: session_id.clone(),
+                    session_file,
+                },
+            ],
+        );
+
+        state.select_session(work_dir, session_id.clone());
+
+        let trajectory = &state.trajectory_by_session[&session_id];
+        assert_eq!(trajectory[0].summary, "live tool");
+        assert!(trajectory
+            .iter()
+            .any(|entry| entry.summary == "Turn 2 started"));
+    }
+
+    #[test]
+    fn durable_trajectory_hydrates_after_session_switch() {
+        use threadlane_agent::harness::SessionStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(&path, "").unwrap();
+        let store = threadlane_agent::harness::JsonlStore::open(&path).unwrap();
+        let mut harness = threadlane_agent::harness::AgentHarness::new(store);
+        harness
+            .accept_prompt("run-1", AgentMessage::user("old prompt", vec![]))
+            .unwrap();
+        harness.drive_to_completion().unwrap();
+        let parent_id = harness.store().entries().last().unwrap().id.clone();
+        let seq = harness.store().next_sequence();
+        harness
+            .store_mut()
+            .append_entry(threadlane_agent::harness::Entry {
+                id: "legacy-tool-result".into(),
+                parent_id: Some(parent_id),
+                lane: "main".into(),
+                seq,
+                timestamp: seq,
+                message: AgentMessage::Tool {
+                    tool_call_id: "legacy-call".into(),
+                    name: "read_file".into(),
+                    content: "legacy output".into(),
+                    is_error: false,
+                    terminate: false,
+                },
+                terminate: false,
+            })
+            .unwrap();
+        drop(harness);
+
+        let mut state = AppState::load_from_registry(Vec::new());
+        state
+            .hydrate_session_projection("old-session", &path)
+            .unwrap();
+
+        let trajectory = &state.trajectory_by_session["old-session"];
+        assert!(trajectory.iter().any(|entry| entry.category == "Operation"));
+        assert!(trajectory
+            .iter()
+            .any(|entry| { entry.category == "Input" && entry.detail == "old prompt" }));
+        assert!(trajectory.iter().any(|entry| entry.category == "Step"));
+        assert!(trajectory.iter().any(|entry| {
+            entry.category == "Tool"
+                && entry.correlation_id.as_deref() == Some("legacy-call")
+                && entry.detail == "legacy output"
+        }));
+    }
+
+    #[test]
     fn trajectory_projection_is_session_scoped_and_preserves_tool_details() {
         let mut state = AppState::load_from_registry(Vec::new());
         state.record_trajectory(
@@ -1966,8 +2439,21 @@ mod tests {
         );
         assert_eq!(state.trajectory_by_session["session-a"].len(), 1);
         assert_eq!(state.trajectory_by_session["session-a"][0].category, "Tool");
-        assert!(state.trajectory_by_session["session-a"][0].detail.contains("src/lib.rs"));
-        assert_eq!(state.trajectory_by_session["session-b"][0].lane.as_deref(), Some("reviewer"));
+        assert!(state.trajectory_by_session["session-a"][0]
+            .detail
+            .contains("src/lib.rs"));
+        assert_eq!(
+            state.trajectory_by_session["session-a"][0]
+                .correlation_id
+                .as_deref(),
+            Some("call-1")
+        );
+        assert_eq!(
+            state.trajectory_by_session["session-b"][0].lane.as_deref(),
+            Some("reviewer")
+        );
+        state.record_trajectory("session-a", &AgentEvent::TurnStart { turn_number: 12 });
+        assert_eq!(state.trajectory_by_session["session-a"][1].turn, Some(12));
     }
 
     #[test]
@@ -1994,7 +2480,11 @@ mod tests {
         state.active_work_dir = Some(work_dir);
         state.accept_edit_proposal(proposal_id).unwrap();
         assert_eq!(std::fs::read_to_string(file).unwrap(), "after\n");
-        assert!(state.session_status.as_deref().unwrap_or_default().contains("Accepted"));
+        assert!(state
+            .session_status
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Accepted"));
     }
 
     #[test]

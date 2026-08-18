@@ -151,7 +151,7 @@ For an attached Git project, the composer shows the current branch with checkout
 
 The chat view includes a session-scoped plan tracker above the composer. It is restored from persisted `session_plan` records and never mixes project-wide background tasks into the current conversation plan. The composer also reports observed turns, tool calls, token totals, and subagent-lane count. These are derived from agent events available to the desktop; unavailable timing/cache metrics are intentionally not fabricated.
 
-The **Trajectory** view is a read-only presentation of canonical agent events observed while the desktop has the session open. It includes turn boundaries, tool activity, subagent lifecycle/recovery, errors, and stream-rule triggers. Exporting a session log copies the canonical JSONL chosen by the user and does not create a second operation log.
+The dedicated **Chat / Trajectory** tabs switch between the transcript and a read-only canonical execution navigator. Trajectory hydrates durable operation, step, retry, tool, usage, user, assistant, and selected context records from the session JSONL, then appends live agent events. Compact rows are grouped by run/turn and expose sequence, lane, and tool-call correlation metadata. Category and lane menus plus text search filter the active projection; the lane menu also shows each observed lane's latest event. The Input/Model/Tools overview represents event order and density, not elapsed duration. Exporting a session log copies the canonical JSONL chosen by the user and does not create a second operation log.
 
 ## Slash Commands
 

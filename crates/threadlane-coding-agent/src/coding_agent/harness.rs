@@ -1277,7 +1277,7 @@ impl CodingSessionHarness {
             .store
             .entries()
             .iter()
-            .filter(|entry| entry.parent_id.as_deref() == Some(assistant_id.as_str()))
+            .filter(|entry| entry.seq > assistant.seq)
             .filter_map(|entry| match &entry.message {
                 AgentMessage::Tool {
                     tool_call_id, name, ..
@@ -1750,9 +1750,8 @@ impl CodingSessionHarness {
         let mut existing: HashMap<String, usize> = HashMap::new();
         for entry in self
             .store
-            .entries()
-            .iter()
-            .filter(|entry| entry.lane == "main")
+            .model_history("main")
+            .map_err(|error| error.to_string())?
         {
             *existing.entry(format!("{:?}", entry.message)).or_default() += 1;
         }
@@ -1787,8 +1786,14 @@ impl CodingSessionHarness {
             .map(|entry| entry.message)
             .collect::<Vec<_>>();
         let mut cursor = 0usize;
-        for message in messages.iter().filter(|message| !matches!(message, AgentMessage::System { .. })) {
-            let Some(offset) = logged[cursor..].iter().position(|candidate| candidate == message) else {
+        for message in messages
+            .iter()
+            .filter(|message| !matches!(message, AgentMessage::System { .. }))
+        {
+            let Some(offset) = logged[cursor..]
+                .iter()
+                .position(|candidate| candidate == message)
+            else {
                 return Err(format!("model-visible message is not logged: {message:?}"));
             };
             cursor += offset + 1;
@@ -2117,6 +2122,117 @@ mod tests {
             harness.store.entries().len(),
             entry_count_before,
             "sync_messages should not create duplicate entries"
+        );
+    }
+
+    #[test]
+    fn sync_messages_persists_reasoning_before_model_visibility_check() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        let run_id = harness.unique_run_id("test").unwrap();
+        let prompt = AgentMessage::user("inspect", vec![]);
+        let thinking = AgentMessage::Custom {
+            custom_type: "thinking".into(),
+            payload: serde_json::json!({"text": "reasoning"}),
+        };
+
+        harness.begin_run(&run_id, prompt.clone()).unwrap();
+        harness
+            .sync_messages(&[prompt.clone(), thinking.clone()])
+            .unwrap();
+        harness
+            .assert_model_visible(&[prompt, thinking.clone()])
+            .unwrap();
+
+        assert!(harness
+            .store
+            .entries()
+            .iter()
+            .any(|entry| entry.message == thinking));
+    }
+
+    #[test]
+    fn stale_metadata_and_chained_tool_results_remain_model_visible_and_get_lifecycle_records() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        let run_id = harness.unique_run_id("test").unwrap();
+        let prompt = AgentMessage::user("inspect", vec![]);
+        harness.begin_run(&run_id, prompt.clone()).unwrap();
+        harness.prepare_assistant_attempt(&run_id).unwrap();
+
+        let mut stale_tree = SessionTree::load_from_file(&path).unwrap();
+        stale_tree.set_name("stale metadata".into()).unwrap();
+
+        let assistant = AgentMessage::Assistant {
+            content: None,
+            tool_calls: Some(vec![
+                threadlane_provider::openai::ToolCall {
+                    id: "call-1".into(),
+                    r#type: "function".into(),
+                    function: threadlane_provider::openai::ToolCallFunction {
+                        name: "read_file".into(),
+                        arguments: "{}".into(),
+                    },
+                    thought_signature: None,
+                },
+                threadlane_provider::openai::ToolCall {
+                    id: "call-2".into(),
+                    r#type: "function".into(),
+                    function: threadlane_provider::openai::ToolCallFunction {
+                        name: "grep".into(),
+                        arguments: "{}".into(),
+                    },
+                    thought_signature: None,
+                },
+            ]),
+            stop_reason: None,
+            deferred_handle: None,
+        };
+        let first_tool = AgentMessage::Tool {
+            tool_call_id: "call-1".into(),
+            name: "read_file".into(),
+            content: "first".into(),
+            is_error: false,
+            terminate: false,
+        };
+        let second_tool = AgentMessage::Tool {
+            tool_call_id: "call-2".into(),
+            name: "grep".into(),
+            content: "second".into(),
+            is_error: false,
+            terminate: false,
+        };
+        let final_assistant = AgentMessage::Assistant {
+            content: Some("done".into()),
+            tool_calls: None,
+            stop_reason: Some("end_turn".into()),
+            deferred_handle: None,
+        };
+        let messages = vec![prompt, assistant, first_tool, second_tool, final_assistant];
+
+        harness.sync_messages(&messages).unwrap();
+        harness.assert_model_visible(&messages).unwrap();
+        harness
+            .record_completed_tools_with_termination(&run_id, &HashMap::new())
+            .unwrap();
+
+        assert_eq!(
+            harness
+                .store
+                .records()
+                .iter()
+                .filter(|record| matches!(record, HarnessRecord::ToolStarted { .. }))
+                .count(),
+            2
+        );
+        assert_eq!(
+            harness
+                .store
+                .records()
+                .iter()
+                .filter(|record| matches!(record, HarnessRecord::ToolFinished { .. }))
+                .count(),
+            2
         );
     }
 
