@@ -34,18 +34,18 @@ impl AgentSource {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDefinition {
-    pub name: String,
-    pub description: String,
+    pub(crate) name: String,
+    pub(crate) description: String,
     pub(crate) tools: Option<Vec<String>>,
-    pub model: Option<String>,
+    pub(crate) model: Option<String>,
     pub(crate) system_prompt: String,
-    pub source: AgentSource,
+    pub(crate) source: AgentSource,
     pub(crate) file_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDiscoveryResult {
-    pub agents: Vec<AgentDefinition>,
+    pub(crate) agents: Vec<AgentDefinition>,
     project_agents_dir: Option<PathBuf>,
 }
 
@@ -189,7 +189,7 @@ fn find_nearest_project_agent_dirs(cwd: &Path) -> (Option<PathBuf>, Vec<PathBuf>
     }
 }
 
-pub fn discover_agents(cwd: &Path, scope: AgentScope) -> AgentDiscoveryResult {
+pub(crate) fn discover_agents(cwd: &Path, scope: AgentScope) -> AgentDiscoveryResult {
     let home = threadlane_agent::utils::dirs_home();
     let user_dirs = home
         .map(|h| {

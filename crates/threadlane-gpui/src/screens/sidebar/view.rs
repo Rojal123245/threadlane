@@ -63,13 +63,13 @@ fn format_time_ago(timestamp: u64) -> String {
 }
 
 pub struct SidebarView {
-    pub model: Entity<AppState>,
-    pub search_input: Entity<InputState>,
+    model: Entity<AppState>,
+    search_input: Entity<InputState>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl SidebarView {
-    pub fn new(model: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(model: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
 
         let sub1 = cx.observe(&model, |_this, _model, cx| {

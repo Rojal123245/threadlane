@@ -10,13 +10,13 @@ pub struct AbortOnDrop<T> {
 }
 
 impl<T> AbortOnDrop<T> {
-    pub fn new(handle: tokio::task::JoinHandle<T>) -> Self {
+    pub(crate) fn new(handle: tokio::task::JoinHandle<T>) -> Self {
         Self {
             handle: Some(handle),
         }
     }
 
-    pub async fn join(mut self) -> Result<T, tokio::task::JoinError> {
+    pub(crate) async fn join(mut self) -> Result<T, tokio::task::JoinError> {
         let result = self.handle.as_mut().expect("task handle missing").await;
         self.handle = None;
         result

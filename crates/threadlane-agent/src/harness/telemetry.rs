@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Default)]
 pub struct ExecutionContext {
-    pub session_id: Option<String>,
-    pub lane: Option<String>,
-    pub run_id: Option<String>,
+    session_id: Option<String>,
+    pub(crate) lane: Option<String>,
+    pub(crate) run_id: Option<String>,
     attributes: BTreeMap<String, String>,
 }
 

@@ -467,7 +467,7 @@ fn projection_cursor_is_monotonically_increasing() {
 
 #[test]
 fn projection_respects_commit_order_in_subscription() {
-    let mut store = MemoryStore::new("session-1");
+    let store = MemoryStore::new("session-1");
     let hub = HarnessEventHub::new(16);
 
     // Subscribe before publishing to observe buffered delivery.
@@ -534,7 +534,7 @@ fn projection_respects_commit_order_in_subscription() {
 
 #[test]
 fn agent_end_not_projected_before_operation_finished_commit() {
-    let mut store = MemoryStore::new("session-1");
+    let store = MemoryStore::new("session-1");
     let hub = HarnessEventHub::new(16);
 
     // Subscribe first so poll captures new events after the cursor.
@@ -589,7 +589,7 @@ fn agent_end_not_projected_before_operation_finished_commit() {
 
 #[test]
 fn agent_start_and_end_are_separated_by_commit_events_in_projection() {
-    let mut store = MemoryStore::new("session-1");
+    let store = MemoryStore::new("session-1");
     let hub = HarnessEventHub::new(16);
 
     // Subscribe before publishing to observe all events via poll.
@@ -716,7 +716,7 @@ fn reconnecting_with_snapshot_plus_cursor_avoids_gaps() {
 }
 #[test]
 fn cursor_tracks_last_projected_event_across_poll_batches() {
-    let mut store = MemoryStore::new("session-1");
+    let store = MemoryStore::new("session-1");
     let hub = HarnessEventHub::new(16);
 
     // Subscribe before publishing so the subscription sees buffered events.
@@ -765,7 +765,7 @@ fn cursor_tracks_last_projected_event_across_poll_batches() {
 
 #[test]
 fn poll_without_new_events_returns_empty() {
-    let mut store = MemoryStore::new("session-1");
+    let store = MemoryStore::new("session-1");
     let hub = HarnessEventHub::new(8);
 
     // Subscribe first to capture the starting cursor, then publish.
@@ -790,7 +790,7 @@ fn poll_without_new_events_returns_empty() {
 
 #[test]
 fn re_poll_does_not_re_emit_projected_events() {
-    let mut store = MemoryStore::new("session-1");
+    let store = MemoryStore::new("session-1");
     let hub = HarnessEventHub::new(8);
 
     // Subscribe before publishing so the poll sees the event.
@@ -818,7 +818,7 @@ fn re_poll_does_not_re_emit_projected_events() {
 
 #[test]
 fn gap_error_stops_projection_but_preserves_cursor_for_reconnect() {
-    let mut store = MemoryStore::new("session-1");
+    let store = MemoryStore::new("session-1");
     let hub = HarnessEventHub::new(2);
 
     let mut subscription = hub.subscribe(&store).unwrap();

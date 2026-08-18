@@ -181,7 +181,7 @@ impl Clone for ProviderRouter {
 
 impl ProviderRouter {
     /// Creates a router with the default adapters (Chat Completions + Codex).
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -192,7 +192,7 @@ impl ProviderRouter {
     }
 
     /// Returns the first adapter whose format matches the given format.
-    pub fn select(&self, format: PayloadFormat) -> Arc<dyn ProviderAdapter> {
+    fn select(&self, format: PayloadFormat) -> Arc<dyn ProviderAdapter> {
         self.adapters
             .iter()
             .find(|adapter| adapter.format() == format)
@@ -202,7 +202,7 @@ impl ProviderRouter {
 
     /// Builds a complete payload for the given format, reading state and tools
     /// from the caller.
-    pub fn build_payload(
+    pub(crate) fn build_payload(
         &self,
         format: PayloadFormat,
         state: &TurnState,

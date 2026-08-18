@@ -214,7 +214,7 @@ impl Default for AntigravityClient {
 }
 
 impl AntigravityClient {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             client: reqwest::Client::new(),
             project_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -223,7 +223,7 @@ impl AntigravityClient {
 
     /// Converts an OpenAI chat-completions payload and streams events understood by the
     /// shared agent loop.
-    pub(crate) async fn stream_chat_completion(
+    async fn stream_chat_completion(
         &self,
         api_payload: Value,
         event_tx: mpsc::Sender<StreamEvent>,

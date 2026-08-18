@@ -50,7 +50,7 @@ pub struct SettingsView {
 }
 
 impl SettingsView {
-    pub fn new(model: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(model: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (openai_key, opencode_key) = {
             let state = model.read(cx);
             (state.openai_key.clone(), state.opencode_key.clone())

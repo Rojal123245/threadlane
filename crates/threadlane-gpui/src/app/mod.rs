@@ -1,2 +1,2 @@
 pub mod actions;
-pub mod controller;
+pub(crate) mod controller;

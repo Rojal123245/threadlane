@@ -45,7 +45,7 @@ impl Drop for RunCleanup {
     }
 }
 
-pub fn execute_prompt(
+pub(crate) fn execute_prompt(
     runtime: Arc<SessionRuntime>,
     session_id: String,
     text: String,
@@ -161,7 +161,7 @@ pub fn execute_prompt(
     Ok(())
 }
 
-pub fn spawn_session_title(
+pub(crate) fn spawn_session_title(
     session_file: PathBuf,
     session_id: String,
     submitted_prompt: String,
@@ -274,7 +274,7 @@ fn normalize_session_title(value: &str) -> String {
     collapsed.chars().take(42).collect()
 }
 
-pub fn cancel_prompt(
+pub(crate) fn cancel_prompt(
     runtime: Arc<SessionRuntime>,
     session_id: String,
     stream_tx: Sender<ChatStreamEvent>,

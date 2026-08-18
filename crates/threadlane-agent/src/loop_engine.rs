@@ -54,8 +54,6 @@ pub fn repair_interrupted_tool_turn(messages: &mut Vec<AgentMessage>) -> bool {
     false
 }
 
-pub use crate::turn_driver::{ProviderStepAccumulator, ProviderStepResult};
-
 // ── Backward-compatible re-exports (now defined in `provider`) ──────────
 
 pub use crate::provider::{

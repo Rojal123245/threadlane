@@ -16,26 +16,26 @@ use std::time::Duration;
 pub struct AgentConfig {
     // ── Compaction ──────────────────────────────────────────────────────
     /// Estimated token threshold above which auto-compaction triggers.
-    pub auto_compaction_threshold_tokens: usize,
+    pub(crate) auto_compaction_threshold_tokens: usize,
 
     /// Number of tokens to retain from the most recent messages during
     /// token-budget compaction.
-    pub auto_compaction_keep_recent_tokens: usize,
+    pub(crate) auto_compaction_keep_recent_tokens: usize,
 
     /// Maximum characters for a compaction checkpoint excerpt.
-    pub max_checkpoint_chars: usize,
+    pub(crate) max_checkpoint_chars: usize,
 
     /// Estimated tokens per image attachment (used for token counting).
-    pub estimated_image_tokens: usize,
+    pub(crate) estimated_image_tokens: usize,
 
     // ── Stream Rules ────────────────────────────────────────────────────
     /// Maximum bytes of accumulated streaming text to retain for regex
     /// matching. Text beyond this window is discarded.
-    pub stream_rule_max_window_bytes: usize,
+    pub(crate) stream_rule_max_window_bytes: usize,
 
     // ── Provider ────────────────────────────────────────────────────────
     /// Default system prompt used when none is explicitly set.
-    pub default_system_prompt: String,
+    pub(crate) default_system_prompt: String,
 
     // ── Model Roles ─────────────────────────────────────────────────────
     /// Assigned models for specialized roles (Task, Plan, Advisor).
@@ -44,15 +44,15 @@ pub struct AgentConfig {
 
     // ── Tool Execution ──────────────────────────────────────────────────
     /// Timeout for individual tool executions. `None` means no timeout.
-    pub tool_execution_timeout: Option<Duration>,
+    tool_execution_timeout: Option<Duration>,
 
     /// Maximum tool output length in bytes before truncation. `None` means
     /// no limit.
-    pub max_tool_output_bytes: Option<usize>,
+    max_tool_output_bytes: Option<usize>,
 
     // ── Event Channel ───────────────────────────────────────────────────
     /// Capacity of the broadcast channel for [`AgentEvent`]s.
-    pub event_channel_capacity: usize,
+    pub(crate) event_channel_capacity: usize,
 }
 
 impl Default for AgentConfig {

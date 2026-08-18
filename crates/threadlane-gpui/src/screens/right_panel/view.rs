@@ -82,7 +82,7 @@ pub struct RightPanelView {
 }
 
 impl RightPanelView {
-    pub fn new(model: Entity<AppState>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(model: Entity<AppState>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         let document_state = cx.new(|cx| TextViewState::markdown("", cx));
         let (event_tx, event_rx) = mpsc::channel();
 
@@ -142,7 +142,7 @@ impl RightPanelView {
         self.refresh_active_surface();
     }
 
-    pub fn open_review(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_review(&mut self, cx: &mut Context<Self>) {
         self.open_surface(Surface::Review, cx);
     }
 

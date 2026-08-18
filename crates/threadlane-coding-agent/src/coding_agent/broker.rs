@@ -23,10 +23,10 @@ pub(crate) const CAPABILITY_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const MAX_CAPABILITY_BUFFER_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_PROCESS_TIMEOUT_MS: u64 = 120_000;
 pub(crate) const MAX_PROCESS_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
-pub(crate) const MAX_MANAGED_PROCESSES: usize = 16;
-pub(crate) const DEFAULT_RECV_TIMEOUT_MS: u64 = 5000;
-pub(crate) const MAX_RECV_TIMEOUT_MS: u64 = 30_000;
-pub(crate) const MAX_MANAGED_STDOUT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_MANAGED_PROCESSES: usize = 16;
+const DEFAULT_RECV_TIMEOUT_MS: u64 = 5000;
+const MAX_RECV_TIMEOUT_MS: u64 = 30_000;
+const MAX_MANAGED_STDOUT_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const MAX_BROKER_CONTINUATION_ROUNDS: usize = 4;
 
 /// A persistent subprocess managed by the host for WASI extensions.
@@ -945,34 +945,34 @@ fn bounded_positive_integer_argument(
     Ok(value.min(max))
 }
 
-pub(crate) fn timeout_error(operation: &str) -> BrokerError {
+fn timeout_error(operation: &str) -> BrokerError {
     BrokerError {
         code: "timeout".into(),
         message: format!("Capability operation `{operation}` timed out"),
     }
 }
-pub(crate) fn internal_error(message: impl Into<String>) -> BrokerError {
+fn internal_error(message: impl Into<String>) -> BrokerError {
     BrokerError {
         code: "host_error".into(),
         message: message.into(),
     }
 }
-pub(crate) fn host_error(error: impl std::fmt::Display) -> BrokerError {
+fn host_error(error: impl std::fmt::Display) -> BrokerError {
     internal_error(error.to_string())
 }
-pub(crate) fn invalid_argument(message: impl Into<String>) -> BrokerError {
+fn invalid_argument(message: impl Into<String>) -> BrokerError {
     BrokerError {
         code: "invalid_argument".into(),
         message: message.into(),
     }
 }
-pub(crate) fn unknown_operation(capability: &str, operation: &str) -> Result<Value, BrokerError> {
+fn unknown_operation(capability: &str, operation: &str) -> Result<Value, BrokerError> {
     Err(BrokerError {
         code: "unknown_operation".into(),
         message: format!("Capability `{capability}` does not implement operation `{operation}`"),
     })
 }
-pub(crate) fn string_argument<'a>(
+fn string_argument<'a>(
     arguments: &'a Value,
     name: &str,
 ) -> Result<&'a str, BrokerError> {

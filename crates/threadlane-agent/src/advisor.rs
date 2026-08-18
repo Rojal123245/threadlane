@@ -10,7 +10,7 @@ use threadlane_provider::router::{PayloadFormat, PayloadSource, ProviderClient};
 use tokio::sync::mpsc;
 
 /// System prompt supplied to the Advisor model.
-pub const ADVISOR_SYSTEM_PROMPT: &str = r#"You are the AI Advisor and Reviewer for an AI coding assistant.
+const ADVISOR_SYSTEM_PROMPT: &str = r#"You are the AI Advisor and Reviewer for an AI coding assistant.
 You monitor the main agent's actions on every turn to catch mistakes, risky code, regressions, or deviations from the objective.
 
 Evaluate the agent's latest turn, reasoning, tool executions, and results.
@@ -39,13 +39,13 @@ struct RawAdvisorResponse {
 }
 
 /// Evaluates a turn and produces an optional [`AdvisorNote`].
-pub struct AdvisorEvaluator {
+pub(crate) struct AdvisorEvaluator {
     provider_client: ProviderClient,
     model: String,
 }
 
 impl AdvisorEvaluator {
-    pub fn new(provider_client: ProviderClient, model: impl Into<String>) -> Self {
+    pub(crate) fn new(provider_client: ProviderClient, model: impl Into<String>) -> Self {
         Self {
             provider_client,
             model: model.into(),
@@ -53,7 +53,7 @@ impl AdvisorEvaluator {
     }
 
     /// Evaluates the recent messages in a turn.
-    pub async fn evaluate_turn(&self, messages: &[AgentMessage]) -> Option<AdvisorNote> {
+    pub(crate) async fn evaluate_turn(&self, messages: &[AgentMessage]) -> Option<AdvisorNote> {
         if messages.is_empty() {
             return None;
         }
@@ -187,7 +187,7 @@ impl AdvisorEvaluator {
 
 
 /// Parses the raw JSON response from an Advisor model into an [`AdvisorNote`].
-pub fn parse_advisor_response(raw: &str) -> Option<AdvisorNote> {
+fn parse_advisor_response(raw: &str) -> Option<AdvisorNote> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;

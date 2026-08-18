@@ -9,7 +9,7 @@ const UPDATE_ENDPOINT: &str = match option_env!("THREADLANE_UPDATER_ENDPOINT") {
     Some(endpoint) => endpoint,
     None => "https://github.com/wheregmis/threadlane/releases/latest/download/latest.json",
 };
-pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const UPDATER_PUBLIC_KEY: &str = match option_env!("THREADLANE_UPDATER_PUBLIC_KEY") {
     Some(key) => key,
     None => "",
@@ -18,7 +18,7 @@ const UPDATER_PUBLIC_KEY: &str = match option_env!("THREADLANE_UPDATER_PUBLIC_KE
 #[derive(Clone, Debug)]
 pub struct UpdateReleaseInfo {
     pub version: String,
-    pub notes: String,
+    notes: String,
     update: Update,
 }
 

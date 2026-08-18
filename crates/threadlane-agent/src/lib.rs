@@ -1,4 +1,4 @@
-pub mod advisor;
+pub(crate) mod advisor;
 pub mod capability;
 pub mod compaction;
 pub mod config;
@@ -17,7 +17,6 @@ pub mod types;
 pub mod unified;
 pub mod utils;
 
-pub use advisor::{AdvisorEvaluator, ADVISOR_SYSTEM_PROMPT};
 pub use utils::{dirs_home, now_timestamp_ms, now_timestamp_secs, AbortOnDrop};
 
 pub use capability::{Capability, CapabilityRegistry};
@@ -47,6 +46,5 @@ pub use rules::*;
 pub use session_tree::{SessionNode, SessionTree};
 pub use tool_dispatcher::ToolDispatcher;
 pub use tool_executor::ToolExecutor;
-pub use turn_driver::TurnDriver;
 pub use types::*;
 pub use unified::{TurnState, UnifiedAgent};

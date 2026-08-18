@@ -77,9 +77,9 @@ pub struct DeviceCodeResponse {
     #[serde(default = "default_verification_uri")]
     pub verification_uri: String,
     #[serde(default)]
-    pub expires_at: Option<String>,
+    expires_at: Option<String>,
     #[serde(default)]
-    pub expires_in: Option<u64>,
+    expires_in: Option<u64>,
     #[serde(
         deserialize_with = "deserialize_string_or_number",
         default = "default_interval"
@@ -94,15 +94,15 @@ fn default_interval() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OAuthTokens {
     #[serde(default)]
-    pub access_token: String,
+    access_token: String,
     #[serde(default)]
-    pub refresh_token: Option<String>,
+    refresh_token: Option<String>,
     #[serde(default)]
-    pub expires_in: Option<u64>,
+    expires_in: Option<u64>,
     #[serde(default)]
-    pub id_token: Option<String>,
+    id_token: Option<String>,
     #[serde(default)]
-    pub account_id: Option<String>,
+    account_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,7 +114,7 @@ struct DeviceAuthorizationCode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredCredentials {
     pub access_token: String,
-    pub refresh_token: Option<String>,
+    refresh_token: Option<String>,
     pub account_id: Option<String>,
     pub source: String,
 }
@@ -127,13 +127,13 @@ fn get_threadlane_dir() -> PathBuf {
     path
 }
 
-pub fn get_credentials_path() -> PathBuf {
+fn get_credentials_path() -> PathBuf {
     let mut path = get_threadlane_dir();
     path.push("credentials.json");
     path
 }
 
-pub fn save_credentials(tokens: &OAuthTokens) -> Result<(), String> {
+fn save_credentials(tokens: &OAuthTokens) -> Result<(), String> {
     let path = get_credentials_path();
     let creds = StoredCredentials {
         access_token: tokens.access_token.clone(),
@@ -396,7 +396,7 @@ fn device_token_error(status: reqwest::StatusCode, body: &str) -> Option<String>
     Some(format!("Device login failed ({status}): {reason}"))
 }
 
-pub async fn poll_device_token_without_saving(
+async fn poll_device_token_without_saving(
     device_auth_id: &str,
     user_code: &str,
 ) -> Result<OAuthTokens, String> {

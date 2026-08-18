@@ -50,7 +50,7 @@ pub fn load_antigravity_credentials() -> Option<AntigravityCredentials> {
     None
 }
 
-pub fn save_antigravity_credentials(creds: &AntigravityCredentials) -> Result<(), String> {
+fn save_antigravity_credentials(creds: &AntigravityCredentials) -> Result<(), String> {
     let path = get_antigravity_credentials_path();
     let json = serde_json::to_string_pretty(creds)
         .map_err(|_| "Failed to serialize credentials".to_string())?;
@@ -122,7 +122,7 @@ pub async fn exchange_code_for_tokens(
     Ok(creds)
 }
 
-pub async fn exchange_code_for_tokens_without_saving(
+async fn exchange_code_for_tokens_without_saving(
     code: &str,
     code_verifier: &str,
 ) -> Result<AntigravityCredentials, String> {

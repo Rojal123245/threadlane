@@ -40,9 +40,9 @@ pub fn init(cx: &mut App) {
 }
 
 pub struct ChatListView {
-    pub model: Entity<AppState>,
-    pub input_state: Entity<TextareaState>,
-    pub header_left_padding: Pixels,
+    model: Entity<AppState>,
+    pub(crate) input_state: Entity<TextareaState>,
+    pub(crate) header_left_padding: Pixels,
     scroll_handle: ScrollHandle,
     expanded_activity_groups: HashSet<String>,
     markdown_states: HashMap<String, (String, Entity<TextViewState>)>,
@@ -57,7 +57,7 @@ pub struct ChatListView {
 }
 
 impl ChatListView {
-    pub fn new(model: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(model: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let scroll_handle = ScrollHandle::new();
         let input_state = cx.new(|cx| {
             TextareaState::new(window, cx)

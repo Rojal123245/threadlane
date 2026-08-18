@@ -10,15 +10,15 @@ use std::process::Command;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GitStatus {
     pub branch: Option<String>,
-    pub detached: bool,
-    pub has_upstream: bool,
-    pub has_changes: bool,
+    detached: bool,
+    has_upstream: bool,
+    has_changes: bool,
     pub staged_changes: bool,
     pub unstaged_changes: bool,
     pub ahead: usize,
-    pub behind: usize,
-    pub pr_ready: bool,
-    pub remote: Option<String>,
+    behind: usize,
+    pr_ready: bool,
+    remote: Option<String>,
     pub branches: Vec<String>,
     pub files: Vec<GitFile>,
 }
@@ -26,10 +26,10 @@ pub struct GitStatus {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GitFile {
     pub path: String,
-    pub status: String,
-    pub index_status: char,
-    pub worktree_status: char,
-    pub staged: bool,
+    status: String,
+    index_status: char,
+    worktree_status: char,
+    staged: bool,
     pub unstaged: bool,
     pub additions: u32,
     pub deletions: u32,
@@ -37,7 +37,7 @@ pub struct GitFile {
 
 impl GitFile {
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn status_for_section(&self, staged_section: bool) -> char {
+    fn status_for_section(&self, staged_section: bool) -> char {
         if staged_section {
             self.index_status
         } else {
@@ -295,7 +295,7 @@ pub fn checkout(work_dir: &Path, name: &str) -> Result<(), GitError> {
     Ok(())
 }
 
-pub fn create_worktree(work_dir: &Path, path: &Path, branch: &str) -> Result<(), GitError> {
+fn create_worktree(work_dir: &Path, path: &Path, branch: &str) -> Result<(), GitError> {
     let branch = validate_branch_name(work_dir, branch)?;
     if !path.is_absolute() {
         return Err(GitError {
@@ -442,7 +442,7 @@ pub fn commit_message_diff(work_dir: &Path) -> Result<String, GitError> {
     Ok(diff)
 }
 
-pub fn default_branch(work_dir: &Path) -> Option<String> {
+fn default_branch(work_dir: &Path) -> Option<String> {
     if let Some(branch) = command(
         work_dir,
         &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
@@ -469,7 +469,7 @@ pub fn default_branch(work_dir: &Path) -> Option<String> {
     Some("main".to_owned())
 }
 
-pub fn github_repository(remote: &str) -> Option<(String, String)> {
+fn github_repository(remote: &str) -> Option<(String, String)> {
     let normalized = remote.trim().trim_end_matches('/').trim_end_matches(".git");
     let path = normalized
         .strip_prefix("https://github.com/")
@@ -485,7 +485,7 @@ pub fn github_repository(remote: &str) -> Option<(String, String)> {
     Some((owner.to_owned(), repository.to_owned()))
 }
 
-pub fn github_compare_url(remote: &str, head: &str, base: Option<&str>) -> Option<String> {
+fn github_compare_url(remote: &str, head: &str, base: Option<&str>) -> Option<String> {
     let (owner, repo) = github_repository(remote)?;
     let base = base.unwrap_or("main");
     Some(format!(

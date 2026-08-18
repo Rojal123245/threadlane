@@ -13,10 +13,10 @@ pub fn classify_tool_replay_safety(tool_name: &str) -> ToolReplaySafety {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamRule {
-    pub(crate) id: String,
-    pub(crate) name: String,
+    id: String,
+    name: String,
     pub(crate) pattern: String,
-    pub(crate) reminder: String,
+    reminder: String,
 }
 
 #[allow(dead_code)]

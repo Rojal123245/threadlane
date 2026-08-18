@@ -145,7 +145,7 @@ impl JsonlStore {
         Ok(store)
     }
 
-    pub fn refresh(&mut self) -> io::Result<()> {
+    fn refresh(&mut self) -> io::Result<()> {
         let claim = self.claim.clone();
         let _guard = claim
             .gate

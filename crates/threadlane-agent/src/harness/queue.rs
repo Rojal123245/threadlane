@@ -20,7 +20,7 @@ pub enum SteerPriority {
 pub struct SteerItem {
     pub message: AgentMessage,
     pub priority: SteerPriority,
-    pub timestamp_ms: u128,
+    timestamp_ms: u128,
 }
 
 impl PartialEq for SteerItem {
@@ -51,7 +51,7 @@ impl Ord for SteerItem {
 pub struct LaneQueue {
     pub steer: Vec<SteerItem>,
     pub follow_up: VecDeque<AgentMessage>,
-    pub next_run: VecDeque<AgentMessage>,
+    next_run: VecDeque<AgentMessage>,
 }
 
 impl LaneQueue {

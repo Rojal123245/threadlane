@@ -27,7 +27,6 @@ pub use acp::{
 pub use acp_bridge::{
     acp_agent_id, acp_model_id, agent_events_for, is_acp_model, ACP_MODEL_PREFIX,
 };
-pub use agents::{discover_agents, AgentDefinition, AgentDiscoveryResult, AgentScope, AgentSource};
 pub use capabilities::CapabilityCatalog;
 pub use coding_agent::{
     cancel_open_subagent_operations, extension_before_tool_hook_handler, CodingAgent,
@@ -39,7 +38,6 @@ pub use commands::{
 };
 pub use config::{CodingAgentConfig, CodingAgentConfigBuilder};
 pub use context::{ProjectContext, ProjectInstruction};
-pub use error::CodingAgentError;
 pub use permission::{PermissionDecision, PermissionHandle};
 pub use policy::ToolPolicy;
 pub use prompt_templates::{

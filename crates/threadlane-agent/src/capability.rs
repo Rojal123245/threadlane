@@ -43,7 +43,7 @@ impl CapabilityRegistry {
     }
 
     /// Returns all tool executors from all registered capabilities.
-    pub fn all_tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
+    fn all_tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
         self.capabilities
             .iter()
             .flat_map(|cap| cap.tool_executors())
@@ -51,7 +51,7 @@ impl CapabilityRegistry {
     }
 
     /// Returns all hooks from all registered capabilities.
-    pub fn all_hooks(&self) -> Vec<(HookKind, &str, HookHandler)> {
+    fn all_hooks(&self) -> Vec<(HookKind, &str, HookHandler)> {
         self.capabilities
             .iter()
             .flat_map(|cap| cap.hooks())

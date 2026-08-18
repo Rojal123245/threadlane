@@ -71,7 +71,7 @@ pub struct McpSettings {
 }
 
 impl McpSettings {
-    pub fn load_global(global_dir: Option<&Path>) -> Vec<McpServerConfig> {
+    fn load_global(global_dir: Option<&Path>) -> Vec<McpServerConfig> {
         let Some(dir) = global_dir else {
             return Vec::new();
         };
@@ -79,7 +79,7 @@ impl McpSettings {
         Self::load_file(&path, McpScope::Global)
     }
 
-    pub fn load_project(project_root: Option<&Path>) -> Vec<McpServerConfig> {
+    fn load_project(project_root: Option<&Path>) -> Vec<McpServerConfig> {
         let Some(root) = project_root else {
             return Vec::new();
         };
@@ -159,16 +159,16 @@ impl McpServerStatus {
 
 #[derive(Debug, Clone)]
 pub struct McpToolInfo {
-    pub tool_name: String,
-    pub full_name: String,
-    pub definition: AgentToolDefinition,
+    tool_name: String,
+    full_name: String,
+    definition: AgentToolDefinition,
 }
 
 #[derive(Debug, Clone)]
 pub struct McpServerRecord {
-    pub config: McpServerConfig,
-    pub status: McpServerStatus,
-    pub tools: Vec<McpToolInfo>,
+    config: McpServerConfig,
+    status: McpServerStatus,
+    tools: Vec<McpToolInfo>,
 }
 
 /// A live stdio session with one MCP server.

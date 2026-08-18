@@ -54,13 +54,13 @@ pub struct BrokerError {
 pub struct BrokerResponse {
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub value: Option<Value>,
+    value: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<BrokerError>,
 }
 
 impl BrokerResponse {
-    pub fn ok(value: Value) -> Self {
+    pub(crate) fn ok(value: Value) -> Self {
         Self {
             ok: true,
             value: Some(value),
@@ -68,7 +68,7 @@ impl BrokerResponse {
         }
     }
 
-    pub fn error(code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub(crate) fn error(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             ok: false,
             value: None,
@@ -203,7 +203,7 @@ impl HostCapabilityGrantPolicy {
         }
     }
 
-    pub fn allows_declared(&self, declared: &[String], capability: &str) -> bool {
+    pub(crate) fn allows_declared(&self, declared: &[String], capability: &str) -> bool {
         declared.iter().any(|item| item == capability)
             && self
                 .allowed

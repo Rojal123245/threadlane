@@ -36,7 +36,7 @@ pub enum LaneStatus {
 
 #[derive(Debug, Clone, Default)]
 pub struct CheckpointResult {
-    pub steer_messages: Vec<AgentMessage>,
+    steer_messages: Vec<AgentMessage>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,19 +49,19 @@ pub enum TaskKind {
 /// Persistence is owned by `CodingSessionHarness`.
 #[derive(Debug, Clone)]
 pub struct Lane {
-    pub name: String,
-    pub session_id: String,
-    pub parent_lane: Option<String>,
-    pub leaf_id: Option<String>,
-    pub status: LaneStatus,
-    pub queue: LaneQueue,
-    pub active_run_id: Option<String>,
+    name: String,
+    session_id: String,
+    parent_lane: Option<String>,
+    leaf_id: Option<String>,
+    status: LaneStatus,
+    queue: LaneQueue,
+    active_run_id: Option<String>,
     session_file: Option<PathBuf>,
-    pub accumulated_usage: TokenUsage,
+    accumulated_usage: TokenUsage,
 }
 
 impl Lane {
-    pub fn new(name: impl Into<String>, session_id: impl Into<String>) -> Self {
+    fn new(name: impl Into<String>, session_id: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             session_id: session_id.into(),
@@ -87,25 +87,25 @@ pub struct ProjectRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRecord {
     pub id: String,
-    pub project_id: String,
-    pub session_id: String,
+    project_id: String,
+    session_id: String,
     pub session_file: Option<PathBuf>,
-    pub parent_task_id: Option<String>,
-    pub kind: TaskKind,
-    pub agent: String,
-    pub summary: String,
-    pub current_activity: Option<String>,
-    pub status: TaskStatus,
-    pub started_at_ms: u128,
-    pub finished_at_ms: Option<u128>,
+    parent_task_id: Option<String>,
+    kind: TaskKind,
+    agent: String,
+    summary: String,
+    current_activity: Option<String>,
+    status: TaskStatus,
+    started_at_ms: u128,
+    finished_at_ms: Option<u128>,
 }
 
 impl TaskRecord {
-    pub fn cancellable(&self) -> bool {
+    fn cancellable(&self) -> bool {
         self.kind == TaskKind::Background && self.active()
     }
 
-    pub fn active(&self) -> bool {
+    fn active(&self) -> bool {
         matches!(
             self.status,
             TaskStatus::Idle | TaskStatus::Running | TaskStatus::Waiting
@@ -122,7 +122,7 @@ pub struct TaskAgentEvent {
     /// When set, this event carries a harness event instead of a legacy
     /// AgentEvent. The `event` field is a sentinel (AgentStart) and the
     /// UI should use `harness_event` for activity updates.
-    pub harness_event: Option<HarnessEvent>,
+    harness_event: Option<HarnessEvent>,
 }
 
 impl TaskAgentEvent {
@@ -162,15 +162,15 @@ pub struct ToolOutputCache {
 }
 
 impl ToolOutputCache {
-    pub fn get(&self, key: &str) -> Option<String> {
+    fn get(&self, key: &str) -> Option<String> {
         self.cache.get(key).cloned()
     }
 
-    pub fn put(&mut self, key: String, output: String) {
+    fn put(&mut self, key: String, output: String) {
         self.cache.insert(key, output);
     }
 
-    pub fn invalidate_all(&mut self) {
+    fn invalidate_all(&mut self) {
         self.cache.clear();
     }
 
@@ -211,11 +211,11 @@ impl HarnessSupervisor {
 
     // ── Lane projection (in-memory operational state only) ───────────────
 
-    pub fn output_cache(&self) -> Arc<Mutex<ToolOutputCache>> {
+    fn output_cache(&self) -> Arc<Mutex<ToolOutputCache>> {
         self.output_cache.clone()
     }
 
-    pub fn record_lane_usage(&self, session_id: &str, lane_name: &str, usage: &TokenUsage) {
+    fn record_lane_usage(&self, session_id: &str, lane_name: &str, usage: &TokenUsage) {
         let key = format!("{session_id}:{lane_name}");
         let mut lock = self.lanes.lock().unwrap();
         if let Some(lane) = lock.get_mut(&key) {
@@ -225,7 +225,7 @@ impl HarnessSupervisor {
         }
     }
 
-    pub fn aggregate_tree_usage(&self, session_id: &str, root_lane: &str) -> TokenUsage {
+    fn aggregate_tree_usage(&self, session_id: &str, root_lane: &str) -> TokenUsage {
         let lock = self.lanes.lock().unwrap();
         let mut total = TokenUsage::default();
         for lane in lock.values() {
@@ -240,7 +240,7 @@ impl HarnessSupervisor {
         total
     }
 
-    pub fn metrics(&self) -> threadlane_agent::HarnessMetrics {
+    fn metrics(&self) -> threadlane_agent::HarnessMetrics {
         let mut m = self.metrics.lock().unwrap().clone();
         m.active_lanes = self.lanes.lock().unwrap().len();
         m
@@ -250,7 +250,7 @@ impl HarnessSupervisor {
         self.event_tx.subscribe()
     }
 
-    pub fn subscribe_lane(
+    fn subscribe_lane(
         &self,
         _session_id: &str,
         _lane_name: &str,
@@ -258,7 +258,7 @@ impl HarnessSupervisor {
         self.event_tx.subscribe()
     }
 
-    pub fn get_or_create_lane(&self, session_id: &str, lane_name: &str) -> Lane {
+    fn get_or_create_lane(&self, session_id: &str, lane_name: &str) -> Lane {
         let key = format!("{session_id}:{lane_name}");
         let mut lock = self.lanes.lock().unwrap();
         lock.entry(key)
@@ -266,7 +266,7 @@ impl HarnessSupervisor {
             .clone()
     }
 
-    pub fn get_or_create_sub_lane(
+    fn get_or_create_sub_lane(
         &self,
         session_id: &str,
         lane_name: &str,
@@ -282,7 +282,7 @@ impl HarnessSupervisor {
         lane.clone()
     }
 
-    pub fn cancel_lane_hierarchy(&self, session_id: &str, root_lane: &str) -> usize {
+    fn cancel_lane_hierarchy(&self, session_id: &str, root_lane: &str) -> usize {
         let mut lock = self.lanes.lock().unwrap();
         let mut cancelled_count = 0;
         let targets: Vec<String> = lock
@@ -305,7 +305,7 @@ impl HarnessSupervisor {
 
     /// Queue a steer message in the in-memory lane projection only.
     /// Persistence is handled by `CodingSessionHarness` during the agent run.
-    pub fn enqueue_steer(
+    fn enqueue_steer(
         &self,
         session_id: &str,
         lane_name: &str,
@@ -320,7 +320,7 @@ impl HarnessSupervisor {
         Ok(())
     }
 
-    pub fn enqueue_steer_priority(
+    fn enqueue_steer_priority(
         &self,
         session_id: &str,
         lane_name: &str,
@@ -336,7 +336,7 @@ impl HarnessSupervisor {
         Ok(())
     }
 
-    pub fn enqueue_followup(
+    fn enqueue_followup(
         &self,
         session_id: &str,
         lane_name: &str,
@@ -351,7 +351,7 @@ impl HarnessSupervisor {
         Ok(())
     }
 
-    pub fn update_lane_leaf(&self, session_id: &str, lane_name: &str, leaf_id: Option<String>) {
+    fn update_lane_leaf(&self, session_id: &str, lane_name: &str, leaf_id: Option<String>) {
         let key = format!("{session_id}:{lane_name}");
         let mut lock = self.lanes.lock().unwrap();
         if let Some(lane) = lock.get_mut(&key) {
@@ -378,7 +378,7 @@ impl HarnessSupervisor {
     /// Navigate a lane to a target node.  Persistence goes through
     /// `CodingSessionHarness`; the supervisor updates its in-memory
     /// projection only after the harness commits.
-    pub fn navigate_lane(
+    fn navigate_lane(
         &self,
         session_id: &str,
         lane_name: &str,
@@ -445,7 +445,7 @@ impl HarnessSupervisor {
         Ok(true)
     }
 
-    pub fn redeem_deferred(
+    fn redeem_deferred(
         &self,
         session_id: &str,
         lane_name: &str,
@@ -476,7 +476,7 @@ impl HarnessSupervisor {
     // ── Recovery helpers (delegate to CodingSessionHarness) ───────────────
 
     /// Restore supervisor lane projections from the harness snapshot.
-    pub fn restore_session_lanes(
+    fn restore_session_lanes(
         &self,
         session_id: &str,
         session_file: &Path,
@@ -538,7 +538,7 @@ impl HarnessSupervisor {
     }
 
     /// Finish recovered operations through CodingSessionHarness.
-    pub fn finish_recovered_operations(
+    fn finish_recovered_operations(
         &self,
         session_id: &str,
         session_file: &Path,
@@ -1160,7 +1160,7 @@ impl HarnessSupervisor {
 
     /// Cancel a task and all its subagent children.  Abort requests and
     /// terminal state are written through `CodingSessionHarness`.
-    pub fn cancel_task(&self, task_id: &str) -> Result<(), String> {
+    fn cancel_task(&self, task_id: &str) -> Result<(), String> {
         let active_run = {
             let task = self.tasks.lock().unwrap().get(task_id).cloned();
             task.filter(|task| task.active()).and_then(|task| {
@@ -1294,7 +1294,7 @@ impl HarnessSupervisor {
         tasks
     }
 
-    pub fn observe_session_event(
+    fn observe_session_event(
         &self,
         project_id: &str,
         session_id: &str,
@@ -1312,7 +1312,7 @@ impl HarnessSupervisor {
         )
     }
 
-    pub fn finish_session_tasks(&self, project_id: &str, session_id: &str) -> bool {
+    fn finish_session_tasks(&self, project_id: &str, session_id: &str) -> bool {
         let mut changed = false;
         let finished_at_ms = now_ms();
         for task in self.tasks.lock().unwrap().values_mut() {
@@ -1593,7 +1593,7 @@ mod tests {
     #[tokio::test]
     async fn recovery_replay_does_not_record_a_main_lane_intent() {
         let dir = tempfile::tempdir().unwrap();
-        let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
+        let _supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
         let session_file = dir.path().join("session.jsonl");
         let mut harness = open_test_harness(&session_file);
         harness
@@ -1601,7 +1601,7 @@ mod tests {
             .unwrap();
         drop(harness);
 
-        let mut agent = CodingAgent::new(CodingAgentOptions {
+        let agent = CodingAgent::new(CodingAgentOptions {
             api_key: "test_key".into(),
             account_id: None,
             model: "gpt-4o".into(),

@@ -240,11 +240,11 @@ fn consume_harness_follow_ups(session_file: &Path) -> Result<(), String> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentRunTask {
-    pub agent: String,
-    pub task: String,
-    pub instructions: Option<String>,
-    pub tools: Option<Vec<String>>,
-    pub model: Option<String>,
+    pub(crate) agent: String,
+    pub(crate) task: String,
+    pub(crate) instructions: Option<String>,
+    pub(crate) tools: Option<Vec<String>>,
+    pub(crate) model: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -390,7 +390,7 @@ impl CodingAgentCancellation {
         }
     }
 
-    pub fn clear_cancellation_guard(&self) {
+    fn clear_cancellation_guard(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.cancellation_guard = None;
         }
@@ -555,7 +555,7 @@ impl CodingAgentWorkHandle {
         self.queue_follow_up_with_images(content, Vec::new());
     }
 
-    pub fn queue_follow_up_with_images(
+    pub(crate) fn queue_follow_up_with_images(
         &self,
         content: impl Into<String>,
         images: Vec<ImageAttachment>,
@@ -585,7 +585,7 @@ impl CodingAgentWorkHandle {
         Ok(())
     }
 
-    pub fn queue_next_run_with_images(
+    pub(crate) fn queue_next_run_with_images(
         &self,
         content: impl Into<String>,
         images: Vec<ImageAttachment>,
@@ -647,25 +647,25 @@ pub struct CodingAgent {
     pub(crate) agent: UnifiedAgent,
     pub session_tree: SessionTree,
     pub wasi_extensions: Arc<WasiExtensionManager>,
-    pub(crate) tool_policy: Arc<tokio::sync::Mutex<ToolPolicy>>,
-    pub(crate) work_dir: PathBuf,
-    pub skills: Arc<SkillRegistry>,
-    pub(crate) agent_runner: AgentRunner,
-    pub(crate) broker_dispatcher: Arc<CapabilityDispatcher>,
-    pub(crate) managed_processes: ManagedProcessRegistry,
-    pub(crate) permission_handle: crate::permission::PermissionHandle,
+    tool_policy: Arc<tokio::sync::Mutex<ToolPolicy>>,
+    work_dir: PathBuf,
+    skills: Arc<SkillRegistry>,
+    agent_runner: AgentRunner,
+    broker_dispatcher: Arc<CapabilityDispatcher>,
+    managed_processes: ManagedProcessRegistry,
+    permission_handle: crate::permission::PermissionHandle,
     pub(crate) agent_work: AgentWorkScheduler,
-    pub(crate) mcp_manager: Arc<McpManager>,
-    pub(crate) plan_store: SessionPlanStore,
-    pub(crate) prompt_templates: Option<Vec<crate::prompt_templates::PromptTemplate>>,
-    pub(crate) dispatch_parent_leaf: Arc<std::sync::Mutex<Option<String>>>,
-    pub(crate) completed_subagent_lanes: Arc<std::sync::Mutex<Vec<CompletedSubagentLane>>>,
-    pub(crate) harness: Option<crate::coding_agent::harness::CodingSessionHarness>,
-    pub(crate) harness_journal_error: Option<String>,
-    pub(crate) harness_run_id: Arc<std::sync::Mutex<Option<String>>>,
-    pub(crate) cancellation: CodingAgentCancellation,
+    mcp_manager: Arc<McpManager>,
+    plan_store: SessionPlanStore,
+    prompt_templates: Option<Vec<crate::prompt_templates::PromptTemplate>>,
+    dispatch_parent_leaf: Arc<std::sync::Mutex<Option<String>>>,
+    completed_subagent_lanes: Arc<std::sync::Mutex<Vec<CompletedSubagentLane>>>,
+    harness: Option<crate::coding_agent::harness::CodingSessionHarness>,
+    harness_journal_error: Option<String>,
+    harness_run_id: Arc<std::sync::Mutex<Option<String>>>,
+    cancellation: CodingAgentCancellation,
     pub(crate) interrupted_subagent_recovery: InterruptedSubagentRecoveryState,
-    pub config: crate::config::CodingAgentConfig,
+    config: crate::config::CodingAgentConfig,
     #[cfg(test)]
     subagent_work_observer: SubagentObserverState,
     #[cfg(test)]
@@ -965,7 +965,7 @@ impl CodingAgent {
         }
     }
 
-    pub fn set_credentials(&mut self, api_key: String, account_id: Option<String>) {
+    pub(crate) fn set_credentials(&mut self, api_key: String, account_id: Option<String>) {
         self.agent.set_credentials(api_key, account_id);
     }
 
@@ -977,7 +977,7 @@ impl CodingAgent {
         self.agent.model_roles()
     }
 
-    pub async fn replay_safe_tools(
+    pub(crate) async fn replay_safe_tools(
         &self,
         records: &[threadlane_agent::Record],
     ) -> Vec<AgentToolResult> {
@@ -1008,7 +1008,7 @@ impl CodingAgent {
         self.agent.execute_tools_for_replay(&calls).await
     }
 
-    pub async fn sync_session_history(&mut self) {
+    pub(crate) async fn sync_session_history(&mut self) {
         let branch = self.session_tree.get_active_branch_messages();
         let mut state = self.agent.turn.lock().await;
         let system_prompt = state.system_prompt.clone();
@@ -1378,7 +1378,7 @@ impl CodingAgent {
         }
     }
 
-    pub async fn run_scheduled_agent_work(&mut self) {
+    pub(crate) async fn run_scheduled_agent_work(&mut self) {
         while self.agent_work.run_unified(&mut self.agent).await {
             self.sync_session_tree_and_dispatch_assistant_hooks().await;
             if let Some(path) = self.session_tree.file_path.as_deref() {
@@ -1422,7 +1422,7 @@ impl CodingAgent {
         self.harness_journal_error.as_deref()
     }
 
-    pub fn watch_harness(&mut self) -> Result<Option<HarnessWatch>, String> {
+    pub(crate) fn watch_harness(&mut self) -> Result<Option<HarnessWatch>, String> {
         let Some(journal) = self.harness.as_mut() else {
             return Ok(None);
         };
@@ -1441,11 +1441,11 @@ impl CodingAgent {
         self.cancellation.clone()
     }
 
-    pub fn cancel(&self) -> Result<(), String> {
+    pub(crate) fn cancel(&self) -> Result<(), String> {
         self.cancellation.cancel()
     }
 
-    pub fn current_plan(&self) -> threadlane_agent::SessionPlan {
+    pub(crate) fn current_plan(&self) -> threadlane_agent::SessionPlan {
         self.plan_store.current()
     }
     pub fn has_interrupted_work(&self) -> bool {
@@ -1619,7 +1619,7 @@ impl CodingAgent {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_subagent_branch_observer(&mut self, observer: SubagentBoundaryObserver) {
+    fn set_subagent_branch_observer(&mut self, observer: SubagentBoundaryObserver) {
         self.subagent_branch_observer = Some(observer);
     }
 
@@ -2166,7 +2166,7 @@ impl CodingAgent {
         self.agent.set_reasoning_effort(effort).await;
     }
 
-    pub async fn set_model(&mut self, model: String) -> Result<(), String> {
+    pub(crate) async fn set_model(&mut self, model: String) -> Result<(), String> {
         let model = model.trim();
         if model.is_empty() {
             return Err("model cannot be empty".into());
@@ -2194,7 +2194,7 @@ impl CodingAgent {
         Ok(())
     }
 
-    pub fn set_name(&mut self, name: String) -> Result<(), String> {
+    fn set_name(&mut self, name: String) -> Result<(), String> {
         if self.harness.is_some() {
             let journal = self
                 .harness
@@ -2434,7 +2434,7 @@ impl CodingAgent {
         self.handle_input_with_images(input, Vec::new()).await
     }
 
-    pub async fn resume_suspended_harness(&mut self) -> Result<bool, String> {
+    pub(crate) async fn resume_suspended_harness(&mut self) -> Result<bool, String> {
         if let Some(error) = self.harness_journal_error.as_ref() {
             return Err(format!("Harness Error: {error}"));
         }
@@ -2577,7 +2577,7 @@ impl CodingAgent {
         Ok(true)
     }
 
-    pub fn redeem_suspended_deferred(
+    fn redeem_suspended_deferred(
         &mut self,
         run_id: &str,
         resolution: DeferredResolution,
@@ -2589,7 +2589,7 @@ impl CodingAgent {
         journal.redeem_deferred(run_id, resolution)
     }
 
-    pub async fn redeem_suspended_deferred_from_provider(
+    async fn redeem_suspended_deferred_from_provider(
         &mut self,
         run_id: &str,
     ) -> Result<bool, String> {

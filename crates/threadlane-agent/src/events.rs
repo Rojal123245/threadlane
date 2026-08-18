@@ -120,9 +120,9 @@ pub enum SubagentRecoveryStatus {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HarnessMetrics {
-    pub total_runs: u64,
-    pub total_tools_executed: u64,
-    pub total_input_tokens: u64,
-    pub total_output_tokens: u64,
+    total_runs: u64,
+    total_tools_executed: u64,
+    total_input_tokens: u64,
+    total_output_tokens: u64,
     pub active_lanes: usize,
 }

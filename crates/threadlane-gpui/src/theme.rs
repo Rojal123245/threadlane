@@ -38,7 +38,7 @@ pub fn init(cx: &mut App) {
     }
 }
 
-pub fn available_themes(cx: &App) -> Vec<(SharedString, ThemeMode)> {
+pub(crate) fn available_themes(cx: &App) -> Vec<(SharedString, ThemeMode)> {
     ThemeRegistry::global(cx)
         .sorted_themes()
         .into_iter()
@@ -46,11 +46,11 @@ pub fn available_themes(cx: &App) -> Vec<(SharedString, ThemeMode)> {
         .collect()
 }
 
-pub fn active_theme_name(cx: &App) -> SharedString {
+pub(crate) fn active_theme_name(cx: &App) -> SharedString {
     cx.theme().theme_name().clone()
 }
 
-pub fn apply_theme(theme_name: &str, cx: &mut App) -> bool {
+pub(crate) fn apply_theme(theme_name: &str, cx: &mut App) -> bool {
     let Some(theme) = find_theme(theme_name, cx) else {
         return false;
     };

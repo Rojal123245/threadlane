@@ -18,18 +18,18 @@ pub enum SessionRuntimeStatus {
 }
 
 pub struct SessionRuntime {
-    pub agent: Arc<tokio::sync::Mutex<CodingAgent>>,
-    pub cancellation: CodingAgentCancellation,
-    pub work_handle: CodingAgentWorkHandle,
-    pub permission_handle: PermissionHandle,
-    pub session_file: PathBuf,
-    pub selected_model: String,
+    pub(crate) agent: Arc<tokio::sync::Mutex<CodingAgent>>,
+    pub(crate) cancellation: CodingAgentCancellation,
+    pub(crate) work_handle: CodingAgentWorkHandle,
+    permission_handle: PermissionHandle,
+    pub(crate) session_file: PathBuf,
+    pub(crate) selected_model: String,
     is_generating: AtomicBool,
     status: Mutex<SessionRuntimeStatus>,
 }
 
 impl SessionRuntime {
-    pub fn new(options: CodingAgentOptions) -> Arc<Self> {
+    pub(crate) fn new(options: CodingAgentOptions) -> Arc<Self> {
         let session_file = options
             .session_file
             .clone()
@@ -62,11 +62,11 @@ impl SessionRuntime {
         })
     }
 
-    pub fn is_generating(&self) -> bool {
+    pub(crate) fn is_generating(&self) -> bool {
         self.is_generating.load(Ordering::SeqCst)
     }
 
-    pub fn status(&self) -> SessionRuntimeStatus {
+    pub(crate) fn status(&self) -> SessionRuntimeStatus {
         self.status
             .lock()
             .map(|status| status.clone())
@@ -83,7 +83,7 @@ impl SessionRuntime {
         Ok(())
     }
 
-    pub async fn set_model_roles(&self, roles: threadlane_agent::ModelRoles) {
+    pub(crate) async fn set_model_roles(&self, roles: threadlane_agent::ModelRoles) {
         let mut agent = self.agent.lock().await;
         agent.set_model_roles(roles);
     }
@@ -97,11 +97,11 @@ impl SessionRuntime {
         }
     }
 
-    pub fn resolve_permission(&self, request_id: &str, decision: PermissionDecision) -> bool {
+    pub(crate) fn resolve_permission(&self, request_id: &str, decision: PermissionDecision) -> bool {
         self.permission_handle.resolve(request_id, decision)
     }
 
-    pub fn cancel(&self) -> Result<(), String> {
+    pub(crate) fn cancel(&self) -> Result<(), String> {
         self.cancellation.cancel()
     }
 }

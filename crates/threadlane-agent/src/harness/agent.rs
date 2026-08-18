@@ -413,7 +413,7 @@ impl<S: SessionStore> AgentHarness<S> {
         QueueProcedure::enqueue(&self.store, run_id, queue, target, &mut self.effects)
     }
 
-    pub fn enqueue_unbound(
+    pub(crate) fn enqueue_unbound(
         &mut self,
         queue: QueueKind,
         target: ProvisionedEntry,
@@ -444,7 +444,7 @@ impl<S: SessionStore> AgentHarness<S> {
         QueueProcedure::cancel(&self.store, run_id, entry_id, &mut self.effects)
     }
 
-    pub fn cancel_queued_on_lane(
+    pub(crate) fn cancel_queued_on_lane(
         &mut self,
         lane: &str,
         run_id: &str,
@@ -457,7 +457,7 @@ impl<S: SessionStore> AgentHarness<S> {
         QueueProcedure::cancel_unbound(&self.store, entry_id, &mut self.effects)
     }
 
-    pub fn cancel_unbound_on_lane(
+    pub(crate) fn cancel_unbound_on_lane(
         &mut self,
         lane: &str,
         entry_id: &str,
@@ -469,7 +469,7 @@ impl<S: SessionStore> AgentHarness<S> {
         QueueProcedure::consume(&self.store, run_id, entry_id, &mut self.effects)
     }
 
-    pub fn consume_queued_on_lane(
+    pub(crate) fn consume_queued_on_lane(
         &mut self,
         lane: &str,
         run_id: &str,
@@ -478,11 +478,11 @@ impl<S: SessionStore> AgentHarness<S> {
         QueueProcedure::consume_on_lane(&self.store, lane, run_id, entry_id, &mut self.effects)
     }
 
-    pub fn consume_unbound(&mut self, entry_id: &str) -> Result<(), ProcedureError> {
+    pub(crate) fn consume_unbound(&mut self, entry_id: &str) -> Result<(), ProcedureError> {
         QueueProcedure::consume_unbound(&self.store, entry_id, &mut self.effects)
     }
 
-    pub fn consume_unbound_on_lane(
+    pub(crate) fn consume_unbound_on_lane(
         &mut self,
         lane: &str,
         entry_id: &str,
@@ -689,7 +689,7 @@ impl<S: SessionStore> AgentHarness<S> {
         self.effects.peek_action_on_lane(lane)
     }
 
-    pub fn drive_one_on_lane(&mut self, lane: &str) -> Result<bool, EffectsError> {
+    pub(crate) fn drive_one_on_lane(&mut self, lane: &str) -> Result<bool, EffectsError> {
         let Some(id) = self
             .effects
             .peek_action_on_lane(lane)
@@ -727,7 +727,7 @@ impl<S: SessionStore> AgentHarness<S> {
         self.store.refresh().map_err(EffectsError::Store)
     }
 
-    pub fn drive_to_completion_on_lane(&mut self, lane: &str) -> Result<(), EffectsError> {
+    pub(crate) fn drive_to_completion_on_lane(&mut self, lane: &str) -> Result<(), EffectsError> {
         self.effects.run_to_completion_on_lane_with_events(
             &mut self.store,
             &mut self.events,

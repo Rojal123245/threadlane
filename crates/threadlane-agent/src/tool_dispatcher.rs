@@ -58,13 +58,13 @@ struct PreparedToolCall {
 /// so the dispatcher can be shared behind an `Arc`.
 #[derive(Clone)]
 pub struct ToolDispatcher {
-    pub tool_execution_mode: ToolExecutionMode,
-    pub hook_registry: HookRegistry,
+    pub(crate) tool_execution_mode: ToolExecutionMode,
+    hook_registry: HookRegistry,
     pub tool_intent_recorder: Option<ToolIntentRecorder>,
     pub tool_completion_recorder: Option<ToolCompletionRecorder>,
-    pub allowed_tool_names: Option<HashSet<String>>,
-    pub work_dir: Option<PathBuf>,
-    pub session_id: String,
+    pub(crate) allowed_tool_names: Option<HashSet<String>>,
+    pub(crate) work_dir: Option<PathBuf>,
+    pub(crate) session_id: String,
 
     tool_executors: Vec<Arc<dyn ToolExecutor>>,
     extension_manager: Option<Arc<dyn ToolExecutor>>,
@@ -73,7 +73,7 @@ pub struct ToolDispatcher {
 
 impl ToolDispatcher {
     /// Creates a dispatcher backed by the given event channel and hook registry.
-    pub fn new(event_tx: broadcast::Sender<AgentEvent>, hooks: HookRegistry) -> Self {
+    pub(crate) fn new(event_tx: broadcast::Sender<AgentEvent>, hooks: HookRegistry) -> Self {
         Self {
             tool_execution_mode: ToolExecutionMode::Parallel,
             hook_registry: hooks,
@@ -92,7 +92,7 @@ impl ToolDispatcher {
 
     /// Returns the core and registered executor schemas in provider order,
     /// after conflict deduplication and the active allowlist are applied.
-    pub fn configured_tool_definitions(&self) -> Vec<AgentToolDefinition> {
+    pub(crate) fn configured_tool_definitions(&self) -> Vec<AgentToolDefinition> {
         let mut definitions =
             collect_tool_definitions(&[], &self.tool_executors, self.compatibility_executor());
         if let Some(allowed) = &self.allowed_tool_names {
@@ -101,7 +101,7 @@ impl ToolDispatcher {
         definitions
     }
 
-    pub fn register_tool_executor(
+    pub(crate) fn register_tool_executor(
         &mut self,
         executor: Arc<dyn ToolExecutor>,
     ) -> Result<(), AgentError> {
@@ -175,13 +175,13 @@ impl ToolDispatcher {
     // ── Tool execution ────────────────────────────────────────────────
 
     /// Executes tools and returns results. Intents are recorded before execution.
-    pub async fn execute_tools(&self, tool_calls: &[ToolCall]) -> Vec<AgentToolResult> {
+    pub(crate) async fn execute_tools(&self, tool_calls: &[ToolCall]) -> Vec<AgentToolResult> {
         self.execute_tools_with_options(tool_calls, self.tool_intent_recorder.clone(), false)
             .await
     }
 
     /// Executes tools without recording intents (e.g., replay).
-    pub async fn execute_tools_without_intent_recording(
+    async fn execute_tools_without_intent_recording(
         &self,
         tool_calls: &[ToolCall],
     ) -> Vec<AgentToolResult> {
@@ -191,12 +191,12 @@ impl ToolDispatcher {
 
     /// Replays already-intended safe tools. The before hook is intentionally
     /// skipped: the durable ToolStarted record is the clearance boundary.
-    pub async fn execute_tools_for_replay(&self, tool_calls: &[ToolCall]) -> Vec<AgentToolResult> {
+    pub(crate) async fn execute_tools_for_replay(&self, tool_calls: &[ToolCall]) -> Vec<AgentToolResult> {
         self.execute_tools_with_options(tool_calls, None, true)
             .await
     }
 
-    pub(crate) async fn execute_tools_with_options(
+    async fn execute_tools_with_options(
         &self,
         tool_calls: &[ToolCall],
         intent_recorder: Option<ToolIntentRecorder>,

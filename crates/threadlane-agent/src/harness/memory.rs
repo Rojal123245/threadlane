@@ -26,7 +26,7 @@ impl MemoryStore {
         }
     }
 
-    pub fn session_id(&self) -> &str {
+    fn session_id(&self) -> &str {
         &self.session_id
     }
     pub fn entries(&self) -> &[Entry] {
@@ -44,7 +44,7 @@ impl MemoryStore {
             .expect("valid durable entry")
     }
 
-    pub fn try_append_message(
+    fn try_append_message(
         &mut self,
         parent_id: Option<String>,
         message: AgentMessage,

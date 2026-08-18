@@ -57,11 +57,11 @@ pub enum AcpScope {
 pub struct AcpAgentConfig {
     pub id: String,
     pub name: String,
-    pub command: String,
+    command: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub args: Vec<String>,
+    args: Vec<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub env: HashMap<String, String>,
+    env: HashMap<String, String>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
     #[serde(default)]
@@ -222,37 +222,37 @@ where
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AcpImplementation {
-    pub name: String,
-    pub version: String,
+    name: String,
+    version: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpFileSystemCapabilities {
     #[serde(default)]
-    pub read_text_file: bool,
+    read_text_file: bool,
     #[serde(default)]
-    pub write_text_file: bool,
+    write_text_file: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpClientCapabilities {
     #[serde(default)]
-    pub fs: AcpFileSystemCapabilities,
+    fs: AcpFileSystemCapabilities,
     #[serde(default)]
-    pub terminal: bool,
+    terminal: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpPromptCapabilities {
     #[serde(default)]
-    pub image: bool,
+    image: bool,
     #[serde(default)]
-    pub audio: bool,
+    audio: bool,
     #[serde(default)]
-    pub embedded_context: bool,
+    embedded_context: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -261,15 +261,15 @@ pub struct AcpAgentCapabilities {
     #[serde(default)]
     pub load_session: bool,
     #[serde(default)]
-    pub prompt_capabilities: AcpPromptCapabilities,
+    prompt_capabilities: AcpPromptCapabilities,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AcpAuthMethod {
     pub id: String,
-    pub name: String,
+    name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
+    description: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -281,7 +281,7 @@ pub struct AcpInitializeResult {
     #[serde(default)]
     pub auth_methods: Vec<AcpAuthMethod>,
     #[serde(default)]
-    pub agent_info: Option<AcpImplementation>,
+    agent_info: Option<AcpImplementation>,
 }
 
 impl AcpInitializeResult {
@@ -301,18 +301,18 @@ impl AcpInitializeResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpSessionMode {
-    pub id: String,
-    pub name: String,
+    id: String,
+    name: String,
     #[serde(default)]
-    pub description: Option<String>,
+    description: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpSessionModeState {
-    pub current_mode_id: String,
+    current_mode_id: String,
     #[serde(default)]
-    pub available_modes: Vec<AcpSessionMode>,
+    available_modes: Vec<AcpSessionMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -320,7 +320,7 @@ pub struct AcpSessionModeState {
 pub struct AcpNewSessionResult {
     pub session_id: String,
     #[serde(default)]
-    pub modes: Option<AcpSessionModeState>,
+    modes: Option<AcpSessionModeState>,
 }
 
 /// A single block of prompt or response content.
@@ -398,9 +398,9 @@ pub enum AcpToolKind {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpToolCallLocation {
-    pub path: String,
+    path: String,
     #[serde(default)]
-    pub line: Option<u64>,
+    line: Option<u64>,
 }
 
 /// `tool_call` and `tool_call_update` payloads share one shape here; only
@@ -408,21 +408,21 @@ pub struct AcpToolCallLocation {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpToolCall {
-    pub tool_call_id: String,
+    pub(crate) tool_call_id: String,
     #[serde(default)]
-    pub title: Option<String>,
+    pub(crate) title: Option<String>,
     #[serde(default, deserialize_with = "lenient_option")]
-    pub kind: Option<AcpToolKind>,
+    pub(crate) kind: Option<AcpToolKind>,
     #[serde(default, deserialize_with = "lenient_option")]
-    pub status: Option<AcpToolCallStatus>,
+    pub(crate) status: Option<AcpToolCallStatus>,
     #[serde(default)]
-    pub content: Option<Vec<Value>>,
+    pub(crate) content: Option<Vec<Value>>,
     #[serde(default)]
-    pub locations: Option<Vec<AcpToolCallLocation>>,
+    locations: Option<Vec<AcpToolCallLocation>>,
     #[serde(default)]
-    pub raw_input: Option<Value>,
+    pub(crate) raw_input: Option<Value>,
     #[serde(default)]
-    pub raw_output: Option<Value>,
+    raw_output: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -443,16 +443,16 @@ pub enum AcpPlanEntryStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct AcpPlanEntry {
-    pub content: String,
-    pub priority: AcpPlanEntryPriority,
-    pub status: AcpPlanEntryStatus,
+    pub(crate) content: String,
+    priority: AcpPlanEntryPriority,
+    pub(crate) status: AcpPlanEntryStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct AcpAvailableCommand {
-    pub name: String,
+    name: String,
     #[serde(default)]
-    pub description: String,
+    description: String,
 }
 
 /// Decoded `session/update` payload.
@@ -539,7 +539,7 @@ pub enum AcpStopReason {
 impl AcpStopReason {
     /// Decodes a stop reason, treating an unrecognized value as
     /// [`AcpStopReason::Unknown`] rather than failing the turn.
-    pub fn from_value(value: &Value) -> Self {
+    fn from_value(value: &Value) -> Self {
         serde_json::from_value(value.clone()).unwrap_or_default()
     }
 }
@@ -558,20 +558,20 @@ pub enum AcpPermissionOptionKind {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpPermissionOption {
-    pub option_id: String,
-    pub name: String,
+    option_id: String,
+    name: String,
     #[serde(default, deserialize_with = "lenient")]
-    pub kind: AcpPermissionOptionKind,
+    kind: AcpPermissionOptionKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpPermissionRequest {
-    pub session_id: String,
+    session_id: String,
     #[serde(default)]
-    pub tool_call: Option<AcpToolCall>,
+    tool_call: Option<AcpToolCall>,
     #[serde(default)]
-    pub options: Vec<AcpPermissionOption>,
+    options: Vec<AcpPermissionOption>,
 }
 
 /// Client answer to `session/request_permission`.
@@ -598,20 +598,20 @@ impl AcpPermissionOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpReadTextFileRequest {
-    pub session_id: String,
-    pub path: String,
+    session_id: String,
+    path: String,
     #[serde(default)]
-    pub line: Option<u32>,
+    line: Option<u32>,
     #[serde(default)]
-    pub limit: Option<u32>,
+    limit: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpWriteTextFileRequest {
-    pub session_id: String,
-    pub path: String,
-    pub content: String,
+    session_id: String,
+    path: String,
+    content: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -805,7 +805,7 @@ pub struct AcpConnection {
 
 impl AcpConnection {
     /// Spawns `config` as a subprocess and drives ACP over its stdio pipes.
-    pub async fn spawn(
+    async fn spawn(
         config: &AcpAgentConfig,
         cwd: Option<&Path>,
         handler: Arc<dyn AcpClientHandler>,
@@ -900,7 +900,7 @@ impl AcpConnection {
 
     /// Sends a request and awaits its response. `timeout` of `None` waits
     /// indefinitely, which is what a prompt turn needs.
-    pub async fn request(
+    async fn request(
         &self,
         method: &str,
         params: Value,
@@ -940,7 +940,7 @@ impl AcpConnection {
         }
     }
 
-    pub async fn notify(&self, method: &str, params: Value) -> Result<(), String> {
+    async fn notify(&self, method: &str, params: Value) -> Result<(), String> {
         self.send_line(&json!({
             "jsonrpc": "2.0",
             "method": method,
@@ -1216,7 +1216,7 @@ pub struct AcpSession {
 impl AcpSession {
     /// Spawns the agent, performs the handshake, and opens a session rooted at
     /// `cwd`.
-    pub async fn start(
+    async fn start(
         config: &AcpAgentConfig,
         cwd: &Path,
         handler: Arc<dyn AcpClientHandler>,

@@ -72,12 +72,12 @@ pub struct SkillMetadata {
     pub id: String,
     pub name: String,
     pub description: String,
-    pub tags: Vec<String>,
-    pub file_path: PathBuf,
+    tags: Vec<String>,
+    file_path: PathBuf,
     pub scope: SkillScope,
     pub enabled: bool,
     pub is_valid: bool,
-    pub validation_error: Option<String>,
+    validation_error: Option<String>,
 }
 
 /// Project-scoped persisted skill enable/disable state, stored in
@@ -112,7 +112,7 @@ impl SkillSettings {
         }
     }
 
-    pub fn is_disabled(&self, skill_id: &str) -> bool {
+    fn is_disabled(&self, skill_id: &str) -> bool {
         self.disabled.contains(skill_id)
     }
 
@@ -166,14 +166,14 @@ impl SkillMetadata {
 
 #[derive(Debug, Clone)]
 pub struct SkillDiscoveryOptions {
-    pub project_root: Option<PathBuf>,
-    pub home_dir: Option<PathBuf>,
-    pub include_pi_compatibility: bool,
+    project_root: Option<PathBuf>,
+    home_dir: Option<PathBuf>,
+    include_pi_compatibility: bool,
     pub max_skill_bytes: usize,
-    pub max_frontmatter_bytes: usize,
-    pub max_manifest_bytes: usize,
-    pub max_directory_entries: usize,
-    pub max_skills: usize,
+    max_frontmatter_bytes: usize,
+    max_manifest_bytes: usize,
+    max_directory_entries: usize,
+    max_skills: usize,
 }
 
 impl SkillDiscoveryOptions {
@@ -221,8 +221,8 @@ pub enum SkillDiscoveryWarningKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillDiscoveryWarning {
     pub kind: SkillDiscoveryWarningKind,
-    pub message: String,
-    pub path: Option<PathBuf>,
+    message: String,
+    path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -261,13 +261,13 @@ pub struct SkillRegistry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedSkill {
-    pub id: String,
-    pub instructions: String,
-    pub scope: SkillScope,
+    id: String,
+    instructions: String,
+    scope: SkillScope,
 }
 
 impl SkillRegistry {
-    pub fn list_skills(&self) -> Vec<SkillMetadata> {
+    fn list_skills(&self) -> Vec<SkillMetadata> {
         sorted_metadata(self.records.values().map(|record| record.metadata.clone()))
     }
 
@@ -275,7 +275,7 @@ impl SkillRegistry {
         self.load_skill(skill_id).map(|skill| skill.instructions)
     }
 
-    pub fn load_skill(&self, skill_id: &str) -> Result<LoadedSkill, String> {
+    fn load_skill(&self, skill_id: &str) -> Result<LoadedSkill, String> {
         let record = self
             .records
             .get(skill_id)
