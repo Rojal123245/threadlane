@@ -195,6 +195,17 @@ impl SettingsView {
         }
     }
 
+    /// Renders the muted "no items" placeholder shared by the extension,
+    /// skill, and ACP agent lists.
+    fn empty_state(message: &str, colors: gpui_component::ThemeColor) -> AnyElement {
+        div()
+            .p_6()
+            .text_sm()
+            .text_color(colors.muted_foreground)
+            .child(message.to_string())
+            .into_any_element()
+    }
+
     fn render_navigation(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
         let model = self.model.clone();
@@ -1172,13 +1183,7 @@ impl SettingsView {
                     )
             }))
             .when(self.extension_rows.is_empty(), |view| {
-                view.child(
-                    div()
-                        .p_6()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child("No WASI extensions found."),
-                )
+                view.child(Self::empty_state("No WASI extensions found.", theme))
             })
             .into_any_element()
     }
@@ -1314,13 +1319,7 @@ impl SettingsView {
                     )
             }))
             .when(self.skill_rows.is_empty(), |view| {
-                view.child(
-                    div()
-                        .p_6()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child("No skills found."),
-                )
+                view.child(Self::empty_state("No skills found.", theme))
             })
             .into_any_element()
     }
@@ -1527,13 +1526,7 @@ impl SettingsView {
                     )
             }))
             .when(self.acp_rows.is_empty(), |view| {
-                view.child(
-                    div()
-                        .p_6()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child("No ACP agents configured."),
-                )
+                view.child(Self::empty_state("No ACP agents configured.", theme))
             })
             .into_any_element()
     }
