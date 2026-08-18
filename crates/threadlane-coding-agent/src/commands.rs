@@ -12,6 +12,9 @@ pub struct SlashCommandInfo {
 pub fn builtin_commands() -> Vec<SlashCommandInfo> {
     [
         ("model", "Switch model, or show the current one"),
+        ("advisor", "Toggle or configure the advisor reviewer model (/advisor on|off|status|model <id>)"),
+        ("plan", "Create or refine an implementation plan using the plan model (/plan <objective>)"),
+        ("roles", "View or configure model roles (task, plan, advisor)"),
         ("compact", "Compact the conversation context"),
         ("session", "Show session info"),
         ("name", "Name this session"),
@@ -60,6 +63,9 @@ pub fn available_slash_commands(project_root: Option<&Path>) -> Vec<SlashCommand
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandAction {
     SwitchModel(String),
+    Advisor(String),
+    Plan(String),
+    Roles(String),
     Compact,
     ShowSession,
     SetName(String),
@@ -85,6 +91,9 @@ pub fn parse_slash_command(input: &str) -> Option<CommandAction> {
 
     match cmd {
         "model" => Some(CommandAction::SwitchModel(arg)),
+        "advisor" => Some(CommandAction::Advisor(arg)),
+        "plan" => Some(CommandAction::Plan(arg)),
+        "roles" => Some(CommandAction::Roles(arg)),
         "compact" => Some(CommandAction::Compact),
         "session" => Some(CommandAction::ShowSession),
         "name" => Some(CommandAction::SetName(arg)),
@@ -99,6 +108,7 @@ pub fn parse_slash_command(input: &str) -> Option<CommandAction> {
     }
 }
 
+
 pub async fn execute_slash_command(
     action: CommandAction,
     agent: &mut UnifiedAgent,
@@ -112,9 +122,83 @@ pub async fn execute_slash_command(
             } else if let Err(error) = session_tree.set_model(new_model.clone()) {
                 format!("Could not persist model switch: {error}")
             } else {
-                let mut st = agent.turn.lock().await;
-                st.model = new_model.clone();
+                {
+                    let mut st = agent.turn.lock().await;
+                    st.model = new_model.clone();
+                }
+                let mut roles = agent.model_roles().clone();
+                roles.task = Some(new_model.clone());
+                agent.set_model_roles(roles);
                 format!("Switched model to: {}", new_model)
+            }
+
+        }
+        CommandAction::Advisor(arg) => {
+            let mut roles = agent.model_roles().clone();
+            let trimmed = arg.trim();
+            if trimmed.is_empty() || trimmed == "status" {
+                let status = if roles.advisor_enabled { "ENABLED" } else { "DISABLED" };
+                let model = roles.advisor.as_deref().unwrap_or("inherit main");
+                format!("Advisor status: {status}\nAdvisor model: {model}\nUsage: /advisor on | off | model <model-id>")
+            } else if trimmed == "on" || trimmed == "enable" {
+                roles.advisor_enabled = true;
+                agent.set_model_roles(roles);
+                "Advisor reviewer turned ON (watching every turn).".to_string()
+            } else if trimmed == "off" || trimmed == "disable" {
+                roles.advisor_enabled = false;
+                agent.set_model_roles(roles);
+                "Advisor reviewer turned OFF.".to_string()
+            } else if let Some(model_id) = trimmed.strip_prefix("model ") {
+                let model_id = model_id.trim().to_string();
+                roles.advisor = Some(model_id.clone());
+                agent.set_model_roles(roles);
+                format!("Advisor model set to: {model_id}")
+            } else {
+                format!("Unknown advisor subcommand: {trimmed}. Use: /advisor on | off | status | model <id>")
+            }
+        }
+        CommandAction::Roles(arg) => {
+            let mut roles = agent.model_roles().clone();
+            let trimmed = arg.trim();
+            if trimmed.is_empty() {
+                let main_model = agent.get_state().await.model;
+                format!(
+                    "Model Roles:\n  Task (execution): {}\n  Plan (architecture): {}\n  Advisor (reviewer): {} [{}]\n\nUsage: /roles plan=<model> | task=<model> | advisor=<model>",
+                    roles.resolve_task(&main_model),
+                    roles.resolve_plan(&main_model),
+                    roles.resolve_advisor(&main_model),
+                    if roles.advisor_enabled { "active" } else { "inactive" }
+                )
+            } else if let Some((key, val)) = trimmed.split_once('=') {
+                let key = key.trim().to_lowercase();
+                let val = val.trim().to_string();
+                match key.as_str() {
+                    "task" => {
+                        roles.task = Some(val.clone());
+                        agent.set_model_roles(roles);
+                        format!("Task model role set to: {val}")
+                    }
+                    "plan" => {
+                        roles.plan = Some(val.clone());
+                        agent.set_model_roles(roles);
+                        format!("Plan model role set to: {val}")
+                    }
+                    "advisor" => {
+                        roles.advisor = Some(val.clone());
+                        agent.set_model_roles(roles);
+                        format!("Advisor model role set to: {val}")
+                    }
+                    other => format!("Unknown model role: {other}. Available roles: task, plan, advisor"),
+                }
+            } else {
+                format!("Usage: /roles plan=<model> | task=<model> | advisor=<model>")
+            }
+        }
+        CommandAction::Plan(objective) => {
+            if objective.trim().is_empty() {
+                "Usage: /plan <task objective or prompt> to generate a structured implementation plan.".to_string()
+            } else {
+                format!("Generating implementation plan for: {}", objective.trim())
             }
         }
         CommandAction::Compact => {

@@ -1,3 +1,4 @@
+pub mod advisor;
 pub mod capability;
 pub mod compaction;
 pub mod config;
@@ -16,6 +17,7 @@ pub mod types;
 pub mod unified;
 pub mod utils;
 
+pub use advisor::{AdvisorEvaluator, ADVISOR_SYSTEM_PROMPT};
 pub use utils::{dirs_home, now_timestamp_ms, now_timestamp_secs, AbortOnDrop};
 
 pub use capability::{Capability, CapabilityRegistry};
@@ -27,7 +29,9 @@ pub use compaction::{
 pub use config::{AgentConfig, AgentConfigBuilder};
 pub use engine::get_runtime;
 pub use error::AgentError;
-pub use events::{AgentEvent, HarnessMetrics, SubagentRecoveryStatus};
+pub use events::{
+    AgentEvent, HarnessMetrics, PermissionRequest, PermissionScope, SubagentRecoveryStatus,
+};
 pub use harness::{
     has_open_subagent_lanes, interrupted_subagent_lanes, InterruptedSubagentLane, LaneQueue,
     OperationOutcome, QueueKind, Record, RecoveryResult, SteerItem, SteerPriority,

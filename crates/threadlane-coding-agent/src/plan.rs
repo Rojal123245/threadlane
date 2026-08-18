@@ -13,6 +13,108 @@ const MAX_PLAN_ITEMS: usize = 20;
 const MAX_STEP_CHARS: usize = 200;
 const MAX_EXPLANATION_CHARS: usize = 500;
 
+pub const PLAN_SYSTEM_PROMPT: &str = r#"You are the AI Planner and Architect for a software engineering agent.
+Your role is to analyze the user's objective and break it down into a clear, sequential, realistic SessionPlan.
+Respond with ONLY valid JSON with this exact schema:
+{
+  "explanation": "Brief 1-2 sentence strategy explanation",
+  "plan": [
+    { "step": "Step description (max 200 chars)", "status": "in_progress" | "pending" }
+  ]
+}
+
+Rules:
+- The first step should be marked "in_progress", and subsequent steps "pending".
+- Keep steps discrete, testable, and actionable.
+- Limit to at most 10 well-defined steps.
+- Do not output markdown code fences around JSON if possible."#;
+
+/// Generates a structured [`SessionPlan`] using the designated Plan model.
+pub async fn generate_plan_with_model(
+    provider_client: &threadlane_provider::router::ProviderClient,
+    model: &str,
+    task_prompt: &str,
+) -> Result<SessionPlan, String> {
+    use threadlane_provider::openai::StreamEvent;
+    use threadlane_provider::router::{PayloadFormat, PayloadSource};
+    use tokio::sync::mpsc;
+
+    let model_str = model.to_string();
+    let prompt_text = format!("Create a multi-step implementation plan for the following task:\n\n{}", task_prompt);
+
+    let payload_source = PayloadSource::lazy(model_str.clone(), {
+        let model = model_str.clone();
+        let prompt_text = prompt_text.clone();
+        move |format| {
+            let model = model.clone();
+            let prompt_text = prompt_text.clone();
+            Box::pin(async move {
+                match format {
+                    PayloadFormat::Codex => serde_json::json!({
+                        "model": model,
+                        "instructions": PLAN_SYSTEM_PROMPT,
+                        "input": [{
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": prompt_text.as_str()}]
+                        }],
+                        "store": false,
+                        "stream": true,
+                    }),
+                    PayloadFormat::ChatCompletions => serde_json::json!({
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": PLAN_SYSTEM_PROMPT},
+                            {"role": "user", "content": prompt_text.as_str()}
+                        ],
+                        "temperature": 0.2,
+                        "stream": true,
+                    }),
+                }
+            })
+        }
+    });
+
+    let (tx, mut rx) = mpsc::channel(50);
+    let client = provider_client.clone();
+    tokio::spawn(async move {
+        client.stream_chat_completion(payload_source, None, tx).await;
+    });
+
+    let mut output = String::new();
+    let mut stream_error = None;
+    while let Some(evt) = rx.recv().await {
+        match evt {
+            StreamEvent::ContentToken(token) => {
+                output.push_str(&token);
+            }
+            StreamEvent::Error(err) => {
+                stream_error = Some(err);
+            }
+            _ => {}
+        }
+    }
+
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        if let Some(err) = stream_error {
+            return Err(format!("Plan model error: {err}"));
+        }
+        return Err("Plan model returned an empty response".to_string());
+    }
+
+    let json_text = if let Some(stripped) = trimmed.strip_prefix("```json") {
+        stripped.strip_suffix("```").unwrap_or(stripped).trim()
+    } else if let Some(stripped) = trimmed.strip_prefix("```") {
+        stripped.strip_suffix("```").unwrap_or(stripped).trim()
+    } else {
+        trimmed
+    };
+
+    parse_update_plan(json_text)
+}
+
+
 #[derive(Deserialize)]
 struct UpdatePlanArgs {
     #[serde(default)]
@@ -87,7 +189,7 @@ impl SessionPlanStore {
         self.inner.lock().unwrap().plan.clone()
     }
 
-    fn replace(&self, plan: SessionPlan) -> Result<(), String> {
+    pub(crate) fn replace(&self, plan: SessionPlan) -> Result<(), String> {
         let mut state = self
             .inner
             .lock()
@@ -184,6 +286,104 @@ impl ToolExecutor for UpdatePlanToolExecutor {
         )))
     }
 }
+
+pub(crate) const GENERATE_PLAN_TOOL_NAME: &str = "generate_plan";
+
+
+#[derive(Deserialize)]
+struct GeneratePlanArgs {
+    objective: String,
+}
+
+pub(crate) struct GeneratePlanToolExecutor {
+    store: SessionPlanStore,
+    event_tx: broadcast::Sender<AgentEvent>,
+    provider_client: threadlane_provider::router::ProviderClient,
+    turn: Arc<tokio::sync::Mutex<threadlane_agent::TurnState>>,
+    config: threadlane_agent::AgentConfig,
+}
+
+impl GeneratePlanToolExecutor {
+    pub(crate) fn new(
+        store: SessionPlanStore,
+        event_tx: broadcast::Sender<AgentEvent>,
+        provider_client: threadlane_provider::router::ProviderClient,
+        turn: Arc<tokio::sync::Mutex<threadlane_agent::TurnState>>,
+        config: threadlane_agent::AgentConfig,
+    ) -> Self {
+        Self {
+            store,
+            event_tx,
+            provider_client,
+            turn,
+            config,
+        }
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for GeneratePlanToolExecutor {
+    fn executor_id(&self) -> &str {
+        "threadlane.host.generate_plan"
+    }
+
+    fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
+        vec![AgentToolDefinition::new(
+            GENERATE_PLAN_TOOL_NAME,
+            "Hand off planning to the dedicated Plan Model. Generates a structured multi-step plan from an objective, replaces the session plan, and returns the steps so you can begin executing.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "objective": {
+                        "type": "string",
+                        "description": "The goal, architecture requirements, or task to decompose into a step-by-step plan."
+                    }
+                },
+                "required": ["objective"],
+                "additionalProperties": false
+            }),
+        )]
+    }
+
+    async fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {
+        if name != GENERATE_PLAN_TOOL_NAME {
+            return None;
+        }
+        let parsed: GeneratePlanArgs = match serde_json::from_str(args) {
+            Ok(val) => val,
+            Err(err) => return Some(Err(format!("Invalid generate_plan args: {err}"))),
+        };
+
+        let current_model = {
+            let turn = self.turn.lock().await;
+            turn.model.clone()
+        };
+        let plan_model = self.config.model_roles.resolve_plan(&current_model).to_string();
+
+        match generate_plan_with_model(&self.provider_client, &plan_model, &parsed.objective).await {
+            Ok(plan) => {
+                if let Err(error) = self.store.replace(plan.clone()) {
+                    return Some(Err(error));
+                }
+                let _ = self.event_tx.send(AgentEvent::PlanUpdated {
+                    plan: plan.clone(),
+                });
+                let mut summary = format!("Plan generated by Plan Model ({plan_model}) with {} steps:\n", plan.items.len());
+                if let Some(exp) = &plan.explanation {
+                    summary.push_str(&format!("Strategy: {}\n", exp));
+                }
+                for (i, item) in plan.items.iter().enumerate() {
+                    summary.push_str(&format!("{}. [{:?}] {}\n", i + 1, item.status, item.step));
+                }
+
+                summary.push_str("\nYou can now proceed to execute step 1.");
+                Some(Ok(summary))
+            }
+            Err(error) => Some(Err(format!("Plan generation failed: {error}"))),
+        }
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

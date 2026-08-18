@@ -13,6 +13,9 @@ use gpui_component::spinner::Spinner;
 use gpui_component::switch::Switch;
 use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable};
+
+
+actions!(threadlane_workspace, [ToggleCommandPalette]);
 use threadlane_git::GitStatus;
 
 use crate::app::actions::AppAction;
@@ -24,6 +27,14 @@ use crate::screens::sidebar::SidebarView;
 use crate::services::updater::{self, UpdaterEvent};
 use crate::state::{AppState, WorkspacePage};
 use threadlane_updater::UpdateStatus;
+
+
+pub fn init(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("cmd-k", ToggleCommandPalette, None),
+        KeyBinding::new("ctrl-k", ToggleCommandPalette, None),
+    ]);
+}
 
 enum GitAction {
     Commit,
@@ -63,6 +74,8 @@ pub struct WorkspaceView {
     right_panel_visible: bool,
     environment_open: bool,
     command_palette_open: bool,
+    command_palette_selected: usize,
+    command_palette_scroll_handle: ScrollHandle,
     command_palette_input: Entity<InputState>,
     git_dialog_open: bool,
     git_include_unstaged: bool,
@@ -86,6 +99,7 @@ impl WorkspaceView {
         let right_panel = cx.new(|cx| RightPanelView::new(model.clone(), window, cx));
         let git_message_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Commit message"));
+        let command_palette_scroll_handle = ScrollHandle::new();
         let command_palette_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Type a command or search sessions…"));
         let (git_event_tx, git_event_rx) = mpsc::channel();
@@ -97,7 +111,7 @@ impl WorkspaceView {
         }
 
         let model_clone = model.clone();
-        cx.new(|cx| {
+        let view = cx.new(|cx| {
             let sub = cx.observe(&model_clone, |_this: &mut Self, _model, cx| {
                 cx.notify();
             });
@@ -139,7 +153,9 @@ impl WorkspaceView {
                 right_panel_visible: false,
                 environment_open: false,
                 command_palette_open: false,
+                command_palette_selected: 0,
                 command_palette_input,
+                command_palette_scroll_handle,
                 git_dialog_open: false,
                 git_include_unstaged: true,
                 git_busy: false,
@@ -152,7 +168,28 @@ impl WorkspaceView {
                 updater_tx,
                 _subscriptions: vec![sub],
             }
-        })
+        });
+
+        let view_handle = view.downgrade();
+        let shortcut_subscription = cx.intercept_keystrokes(move |event, window, cx| {
+            let keystroke = &event.keystroke;
+            if keystroke.key.eq_ignore_ascii_case("k")
+                && (keystroke.modifiers.platform || keystroke.modifiers.control)
+                && !keystroke.modifiers.alt
+                && !keystroke.modifiers.shift
+            {
+                if let Some(view) = view_handle.upgrade() {
+                    view.update(cx, |view, cx| {
+                        view.toggle_command_palette(&ToggleCommandPalette, window, cx);
+                    });
+                    cx.stop_propagation();
+                }
+            }
+        });
+        view.update(cx, |view, _cx| {
+            view._subscriptions.push(shortcut_subscription);
+        });
+        view
     }
 
     fn open_git_dialog(&mut self, cx: &mut Context<Self>) {
@@ -160,6 +197,72 @@ impl WorkspaceView {
         self.git_feedback = None;
         self.refresh_git_status(cx);
         cx.notify();
+    }
+
+    fn toggle_command_palette(&mut self, _: &ToggleCommandPalette, window: &mut Window, cx: &mut Context<Self>) {
+        self.command_palette_open = !self.command_palette_open;
+        self.command_palette_selected = 0;
+        if self.command_palette_open {
+            self.command_palette_input.update(cx, |input, cx| input.focus(window, cx));
+        }
+        cx.notify();
+    }
+
+    fn command_palette_key_down(
+
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = event.keystroke.key.as_str();
+        if !self.command_palette_open {
+            return;
+        }
+        if key.eq_ignore_ascii_case("escape") {
+            self.command_palette_open = false;
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        let query = self.command_palette_input.read(cx).value().trim().to_lowercase();
+        let commands = [
+            ("New Task", "Start a fresh session", "new"),
+            ("Add Project", "Attach a project folder to your workspace", "attach"),
+            ("Goal Planning (/goal)", "Autonomous goal loop extension", "goal"),
+            ("Model Selection (/model)", "Switch model or provider", "model"),
+            ("Compact History (/compact)", "Compact context conversation", "compact"),
+            ("Git Review & Commit", "Review changed files and commit", "git"),
+            ("Toggle Sidebar", "Show or hide your projects and tasks", "sidebar"),
+            ("Toggle Right Panel", "Show review / files / terminal", "panel"),
+            ("Settings", "Configure API keys and providers", "settings"),
+        ];
+        let matching: Vec<_> = commands.iter().filter(|(name, desc, _)| {
+            query.is_empty() || name.to_lowercase().contains(&query) || desc.to_lowercase().contains(&query)
+        }).collect();
+        match key.to_ascii_lowercase().as_str() {
+            "arrowdown" | "down" => {
+                if !matching.is_empty() {
+                    self.command_palette_selected = (self.command_palette_selected + 1) % matching.len();
+                    self.command_palette_scroll_handle.scroll_to_item(self.command_palette_selected);
+                }
+                cx.stop_propagation(); cx.notify();
+            }
+            "arrowup" | "up" => {
+                if !matching.is_empty() {
+                    self.command_palette_selected = self.command_palette_selected.checked_sub(1).unwrap_or(matching.len() - 1);
+                    self.command_palette_scroll_handle.scroll_to_item(self.command_palette_selected);
+                }
+                cx.stop_propagation(); cx.notify();
+            }
+            "enter" if matching.len() == 1 && matching[0].2 == "new" => {
+                self.command_palette_open = false;
+                self.command_palette_selected = 0;
+                self.model.update(cx, |state, _cx| controller::dispatch(state, AppAction::BeginNewTask));
+                cx.stop_propagation(); cx.notify();
+            }
+            _ => {}
+        }
     }
 
     fn refresh_git_status(&mut self, cx: &App) {
@@ -891,19 +994,22 @@ impl WorkspaceView {
                     )
                     .child(
                         div()
-                            .overflow_y_scrollbar()
+                            .px_3()
+                            .py_1()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.muted_foreground)
+                            .child("Commands & Actions"),
+                    )
+                    .child(
+                        div()
+                            .id("command-palette-results")
+                            .track_scroll(&self.command_palette_scroll_handle)
+                            .overflow_y_scroll()
+                            .vertical_scrollbar(&self.command_palette_scroll_handle)
                             .max_h(px(420.0))
                             .py_2()
-                            .child(
-                                div()
-                                    .px_3()
-                                    .py_1()
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.muted_foreground)
-                                    .child("Commands & Actions"),
-                            )
-                            .children(matching_commands.into_iter().map(|(name, desc, action_key)| {
+                            .children(matching_commands.into_iter().enumerate().map(|(index, (name, desc, action_key))| {
                                 let model = self.model.clone();
                                 div()
                                     .id(SharedString::from(format!("palette-cmd-{action_key}")))
@@ -913,6 +1019,7 @@ impl WorkspaceView {
                                     .py_2()
                                     .rounded_lg()
                                     .hover(|style| style.bg(theme.list_hover))
+                                    .when(index == self.command_palette_selected, |style| style.bg(theme.list_hover))
                                     .cursor_pointer()
                                     .flex()
                                     .items_center()
@@ -1088,6 +1195,8 @@ impl Render for WorkspaceView {
             .flex()
             .w_full()
             .h_full()
+            .on_key_down(cx.listener(Self::command_palette_key_down))
+            .on_action(cx.listener(Self::toggle_command_palette))
             .bg(theme.background)
             .children(
                 (workspace_page == WorkspacePage::Chat && !self.sidebar_collapsed)
@@ -1118,7 +1227,7 @@ impl Render for WorkspaceView {
             })
             .children((workspace_page == WorkspacePage::Chat).then(|| {
                 Button::new("command-palette-btn")
-                    .icon(Icon::default().path("icons/effort.svg"))
+                    .icon(IconName::SquareTerminal)
                     .tooltip("Command Palette (Cmd+K)")
                     .ghost()
                     .selected(self.command_palette_open)
@@ -1126,8 +1235,12 @@ impl Render for WorkspaceView {
                     .absolute()
                     .top(px(9.0))
                     .right(px(84.0))
-                    .on_click(cx.listener(|this, _event, _window, cx| {
+                    .on_click(cx.listener(|this, _event, window, cx| {
                         this.command_palette_open = !this.command_palette_open;
+                        this.command_palette_selected = 0;
+                        if this.command_palette_open {
+                            this.command_palette_input.update(cx, |input, cx| input.focus(window, cx));
+                        }
                         cx.notify();
                     }))
             }))

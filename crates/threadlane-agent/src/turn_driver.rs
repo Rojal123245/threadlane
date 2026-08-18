@@ -120,7 +120,10 @@ impl<'a> TurnDriver<'a> {
             // --- Provider streaming ---
             let model = {
                 let turn = self.turn.lock().await;
-                turn.model.clone()
+                // The session model is the user-facing base selection. The Task
+                // role is the model that actually drives execution, including
+                // queued turns and session switches.
+                self.config.model_roles.resolve_task(&turn.model).to_string()
             };
             let (stream_tx, mut stream_rx) = mpsc::channel(100);
             let client = self.provider_client.clone();
@@ -128,7 +131,7 @@ impl<'a> TurnDriver<'a> {
             let tool_definitions = self.tool_dispatcher.configured_tool_definitions();
             let payload_cache_key = pc_key.clone();
 
-            let payload_source = PayloadSource::lazy(model, {
+            let payload_source = PayloadSource::lazy(model.clone(), {
                 let turn_clone = self.turn.clone();
                 let router = self.provider_router.clone();
                 move |format| {
@@ -268,6 +271,28 @@ impl<'a> TurnDriver<'a> {
                     turn_number,
                     tool_results: Vec::new(),
                 });
+
+                // Run Advisor watcher if enabled
+                if self.config.model_roles.advisor_enabled {
+                    let advisor_model = self.config.model_roles.resolve_advisor(&model).to_string();
+                    let evaluator = crate::advisor::AdvisorEvaluator::new(self.provider_client.clone(), advisor_model);
+                    let current_messages = {
+                        let turn = self.turn.lock().await;
+                        turn.messages.clone()
+                    };
+                    if let Some(note) = evaluator.evaluate_turn(&current_messages).await {
+                        self.emit_event(AgentEvent::AdvisorNote { note: note.clone() });
+                        let prompt = note.to_steering_prompt();
+                        self.steering_queue.push(AgentMessage::user(prompt, Vec::new()));
+                    }
+                }
+
+                if !self.steering_queue.is_empty() {
+                    let items: Vec<_> = self.steering_queue.drain(..).collect();
+                    self.turn.lock().await.messages.extend(items);
+                    continue;
+                }
+
                 if !self.follow_up_queue.is_empty() {
                     let items: Vec<_> = self.follow_up_queue.drain(..).collect();
                     self.turn.lock().await.messages.extend(items);
@@ -301,6 +326,21 @@ impl<'a> TurnDriver<'a> {
                 turn_number,
                 tool_results: tool_results.clone(),
             });
+
+            // Run Advisor watcher after tool executions if enabled
+            if self.config.model_roles.advisor_enabled {
+                let advisor_model = self.config.model_roles.resolve_advisor(&model).to_string();
+                let evaluator = crate::advisor::AdvisorEvaluator::new(self.provider_client.clone(), advisor_model);
+                let current_messages = {
+                    let turn = self.turn.lock().await;
+                    turn.messages.clone()
+                };
+                if let Some(note) = evaluator.evaluate_turn(&current_messages).await {
+                    self.emit_event(AgentEvent::AdvisorNote { note: note.clone() });
+                    let prompt = note.to_steering_prompt();
+                    self.steering_queue.push(AgentMessage::user(prompt, Vec::new()));
+                }
+            }
 
             if tool_results.iter().any(|r| r.terminate) {
                 break;

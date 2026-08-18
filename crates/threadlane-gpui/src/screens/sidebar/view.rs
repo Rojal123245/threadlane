@@ -285,6 +285,7 @@ impl SidebarView {
 
         div()
             .id(SharedString::from(format!("session-card-{}", session.id)))
+            .group("session-card")
             .flex()
             .flex_col()
             .gap_1()
@@ -343,6 +344,8 @@ impl SidebarView {
                                 .ghost()
                                 .xsmall()
                                 .compact()
+                                .opacity(0.0)
+                                .group_hover("session-card", |style| style.opacity(1.0))
                                 .tooltip(tooltip_text)
                                 .on_click(move |_event, _window, cx| {
                                     quick_settle_model.update(cx, |state, cx| {

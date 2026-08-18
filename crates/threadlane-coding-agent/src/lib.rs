@@ -8,6 +8,7 @@ pub mod config;
 pub mod context;
 pub mod error;
 pub mod extension_broker;
+pub mod permission;
 mod plan;
 pub mod policy;
 pub mod prompt_templates;
@@ -39,6 +40,7 @@ pub use commands::{
 pub use config::{CodingAgentConfig, CodingAgentConfigBuilder};
 pub use context::{ProjectContext, ProjectInstruction};
 pub use error::CodingAgentError;
+pub use permission::{PermissionDecision, PermissionHandle};
 pub use policy::ToolPolicy;
 pub use prompt_templates::{
     expand_prompt_template, load_prompt_templates, parse_command_args, substitute_args,

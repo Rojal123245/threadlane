@@ -1,4 +1,6 @@
-use threadlane_agent::{AgentEvent, SessionPlan, TokenUsage};
+use threadlane_agent::{
+    AdvisorNote, AgentEvent, ModelRoles, PermissionRequest, SessionPlan, TokenUsage,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChatAgentUpdate {
@@ -19,8 +21,11 @@ pub enum ChatAgentUpdate {
         is_error: bool,
     },
     PlanUpdated(SessionPlan),
+    AdvisorNote(AdvisorNote),
+    ModelRolesUpdated(ModelRoles),
     Usage(TokenUsage),
     Error(String),
+    PermissionRequested(PermissionRequest),
     Ignore,
 }
 
@@ -61,7 +66,12 @@ pub fn adapt_agent_event(event: AgentEvent) -> ChatAgentUpdate {
             is_error: result.is_error,
         },
         AgentEvent::PlanUpdated { plan } => ChatAgentUpdate::PlanUpdated(plan),
+        AgentEvent::AdvisorNote { note } => ChatAgentUpdate::AdvisorNote(note),
+        AgentEvent::ModelRolesUpdated { roles } => ChatAgentUpdate::ModelRolesUpdated(roles),
         AgentEvent::AgentError { error } => ChatAgentUpdate::Error(error),
+        AgentEvent::PermissionRequested { request } => {
+            ChatAgentUpdate::PermissionRequested(request)
+        }
         _ => ChatAgentUpdate::Ignore,
     }
 }

@@ -248,6 +248,26 @@ Threadlane reads identity and version information from the module's exported
 An enabled project module overrides an enabled global module with the same
 manifest name. Each scope can be enabled, disabled, or removed independently.
 
+### Web access
+
+The bundled `web_ext` extension provides `fetch` and `web_search` tools through
+the brokered `network` capability. When a tool requests a new host, the desktop
+app asks whether to allow it once, always allow that exact host for the project,
+or deny it. Persistent approvals are stored in `.threadlane/permissions.json`.
+
+For unattended or preapproved environments, exact hosts can still be supplied
+without an interactive prompt. `web_search` requires `html.duckduckgo.com`,
+while `fetch` requires the host of each requested URL:
+
+```bash
+THREADLANE_NETWORK_ALLOW_HOSTS="html.duckduckgo.com,docs.rs,github.com" \
+  cargo run -p threadlane-gpui
+```
+
+HTTP redirects are not followed automatically because a redirect may target a
+host that was not approved. Fetch the returned location explicitly; a new host
+will require its own approval.
+
 ### Debugging
 
 `debug_ext` lets the agent run a program under a real debugger instead of

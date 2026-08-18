@@ -1,4 +1,6 @@
-use crate::types::{AgentMessage, AgentToolResult, SessionPlan, TokenUsage};
+use crate::types::{
+    AdvisorNote, AgentMessage, AgentToolResult, ModelRoles, SessionPlan, TokenUsage,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -71,8 +73,17 @@ pub enum AgentEvent {
     PlanUpdated {
         plan: SessionPlan,
     },
+    AdvisorNote {
+        note: AdvisorNote,
+    },
+    ModelRolesUpdated {
+        roles: ModelRoles,
+    },
     AgentError {
         error: String,
+    },
+    PermissionRequested {
+        request: PermissionRequest,
     },
     StreamRuleTriggered {
         rule_id: String,
@@ -80,6 +91,22 @@ pub enum AgentEvent {
         matched_text: String,
         reminder: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionRequest {
+    pub id: String,
+    pub capability: String,
+    pub title: String,
+    pub detail: String,
+    pub scopes: Vec<PermissionScope>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionScope {
+    Once,
+    Always,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

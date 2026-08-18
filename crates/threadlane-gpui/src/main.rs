@@ -12,6 +12,7 @@ fn main() {
     app.run(move |cx| {
         gpui_component::init(cx);
         threadlane_gpui::screens::chat::init(cx);
+        threadlane_gpui::screens::workspace::init(cx);
         theme::init(cx);
 
         let options = WindowOptions {

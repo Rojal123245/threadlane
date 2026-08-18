@@ -146,6 +146,23 @@ impl UnifiedAgent {
         self.prompt_cache_key = key;
     }
 
+    pub fn set_model_roles(&mut self, roles: crate::types::ModelRoles) {
+        self.config.model_roles = roles;
+    }
+
+    pub fn model_roles(&self) -> &crate::types::ModelRoles {
+        &self.config.model_roles
+    }
+
+    pub fn provider_client(&self) -> &ProviderClient {
+        &self.provider_client
+    }
+
+    pub fn config(&self) -> &AgentConfig {
+        &self.config
+    }
+
+
     /// Returns a clone of the in-memory turn state (for subagent context).
     pub fn state_clone(&self) -> Arc<Mutex<TurnState>> {
         self.turn.clone()

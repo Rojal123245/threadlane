@@ -6,6 +6,7 @@ use base64::Engine as _;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::hover_card::HoverCard;
 use gpui_component::input::{InputEvent, Textarea, TextareaState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
@@ -23,6 +24,10 @@ use threadlane_coding_agent::commands::available_slash_commands;
 actions!(threadlane_composer, [PasteClipboard]);
 
 const INPUT_KEY_CONTEXT: &str = "Input";
+
+const CHAT_CONTENT_MAX_WIDTH: f32 = 1040.0;
+const AGENT_CONTENT_MAX_WIDTH: f32 = 760.0;
+const USER_BUBBLE_MAX_WIDTH: f32 = 680.0;
 
 pub fn init(cx: &mut App) {
     // gpui-component's Textarea owns the focused `Input` context. Register
@@ -45,6 +50,9 @@ pub struct ChatListView {
     branches: Vec<String>,
     current_checkout: Option<String>,
     branch_error: Option<String>,
+    last_session_key: Option<(std::path::PathBuf, String)>,
+    initial_scroll_frames: u8,
+    older_load_pending: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -119,7 +127,7 @@ impl ChatListView {
                 let interval = if settle_frames > 0 {
                     Duration::from_millis(16) // ~60fps for animation frames
                 } else {
-                    Duration::from_millis(33)
+                    Duration::from_millis(100)
                 };
                 cx.background_executor().timer(interval).await;
 
@@ -175,6 +183,9 @@ impl ChatListView {
             branches: Vec::new(),
             current_checkout: None,
             branch_error: None,
+            last_session_key: None,
+            initial_scroll_frames: 0,
+            older_load_pending: false,
             _subscriptions: vec![sub1, sub2],
         }
     }
@@ -321,101 +332,140 @@ impl ChatListView {
             .filter(|item| item.status == PlanItemStatus::Completed)
             .count();
         let total = plan.items.len();
-        let progress_width = 72.0 * completed as f32 / total as f32;
-        let tooltip_plan = plan.clone();
+        let current_step = plan
+            .items
+            .iter()
+            .position(|item| item.status == PlanItemStatus::InProgress)
+            .or_else(|| {
+                plan.items
+                    .iter()
+                    .position(|item| item.status == PlanItemStatus::Pending)
+            })
+            .map(|index| index + 1)
+            .unwrap_or(total);
+        let is_complete = completed == total;
+        let content_plan = plan.clone();
 
         Some(
-            div()
-                .id("session-plan-hover-region")
+            HoverCard::new("session-plan-hover-card")
                 .w_full()
                 .flex_none()
-                .flex()
-                .justify_center()
-                .py_1()
-                .tooltip(move |window, cx| {
-                    let colors = cx.theme().colors;
-                    let content_plan = tooltip_plan.clone();
-                    Tooltip::element(move |_window, _cx| {
-                        let rows = content_plan.items.iter().enumerate().map(|(index, item)| {
-                            let (marker, color) = match item.status {
-                                PlanItemStatus::Completed => ("✓", colors.success),
-                                PlanItemStatus::InProgress => ("●", colors.primary),
-                                PlanItemStatus::Pending => ("○", colors.muted_foreground),
-                            };
+                .anchor(Anchor::BottomCenter)
+                .close_delay(Duration::from_millis(700))
+                .trigger(
+                    div().w_full().flex().justify_center().py_1().child(
+                        Button::new("session-plan-tracker").ghost().child(
                             div()
                                 .flex()
-                                .items_start()
+                                .items_center()
                                 .gap_2()
-                                .child(
-                                    div()
-                                        .w(px(16.0))
-                                        .flex_none()
-                                        .text_center()
-                                        .text_xs()
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(color)
-                                        .child(marker),
-                                )
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .text_sm()
-                                        .text_color(colors.foreground)
-                                        .child(format!("{}. {}", index + 1, item.step)),
-                                )
-                        });
-                        div()
-                            .w(px(640.0))
-                            .max_h(px(280.0))
-                            .overflow_y_scrollbar()
-                            .p_2()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .children(content_plan.explanation.clone().map(|explanation| {
-                                div()
-                                    .pb_2()
-                                    .border_b_1()
-                                    .border_color(colors.border)
-                                    .text_sm()
-                                    .text_color(colors.muted_foreground)
-                                    .child(explanation)
-                            }))
-                            .children(rows)
-                    })
-                    .build(window, cx)
-                })
-                .child(
-                    Button::new("session-plan-tracker").ghost().child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.muted_foreground)
-                                    .child(format!("{completed}/{total}")),
-                            )
-                            .child(
-                                div()
-                                    .w(px(72.0))
-                                    .h(px(3.0))
-                                    .rounded_full()
-                                    .overflow_hidden()
-                                    .bg(theme.border)
-                                    .child(
+                                .children(if is_complete {
+                                    Some(
                                         div()
-                                            .w(px(progress_width))
-                                            .h_full()
+                                            .size(px(16.0))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
                                             .rounded_full()
-                                            .bg(theme.primary),
-                                    ),
-                            ),
+                                            .border_1()
+                                            .border_color(theme.success)
+                                            .text_size(px(10.0))
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(theme.success)
+                                            .child("✓"),
+                                    )
+                                } else {
+                                    None
+                                })
+                                .children(if is_complete {
+                                    None
+                                } else {
+                                    Some(
+                                        div()
+                                            .size(px(16.0))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .text_color(theme.primary)
+                                            .child(
+                                                gpui_component::spinner::Spinner::new().xsmall(),
+                                            ),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(theme.muted_foreground)
+                                        .child(format!("Step {current_step} / {total}")),
+                                ),
+                        ),
                     ),
                 )
+                .content(move |_state, _window, _cx| {
+                    let colors = theme;
+                    let rows = content_plan.items.iter().enumerate().map(|(index, item)| {
+                        let marker = match item.status {
+                            PlanItemStatus::Completed => div()
+                                .size(px(16.0))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_full()
+                                .border_1()
+                                .border_color(colors.success)
+                                .text_size(px(10.0))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(colors.success)
+                                .child("✓")
+                                .into_any_element(),
+                            PlanItemStatus::InProgress => div()
+                                .size(px(16.0))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_color(colors.primary)
+                                .child(gpui_component::spinner::Spinner::new().xsmall())
+                                .into_any_element(),
+                            PlanItemStatus::Pending => div()
+                                .size(px(16.0))
+                                .flex_none()
+                                .rounded_full()
+                                .border_1()
+                                .border_color(colors.muted_foreground)
+                                .into_any_element(),
+                        };
+                        div().flex().items_start().gap_2().child(marker).child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .text_sm()
+                                .text_color(colors.foreground)
+                                .child(format!("{}. {}", index + 1, item.step)),
+                        )
+                    });
+                    div()
+                        .w(px(520.0))
+                        .max_w(px(CHAT_CONTENT_MAX_WIDTH - 32.0))
+                        .max_h(px(360.0))
+                        .overflow_y_scrollbar()
+                        .p_2()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .children(content_plan.explanation.clone().map(|explanation| {
+                            div()
+                                .pb_2()
+                                .border_b_1()
+                                .border_color(colors.border)
+                                .text_sm()
+                                .text_color(colors.muted_foreground)
+                                .child(explanation)
+                        }))
+                        .children(rows)
+                })
                 .into_any_element(),
         )
     }
@@ -557,7 +607,7 @@ impl ChatListView {
                 div()
                     .w_full()
                     .min_w_0()
-                    .max_w(px(720.0))
+                    .max_w(px(AGENT_CONTENT_MAX_WIDTH))
                     .flex()
                     .flex_col()
                     .children((hidden_count > 0).then(|| {
@@ -597,7 +647,7 @@ impl ChatListView {
                 div()
                     .w_full()
                     .min_w_0()
-                    .max_w(px(720.0))
+                    .max_w(px(AGENT_CONTENT_MAX_WIDTH))
                     .flex()
                     .items_center()
                     .gap_2()
@@ -823,7 +873,7 @@ impl ChatListView {
                 .child(
                     div()
                         .min_w_0()
-                        .max_w(px(600.0))
+                        .max_w(px(USER_BUBBLE_MAX_WIDTH))
                         .p_3()
                         .rounded_lg()
                         .bg(theme.secondary)
@@ -881,7 +931,7 @@ impl ChatListView {
                         div()
                             .w_full()
                             .min_w_0()
-                            .max_w(px(720.0))
+                            .max_w(px(AGENT_CONTENT_MAX_WIDTH))
                             .flex()
                             .flex_col()
                             .gap_2()
@@ -958,9 +1008,73 @@ impl ChatListView {
                         }
                     }),
             ),
+            MessageRole::Advisor(severity) => {
+                let (badge_text, bg_color, border_color, text_color) = match severity {
+                    threadlane_agent::AdvisorSeverity::Aside => (
+                        "ADVISOR ASIDE",
+                        theme.secondary,
+                        theme.border,
+                        theme.secondary_foreground,
+                    ),
+                    threadlane_agent::AdvisorSeverity::Concern => (
+                        "ADVISOR CONCERN",
+                        theme.warning,
+                        theme.warning,
+                        theme.warning_foreground,
+                    ),
+                    threadlane_agent::AdvisorSeverity::Blocker => (
+                        "ADVISOR BLOCKER",
+                        theme.danger,
+                        theme.danger,
+                        theme.danger_foreground,
+                    ),
+                };
+
+                div().w_full().flex().justify_center().my_2().px_4().child(
+                    div()
+                        .max_w(px(AGENT_CONTENT_MAX_WIDTH))
+                        .w_full()
+                        .p_3()
+                        .rounded_lg()
+                        .bg(bg_color)
+                        .border_1()
+                        .border_color(border_color)
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div().flex().items_center().gap_2().child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(text_color)
+                                    .child(badge_text),
+                            ),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(text_color)
+                                .child(msg.content.clone())
+                                .context_menu({
+                                    let content = msg.content.clone();
+                                    move |menu, _window, _cx| {
+                                        let text = content.clone();
+                                        menu.item(PopupMenuItem::new("Copy Note").on_click(
+                                            move |_event, _window, cx| {
+                                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                                    text.clone(),
+                                                ));
+                                            },
+                                        ))
+                                    }
+                                }),
+                        ),
+                )
+            }
             MessageRole::Error => div().flex().justify_center().my_2().px_4().child(
                 div()
-                    .max_w(px(720.0))
+                    .max_w(px(AGENT_CONTENT_MAX_WIDTH))
                     .w_full()
                     .p_3()
                     .rounded_lg()
@@ -1095,6 +1209,102 @@ impl ChatListView {
                     .child("?"),
             )
             .into_any_element()
+    }
+
+    fn render_permission_prompt(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let state = self.model.read(cx);
+        let session_id = state.active_session_id.as_ref()?;
+        let request = state.pending_permissions.get(session_id)?.clone();
+        let theme = cx.theme().colors;
+
+        let action_button = |id: &'static str,
+                             label: &'static str,
+                             decision: threadlane_coding_agent::PermissionDecision,
+                             primary: bool,
+                             danger: bool| {
+            let model = self.model.clone();
+            let request_id = request.id.clone();
+            Button::new(id)
+                .label(label)
+                .xsmall()
+                .when(primary, |button| button.primary())
+                .when(danger, |button| button.danger())
+                .on_click(move |_event, _window, cx| {
+                    model.update(cx, |state, cx| {
+                        state.resolve_active_permission(&request_id, decision);
+                        cx.notify();
+                    });
+                })
+        };
+
+        Some(
+            div()
+                .w_full()
+                .flex_none()
+                .px_4()
+                .pt_1()
+                .bg(theme.background)
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(1000.0))
+                        .mx_auto()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.title_bar)
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_xs()
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(theme.foreground)
+                                        .child(request.title),
+                                )
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .text_color(theme.muted_foreground)
+                                        .truncate()
+                                        .child(request.detail),
+                                ),
+                        )
+                        .child(action_button(
+                            "permission-deny",
+                            "Deny",
+                            threadlane_coding_agent::PermissionDecision::Deny,
+                            false,
+                            true,
+                        ))
+                        .child(action_button(
+                            "permission-allow-once",
+                            "Allow once",
+                            threadlane_coding_agent::PermissionDecision::AllowOnce,
+                            false,
+                            false,
+                        ))
+                        .child(action_button(
+                            "permission-allow-always",
+                            "Always",
+                            threadlane_coding_agent::PermissionDecision::AllowAlways,
+                            true,
+                            false,
+                        )),
+                )
+                .into_any_element(),
+        )
     }
 
     fn render_composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1773,14 +1983,54 @@ impl ChatListView {
 
 impl Render for ChatListView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (messages, is_new_task, active_plan) = {
+        let (messages, is_new_task, active_plan, session_key, has_older) = {
             let state = self.model.read(cx);
             (
                 state.messages.clone(),
                 state.is_new_task,
                 state.active_plan.clone(),
+                state
+                    .active_work_dir
+                    .clone()
+                    .zip(state.active_session_id.clone()),
+                state.has_older_messages(),
             )
         };
+        if session_key != self.last_session_key {
+            self.last_session_key = session_key;
+            self.initial_scroll_frames = 6;
+        }
+        if self.initial_scroll_frames > 0 {
+            self.scroll_handle.scroll_to_bottom();
+            self.initial_scroll_frames = self.initial_scroll_frames.saturating_sub(1);
+        }
+        if has_older
+            && self.initial_scroll_frames == 0
+            && !self.older_load_pending
+            && self.scroll_handle.offset().y >= px(-80.0)
+        {
+            let old_top_item = self.scroll_handle.top_item();
+            self.older_load_pending = true;
+            let model = self.model.clone();
+            let scroll_handle = self.scroll_handle.clone();
+            cx.spawn(async move |this, cx| {
+                let added = model.update(cx, |model, cx| {
+                    let added = model.load_older_messages();
+                    if added > 0 {
+                        cx.notify();
+                    }
+                    added
+                });
+                if added > 0 {
+                    scroll_handle.scroll_to_item(old_top_item.saturating_add(added));
+                }
+                let _ = this.update(cx, |view, cx| {
+                    view.older_load_pending = false;
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
         let theme = cx.theme().colors;
         let transcript_rows = self.render_transcript_rows(&messages, cx);
 
@@ -1820,10 +2070,17 @@ impl Render for ChatListView {
                     .vertical_scrollbar(&self.scroll_handle)
                     .pt_3()
                     .pb_6()
-                    .children(transcript_rows)
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(CHAT_CONTENT_MAX_WIDTH))
+                            .mx_auto()
+                            .children(transcript_rows),
+                    )
                     .into_any_element()
             })
             .children(self.render_plan_tracker(&active_plan, cx))
+            .children(self.render_permission_prompt(cx))
             .child(self.render_composer(cx))
     }
 }

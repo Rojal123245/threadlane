@@ -2035,6 +2035,7 @@ mod tests {
             work_dir,
             event_tx,
             allowed_hosts: Arc::new(HashSet::new()),
+            permissions: None,
             agent_work,
             agent_runner: None,
             persist_tool_policy: false,
@@ -3292,6 +3293,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unattended_network_request_is_denied() {
+        let dir = tempfile::tempdir().unwrap();
+        let network = handler("network", dir.path().to_path_buf());
+        let request = BrokerRequest {
+            api_version: 2,
+            capability: "network".into(),
+            operation: "http".into(),
+            arguments: serde_json::json!({
+                "url": "https://example.com/",
+                "method": "GET",
+                "body": ""
+            }),
+        };
+
+        let error = network
+            .handle_for_extension_async(&request, "ext")
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "host_denied");
+    }
+
+    #[tokio::test]
     async fn network_response_is_bounded_before_buffering() {
         let dir = tempfile::tempdir().unwrap();
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -3301,7 +3324,8 @@ mod tests {
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut response = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec();
-            response.resize(MAX_CAPABILITY_BUFFER_BYTES + 1, b'x');
+            let oversized_response = response.len() + MAX_CAPABILITY_BUFFER_BYTES + 1;
+            response.resize(oversized_response, b'x');
             tokio::io::AsyncWriteExt::write_all(&mut socket, &response)
                 .await
                 .unwrap();
