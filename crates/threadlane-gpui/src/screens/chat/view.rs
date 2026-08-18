@@ -316,6 +316,43 @@ impl ChatListView {
             )
     }
 
+    /// Renders the 16px status circle used for a plan step: a bordered ✓ for
+    /// completed, a spinner for in-progress, and an empty ring for pending.
+    fn plan_step_marker(status: PlanItemStatus, colors: gpui_component::ThemeColor) -> AnyElement {
+        match status {
+            PlanItemStatus::Completed => div()
+                .size(px(16.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .border_1()
+                .border_color(colors.success)
+                .text_size(px(10.0))
+                .font_weight(FontWeight::BOLD)
+                .text_color(colors.success)
+                .child("✓")
+                .into_any_element(),
+            PlanItemStatus::InProgress => div()
+                .size(px(16.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(colors.primary)
+                .child(gpui_component::spinner::Spinner::new().xsmall())
+                .into_any_element(),
+            PlanItemStatus::Pending => div()
+                .size(px(16.0))
+                .flex_none()
+                .rounded_full()
+                .border_1()
+                .border_color(colors.muted_foreground)
+                .into_any_element(),
+        }
+    }
+
     fn render_plan_tracker(
         &self,
         plan: &SessionPlan,
@@ -359,39 +396,14 @@ impl ChatListView {
                                 .flex()
                                 .items_center()
                                 .gap_2()
-                                .children(if is_complete {
-                                    Some(
-                                        div()
-                                            .size(px(16.0))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded_full()
-                                            .border_1()
-                                            .border_color(theme.success)
-                                            .text_size(px(10.0))
-                                            .font_weight(FontWeight::BOLD)
-                                            .text_color(theme.success)
-                                            .child("✓"),
-                                    )
-                                } else {
-                                    None
-                                })
-                                .children(if is_complete {
-                                    None
-                                } else {
-                                    Some(
-                                        div()
-                                            .size(px(16.0))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .text_color(theme.primary)
-                                            .child(
-                                                gpui_component::spinner::Spinner::new().xsmall(),
-                                            ),
-                                    )
-                                })
+                                .child(Self::plan_step_marker(
+                                    if is_complete {
+                                        PlanItemStatus::Completed
+                                    } else {
+                                        PlanItemStatus::InProgress
+                                    },
+                                    theme,
+                                ))
                                 .child(
                                     div()
                                         .text_xs()
@@ -405,38 +417,7 @@ impl ChatListView {
                 .content(move |_state, _window, _cx| {
                     let colors = theme;
                     let rows = content_plan.items.iter().enumerate().map(|(index, item)| {
-                        let marker = match item.status {
-                            PlanItemStatus::Completed => div()
-                                .size(px(16.0))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded_full()
-                                .border_1()
-                                .border_color(colors.success)
-                                .text_size(px(10.0))
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(colors.success)
-                                .child("✓")
-                                .into_any_element(),
-                            PlanItemStatus::InProgress => div()
-                                .size(px(16.0))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_color(colors.primary)
-                                .child(gpui_component::spinner::Spinner::new().xsmall())
-                                .into_any_element(),
-                            PlanItemStatus::Pending => div()
-                                .size(px(16.0))
-                                .flex_none()
-                                .rounded_full()
-                                .border_1()
-                                .border_color(colors.muted_foreground)
-                                .into_any_element(),
-                        };
+                        let marker = Self::plan_step_marker(item.status, colors);
                         div().flex().items_start().gap_2().child(marker).child(
                             div()
                                 .min_w_0()
