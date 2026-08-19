@@ -639,17 +639,35 @@ impl RightPanelView {
                         ))
                     })
                     .when(!entry.is_dir, |row| {
+                        let target_path = file_path.clone();
                         row.cursor_pointer().on_click(cx.listener(
-                            move |this, _event, _window, _cx| {
-                                this.open_file(file_path.clone());
+                            move |this, _event, _window, cx| {
+                                this.model.update(cx, |state, cx| {
+                                    state.request_open_file(target_path.clone());
+                                    cx.notify();
+                                });
                             },
                         ))
                     })
                     .context_menu({
                         let path = context_path.clone();
                         let absolute_path = absolute_path.clone();
+                        let editor_path = context_path.clone();
+                        let model = self.model.clone();
                         move |menu, _window, _cx| {
                             let text = path.clone();
+                            let ed_path = editor_path.clone();
+                            let model_ref = model.clone();
+                            let menu = menu.item(
+                                PopupMenuItem::new("Open in Editor Tab").on_click(
+                                    move |_event, _window, cx| {
+                                        model_ref.update(cx, |state, cx| {
+                                            state.request_open_file(ed_path.clone());
+                                            cx.notify();
+                                        });
+                                    },
+                                ),
+                            );
                             let menu =
                                 menu.item(PopupMenuItem::new("Copy Relative Path").on_click(
                                     move |_event, _window, cx| {

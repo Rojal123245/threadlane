@@ -1,0 +1,512 @@
+use std::path::{Path, PathBuf};
+
+use gpui::prelude::FluentBuilder;
+use gpui::*;
+use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::input::{Editor, EditorState, InputEvent, TabSize};
+use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
+use gpui_component::{ActiveTheme, Disableable, IconName, Sizable};
+
+use crate::state::AppState;
+
+fn detect_language(path_str: &str) -> &'static str {
+    let path = Path::new(path_str);
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|s| s.to_lowercase())
+        .as_deref()
+    {
+        Some("rs") => "rust",
+        Some("py") => "python",
+        Some("js" | "mjs" | "cjs") => "javascript",
+        Some("ts" | "mts" | "cts" | "jsx" | "tsx") => "typescript",
+        Some("json") => "json",
+        Some("toml") => "toml",
+        Some("yaml" | "yml") => "yaml",
+        Some("html" | "htm") => "html",
+        Some("css") => "css",
+        Some("md" | "markdown") => "markdown",
+        Some("sh" | "bash" | "zsh") => "bash",
+        Some("go") => "go",
+        Some("c" | "h") => "c",
+        Some("cpp" | "hpp" | "cc" | "cxx" | "hh") => "cpp",
+        Some("diff" | "patch") => "diff",
+        Some("zig") => "zig",
+        _ => match path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|s| s.to_lowercase())
+            .as_deref()
+        {
+            Some("dockerfile") => "bash",
+            Some("cargo.lock") => "toml",
+            _ => "text",
+        },
+    }
+}
+
+pub struct EditorTab {
+    pub relative_path: String,
+    pub file_name: String,
+    pub language: &'static str,
+    pub saved_content: String,
+    pub is_dirty: bool,
+    pub editor_state: Entity<EditorState>,
+    pub _subscription: Subscription,
+}
+
+pub struct EditorView {
+    model: Entity<AppState>,
+    tabs: Vec<EditorTab>,
+    active_tab_index: Option<usize>,
+    pending_open_path: Option<String>,
+    status_msg: Option<String>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl EditorView {
+    pub fn new(model: Entity<AppState>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let model_clone = model.clone();
+        let sub = cx.observe(&model_clone, |_this, _model, cx| {
+            cx.notify();
+        });
+
+        Self {
+            model,
+            tabs: Vec::new(),
+            active_tab_index: None,
+            pending_open_path: None,
+            status_msg: None,
+            _subscriptions: vec![sub],
+        }
+    }
+
+    pub fn has_tabs(&self) -> bool {
+        !self.tabs.is_empty()
+    }
+
+    pub fn tab_count(&self) -> usize {
+        self.tabs.len()
+    }
+
+    pub fn is_active_dirty(&self) -> bool {
+        self.active_tab_index
+            .and_then(|idx| self.tabs.get(idx))
+            .map(|tab| tab.is_dirty)
+            .unwrap_or(false)
+    }
+
+    fn sync_pending_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(relative_path) = self.pending_open_path.take() else {
+            return;
+        };
+        self.open_file_internal(&relative_path, window, cx);
+    }
+
+    pub fn open_file(&mut self, relative_path: &str, cx: &mut Context<Self>) {
+        self.pending_open_path = Some(relative_path.to_string());
+        cx.notify();
+    }
+
+    fn open_file_internal(
+        &mut self,
+        relative_path: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // If already open, just select the tab
+        if let Some(existing_idx) = self
+            .tabs
+            .iter()
+            .position(|t| t.relative_path == relative_path)
+        {
+            self.active_tab_index = Some(existing_idx);
+            cx.notify();
+            return;
+        }
+
+        let base_dir = self
+            .model
+            .read(cx)
+            .active_work_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        let full_path = base_dir.join(relative_path);
+        let content = match std::fs::read_to_string(&full_path) {
+            Ok(c) => c,
+            Err(err) => {
+                log::error!("Failed to open file {}: {}", full_path.display(), err);
+                format!("// Failed to open file: {err}\n")
+            }
+        };
+
+        let lang = detect_language(relative_path);
+        let content_for_sub = content.clone();
+        let editor = cx.new(|cx| {
+            EditorState::new(lang, window, cx)
+                .line_number(true)
+                .folding(true)
+                .show_whitespaces(false)
+                .tab_size(TabSize {
+                    tab_size: 4,
+                    hard_tabs: false,
+                })
+                .default_value(&content)
+        });
+
+        let target_path = relative_path.to_string();
+        let subscription = cx.subscribe(&editor, move |this, editor, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                let current = editor.read(cx).value();
+                if let Some(tab) = this
+                    .tabs
+                    .iter_mut()
+                    .find(|t| t.relative_path == target_path)
+                {
+                    let dirty = current.as_str() != tab.saved_content.as_str();
+                    if tab.is_dirty != dirty {
+                        tab.is_dirty = dirty;
+                        cx.notify();
+                    }
+                }
+            }
+        });
+
+        let file_name = Path::new(relative_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(relative_path)
+            .to_string();
+
+        self.tabs.push(EditorTab {
+            relative_path: relative_path.to_string(),
+            file_name,
+            language: lang,
+            saved_content: content_for_sub,
+            is_dirty: false,
+            editor_state: editor,
+            _subscription: subscription,
+        });
+
+        self.active_tab_index = Some(self.tabs.len() - 1);
+        self.status_msg = None;
+        cx.notify();
+    }
+
+    pub fn select_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.tabs.len() {
+            self.active_tab_index = Some(index);
+            self.status_msg = None;
+            cx.notify();
+        }
+    }
+
+    pub fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.tabs.len() {
+            self.tabs.remove(index);
+            if self.tabs.is_empty() {
+                self.active_tab_index = None;
+            } else if let Some(active) = self.active_tab_index {
+                if active >= self.tabs.len() {
+                    self.active_tab_index = Some(self.tabs.len() - 1);
+                } else if active > index {
+                    self.active_tab_index = Some(active - 1);
+                }
+            }
+            self.status_msg = None;
+            cx.notify();
+        }
+    }
+
+    pub fn close_other_tabs(&mut self, keep_index: usize, cx: &mut Context<Self>) {
+        if keep_index < self.tabs.len() {
+            let kept = self.tabs.remove(keep_index);
+            self.tabs = vec![kept];
+            self.active_tab_index = Some(0);
+            self.status_msg = None;
+            cx.notify();
+        }
+    }
+
+    pub fn close_all_tabs(&mut self, cx: &mut Context<Self>) {
+        self.tabs.clear();
+        self.active_tab_index = None;
+        self.status_msg = None;
+        cx.notify();
+    }
+
+    pub fn save_active_file(&mut self, cx: &mut Context<Self>) {
+        let Some(idx) = self.active_tab_index else {
+            return;
+        };
+        self.save_tab_at(idx, cx);
+    }
+
+    pub fn save_tab_at(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get_mut(index) else {
+            return;
+        };
+
+        let base_dir = self
+            .model
+            .read(cx)
+            .active_work_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        let file_path = base_dir.join(&tab.relative_path);
+        let content = tab.editor_state.read(cx).value().to_string();
+
+        match std::fs::write(&file_path, &content) {
+            Ok(_) => {
+                tab.saved_content = content;
+                tab.is_dirty = false;
+                self.status_msg = Some(format!("Saved {}", tab.file_name));
+                cx.notify();
+            }
+            Err(err) => {
+                log::error!("Failed to save file {}: {}", file_path.display(), err);
+                self.status_msg = Some(format!("Error saving {}: {}", tab.file_name, err));
+                cx.notify();
+            }
+        }
+    }
+
+    fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().colors;
+        let is_active_dirty = self.is_active_dirty();
+        let view_entity = cx.entity().clone();
+
+        div()
+            .h(px(34.0))
+            .w_full()
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_between()
+            .bg(theme.muted.opacity(0.3))
+            .border_b_1()
+            .border_color(theme.border)
+            .px_2()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .overflow_x_hidden()
+                    .children(self.tabs.iter().enumerate().map(|(idx, tab)| {
+                        let is_selected = Some(idx) == self.active_tab_index;
+                        let tab_bg = if is_selected {
+                            theme.background
+                        } else {
+                            theme.background.opacity(0.0)
+                        };
+
+                        let text_color = if is_selected {
+                            theme.foreground
+                        } else {
+                            theme.muted_foreground
+                        };
+
+                        let select_view = view_entity.clone();
+                        let menu_view = view_entity.clone();
+                        let close_view = view_entity.clone();
+
+                        div()
+                            .id(SharedString::from(format!("editor-tab-{}", idx)))
+                            .h(px(26.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .px_2()
+                            .rounded_t_sm()
+                            .bg(tab_bg)
+                            .border_1()
+                            .border_color(if is_selected {
+                                theme.border
+                            } else {
+                                theme.border.opacity(0.0)
+                            })
+                            .when(!is_selected, |this| {
+                                this.hover(|s| s.bg(theme.muted.opacity(0.5)))
+                            })
+                            .cursor_pointer()
+                            .on_click(move |_event, _window, cx| {
+                                select_view.update(cx, |this, cx| this.select_tab(idx, cx));
+                            })
+                            .context_menu({
+                                let keep_idx = idx;
+                                move |menu, _window, _cx| {
+                                    let v1 = menu_view.clone();
+                                    let v2 = menu_view.clone();
+                                    let v3 = menu_view.clone();
+                                    menu.item(
+                                        PopupMenuItem::new("Close Tab")
+                                            .on_click(move |_event, _window, cx| {
+                                                v1.update(cx, |this, cx| this.close_tab(keep_idx, cx));
+                                            }),
+                                    )
+                                    .item(
+                                        PopupMenuItem::new("Close Other Tabs")
+                                            .on_click(move |_event, _window, cx| {
+                                                v2.update(cx, |this, cx| this.close_other_tabs(keep_idx, cx));
+                                            }),
+                                    )
+                                    .item(
+                                        PopupMenuItem::new("Close All Tabs")
+                                            .on_click(move |_event, _window, cx| {
+                                                v3.update(cx, |this, cx| this.close_all_tabs(cx));
+                                            }),
+                                    )
+                                }
+                            })
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(text_color)
+                                    .child(IconName::File),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .font_weight(if is_selected {
+                                        FontWeight::MEDIUM
+                                    } else {
+                                        FontWeight::NORMAL
+                                    })
+                                    .text_color(text_color)
+                                    .child(tab.file_name.clone()),
+                            )
+                            .child(if tab.is_dirty {
+                                div()
+                                    .size(px(6.0))
+                                    .rounded_full()
+                                    .bg(theme.accent)
+                                    .into_any_element()
+                            } else {
+                                div().into_any_element()
+                            })
+                            .child(
+                                Button::new(SharedString::from(format!("tab-close-{}", idx)))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::Close)
+                                    .on_click(move |_event, _window, cx| {
+                                        close_view.update(cx, |this, cx| this.close_tab(idx, cx));
+                                    }),
+                            )
+                    })),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_1()
+                    .child(if let Some(msg) = &self.status_msg {
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(theme.muted_foreground)
+                            .px_2()
+                            .child(msg.clone())
+                            .into_any_element()
+                    } else {
+                        div().into_any_element()
+                    })
+                    .child(
+                        Button::new("editor-save-btn")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Check)
+                            .label("Save")
+                            .disabled(!is_active_dirty)
+                            .tooltip("Save file (Cmd+S)")
+                            .on_click({
+                                let save_view = view_entity.clone();
+                                move |_event, _window, cx| {
+                                    save_view.update(cx, |this, cx| this.save_active_file(cx));
+                                }
+                            }),
+                    ),
+            )
+    }
+
+    fn render_empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().colors;
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .p_6()
+            .child(
+                div()
+                    .size(px(48.0))
+                    .rounded_full()
+                    .bg(theme.muted.opacity(0.5))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(24.0))
+                    .text_color(theme.muted_foreground)
+                    .child(IconName::File),
+            )
+            .child(
+                div()
+                    .text_size(px(14.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.foreground)
+                    .child("No files open in Editor"),
+            )
+            .child(
+                div()
+                    .max_w(px(380.0))
+                    .text_center()
+                    .text_size(px(12.0))
+                    .text_color(theme.muted_foreground)
+                    .child("Right-click a file in the Files panel and choose 'Open in Editor Tab' to open and edit here."),
+            )
+    }
+}
+
+impl Render for EditorView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_pending_file(window, cx);
+        let theme = cx.theme().colors;
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .h_full()
+            .w_full()
+            .min_w_0()
+            .min_h_0()
+            .bg(theme.background)
+            .children(self.has_tabs().then(|| self.render_tab_bar(cx)))
+            .child(if let Some(idx) = self.active_tab_index {
+                if let Some(active_tab) = self.tabs.get(idx) {
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .h_full()
+                        .child(Editor::new(&active_tab.editor_state).bordered(false).size_full())
+                        .into_any_element()
+                } else {
+                    self.render_empty_state(cx).into_any_element()
+                }
+            } else {
+                self.render_empty_state(cx).into_any_element()
+            })
+    }
+}

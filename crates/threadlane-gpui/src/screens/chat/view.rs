@@ -17,6 +17,7 @@ use gpui_component::theme::ActiveTheme;
 use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable};
 
 use crate::app::{actions::AppAction, controller};
+use crate::screens::editor::EditorView;
 use crate::state::{AppState, ChatMessageInfo, MessageRole, ToolActivityInfo};
 use threadlane_agent::{ImageAttachment, PlanItemStatus, ReasoningEffort, SessionPlan};
 use threadlane_coding_agent::commands::available_slash_commands;
@@ -27,6 +28,14 @@ const INPUT_KEY_CONTEXT: &str = "Input";
 
 const CHAT_CONTENT_MAX_WIDTH: f32 = 1040.0;
 const USER_BUBBLE_MAX_WIDTH: f32 = 680.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CentralTab {
+    #[default]
+    Chat,
+    Trajectory,
+    Editor,
+}
 
 pub fn init(cx: &mut App) {
     // gpui-component's Textarea owns the focused `Input` context. Register
@@ -53,7 +62,8 @@ pub struct ChatListView {
     last_session_key: Option<(std::path::PathBuf, String)>,
     initial_scroll_frames: u8,
     older_load_pending: bool,
-    show_trajectory: bool,
+    current_tab: CentralTab,
+    editor: Entity<EditorView>,
     trajectory_search: String,
     trajectory_search_input: Entity<InputState>,
     trajectory_category: Option<String>,
@@ -81,7 +91,19 @@ impl ChatListView {
         let trajectory_search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search trajectory…"));
 
-        let sub1 = cx.observe(&model, |_this, _model, cx| {
+        let editor = cx.new(|cx| EditorView::new(model.clone(), window, cx));
+
+        let sub1 = cx.observe(&model, |this, model, cx| {
+            if let Some(requested_file) = model.update(cx, |state, _cx| state.requested_editor_file.take()) {
+                this.current_tab = CentralTab::Editor;
+                this.editor.update(cx, |editor, cx| {
+                    editor.open_file(&requested_file, cx);
+                });
+            }
+            cx.notify();
+        });
+
+        let sub_editor = cx.observe(&editor, |_this, _editor, cx| {
             cx.notify();
         });
 
@@ -206,13 +228,14 @@ impl ChatListView {
             last_session_key: None,
             initial_scroll_frames: 0,
             older_load_pending: false,
-            show_trajectory: false,
+            current_tab: CentralTab::Chat,
+            editor,
             trajectory_search: String::new(),
             trajectory_search_input,
             trajectory_category: None,
             trajectory_lane: None,
             selected_trajectory_index: None,
-            _subscriptions: vec![sub1, sub2, sub3],
+            _subscriptions: vec![sub1, sub2, sub3, sub_editor],
         }
     }
 
@@ -318,6 +341,12 @@ impl ChatListView {
                 .unwrap_or_else(|| "New task".to_string())
         };
         let theme = cx.theme().colors;
+        let editor_tab_count = self.editor.read(cx).tab_count();
+        let editor_label = if editor_tab_count > 0 {
+            format!("Editor ({editor_tab_count})")
+        } else {
+            "Editor".to_string()
+        };
 
         div()
             .h(px(52.0))
@@ -327,8 +356,6 @@ impl ChatListView {
             .gap_3()
             .px_4()
             .pl(self.header_left_padding)
-            // The workspace owns the rightmost 120px for command palette,
-            // environment, and panel buttons rendered as absolute overlays.
             .pr(px(128.0))
             .border_b_1()
             .border_color(theme.title_bar_border)
@@ -366,10 +393,10 @@ impl ChatListView {
                         Button::new("trajectory-tab-chat")
                             .ghost()
                             .xsmall()
-                            .selected(!self.show_trajectory)
+                            .selected(self.current_tab == CentralTab::Chat)
                             .label("Chat")
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.show_trajectory = false;
+                                this.current_tab = CentralTab::Chat;
                                 cx.notify();
                             })),
                     )
@@ -377,10 +404,21 @@ impl ChatListView {
                         Button::new("trajectory-tab-events")
                             .ghost()
                             .xsmall()
-                            .selected(self.show_trajectory)
+                            .selected(self.current_tab == CentralTab::Trajectory)
                             .label("Trajectory")
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.show_trajectory = true;
+                                this.current_tab = CentralTab::Trajectory;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("trajectory-tab-editor")
+                            .ghost()
+                            .xsmall()
+                            .selected(self.current_tab == CentralTab::Editor)
+                            .label(editor_label)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.current_tab = CentralTab::Editor;
                                 cx.notify();
                             })),
                     ),
@@ -2657,65 +2695,69 @@ impl Render for ChatListView {
             .min_h_0()
             .bg(theme.background)
             .child(self.render_header(cx))
-            .child(if self.show_trajectory {
-                self.render_trajectory(cx)
-            } else if is_new_task {
-                self.render_new_task(cx)
-            } else if messages.is_empty() {
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        div().text_sm().text_color(theme.muted_foreground).child(
-                            "No messages in this session yet. Type a prompt below to begin.",
-                        ),
-                    )
-                    .into_any_element()
-            } else {
-                div()
-                    .id("chat-transcript-container")
-                    .relative()
-                    .w_full()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .child(
+            .child(match self.current_tab {
+                CentralTab::Editor => self.editor.clone().into_any_element(),
+                CentralTab::Trajectory => self.render_trajectory(cx),
+                CentralTab::Chat => {
+                    if is_new_task {
+                        self.render_new_task(cx)
+                    } else if messages.is_empty() {
                         div()
-                            .id("chat-transcript")
-                            .size_full()
-                            .track_scroll(&self.scroll_handle)
-                            .overflow_y_scroll()
-                            .pt_3()
-                            .pb_6()
+                            .flex_1()
+                            .min_h_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                div().text_sm().text_color(theme.muted_foreground).child(
+                                    "No messages in this session yet. Type a prompt below to begin.",
+                                ),
+                            )
+                            .into_any_element()
+                    } else {
+                        div()
+                            .id("chat-transcript-container")
+                            .relative()
+                            .w_full()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
                             .child(
                                 div()
-                                    .w_full()
-                                    .max_w(px(CHAT_CONTENT_MAX_WIDTH))
-                                    .mx_auto()
-                                    .children(transcript_rows),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .child(gpui_component::scroll::Scrollbar::vertical(&self.scroll_handle)),
-                    )
-                    .into_any_element()
+                                    .id("chat-transcript")
+                                    .size_full()
+                                    .track_scroll(&self.scroll_handle)
+                                    .overflow_y_scroll()
+                                    .pt_3()
+                                    .pb_6()
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .max_w(px(CHAT_CONTENT_MAX_WIDTH))
+                                            .mx_auto()
+                                            .children(transcript_rows),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .child(gpui_component::scroll::Scrollbar::vertical(&self.scroll_handle)),
+                            )
+                            .into_any_element()
+                    }
+                }
             })
             .children(
-                (!self.show_trajectory)
+                (self.current_tab == CentralTab::Chat)
                     .then(|| self.render_plan_tracker(&active_plan, cx))
                     .flatten(),
             )
             .children(
-                (!self.show_trajectory)
+                (self.current_tab == CentralTab::Chat)
                     .then(|| self.render_permission_prompt(cx))
                     .flatten(),
             )
-            .children((!self.show_trajectory).then(|| self.render_composer(cx)))
+            .children((self.current_tab == CentralTab::Chat).then(|| self.render_composer(cx)))
     }
 }

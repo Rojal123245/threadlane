@@ -143,6 +143,7 @@ pub struct AppState {
     pub(crate) auth_status_msg: Option<String>,
     pub(crate) update_status: threadlane_updater::UpdateStatus,
     pub(crate) update_notice_dismissed: bool,
+    pub(crate) requested_editor_file: Option<String>,
     stream_tx: Sender<ChatStreamEvent>,
     stream_rx: Receiver<ChatStreamEvent>,
     pending_stream_event: Mutex<Option<ChatStreamEvent>>,
@@ -759,6 +760,7 @@ impl AppState {
             auth_status_msg: None,
             update_status: threadlane_updater::UpdateStatus::Idle,
             update_notice_dismissed: false,
+            requested_editor_file: None,
             stream_tx,
             stream_rx,
             pending_stream_event: Mutex::new(None),
@@ -1029,6 +1031,11 @@ impl AppState {
         }
         added
     }
+
+    pub(crate) fn request_open_file(&mut self, relative_path: String) {
+        self.requested_editor_file = Some(relative_path);
+    }
+
     pub(crate) fn select_session(&mut self, work_dir: PathBuf, session_id: String) {
         self.workspace_page = WorkspacePage::Chat;
         self.active_work_dir = Some(work_dir.clone());
