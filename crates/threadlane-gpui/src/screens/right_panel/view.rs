@@ -377,43 +377,47 @@ impl RightPanelView {
         let theme = cx.theme().colors;
         let active = self.active_surface;
         div()
-            .h(px(48.0))
             .flex_none()
-            .flex()
-            .items_center()
-            .gap_1()
+            .pt(px(44.0))
+            .pb_2()
             .px_3()
             .border_b_1()
             .border_color(theme.border)
-            .children(
-                [Surface::Review, Surface::Files].map(|surface| {
-                    Button::new(SharedString::from(format!(
-                        "right-panel-tab-{}",
-                        surface.label().to_lowercase()
-                    )))
-                    .icon(surface.icon())
-                    .label(surface.label())
-                    .ghost()
-                    .selected(active == Some(surface))
-                    .small()
-                    .on_click(cx.listener(
-                        move |this, _event, _window, cx| {
-                            this.open_surface(surface, cx);
-                        },
-                    ))
-                }),
-            )
-            .child(div().flex_1())
             .child(
-                Button::new("right-panel-refresh")
-                    .icon(IconName::Redo)
-                    .tooltip("Refresh surface")
-                    .ghost()
-                    .xsmall()
-                    .on_click(cx.listener(|this, _event, _window, cx| {
-                        this.refresh_active_surface();
-                        cx.notify();
-                    })),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .children(
+                        [Surface::Review, Surface::Files].map(|surface| {
+                            Button::new(SharedString::from(format!(
+                                "right-panel-tab-{}",
+                                surface.label().to_lowercase()
+                            )))
+                            .icon(surface.icon())
+                            .label(surface.label())
+                            .ghost()
+                            .selected(active == Some(surface))
+                            .small()
+                            .on_click(cx.listener(
+                                move |this, _event, _window, cx| {
+                                    this.open_surface(surface, cx);
+                                },
+                            ))
+                        }),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("right-panel-refresh")
+                            .icon(IconName::Redo)
+                            .tooltip("Refresh surface")
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.refresh_active_surface();
+                                cx.notify();
+                            })),
+                    ),
             )
     }
 
@@ -936,8 +940,6 @@ impl Render for RightPanelView {
             .min_w_0()
             .flex()
             .flex_col()
-            .border_l_1()
-            .border_color(theme.border)
             .bg(theme.background)
             .child(self.render_header(cx))
             .child(body)
