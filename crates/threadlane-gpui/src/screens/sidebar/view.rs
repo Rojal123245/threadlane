@@ -1,3 +1,4 @@
+use gpui::prelude::FluentBuilder;
 use gpui::InteractiveElement;
 use gpui::*;
 
@@ -242,19 +243,43 @@ impl SidebarView {
     fn render_history_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let model = self.model.clone();
         let theme = cx.theme().colors;
+        let session_count = self
+            .model
+            .read(cx)
+            .projects
+            .iter()
+            .map(|project| project.sessions.len())
+            .sum::<usize>();
+
         div()
             .flex()
             .items_center()
             .justify_between()
             .px_3()
-            .pt_2()
-            .pb_2()
+            .pt_3()
+            .pb_1()
             .child(
                 div()
-                    .text_sm()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.muted_foreground)
-                    .child("Today"),
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.muted_foreground)
+                            .child("RECENT"),
+                    )
+                    .child(
+                        div()
+                            .px_1p5()
+                            .py_0p5()
+                            .rounded_full()
+                            .bg(theme.secondary)
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(session_count.to_string()),
+                    ),
             )
             .child(
                 Button::new("attach-project-btn")
@@ -334,13 +359,13 @@ impl SidebarView {
         };
 
         let bg_color = if is_active {
-            theme.secondary_hover
+            theme.sidebar_accent
         } else {
             theme.title_bar
         };
 
         let border_color = if is_active {
-            theme.secondary_hover
+            theme.primary.opacity(0.4)
         } else {
             theme.title_bar
         };
@@ -386,12 +411,9 @@ impl SidebarView {
             .id(SharedString::from(format!("session-card-{}", session.id)))
             .group("session-card")
             .flex()
-            .flex_col()
-            .gap_1()
+            .items_stretch()
             .mx_2()
             .my_0p5()
-            .px_3()
-            .py_2()
             .rounded_lg()
             .bg(bg_color)
             .border_1()
@@ -412,81 +434,98 @@ impl SidebarView {
                     cx.notify();
                 });
             })
+            .when(is_active, |this| {
+                this.child(div().w(px(3.0)).rounded_l_full().bg(theme.primary))
+            })
             .child(
                 div()
+                    .flex_1()
+                    .min_w_0()
                     .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(title_color)
-                            .truncate()
-                            .child(session.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .gap_1()
-                            .children(status_indicator)
-                            .child(
-                                Button::new(SharedString::from(format!(
-                                    "settle-session-{}",
-                                    session.id
-                                )))
-                                .icon(IconName::Check)
-                                .ghost()
-                                .xsmall()
-                                .compact()
-                                .opacity(0.0)
-                                .group_hover("session-card", |style| style.opacity(1.0))
-                                .tooltip(tooltip_text)
-                                .on_click(
-                                    move |_event, _window, cx| {
-                                        quick_settle_model.update(cx, |state, cx| {
-                                            controller::dispatch(
-                                                state,
-                                                AppAction::SettleSession {
-                                                    work_dir: quick_settle_work_dir.clone(),
-                                                    session_id: quick_settle_session_id.clone(),
-                                                },
-                                            );
-                                            cx.notify();
-                                        });
-                                    },
-                                ),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
+                    .flex_col()
+                    .gap_1()
+                    .px_3()
+                    .py_2()
                     .child(
                         div()
                             .flex()
                             .items_center()
+                            .justify_between()
                             .gap_2()
-                            .flex_1()
-                            .min_w_0()
-                            .child(IconName::Folder)
-                            .child(div().truncate().child(project)),
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_sm()
+                                    .font_weight(if is_active {
+                                        FontWeight::SEMIBOLD
+                                    } else {
+                                        FontWeight::MEDIUM
+                                    })
+                                    .text_color(title_color)
+                                    .truncate()
+                                    .child(session.title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_none()
+                                    .items_center()
+                                    .gap_1()
+                                    .children(status_indicator)
+                                    .child(
+                                        Button::new(SharedString::from(format!(
+                                            "settle-session-{}",
+                                            session.id
+                                        )))
+                                        .icon(IconName::Check)
+                                        .ghost()
+                                        .xsmall()
+                                        .compact()
+                                        .opacity(0.0)
+                                        .group_hover("session-card", |style| style.opacity(1.0))
+                                        .tooltip(tooltip_text)
+                                        .on_click(
+                                            move |_event, _window, cx| {
+                                                quick_settle_model.update(cx, |state, cx| {
+                                                    controller::dispatch(
+                                                        state,
+                                                        AppAction::SettleSession {
+                                                            work_dir: quick_settle_work_dir.clone(),
+                                                            session_id: quick_settle_session_id.clone(),
+                                                        },
+                                                    );
+                                                    cx.notify();
+                                                });
+                                            },
+                                        ),
+                                    ),
+                            ),
                     )
                     .child(
                         div()
-                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child(status),
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(IconName::Folder)
+                                    .child(div().truncate().child(project)),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_color(theme.muted_foreground)
+                                    .child(status),
+                            ),
                     ),
             )
             .context_menu(move |menu, _window, _cx| {
@@ -783,19 +822,24 @@ impl SidebarView {
             if sessions.is_empty() {
                 continue;
             }
-            if group != DateGroup::Today {
-                children.push(
-                    div()
-                        .px_3()
-                        .pt_3()
-                        .pb_1()
-                        .text_sm()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.muted_foreground)
-                        .child(group.label())
-                        .into_any_element(),
-                );
-            }
+            children.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .pt(if group == DateGroup::Today { px(2.0) } else { px(14.0) })
+                    .pb_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.muted_foreground)
+                            .child(group.label()),
+                    )
+                    .child(div().h(px(1.0)).flex_1().bg(theme.border.opacity(0.5)))
+                    .into_any_element(),
+            );
             for session in sessions {
                 let is_active = active_work_dir.as_ref() == Some(&session.work_dir)
                     && active_session_id.as_deref() == Some(session.id.as_str());

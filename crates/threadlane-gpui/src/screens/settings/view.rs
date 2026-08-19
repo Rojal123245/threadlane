@@ -427,9 +427,7 @@ impl SettingsView {
                             .mt_1()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child(
-                                "Choose a bundled theme or one installed in ~/.threadlane/themes.",
-                            ),
+                            .child("Choose between the focused Light and Black themes."),
                     ),
             )
             .child(theme_picker)

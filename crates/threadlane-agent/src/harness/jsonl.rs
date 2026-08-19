@@ -105,6 +105,8 @@ pub struct JsonlStore {
     tree: crate::SessionTree,
     entries: Vec<Entry>,
     records: Vec<Record>,
+    session_file_len: u64,
+    harness_file_len: u64,
 }
 
 impl JsonlStore {
@@ -132,6 +134,8 @@ impl JsonlStore {
         records.extend(read_strict(&path.with_extension("harness.jsonl"))?);
         records.sort_by_key(Record::seq);
         validate_harness_records(&records, &path.with_extension("harness.jsonl"))?;
+        let session_file_len = file_len(&path)?;
+        let harness_file_len = file_len(&path.with_extension("harness.jsonl"))?;
         let store = Self {
             path,
             claim,
@@ -139,6 +143,8 @@ impl JsonlStore {
             tree,
             entries,
             records,
+            session_file_len,
+            harness_file_len,
         };
         super::Reducer::reduce(&store)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
@@ -155,9 +161,21 @@ impl JsonlStore {
         self.tree = refreshed.0;
         self.entries = refreshed.1;
         self.records = refreshed.2;
+        self.refresh_file_lengths()?;
         super::Reducer::reduce(self)
             .map(|_| ())
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
+    }
+
+    fn refresh_file_lengths(&mut self) -> io::Result<()> {
+        self.session_file_len = file_len(&self.path)?;
+        self.harness_file_len = file_len(&self.path.with_extension("harness.jsonl"))?;
+        Ok(())
+    }
+
+    fn is_fresh(&self) -> io::Result<bool> {
+        Ok(self.session_file_len == file_len(&self.path)?
+            && self.harness_file_len == file_len(&self.path.with_extension("harness.jsonl"))?)
     }
 
     fn load_parts(path: &Path) -> io::Result<(crate::SessionTree, Vec<Entry>, Vec<Record>)> {
@@ -244,7 +262,12 @@ impl SessionStore for JsonlStore {
             .gate
             .lock()
             .map_err(|error| ReduceError::Storage(error.to_string()))?;
-        self.reload_unlocked()?;
+        if !self
+            .is_fresh()
+            .map_err(|error| ReduceError::Storage(error.to_string()))?
+        {
+            self.reload_unlocked()?;
+        }
         if entry.id.trim().is_empty() {
             return Err(ReduceError::InvalidRecord("empty entry id".into()));
         }
@@ -271,7 +294,11 @@ impl SessionStore for JsonlStore {
         }
         validate_candidate_entry(self, &entry)?;
         append_json_line(&self.path, &entry)?;
-        self.reload_unlocked()
+        self.session_file_len =
+            file_len(&self.path).map_err(|error| ReduceError::Storage(error.to_string()))?;
+        self.tree.project_harness_entry(&entry);
+        self.entries.push(entry);
+        super::Reducer::reduce(self).map(|_| ())
     }
 
     fn append_record(&mut self, mut record: Record) -> Result<(), ReduceError> {
@@ -283,7 +310,12 @@ impl SessionStore for JsonlStore {
             .gate
             .lock()
             .map_err(|error| ReduceError::Storage(error.to_string()))?;
-        self.reload_unlocked()?;
+        if !self
+            .is_fresh()
+            .map_err(|error| ReduceError::Storage(error.to_string()))?
+        {
+            self.reload_unlocked()?;
+        }
         if record.lane().trim().is_empty() {
             return Err(ReduceError::InvalidLane(record.lane().into()));
         }
@@ -303,7 +335,11 @@ impl SessionStore for JsonlStore {
         }
         validate_candidate_record(self, &record)?;
         append_json_line(&self.path, &record)?;
-        self.reload_unlocked()
+        self.session_file_len =
+            file_len(&self.path).map_err(|error| ReduceError::Storage(error.to_string()))?;
+        self.tree.project_harness_record(&record);
+        self.records.push(record);
+        super::Reducer::reduce(self).map(|_| ())
     }
 }
 
@@ -487,6 +523,14 @@ pub(crate) fn append_session_json_line<T: serde::Serialize>(
         .open(path)?;
     serde_json::to_writer(&mut file, value).map_err(io::Error::other)?;
     file.write_all(b"\n").and_then(|_| file.sync_all())
+}
+
+fn file_len(path: &Path) -> io::Result<u64> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.len()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error),
+    }
 }
 
 fn append_json_line<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), ReduceError> {

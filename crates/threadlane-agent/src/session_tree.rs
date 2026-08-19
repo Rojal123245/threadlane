@@ -217,6 +217,43 @@ impl SessionTree {
         self.active_node_id.as_deref()
     }
 
+    pub(crate) fn project_harness_entry(&mut self, entry: &crate::harness::Entry) {
+        if !self.v2_entry_ids.insert(entry.id.clone()) {
+            return;
+        }
+        self.node_order.push(entry.id.clone());
+        self.nodes.insert(
+            entry.id.clone(),
+            SessionNode {
+                id: entry.id.clone(),
+                parent_id: entry.parent_id.clone(),
+                timestamp: entry.timestamp,
+                seq: Some(entry.seq),
+                message: entry.message.clone(),
+            },
+        );
+        if entry.lane == "main" {
+            self.active_node_id = Some(entry.id.clone());
+        }
+    }
+
+    pub(crate) fn project_harness_record(&mut self, record: &crate::harness::Record) {
+        if let crate::harness::Record::FactSet {
+            run_id: None,
+            key,
+            value,
+            ..
+        } = record
+        {
+            self.global_facts.insert(key.clone(), value.clone());
+            match key.as_str() {
+                "model" => self.model = Some(value.clone()),
+                "name" => self.name = Some(value.clone()),
+                _ => {}
+            }
+        }
+    }
+
     fn get_fact(&self, key: &str) -> Option<&str> {
         self.global_facts.get(key).map(|s| s.as_str())
     }

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::persistence::global_threadlane_dir;
 
-const DEFAULT_THEME_NAME: &str = "Threadlane Dark";
+const DEFAULT_THEME_NAME: &str = "Threadlane Black";
 const BUNDLED_THEMES: &str = include_str!("../themes/threadlane.json");
 
 #[derive(Default, Deserialize, Serialize)]
@@ -134,6 +134,10 @@ mod tests {
         assert!(themes
             .themes
             .iter()
-            .any(|theme| theme.name == "Threadlane Dark"));
+            .any(|theme| theme.name == "Threadlane Black"));
+        assert!(themes
+            .themes
+            .iter()
+            .any(|theme| theme.name == "Threadlane Light"));
     }
 }

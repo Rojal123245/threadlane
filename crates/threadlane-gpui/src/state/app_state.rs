@@ -2024,26 +2024,32 @@ impl AppState {
     }
 
     pub(crate) fn drain_chat_stream(&mut self) -> bool {
+        const MAX_EVENTS_PER_DRAIN: usize = 128;
         let first = self
             .pending_stream_event
             .lock()
             .ok()
             .and_then(|mut pending| pending.take());
-        let deferred = self
-            .active_session_id
+        let active_session_id = self.active_session_id.clone();
+        let mut deferred = active_session_id
             .as_ref()
             .and_then(|session_id| self.deferred_stream_events.remove(session_id))
-            .unwrap_or_default();
-        let events = deferred
-            .into_iter()
-            .chain(first)
-            .chain(self.stream_rx.try_iter())
-            .collect::<Vec<_>>();
-        if events.is_empty() {
-            return false;
-        }
+            .unwrap_or_default()
+            .into_iter();
+        let mut first = first;
+        let mut processed = 0usize;
+        let mut has_events = false;
 
-        for event in events {
+        while processed < MAX_EVENTS_PER_DRAIN {
+            let event = deferred
+                .next()
+                .or_else(|| first.take())
+                .or_else(|| self.stream_rx.try_recv().ok());
+            let Some(event) = event else {
+                break;
+            };
+            has_events = true;
+            processed = processed.saturating_add(1);
             match event {
                 ChatStreamEvent::Agent { session_id, event }
                     if self.active_session_id.as_deref() == Some(&session_id) =>
@@ -2296,7 +2302,13 @@ impl AppState {
                 }
             }
         }
-        true
+        if let Some(session_id) = active_session_id {
+            let remaining = deferred.collect::<Vec<_>>();
+            if !remaining.is_empty() {
+                self.deferred_stream_events.insert(session_id, remaining);
+            }
+        }
+        has_events
     }
 
     pub(crate) fn active_pending_composer_message(&self) -> Option<&str> {
@@ -3390,6 +3402,35 @@ mod tests {
         );
         assert!(state.deferred_stream_events.is_empty());
     }
+    #[test]
+    fn stream_drain_preserves_events_beyond_one_frame_budget() {
+        let mut state = AppState::load_from_registry(Vec::new());
+        state.messages.clear();
+        state.active_session_id = Some("session".into());
+        state.is_new_task = false;
+
+        for index in 0..130 {
+            state
+                .stream_tx
+                .send(ChatStreamEvent::Agent {
+                    session_id: "session".into(),
+                    event: AgentEvent::MessageUpdate {
+                        text_delta: Some(format!("{index},")),
+                        reasoning_delta: None,
+                        tool_call_name: None,
+                    },
+                })
+                .unwrap();
+        }
+
+        assert!(state.drain_chat_stream());
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].content.matches(',').count(), 128);
+        assert!(state.chat_stream_pending());
+        assert!(state.drain_chat_stream());
+        assert_eq!(state.messages[0].content.matches(',').count(), 130);
+    }
+
     #[test]
     fn session_message_page_returns_newest_window_and_older_cursor() {
         let unique = std::time::SystemTime::now()
