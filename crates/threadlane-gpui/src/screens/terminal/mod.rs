@@ -4,10 +4,9 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 use gpui::*;
-use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
-use gpui_component::{ActiveTheme, Sizable};
+use gpui_component::{ActiveTheme, ElementExt};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
 const DEFAULT_ROWS: u16 = 30;
@@ -66,6 +65,9 @@ pub struct TerminalView {
     status: Option<String>,
     rows: u16,
     cols: u16,
+    screen_bounds: Option<Bounds<Pixels>>,
+    selection_anchor: Option<(u16, u16)>,
+    selection_head: Option<(u16, u16)>,
 }
 
 impl TerminalView {
@@ -97,6 +99,9 @@ impl TerminalView {
             status: None,
             rows: DEFAULT_ROWS,
             cols: DEFAULT_COLS,
+            screen_bounds: None,
+            selection_anchor: None,
+            selection_head: None,
         };
         terminal.start();
         terminal
@@ -111,7 +116,7 @@ impl TerminalView {
     }
 
     /// Terminates the current shell and starts a fresh login-capable interactive shell.
-    fn restart(&mut self, cx: &mut Context<Self>) {
+    pub fn restart(&mut self, cx: &mut Context<Self>) {
         self.session.take();
         self.parser = vt100::Parser::new(self.rows, self.cols, SCROLLBACK_ROWS);
         self.status = None;
@@ -120,7 +125,7 @@ impl TerminalView {
     }
 
     /// Clears both the emulator scrollback and the visible screen.
-    fn clear(&mut self, cx: &mut Context<Self>) {
+    pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.parser = vt100::Parser::new(self.rows, self.cols, SCROLLBACK_ROWS);
         self.status = None;
         cx.notify();
@@ -178,13 +183,23 @@ impl TerminalView {
         }
     }
 
+    fn paste(&self, text: String) {
+        if self.parser.screen().bracketed_paste() {
+            self.send(b"\x1b[200~");
+            self.send(text.as_bytes());
+            self.send(b"\x1b[201~");
+        } else {
+            self.send(text.as_bytes());
+        }
+    }
+
     fn key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let key = event.keystroke.key.as_str();
         let modifiers = event.keystroke.modifiers;
 
         if modifiers.platform && key.eq_ignore_ascii_case("v") {
             if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                self.send(text.as_bytes());
+                self.paste(text);
             }
             cx.stop_propagation();
             return;
@@ -199,7 +214,13 @@ impl TerminalView {
                 "v" if !modifiers.platform => cx
                     .read_from_clipboard()
                     .and_then(|item| item.text())
-                    .map(|text| text.into_bytes()),
+                    .map(|text| {
+                        if self.parser.screen().bracketed_paste() {
+                            [b"\x1b[200~".as_slice(), text.as_bytes(), b"\x1b[201~".as_slice()].concat()
+                        } else {
+                            text.into_bytes()
+                        }
+                    }),
                 _ => None,
             }
         } else {
@@ -207,19 +228,40 @@ impl TerminalView {
                 "enter" => Some(b"\r".to_vec()),
                 "backspace" => Some(vec![0x7f]),
                 "tab" => Some(b"\t".to_vec()),
-                "up" => Some(b"\x1b[A".to_vec()),
-                "down" => Some(b"\x1b[B".to_vec()),
-                "right" => Some(b"\x1b[C".to_vec()),
-                "left" => Some(b"\x1b[D".to_vec()),
+                "up" => Some(self.cursor_key(b'A', modifiers)),
+                "down" => Some(self.cursor_key(b'B', modifiers)),
+                "right" => Some(self.cursor_key(b'C', modifiers)),
+                "left" => Some(self.cursor_key(b'D', modifiers)),
                 "home" => Some(b"\x1b[H".to_vec()),
                 "end" => Some(b"\x1b[F".to_vec()),
                 "delete" => Some(b"\x1b[3~".to_vec()),
+                "pageup" => Some(b"\x1b[5~".to_vec()),
+                "pagedown" => Some(b"\x1b[6~".to_vec()),
+                "f1" => Some(b"\x1bOP".to_vec()),
+                "f2" => Some(b"\x1bOQ".to_vec()),
+                "f3" => Some(b"\x1bOR".to_vec()),
+                "f4" => Some(b"\x1bOS".to_vec()),
+                "f5" => Some(b"\x1b[15~".to_vec()),
+                "f6" => Some(b"\x1b[17~".to_vec()),
+                "f7" => Some(b"\x1b[18~".to_vec()),
+                "f8" => Some(b"\x1b[19~".to_vec()),
+                "f9" => Some(b"\x1b[20~".to_vec()),
+                "f10" => Some(b"\x1b[21~".to_vec()),
+                "f11" => Some(b"\x1b[23~".to_vec()),
+                "f12" => Some(b"\x1b[24~".to_vec()),
                 "escape" => Some(vec![0x1b]),
-                _ if !modifiers.platform && !modifiers.alt => event
+                _ if !modifiers.platform => event
                     .keystroke
                     .key_char
                     .as_ref()
-                    .map(|text| text.as_bytes().to_vec()),
+                    .map(|text| {
+                        let mut bytes = Vec::with_capacity(text.len() + usize::from(modifiers.alt));
+                        if modifiers.alt {
+                            bytes.push(0x1b);
+                        }
+                        bytes.extend_from_slice(text.as_bytes());
+                        bytes
+                    }),
                 _ => None,
             }
         };
@@ -227,6 +269,20 @@ impl TerminalView {
         if let Some(bytes) = bytes {
             self.send(&bytes);
             cx.stop_propagation();
+        }
+    }
+
+    fn cursor_key(&self, key: u8, modifiers: Modifiers) -> Vec<u8> {
+        let modifier = 1 + u8::from(modifiers.shift) + 2 * u8::from(modifiers.alt)
+            + 4 * u8::from(modifiers.control);
+        if modifier == 1 {
+            if self.parser.screen().application_cursor() {
+                vec![0x1b, b'O', key]
+            } else {
+                vec![0x1b, b'[', key]
+            }
+        } else {
+            format!("\x1b[1;{modifier}{}", key as char).into_bytes()
         }
     }
 
@@ -240,6 +296,44 @@ impl TerminalView {
         }
         text
     }
+
+    fn cell_at(&self, position: Point<Pixels>) -> Option<(u16, u16)> {
+        let bounds = self.screen_bounds?;
+        let x = ((position.x - bounds.left()).as_f32() - 12.0) / 7.8;
+        let y = ((position.y - bounds.top()).as_f32() - 12.0) / 17.55;
+        Some((
+            y.floor().max(0.0).min(f32::from(self.rows.saturating_sub(1))) as u16,
+            x.floor().max(0.0).min(f32::from(self.cols.saturating_sub(1))) as u16,
+        ))
+    }
+
+    fn selected_text(&self) -> Option<String> {
+        let (anchor, head) = (self.selection_anchor?, self.selection_head?);
+        if anchor == head {
+            return None;
+        }
+        let (start, end) = if anchor <= head { (anchor, head) } else { (head, anchor) };
+        Some(self.parser.screen().contents_between(start.0, start.1, end.0, end.1))
+    }
+
+    fn begin_selection(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.selection_anchor = self.cell_at(event.position);
+        self.selection_head = self.selection_anchor;
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    fn extend_selection(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if event.dragging() && self.selection_anchor.is_some() {
+            self.selection_head = self.cell_at(event.position);
+            cx.notify();
+        }
+    }
+
+    fn end_selection(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        self.selection_head = self.cell_at(event.position).or(self.selection_head);
+        cx.notify();
+    }
 }
 
 impl Focusable for TerminalView {
@@ -251,13 +345,10 @@ impl Focusable for TerminalView {
 impl Render for TerminalView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
-        let focus_handle = self.focus_handle.clone();
-        let project_name = self
-            .project
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| self.project.display().to_string());
         let terminal_text = self.screen_text();
+        let selected_text = self.selected_text();
+        let terminal_resize = cx.entity().clone();
+        let terminal_actions = cx.entity().clone();
 
         div()
             .size_full()
@@ -269,31 +360,6 @@ impl Render for TerminalView {
             .on_key_down(cx.listener(Self::key_down))
             .child(
                 div()
-                    .h(px(38.0))
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(div().flex_1().truncate().text_xs().child(project_name))
-                    .child(
-                        Button::new("pty-terminal-clear")
-                            .label("Clear")
-                            .ghost()
-                            .xsmall()
-                            .on_click(cx.listener(|this, _, _, cx| this.clear(cx))),
-                    )
-                    .child(
-                        Button::new("pty-terminal-restart")
-                            .label("Restart")
-                            .ghost()
-                            .xsmall()
-                            .on_click(cx.listener(|this, _, _, cx| this.restart(cx))),
-                    ),
-            )
-            .child(
-                div()
                     .id("pty-terminal-screen")
                     .flex_1()
                     .min_h_0()
@@ -303,19 +369,47 @@ impl Render for TerminalView {
                     .text_size(px(13.0))
                     .line_height(relative(1.35))
                     .cursor_text()
-                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                        focus_handle.focus(window, cx);
+                    .on_prepaint(move |bounds, _, cx| {
+                        let rows = ((bounds.size.height.as_f32() - 24.0) / 17.55).floor() as u16;
+                        let cols = ((bounds.size.width.as_f32() - 24.0) / 7.8).floor() as u16;
+                        terminal_resize.update(cx, |terminal, cx| {
+                            terminal.screen_bounds = Some(bounds);
+                            terminal.resize(rows, cols, cx);
+                        });
                     })
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::begin_selection))
+                    .on_mouse_move(cx.listener(Self::extend_selection))
+                    .on_mouse_up(MouseButton::Left, cx.listener(Self::end_selection))
                     .child(terminal_text.clone())
                     .context_menu({
                         let text = terminal_text.clone();
+                        let selection = selected_text.clone();
+                        let clear_terminal = terminal_actions.clone();
+                        let restart_terminal = terminal_actions.clone();
                         move |menu, _window, _cx| {
                             let output = text.clone();
+                            let menu = if let Some(selection) = selection {
+                                menu.item(PopupMenuItem::new("Copy Selection").on_click(
+                                    move |_event, _window, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(selection.clone()));
+                                    },
+                                ))
+                            } else {
+                                menu
+                            };
                             menu.item(PopupMenuItem::new("Copy Terminal Output").on_click(
                                 move |_event, _window, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(
-                                        output.clone(),
-                                    ));
+                                    cx.write_to_clipboard(ClipboardItem::new_string(output.clone()));
+                                },
+                            ))
+                            .item(PopupMenuItem::new("Clear Terminal").on_click(
+                                move |_event, _window, cx| {
+                                    clear_terminal.update(cx, |terminal, cx| terminal.clear(cx));
+                                },
+                            ))
+                            .item(PopupMenuItem::new("Restart Terminal").on_click(
+                                move |_event, _window, cx| {
+                                    restart_terminal.update(cx, |terminal, cx| terminal.restart(cx));
                                 },
                             ))
                         }

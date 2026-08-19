@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -47,6 +49,11 @@ enum GitEvent {
     MessageGenerated(Result<String, String>),
 }
 
+struct TerminalGroup {
+    tabs: Vec<Entity<TerminalView>>,
+    active_tab: usize,
+}
+
 fn normalize_generated_commit_message(raw: &str) -> String {
     let line = raw
         .lines()
@@ -69,7 +76,8 @@ pub struct WorkspaceView {
     chat_list: Entity<ChatListView>,
     settings: Entity<SettingsView>,
     right_panel: Entity<RightPanelView>,
-    terminal: Entity<TerminalView>,
+    fallback_terminal: Entity<TerminalView>,
+    terminal_groups: HashMap<PathBuf, TerminalGroup>,
     sidebar_collapsed: bool,
     right_panel_visible: bool,
     bottom_panel_visible: bool,
@@ -102,7 +110,7 @@ impl WorkspaceView {
         let settings = cx.new(|cx| SettingsView::new(model.clone(), window, cx));
         let right_panel = cx.new(|cx| RightPanelView::new(model.clone(), window, cx));
         let terminal_project = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let terminal = cx.new(|cx| TerminalView::new(terminal_project, cx));
+        let fallback_terminal = cx.new(|cx| TerminalView::new(terminal_project, cx));
         let sidebar_resizable_state = cx.new(|_cx| ResizableState::default());
         let right_panel_resizable_state = cx.new(|_cx| ResizableState::default());
         let bottom_panel_resizable_state = cx.new(|_cx| ResizableState::default());
@@ -159,7 +167,8 @@ impl WorkspaceView {
                 chat_list,
                 settings,
                 right_panel,
-                terminal,
+                fallback_terminal,
+                terminal_groups: HashMap::new(),
                 sidebar_collapsed: false,
                 right_panel_visible: false,
                 bottom_panel_visible: false,
@@ -212,6 +221,35 @@ impl WorkspaceView {
         self.git_feedback = None;
         self.refresh_git_status(cx);
         cx.notify();
+    }
+
+    fn add_terminal_tab(&mut self, project: PathBuf, cx: &mut Context<Self>) {
+        let terminal = cx.new(|cx| TerminalView::new(project.clone(), cx));
+        let group = self.terminal_groups.entry(project).or_insert(TerminalGroup {
+            tabs: Vec::new(),
+            active_tab: 0,
+        });
+        group.tabs.push(terminal);
+        group.active_tab = group.tabs.len() - 1;
+        cx.notify();
+    }
+
+    fn select_terminal_tab(&mut self, project: &PathBuf, tab: usize, cx: &mut Context<Self>) {
+        if let Some(group) = self.terminal_groups.get_mut(project) {
+            group.active_tab = tab.min(group.tabs.len().saturating_sub(1));
+            cx.notify();
+        }
+    }
+
+    fn close_terminal_tab(&mut self, project: &PathBuf, tab: usize, cx: &mut Context<Self>) {
+        if let Some(group) = self.terminal_groups.get_mut(project) {
+            if group.tabs.len() <= 1 || tab >= group.tabs.len() {
+                return;
+            }
+            group.tabs.remove(tab);
+            group.active_tab = group.active_tab.min(group.tabs.len() - 1);
+            cx.notify();
+        }
     }
 
     fn toggle_command_palette(
@@ -1494,9 +1532,23 @@ impl Render for WorkspaceView {
                 .update(cx, |input, cx| input.set_value(message, window, cx));
         }
         let workspace_page = self.model.read(cx).workspace_page;
-        if let Some(project) = self.model.read(cx).active_work_dir.clone() {
-            self.terminal.update(cx, |terminal, cx| terminal.set_project(project, cx));
-        }
+        let terminal_project = self.model.read(cx).active_work_dir.clone();
+        let (terminal_tabs, active_terminal_tab, active_terminal) = if let Some(project) = &terminal_project {
+            let group = self.terminal_groups.entry(project.clone()).or_insert_with(|| {
+                TerminalGroup {
+                    tabs: vec![cx.new(|cx| TerminalView::new(project.clone(), cx))],
+                    active_tab: 0,
+                }
+            });
+            group.active_tab = group.active_tab.min(group.tabs.len().saturating_sub(1));
+            (
+                group.tabs.clone(),
+                group.active_tab,
+                group.tabs[group.active_tab].clone(),
+            )
+        } else {
+            (vec![self.fallback_terminal.clone()], 0, self.fallback_terminal.clone())
+        };
         let theme = cx.theme().colors;
         let sidebar_tooltip = if self.sidebar_collapsed {
             "Show sidebar"
@@ -1524,6 +1576,45 @@ impl Render for WorkspaceView {
             };
 
             let main_content = if self.bottom_panel_visible {
+                let tab_buttons = terminal_tabs.iter().enumerate().map(|(tab, _)| {
+                    let select_project = terminal_project.clone();
+                    let close_project = terminal_project.clone();
+                    let select_view = cx.entity().clone();
+                    let close_view = cx.entity().clone();
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            Button::new(SharedString::from(format!("terminal-tab-{tab}")))
+                                .label(format!("Shell {}", tab + 1))
+                                .ghost()
+                                .selected(tab == active_terminal_tab)
+                                .xsmall()
+                                .on_click(move |_event, _window, cx| {
+                                    if let Some(project) = &select_project {
+                                        select_view.update(cx, |this, cx| {
+                                            this.select_terminal_tab(project, tab, cx)
+                                        });
+                                    }
+                                }),
+                        )
+                        .children((terminal_tabs.len() > 1).then(|| {
+                            Button::new(SharedString::from(format!("terminal-tab-close-{tab}")))
+                                .icon(IconName::Close)
+                                .ghost()
+                                .xsmall()
+                                .on_click(move |_event, _window, cx| {
+                                    if let Some(project) = &close_project {
+                                        close_view.update(cx, |this, cx| {
+                                            this.close_terminal_tab(project, tab, cx)
+                                        });
+                                    }
+                                })
+                        }))
+                });
+                let new_project = terminal_project.clone();
+                let new_view = cx.entity().clone();
                 let terminal_panel = div()
                     .size_full()
                     .min_h_0()
@@ -1537,11 +1628,27 @@ impl Render for WorkspaceView {
                             .flex()
                             .items_center()
                             .px_3()
-                            .text_sm()
-                            .text_color(theme.muted_foreground)
-                            .child("Terminal"),
+                            .gap_1()
+                            .overflow_x_hidden()
+                            .child(div().text_sm().text_color(theme.muted_foreground).child("Terminal"))
+                            .children(tab_buttons)
+                            .child(div().flex_1())
+                            .child(
+                                Button::new("terminal-new-tab")
+                                    .icon(IconName::Plus)
+                                    .tooltip("New terminal")
+                                    .ghost()
+                                    .xsmall()
+                                    .on_click(move |_event, _window, cx| {
+                                        if let Some(project) = &new_project {
+                                            new_view.update(cx, |this, cx| {
+                                                this.add_terminal_tab(project.clone(), cx)
+                                            });
+                                        }
+                                    }),
+                            ),
                     )
-                    .child(div().flex_1().min_h_0().child(self.terminal.clone()));
+                    .child(div().flex_1().min_h_0().child(active_terminal));
 
                 v_resizable("workspace-main-bottom-split")
                     .with_state(&self.bottom_panel_resizable_state)
