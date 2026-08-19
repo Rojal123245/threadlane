@@ -1,5 +1,6 @@
 mod agent;
 mod effects;
+mod diagnostics;
 mod events;
 mod hooks;
 mod jsonl;
@@ -14,6 +15,11 @@ mod telemetry;
 mod types;
 
 pub use agent::AgentHarness;
+pub use diagnostics::{
+    project_recovery, project_session_diagnostics, DurableEventDiagnostic, DurableEventKind,
+    InterruptedToolDiagnostic, LaneRecoveryDiagnostic, ModelContextDiagnostic,
+    QueuedWorkDiagnostic, RecoveryDecision, SessionDiagnostics,
+};
 pub use effects::{EffectAction, EffectsError, GatedEffects};
 pub use events::{
     has_open_subagent_lanes, interrupted_subagent_lanes, EventError, EventPayload, HarnessEvent,

@@ -89,6 +89,16 @@ pub(crate) struct SubagentStartError {
     pub(crate) error: String,
 }
 
+/// Proof that a run prompt has been committed to the canonical session log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AcceptedRun {
+    pub(crate) run_id: String,
+    pub(crate) lane: String,
+    pub(crate) prompt_entry_id: String,
+    pub(crate) assistant_entry_id: String,
+    pub(crate) accepted_through_seq: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum InterruptedSubagentRecoveryState {
     Pending,
@@ -858,42 +868,41 @@ impl CodingSessionHarness {
 
     // ── Run lifecycle ─────────────────────────────────────────────────
 
+
     /// Start a foreground operation and accept the user prompt.
     ///
     /// Returns `Ok(())` after `accept_prompt` is driven to completion
     /// (committed to the JSONL store).
-    pub(crate) fn begin_run(&mut self, run_id: &str, prompt: AgentMessage) -> Result<(), String> {
+    pub(crate) fn begin_run(
+        &mut self,
+        run_id: &str,
+        prompt: AgentMessage,
+    ) -> Result<AcceptedRun, String> {
         self.refresh()?;
-        self.store
+        let assistant_entry_id = self
+            .store
             .accept_prompt(run_id, prompt)
             .map_err(|error| error.to_string())?;
         self.store
             .drive_to_completion()
-            .map_err(|error| error.to_string())
-    }
-
-    /// Accept a prompt on the main lane without starting a new operation.
-    pub(crate) fn accept_prompt(
-        &mut self,
-        run_id: &str,
-        prompt: AgentMessage,
-    ) -> Result<(), String> {
-        self.refresh()?;
-        self.store
-            .accept_prompt(run_id, prompt)
             .map_err(|error| error.to_string())?;
-        self.store
-            .drive_to_completion()
-            .map_err(|error| error.to_string())
-    }
-
-    /// Start a foreground operation with an explicit prompt.
-    pub(crate) fn start_with_prompt(
-        &mut self,
-        run_id: &str,
-        prompt: AgentMessage,
-    ) -> Result<(), String> {
-        self.begin_run(run_id, prompt)
+        let accepted_through_seq = self
+            .store
+            .store()
+            .entries()
+            .iter()
+            .chain(std::iter::empty())
+            .map(|entry| entry.seq)
+            .chain(self.store.store().records().iter().map(|record| record.seq()))
+            .max()
+            .unwrap_or(0);
+        Ok(AcceptedRun {
+            run_id: run_id.to_owned(),
+            lane: self.main_lane_name.clone(),
+            prompt_entry_id: format!("entry-{run_id}-user"),
+            assistant_entry_id,
+            accepted_through_seq,
+        })
     }
 
     /// Append a tool intent.

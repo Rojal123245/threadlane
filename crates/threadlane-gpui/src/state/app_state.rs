@@ -176,6 +176,7 @@ pub struct AppState {
     pending_composer_messages: HashMap<String, String>,
     session_token_usage: HashMap<String, TokenUsage>,
     trajectory_by_session: HashMap<String, Vec<TrajectoryEntry>>,
+    diagnostics_by_session: HashMap<String, threadlane_agent::harness::SessionDiagnostics>,
     session_metrics: HashMap<String, SessionMetricsInfo>,
     stashed_prompts: HashMap<String, String>,
     pub(crate) pending_permissions: HashMap<String, threadlane_agent::PermissionRequest>,
@@ -787,6 +788,7 @@ impl AppState {
             pending_composer_messages: HashMap::new(),
             session_token_usage: HashMap::new(),
             trajectory_by_session: HashMap::new(),
+            diagnostics_by_session: HashMap::new(),
             session_metrics: HashMap::new(),
             stashed_prompts: HashMap::new(),
             selected_model,
@@ -1401,6 +1403,10 @@ impl AppState {
     ) -> Result<(), String> {
         let store = threadlane_agent::harness::JsonlStore::open_read_only(session_file)
             .map_err(|error| error.to_string())?;
+        let diagnostics = threadlane_agent::harness::project_session_diagnostics(&store, "main")
+            .map_err(|error| error.to_string())?;
+        self.diagnostics_by_session
+            .insert(session_id.to_owned(), diagnostics);
         let mut trajectory: Vec<TrajectoryEntry> = Vec::new();
         let mut metrics = SessionMetricsInfo::default();
         let mut durable_usage = TokenUsage::default();
@@ -2009,18 +2015,16 @@ impl AppState {
     }
 
     pub(crate) fn active_model_context_diagnostics(&self) -> Vec<TrajectoryEntry> {
-        let Some(session_file) = self.history_session_file.as_ref() else {
-            return Vec::new();
-        };
-        let Ok(store) = threadlane_agent::harness::JsonlStore::open_read_only(session_file) else {
-            return Vec::new();
-        };
-        let Ok(projection) = store.model_context("main") else {
+        let Some(projection) = self
+            .active_session_id
+            .as_ref()
+            .and_then(|id| self.diagnostics_by_session.get(id))
+        else {
             return Vec::new();
         };
         projection
-            .entries
-            .into_iter()
+            .model_context
+            .iter()
             .map(|entry| TrajectoryEntry {
                 seq: Some(entry.seq),
                 run_id: None,
@@ -2028,63 +2032,64 @@ impl AppState {
                 category: "Model Context".into(),
                 summary: format!("{} · {}", entry.id, entry.message.role_str()),
                 detail: format!("{:?}", entry.message),
-                lane: Some(entry.lane),
-                correlation_id: Some(entry.id),
+                lane: Some(entry.lane.clone()),
+                correlation_id: Some(entry.id.clone()),
             })
             .collect()
     }
 
     pub(crate) fn active_durable_event_diagnostics(&self) -> Vec<TrajectoryEntry> {
-        let Some(session_file) = self.history_session_file.as_ref() else {
+        let Some(projection) = self
+            .active_session_id
+            .as_ref()
+            .and_then(|id| self.diagnostics_by_session.get(id))
+        else {
             return Vec::new();
         };
-        let Ok(store) = threadlane_agent::harness::JsonlStore::open_read_only(session_file) else {
-            return Vec::new();
-        };
-        let mut rows = store
-            .entries()
+        projection
+            .durable_events
             .iter()
-            .map(|entry| TrajectoryEntry {
-                seq: Some(entry.seq),
-                run_id: None,
-                turn: None,
-                category: "Entry".into(),
-                summary: format!("{} · {}", entry.id, entry.message.role_str()),
-                detail: format!("parent={:?}", entry.parent_id),
-                lane: Some(entry.lane.clone()),
-                correlation_id: Some(entry.id.clone()),
+            .map(|event| {
+                let (category, summary, detail) = match &event.kind {
+                    threadlane_agent::harness::DurableEventKind::Entry { role, parent_id } => (
+                        "Entry",
+                        format!("{} · {role}", event.id),
+                        format!("parent={parent_id:?}"),
+                    ),
+                    threadlane_agent::harness::DurableEventKind::Record => (
+                        "Record",
+                        format!("{} · durable record", event.id),
+                        format!(
+                            "seq={} lane={} run={}",
+                            event.seq,
+                            event.lane,
+                            event.run_id.as_deref().unwrap_or("—")
+                        ),
+                    ),
+                };
+                TrajectoryEntry {
+                    seq: Some(event.seq),
+                    run_id: event.run_id.clone(),
+                    turn: event.turn,
+                    category: category.into(),
+                    summary,
+                    detail,
+                    lane: Some(event.lane.clone()),
+                    correlation_id: Some(event.id.clone()),
+                }
             })
-            .collect::<Vec<_>>();
-        rows.extend(store.records().iter().map(|record| TrajectoryEntry {
-            seq: Some(record.seq()),
-            run_id: record.run_id().map(str::to_owned),
-            turn: record.turn(),
-            category: "Record".into(),
-            summary: format!("{} · durable record", record.id()),
-            detail: format!(
-                "seq={} lane={} run={}",
-                record.seq(),
-                record.lane(),
-                record.run_id().unwrap_or("—")
-            ),
-            lane: Some(record.lane().to_owned()),
-            correlation_id: Some(record.id().to_owned()),
-        }));
-        rows.sort_by_key(|entry| entry.seq.unwrap_or(u64::MAX));
-        rows
+            .collect()
     }
 
     pub(crate) fn active_recovery_diagnostics(&self) -> Vec<TrajectoryEntry> {
-        let Some(session_file) = self.history_session_file.as_ref() else {
+        let Some(projection) = self
+            .active_session_id
+            .as_ref()
+            .and_then(|id| self.diagnostics_by_session.get(id))
+        else {
             return Vec::new();
         };
-        let Ok(store) = threadlane_agent::harness::JsonlStore::open_read_only(session_file) else {
-            return Vec::new();
-        };
-        let Ok(state) = threadlane_agent::harness::Reducer::reduce(&store) else {
-            return Vec::new();
-        };
-        project_recovery_diagnostics(&state)
+        project_recovery_diagnostics(&projection.recovery)
     }
 
     pub(crate) fn active_trajectory(&self) -> &[TrajectoryEntry] {
@@ -2628,45 +2633,34 @@ impl AppState {
 }
 
 fn project_recovery_diagnostics(
-    state: &threadlane_agent::harness::ReducedState,
+    lanes: &[threadlane_agent::harness::LaneRecoveryDiagnostic],
 ) -> Vec<TrajectoryEntry> {
     let mut rows = Vec::new();
-    for lane in &state.lanes {
-        let decision = match lane.status {
-            threadlane_agent::harness::LaneStatus::SuspendedCrash => {
-                if lane.tools.iter().any(|tool| {
-                    !tool.completed
-                        && matches!(
-                            tool.replay,
-                            threadlane_agent::harness::ToolReplaySafety::Never
-                        )
-                }) {
-                    "Abort interrupted run; unsafe tool cannot be replayed"
-                } else if lane.tools.iter().any(|tool| {
-                    !tool.completed
-                        && matches!(
-                            tool.replay,
-                            threadlane_agent::harness::ToolReplaySafety::Safe
-                        )
-                }) {
-                    "Replay safe interrupted tools, then resume"
-                } else {
-                    "Resume interrupted operation from durable leaf"
-                }
+    for lane in lanes {
+        let decision = match lane.decision {
+            threadlane_agent::harness::RecoveryDecision::None => "No recovery required",
+            threadlane_agent::harness::RecoveryDecision::ResumeFromLeaf => {
+                "Resume interrupted operation from durable leaf"
             }
-            threadlane_agent::harness::LaneStatus::SuspendedDeferred => {
+            threadlane_agent::harness::RecoveryDecision::ReplaySafeToolsThenResume => {
+                "Replay safe interrupted tools, then resume"
+            }
+            threadlane_agent::harness::RecoveryDecision::AbortUnsafeTool => {
+                "Abort interrupted run; unsafe tool cannot be replayed"
+            }
+            threadlane_agent::harness::RecoveryDecision::WaitForDeferredResult => {
                 "Wait for deferred provider result"
             }
-            threadlane_agent::harness::LaneStatus::Failed => "Keep failed; require explicit retry",
-            threadlane_agent::harness::LaneStatus::Completed
-            | threadlane_agent::harness::LaneStatus::Idle => "No recovery required",
+            threadlane_agent::harness::RecoveryDecision::ExplicitRetryRequired => {
+                "Keep failed; require explicit retry"
+            }
         };
         rows.push(TrajectoryEntry {
             seq: None,
             run_id: lane.open_operation.clone(),
             turn: None,
             category: "Decision".into(),
-            summary: format!("{} · {decision}", lane.name),
+            summary: format!("{} · {decision}", lane.lane),
             detail: format!(
                 "status={:?} attempts={} abort_requested={} leaf={}",
                 lane.status,
@@ -2674,34 +2668,31 @@ fn project_recovery_diagnostics(
                 lane.abort_requested,
                 lane.leaf_id.as_deref().unwrap_or("—")
             ),
-            lane: Some(lane.name.clone()),
+            lane: Some(lane.lane.clone()),
             correlation_id: lane.open_operation.clone(),
         });
-        for tool in lane.tools.iter().filter(|tool| !tool.completed) {
+        for tool in &lane.interrupted_tools {
             rows.push(TrajectoryEntry {
                 seq: None,
                 run_id: Some(tool.run_id.clone()),
                 turn: None,
                 category: "Interrupted Tool".into(),
-                summary: format!("{} · replay {:?}", tool.tool_name, tool.replay),
-                detail: format!(
-                    "call={} result_entry={} terminate={}",
-                    tool.tool_call_id, tool.result_entry_id, tool.terminate
-                ),
-                lane: Some(lane.name.clone()),
-                correlation_id: Some(tool.tool_call_id.clone()),
+                summary: format!("{} · replay {:?}", tool.name, tool.replay),
+                detail: format!("call={} result_entry={}", tool.call_id, tool.result_entry_id),
+                lane: Some(lane.lane.clone()),
+                correlation_id: Some(tool.call_id.clone()),
             });
         }
-        for queued in &lane.queued {
+        for queued in &lane.queued_work {
             rows.push(TrajectoryEntry {
                 seq: None,
                 run_id: lane.open_operation.clone(),
                 turn: None,
                 category: "Queued Work".into(),
-                summary: format!("{:?} · {}", queued.queue, queued.target.id),
-                detail: format!("priority={:?}", queued.priority),
-                lane: Some(lane.name.clone()),
-                correlation_id: Some(queued.target.id.clone()),
+                summary: format!("{:?} · {}", queued.queue, queued.entry_id),
+                detail: String::new(),
+                lane: Some(lane.lane.clone()),
+                correlation_id: Some(queued.entry_id.clone()),
             });
         }
     }
@@ -3268,6 +3259,25 @@ mod tests {
         state.hydrate_session_projection("session", &path).unwrap();
 
         assert_eq!(state.session_token_usage["session"], usage);
+        let diagnostics = &state.diagnostics_by_session["session"];
+        assert!(!diagnostics.model_context.is_empty());
+        assert_eq!(
+            diagnostics
+                .durable_events
+                .iter()
+                .map(|event| event.seq)
+                .collect::<Vec<_>>(),
+            {
+                let mut seqs = diagnostics
+                    .durable_events
+                    .iter()
+                    .map(|event| event.seq)
+                    .collect::<Vec<_>>();
+                seqs.sort_unstable();
+                seqs
+            }
+        );
+        assert_eq!(diagnostics.recovery.len(), 1);
         let tool_rows = state.trajectory_by_session["session"]
             .iter()
             .filter(|entry| entry.correlation_id.as_deref() == Some("call-1"))

@@ -861,7 +861,7 @@ impl HarnessSupervisor {
             .ok_or_else(|| format!("Task ID '{task_id}' has no session file"))?;
 
         // ── Begin run through CodingSessionHarness ────────────────────
-        let (run_id, leaf_id) = {
+        let (accepted_run, leaf_id) = {
             let mut harness = CodingSessionHarness::open(session_file_for_log)?;
             let leaf_id = harness.snapshot().ok().and_then(|snap| {
                 snap.state
@@ -871,8 +871,8 @@ impl HarnessSupervisor {
                     .and_then(|l| l.leaf_id.clone())
             });
             let run_id = harness.unique_run_id("run")?;
-            harness.begin_run(&run_id, AgentMessage::user(&prompt, Vec::new()))?;
-            (run_id, leaf_id)
+            let accepted = harness.begin_run(&run_id, AgentMessage::user(&prompt, Vec::new()))?;
+            (accepted, leaf_id)
         };
 
         // Update in-memory lane projection
@@ -883,7 +883,7 @@ impl HarnessSupervisor {
                 .entry(key)
                 .or_insert_with(|| Lane::new("main", &session_id));
             lane.session_file = Some(session_file_for_log.to_path_buf());
-            lane.active_run_id = Some(run_id.clone());
+            lane.active_run_id = Some(accepted_run.run_id.clone());
             lane.leaf_id = leaf_id;
             lane.status = LaneStatus::Running;
         }
@@ -899,7 +899,8 @@ impl HarnessSupervisor {
         let supervisor = self.clone();
         let session_file_for_run = session_file.clone();
         let session_id_for_run = session_id.to_string();
-        let run_id_for_run = run_id.clone();
+        let accepted_run_for_run = accepted_run.clone();
+        let run_id_for_run = accepted_run.run_id.clone();
 
         let handle = tokio::spawn(async move {
             let _guard = prompt_lock.lock().await;
@@ -1032,12 +1033,17 @@ impl HarnessSupervisor {
                     },
                 )));
             }
-            if let Err(error) = agent.adopt_harness_run(&run_id_for_run) {
+            if let Err(error) = agent.adopt_harness_run(&accepted_run_for_run) {
                 supervisor.update_task_status(&tid, TaskStatus::Failed);
                 error!("failed to adopt supervisor harness run {run_id_for_run}: {error}");
                 return;
             }
-            let input_result = agent.handle_input(&prompt).await;
+            let input_result = Some(
+                agent
+                    .execute_accepted_run(&accepted_run_for_run)
+                    .await
+                    .map(|_| String::new()),
+            );
             agent.set_tool_intent_recorder(None);
             agent.set_tool_completion_recorder(None);
             let (outcome, error) = match input_result {

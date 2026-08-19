@@ -800,17 +800,43 @@ impl CodingAgent {
             })));
     }
 
+    pub(crate) async fn execute_accepted_run(
+        &mut self,
+        accepted: &super::harness::AcceptedRun,
+    ) -> Result<(), String> {
+        if accepted.lane != "main"
+            || accepted.accepted_through_seq == 0
+            || accepted.prompt_entry_id.is_empty()
+            || accepted.assistant_entry_id.is_empty()
+        {
+            return Err("invalid accepted run proof".into());
+        }
+        self.harness_journal_error = None;
+        self.agent
+            .run_accepted(
+                &accepted.run_id,
+                &accepted.lane,
+                accepted.accepted_through_seq,
+            )
+            .await;
+        self.sync_session_tree_and_dispatch_assistant_hooks().await;
+        if let Some(error) = self.harness_journal_error.take() {
+            return Err(error);
+        }
+        Ok(())
+    }
+
     pub(crate) async fn begin_harness_run(
         &mut self,
         prompt: AgentMessage,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<Option<super::harness::AcceptedRun>, String> {
         if let Some(run_id) = self
             .harness_run_id
             .lock()
             .map_err(|_| "Harness run state is unavailable".to_string())?
             .clone()
         {
-            return Ok(Some(run_id));
+            return Err(format!("run {run_id} is already active; prompt acceptance cannot be repeated"));
         }
         let turn = self.agent.get_state().await;
         let model = self
@@ -868,7 +894,7 @@ impl CodingAgent {
             return Ok(None);
         };
         let run_id = journal.unique_run_id("foreground")?;
-        journal.begin_run(&run_id, prompt)?;
+        let accepted = journal.begin_run(&run_id, prompt)?;
         journal.capture_run_context(
             &run_id,
             "main",
@@ -913,10 +939,17 @@ impl CodingAgent {
                 .map_err(|error| format!("failed to reload accepted prompt: {error}"))?;
             self.install_run_trace_recorders(path, run_id.clone());
         }
-        Ok(Some(run_id))
+        Ok(Some(accepted))
     }
 
-    pub(crate) fn adopt_harness_run(&mut self, run_id: &str) -> Result<(), String> {
+    pub(crate) fn adopt_harness_run(
+        &mut self,
+        accepted: &super::harness::AcceptedRun,
+    ) -> Result<(), String> {
+        let run_id = accepted.run_id.as_str();
+        if accepted.lane != "main" || accepted.accepted_through_seq == 0 {
+            return Err("invalid accepted run proof".into());
+        }
         let Some(journal) = self.harness.as_mut() else {
             return Ok(());
         };
@@ -3141,7 +3174,7 @@ impl CodingAgent {
                             *self.dispatch_parent_leaf.lock().unwrap() = None;
                             let _ = self
                                 .finish_harness_run(
-                                    harness_run_id.as_deref(),
+                                    harness_run_id.as_ref().map(|run| run.run_id.as_str()),
                                     OperationOutcome::Failed,
                                     Some(error.clone()),
                                 )
@@ -3151,7 +3184,7 @@ impl CodingAgent {
                         *self.dispatch_parent_leaf.lock().unwrap() = None;
                         if let Err(error) = self
                             .finish_harness_run(
-                                harness_run_id.as_deref(),
+                                harness_run_id.as_ref().map(|run| run.run_id.as_str()),
                                 OperationOutcome::Completed,
                                 None,
                             )
@@ -3182,7 +3215,7 @@ impl CodingAgent {
                     Ok(run_id) => run_id,
                     Err(error) => return Some(Err(format!("Harness Error: {error}"))),
                 };
-                if let Some(run_id) = harness_run_id.as_deref() {
+                if let Some(run_id) = harness_run_id.as_ref().map(|run| run.run_id.as_str()) {
                     if let Some(journal) = self.harness.as_mut() {
                         if let Err(error) = journal.prepare_assistant_attempt(run_id) {
                             let _ = self
@@ -3207,7 +3240,7 @@ impl CodingAgent {
                         *self.dispatch_parent_leaf.lock().unwrap() = None;
                         let _ = self
                             .finish_harness_run(
-                                harness_run_id.as_deref(),
+                                harness_run_id.as_ref().map(|run| run.run_id.as_str()),
                                 OperationOutcome::Failed,
                                 Some(err.clone()),
                             )
@@ -3220,7 +3253,7 @@ impl CodingAgent {
                     *self.dispatch_parent_leaf.lock().unwrap() = None;
                     let _ = self
                         .finish_harness_run(
-                            harness_run_id.as_deref(),
+                            harness_run_id.as_ref().map(|run| run.run_id.as_str()),
                             OperationOutcome::Failed,
                             Some(error.clone()),
                         )
@@ -3234,7 +3267,7 @@ impl CodingAgent {
                     stop_reason: Some("subagent".into()),
                     deferred_handle: None,
                 };
-                if let Some(run_id) = harness_run_id.as_deref() {
+                if let Some(run_id) = harness_run_id.as_ref().map(|run| run.run_id.as_str()) {
                     if let Some(journal) = self.harness.as_mut() {
                         if let Err(error) =
                             journal.append_message(assistant.clone()).and_then(|_| {
@@ -3269,7 +3302,7 @@ impl CodingAgent {
                 self.run_scheduled_agent_work().await;
                 if let Err(error) = self
                     .finish_harness_run(
-                        harness_run_id.as_deref(),
+                        harness_run_id.as_ref().map(|run| run.run_id.as_str()),
                         OperationOutcome::Completed,
                         None,
                     )
@@ -3310,7 +3343,7 @@ impl CodingAgent {
                             Err(error) => {
                                 let _ = self
                                     .finish_harness_run(
-                                        harness_run_id.as_deref(),
+                                        harness_run_id.as_ref().map(|run| run.run_id.as_str()),
                                         OperationOutcome::Failed,
                                         Some(error.message.clone()),
                                     )
@@ -3388,7 +3421,7 @@ impl CodingAgent {
                             *self.dispatch_parent_leaf.lock().unwrap() = None;
                             let _ = self
                                 .finish_harness_run(
-                                    harness_run_id.as_deref(),
+                                    harness_run_id.as_ref().map(|run| run.run_id.as_str()),
                                     OperationOutcome::Failed,
                                     Some(error.clone()),
                                 )
@@ -3405,7 +3438,7 @@ impl CodingAgent {
                             };
                             if let Err(error) = self
                                 .finish_harness_run(
-                                    harness_run_id.as_deref(),
+                                    harness_run_id.as_ref().map(|run| run.run_id.as_str()),
                                     outcome,
                                     result.as_ref().err().cloned(),
                                 )
@@ -3422,7 +3455,7 @@ impl CodingAgent {
                             OperationOutcome::Failed
                         };
                         if let Err(error) = self
-                            .finish_harness_run(harness_run_id.as_deref(), outcome, None)
+                            .finish_harness_run(harness_run_id.as_ref().map(|run| run.run_id.as_str()), outcome, None)
                             .await
                         {
                             return Some(Err(format!("Harness Error: {error}")));
@@ -3433,7 +3466,7 @@ impl CodingAgent {
                         let message = format!("WASI Extension Error: {err}");
                         let _ = self
                             .finish_harness_run(
-                                harness_run_id.as_deref(),
+                                harness_run_id.as_ref().map(|run| run.run_id.as_str()),
                                 OperationOutcome::Failed,
                                 Some(message.clone()),
                             )
@@ -3596,7 +3629,7 @@ impl CodingAgent {
         };
         let parent_leaf = self.prompt_parent_leaf(msg.clone(), harness_run_id.is_some());
         *self.dispatch_parent_leaf.lock().unwrap() = parent_leaf;
-        if let (Some(run_id), Some(harness)) = (harness_run_id.as_deref(), self.harness.as_mut()) {
+        if let (Some(run_id), Some(harness)) = (harness_run_id.as_ref().map(|run| run.run_id.as_str()), self.harness.as_mut()) {
             if let Err(error) = harness.prepare_assistant_attempt(run_id) {
                 let _ = self
                     .finish_harness_run(Some(run_id), OperationOutcome::Failed, Some(error.clone()))
@@ -3605,13 +3638,19 @@ impl CodingAgent {
             }
         }
         let mut harness_events = self.subscribe();
-        self.agent.prompt_message(msg).await;
-        self.sync_session_tree_and_dispatch_assistant_hooks().await;
+        if let Some(accepted) = harness_run_id.as_ref() {
+            if let Err(error) = self.execute_accepted_run(accepted).await {
+                self.harness_journal_error = Some(error);
+            }
+        } else {
+            self.agent.prompt_message(msg).await;
+            self.sync_session_tree_and_dispatch_assistant_hooks().await;
+        }
         if let Some(error) = self.harness_journal_error.clone() {
             *self.dispatch_parent_leaf.lock().unwrap() = None;
             let _ = self
                 .finish_harness_run(
-                    harness_run_id.as_deref(),
+                    harness_run_id.as_ref().map(|run| run.run_id.as_str()),
                     OperationOutcome::Failed,
                     Some(error.clone()),
                 )
@@ -3623,7 +3662,7 @@ impl CodingAgent {
             *self.dispatch_parent_leaf.lock().unwrap() = None;
             let _ = self
                 .finish_harness_run(
-                    harness_run_id.as_deref(),
+                    harness_run_id.as_ref().map(|run| run.run_id.as_str()),
                     OperationOutcome::Failed,
                     Some(error.clone()),
                 )
@@ -3634,7 +3673,7 @@ impl CodingAgent {
             *self.dispatch_parent_leaf.lock().unwrap() = None;
             let _ = self
                 .finish_harness_run(
-                    harness_run_id.as_deref(),
+                    harness_run_id.as_ref().map(|run| run.run_id.as_str()),
                     OperationOutcome::Failed,
                     Some(error.clone()),
                 )
@@ -3666,7 +3705,7 @@ impl CodingAgent {
             }
         };
         if let Some(error) = failure {
-            if let Some(run_id) = harness_run_id.as_deref() {
+            if let Some(run_id) = harness_run_id.as_ref().map(|run| run.run_id.as_str()) {
                 let completion = self.harness.as_mut().map(|journal| {
                     journal.record_completed_tools_with_termination(run_id, &tool_termination)
                 });
@@ -3695,7 +3734,7 @@ impl CodingAgent {
             }
             return Some(Err(error));
         }
-        if let Some(run_id) = harness_run_id.as_deref() {
+        if let Some(run_id) = harness_run_id.as_ref().map(|run| run.run_id.as_str()) {
             let attempt_result = self.harness.as_mut().map(|journal| {
                 journal
                     .record_completed_tools_with_termination(run_id, &tool_termination)
@@ -3709,7 +3748,7 @@ impl CodingAgent {
             }
         }
         if let Err(error) = self
-            .finish_harness_run(harness_run_id.as_deref(), OperationOutcome::Completed, None)
+            .finish_harness_run(harness_run_id.as_ref().map(|run| run.run_id.as_str()), OperationOutcome::Completed, None)
             .await
         {
             return Some(Err(format!("Harness Error: {error}")));

@@ -101,7 +101,7 @@ mod tests {
 
         agent
             .finish_harness_run(
-                Some(&run_id),
+                Some(&run_id.run_id),
                 OperationOutcome::Failed,
                 Some("provider failed".into()),
             )
@@ -128,14 +128,50 @@ mod tests {
         options.session_file = Some(path.clone());
         let mut agent = CodingAgent::new(options);
 
-        agent
+        let accepted = agent
             .begin_harness_run(AgentMessage::user("prompt", vec![]))
             .await
+            .unwrap()
             .unwrap();
 
+        assert_eq!(accepted.lane, "main");
+        assert!(!accepted.run_id.is_empty());
+        assert!(!accepted.prompt_entry_id.is_empty());
+        assert!(accepted.accepted_through_seq > 0);
         let active_leaf = agent.session_tree.active_node_id().unwrap();
         let store = JsonlStore::open(&path).unwrap();
-        assert!(store.entries().iter().any(|entry| entry.id == active_leaf));
+        let prompt_entry = store
+            .entries()
+            .iter()
+            .find(|entry| entry.id == accepted.prompt_entry_id)
+            .expect("accepted prompt entry must be durable");
+        assert!(matches!(
+            &prompt_entry.message,
+            AgentMessage::User { content } if content == "prompt"
+        ));
+        assert!(prompt_entry.seq <= accepted.accepted_through_seq);
+        let active_entry = store
+            .entries()
+            .iter()
+            .find(|entry| entry.id == active_leaf)
+            .expect("active assistant target must be durable");
+        assert!(active_entry.seq <= accepted.accepted_through_seq);
+        assert_eq!(
+            store
+                .entries()
+                .iter()
+                .filter(|entry| matches!(entry.message, AgentMessage::User { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            store
+                .records()
+                .iter()
+                .filter(|record| matches!(record, HarnessRecord::OperationStarted { .. }))
+                .count(),
+            1
+        );
         assert!(!active_leaf.starts_with("node_"));
         let context = store
             .records()
@@ -157,6 +193,27 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn second_prompt_acceptance_is_rejected_while_run_is_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut options = coding_agent_options(dir.path().to_path_buf());
+        options.session_file = Some(path);
+        let mut agent = CodingAgent::new(options);
+        let accepted = agent
+            .begin_harness_run(AgentMessage::user("first", vec![]))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let error = agent
+            .begin_harness_run(AgentMessage::user("second", vec![]))
+            .await
+            .unwrap_err();
+        assert!(error.contains(&accepted.run_id));
+        assert!(error.contains("cannot be repeated"));
+    }
+
     #[test]
     fn adopted_background_run_captures_context_before_provider_work() {
         let dir = tempfile::tempdir().unwrap();
@@ -165,11 +222,11 @@ mod tests {
         options.session_file = Some(path.clone());
         let mut agent = CodingAgent::new(options);
         let mut harness = HarnessJournal::open(&path).unwrap();
-        harness
+        let accepted = harness
             .begin_run("background-run", AgentMessage::user("prompt", vec![]))
             .unwrap();
 
-        agent.adopt_harness_run("background-run").unwrap();
+        agent.adopt_harness_run(&accepted).unwrap();
 
         let store = JsonlStore::open(&path).unwrap();
         assert!(store.records().iter().any(|record| matches!(
@@ -206,7 +263,7 @@ mod tests {
         let path = dir.path().join("session.jsonl");
         let mut journal = HarnessJournal::open(&path).unwrap();
         journal
-            .start_with_prompt("foreground", AgentMessage::user("hello", vec![]))
+            .begin_run("foreground", AgentMessage::user("hello", vec![]))
             .unwrap();
 
         assert!(recover_v2_subagent_records(&path).unwrap().is_empty());
@@ -260,7 +317,7 @@ mod tests {
         let path = dir.path().join("session.jsonl");
         let mut journal = HarnessJournal::open(&path).unwrap();
         journal
-            .start_with_prompt("run-1", AgentMessage::user("hello", vec![]))
+            .begin_run("run-1", AgentMessage::user("hello", vec![]))
             .unwrap();
         journal
             .append_message(AgentMessage::Assistant {
@@ -297,7 +354,7 @@ mod tests {
         let mut journal = HarnessJournal::open(&path).unwrap();
 
         journal
-            .start_with_prompt("run-1", AgentMessage::user("first", vec![]))
+            .begin_run("run-1", AgentMessage::user("first", vec![]))
             .unwrap();
         journal
             .append_message(AgentMessage::Assistant {
@@ -312,7 +369,7 @@ mod tests {
             .unwrap();
 
         journal
-            .start_with_prompt("run-2", AgentMessage::user("second", vec![]))
+            .begin_run("run-2", AgentMessage::user("second", vec![]))
             .unwrap();
         journal
             .append_message(AgentMessage::Assistant {
@@ -341,7 +398,7 @@ mod tests {
         let path = dir.path().join("session.jsonl");
         let mut journal = HarnessJournal::open(&path).unwrap();
         journal
-            .start_with_prompt("run-1", AgentMessage::user("hello", vec![]))
+            .begin_run("run-1", AgentMessage::user("hello", vec![]))
             .unwrap();
 
         let result_id = journal.prepare_assistant_attempt("run-1").unwrap();
@@ -384,7 +441,7 @@ mod tests {
         let path = dir.path().join("session.jsonl");
         let mut journal = HarnessJournal::open(&path).unwrap();
         journal
-            .start_with_prompt("run-1", AgentMessage::user("hello", vec![]))
+            .begin_run("run-1", AgentMessage::user("hello", vec![]))
             .unwrap();
         journal
             .append_message(AgentMessage::Assistant {
@@ -447,7 +504,7 @@ mod tests {
             )
             .unwrap();
         journal
-            .start_with_prompt("run-1", AgentMessage::user("hello", vec![]))
+            .begin_run("run-1", AgentMessage::user("hello", vec![]))
             .unwrap();
         journal
             .append_message(AgentMessage::Assistant {
@@ -489,7 +546,7 @@ mod tests {
         let path = dir.path().join("session.jsonl");
         let mut journal = HarnessJournal::open(&path).unwrap();
         journal
-            .start_with_prompt("run-1", AgentMessage::user("inspect", vec![]))
+            .begin_run("run-1", AgentMessage::user("inspect", vec![]))
             .unwrap();
         journal
             .append_message(AgentMessage::Assistant {

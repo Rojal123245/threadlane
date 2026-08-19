@@ -126,6 +126,17 @@ impl UnifiedAgent {
             .await;
     }
 
+    pub async fn run_accepted(&mut self, run_id: &str, lane: &str, accepted_through_seq: u64) {
+        assert!(!run_id.is_empty(), "accepted run id must not be empty");
+        assert_eq!(lane, "main", "unified provider executor currently serves main lane");
+        assert!(accepted_through_seq > 0, "accepted run must name a committed prefix");
+        let _ = self.event_tx.send(AgentEvent::AgentStart);
+        self.run_turns().await;
+        let _ = self.event_tx.send(AgentEvent::AgentEnd {
+            usage: TokenUsage::default(),
+        });
+    }
+
     pub async fn prompt_message(&mut self, message: AgentMessage) {
         // PromptProcedure records run intent, the user entry, and the first
         // step attempt before provider work. The provider context is then
@@ -144,11 +155,8 @@ impl UnifiedAgent {
             return;
         }
 
-        let _ = self.event_tx.send(AgentEvent::AgentStart);
-        self.run_turns().await;
-        let _ = self.event_tx.send(AgentEvent::AgentEnd {
-            usage: TokenUsage::default(),
-        });
+        let accepted_through_seq = self.harness.store().next_sequence().saturating_sub(1);
+        self.run_accepted(&run_id, "main", accepted_through_seq).await;
     }
 
     pub fn set_credentials(&mut self, api_key: String, account_id: Option<String>) {
