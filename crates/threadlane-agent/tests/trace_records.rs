@@ -63,6 +63,12 @@ fn trace_record_variants_round_trip_without_generic_payloads() {
     fields["usage"] = Value::Null;
     cases.push(("ProviderRequestFinished", fields));
 
+    let mut fields = base("provider-response", 31);
+    fields["request_id"] = json!("request-1");
+    fields["entry_id"] = json!("entry-assistant-1");
+    fields["reasoning_entry_id"] = json!("entry-thinking-1");
+    cases.push(("ProviderResponseAttached", fields));
+
     let mut fields = base("permission-request", 4);
     fields["run_id"] = Value::Null;
     fields["attempt"] = Value::Null;
@@ -295,4 +301,48 @@ fn trace_strings_reject_unbounded_values() {
         }
     });
     assert!(serde_json::from_value::<Record>(value).is_err());
+}
+
+#[test]
+fn bounded_prompt_text_rejects_oversized_values() {
+    let oversized = "x".repeat(256 * 1024 + 1);
+    assert!(threadlane_agent::harness::BoundedPromptText::new(&oversized).is_err());
+
+    let value = json!({
+        "Full": {
+            "content": oversized,
+            "sha256": "sha256:prompt"
+        }
+    });
+    assert!(serde_json::from_value::<threadlane_agent::harness::PromptSnapshot>(value).is_err());
+
+    let valid = "safe prompt content";
+    let bounded = threadlane_agent::harness::BoundedPromptText::new(valid).unwrap();
+    assert_eq!(bounded.as_str(), valid);
+}
+
+#[test]
+fn tool_arguments_sanitizer_redacts_secrets_and_bounds_strings() {
+    let long_payload = "a".repeat(100 * 1024);
+    let raw_args = json!({
+        "api_key": "sk-secret-token-12345",
+        "nested": {
+            "password": "super-secret-password",
+            "bearer_token": "bearer-xyz",
+            "auth_header": "Basic abc"
+        },
+        "safe_key": "normal-value",
+        "oversized_data": long_payload
+    });
+
+    let sanitized = threadlane_agent::harness::sanitize_tool_args(&raw_args);
+    assert_eq!(sanitized["api_key"], "[REDACTED]");
+    assert_eq!(sanitized["nested"]["password"], "[REDACTED]");
+    assert_eq!(sanitized["nested"]["bearer_token"], "[REDACTED]");
+    assert_eq!(sanitized["nested"]["auth_header"], "[REDACTED]");
+    assert_eq!(sanitized["safe_key"], "normal-value");
+
+    let oversized_str = sanitized["oversized_data"].as_str().unwrap();
+    assert!(oversized_str.contains("[TRUNCATED"));
+    assert!(oversized_str.len() <= 64 * 1024 + 64);
 }

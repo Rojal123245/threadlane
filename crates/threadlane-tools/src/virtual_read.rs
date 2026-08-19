@@ -26,7 +26,9 @@ pub fn github(root: &Path, kind: &str, number: &str) -> String {
         .current_dir(root)
         .output()
     {
-        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        }
         Ok(_) => return format!("{kind}:// requires a GitHub origin remote"),
         Err(error) => return format!("{kind}:// could not inspect Git origin: {error}"),
     };
@@ -39,8 +41,13 @@ pub fn github(root: &Path, kind: &str, number: &str) -> String {
         .current_dir(root)
         .output()
     {
-        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout).into_owned(),
-        Ok(output) => format!("{kind}://{number} GitHub CLI error: {}", String::from_utf8_lossy(&output.stderr).trim()),
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        }
+        Ok(output) => format!(
+            "{kind}://{number} GitHub CLI error: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
         Err(error) => format!("{kind}://{number} requires the authenticated GitHub CLI: {error}"),
     }
 }
@@ -51,8 +58,14 @@ mod tests {
 
     #[test]
     fn parses_github_remote_forms() {
-        assert_eq!(github_owner_repo("git@github.com:owner/repo.git"), Some(("owner", "repo")));
-        assert_eq!(github_owner_repo("https://github.com/owner/repo"), Some(("owner", "repo")));
+        assert_eq!(
+            github_owner_repo("git@github.com:owner/repo.git"),
+            Some(("owner", "repo"))
+        );
+        assert_eq!(
+            github_owner_repo("https://github.com/owner/repo"),
+            Some(("owner", "repo"))
+        );
         assert_eq!(github_owner_repo("https://gitlab.com/owner/repo"), None);
     }
 }

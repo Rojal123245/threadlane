@@ -656,6 +656,7 @@ impl Reducer {
                 Record::RunContextCaptured { run_id, .. }
                 | Record::ProviderRequestStarted { run_id, .. }
                 | Record::ProviderRequestFinished { run_id, .. }
+                | Record::ProviderResponseAttached { run_id, .. }
                 | Record::ToolExecutionObserved { run_id, .. }
                 | Record::AbortObserved { run_id, .. }
                 | Record::StreamCheckpoint { run_id, .. } => {

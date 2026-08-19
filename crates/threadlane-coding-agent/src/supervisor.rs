@@ -1018,24 +1018,15 @@ impl HarnessSupervisor {
                 let completion_session_file = session_file.to_path_buf();
                 let completion_run_id = run_id_for_run.clone();
                 agent.set_tool_completion_recorder(Some(Arc::new(
-                    move |tool_call_id, terminate| {
+                    move |result: &threadlane_agent::AgentToolResult| {
                         let completion_session_file = completion_session_file.clone();
                         let completion_run_id = completion_run_id.clone();
-                        let tool_call_id = tool_call_id.to_owned();
+                        let result = result.clone();
                         Box::pin(async move {
                             let mut harness = CodingSessionHarness::open(&completion_session_file)
                                 .map_err(|e| e.to_string())?;
                             harness
-                                .finish_tool_message(
-                                    &completion_run_id,
-                                    &AgentMessage::Tool {
-                                        tool_call_id: tool_call_id.clone(),
-                                        name: String::new(),
-                                        content: String::new(),
-                                        is_error: false,
-                                        terminate,
-                                    },
-                                )
+                                .finish_tool_result(&completion_run_id, &result)
                                 .map_err(|e| e.to_string())
                         })
                     },

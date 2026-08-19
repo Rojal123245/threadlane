@@ -420,6 +420,7 @@ impl HarnessEvent {
                 Record::RunContextCaptured { .. } => "RunContextCaptured",
                 Record::ProviderRequestStarted { .. } => "ProviderRequestStarted",
                 Record::ProviderRequestFinished { .. } => "ProviderRequestFinished",
+                Record::ProviderResponseAttached { .. } => "ProviderResponseAttached",
                 Record::PermissionRequested { .. } => "PermissionRequested",
                 Record::PermissionResolved { .. } => "PermissionResolved",
                 Record::ToolExecutionObserved { .. } => "ToolExecutionObserved",

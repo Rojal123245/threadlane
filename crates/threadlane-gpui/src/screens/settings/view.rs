@@ -50,7 +50,11 @@ pub struct SettingsView {
 }
 
 impl SettingsView {
-    pub(crate) fn new(model: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        model: Entity<AppState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let (openai_key, opencode_key) = {
             let state = model.read(cx);
             (state.openai_key.clone(), state.opencode_key.clone())
@@ -664,8 +668,16 @@ impl SettingsView {
         let (plan_model_id, advisor_model_id, advisor_enabled) = {
             let state = self.model.read(cx);
             (
-                state.model_roles.plan.clone().unwrap_or_else(|| selected_model.clone()),
-                state.model_roles.advisor.clone().unwrap_or_else(|| selected_model.clone()),
+                state
+                    .model_roles
+                    .plan
+                    .clone()
+                    .unwrap_or_else(|| selected_model.clone()),
+                state
+                    .model_roles
+                    .advisor
+                    .clone()
+                    .unwrap_or_else(|| selected_model.clone()),
                 state.model_roles.advisor_enabled,
             )
         };
@@ -757,7 +769,6 @@ impl SettingsView {
             }
             menu
         });
-
 
         let advisor_toggle_model = model.clone();
 

@@ -37,11 +37,11 @@ pub use sqlite::SqliteStore;
 pub use store::{SessionIdGenerator, SessionStore};
 pub use telemetry::{ExecutionContext, NoopTelemetry, TelemetrySink};
 pub use types::{
-    AbortInitiator, AbortObservation, AbortTarget, BoundedText, CapabilitySnapshot, Entry,
-    ErrorCategory, InterruptedSubagentLane, LaneState, LaneStatus, OperationIntent,
-    OperationOutcome, PermissionTraceDecision, PermissionTraceScope, PermissionTraceSource,
-    PromptSnapshot, ProviderErrorSummary, ProviderOutcome, ProvisionedEntry, QueueKind,
-    QueuedEntry, Record, RecoveryResult, ReduceError, ReducedState, RetryState,
+    sanitize_tool_args, AbortInitiator, AbortObservation, AbortTarget, BoundedPromptText,
+    BoundedText, CapabilitySnapshot, Entry, ErrorCategory, InterruptedSubagentLane, LaneState,
+    LaneStatus, OperationIntent, OperationOutcome, PermissionTraceDecision, PermissionTraceScope,
+    PermissionTraceSource, PromptSnapshot, ProviderErrorSummary, ProviderOutcome, ProvisionedEntry,
+    QueueKind, QueuedEntry, Record, RecoveryResult, ReduceError, ReducedState, RetryState,
     StreamCheckpointKind, SubagentLifecyclePhase, ToolExecutionOutcome, ToolExecutionPhase,
     ToolReplaySafety, ToolResult, ToolSpec, ToolState, TraceString, UsageCause,
 };

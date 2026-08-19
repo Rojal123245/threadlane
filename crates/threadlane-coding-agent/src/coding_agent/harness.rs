@@ -177,7 +177,7 @@ impl CodingSessionHarness {
 
     pub(crate) fn append_message_to_path(path: &Path, message: AgentMessage) -> Result<(), String> {
         let mut journal = Self::open(path)?;
-        journal.append_message(message)
+        journal.append_message(message).map(|_| ())
     }
 
     pub(crate) fn capture_run_context(
@@ -250,16 +250,42 @@ impl CodingSessionHarness {
         journal.refresh()?;
         let event = match event {
             ProviderTraceEvent::AssistantReady {
-                reasoning, message, ..
+                attempt,
+                request_id,
+                reasoning,
+                message,
             } => {
-                if let Some(reasoning) = reasoning.filter(|reasoning| !reasoning.trim().is_empty())
+                let reasoning_entry_id = if let Some(reasoning) =
+                    reasoning.filter(|reasoning| !reasoning.trim().is_empty())
                 {
-                    journal.append_message(AgentMessage::Custom {
+                    Some(journal.append_message(AgentMessage::Custom {
                         custom_type: "thinking".into(),
                         payload: serde_json::json!({ "text": reasoning }),
-                    })?;
-                }
-                journal.append_message(message)?;
+                    })?)
+                } else {
+                    None
+                };
+                let entry_id = journal.append_message(message)?;
+                let seq = harness_next_seq(journal.store.store());
+                let record = HarnessRecord::ProviderResponseAttached {
+                    id: format!("provider-response-{run_id}-{request_id}"),
+                    seq,
+                    lane: "main".into(),
+                    timestamp: timestamp(),
+                    run_id: run_id.into(),
+                    attempt,
+                    request_id: Some(TraceString::new(request_id)?),
+                    entry_id,
+                    reasoning_entry_id,
+                };
+                journal
+                    .store
+                    .append_record_gated(record)
+                    .map_err(|error| error.to_string())?;
+                journal
+                    .store
+                    .drive_to_completion()
+                    .map_err(|error| error.to_string())?;
                 return Ok(());
             }
             event => event,
@@ -527,6 +553,15 @@ impl CodingSessionHarness {
         journal
             .append_tool_intent_after_hook(run_id, tool_call_id, tool_name, effective_args)
             .await
+    }
+
+    pub(crate) async fn record_tool_result_to_path(
+        path: &Path,
+        run_id: &str,
+        result: &AgentToolResult,
+    ) -> Result<(), String> {
+        let mut journal = Self::open(path)?;
+        journal.finish_tool_result(run_id, result)
     }
 
     pub(crate) fn start_subagent_lane(
@@ -1208,7 +1243,7 @@ impl CodingSessionHarness {
 
     /// Append a user/assistant/tool message as a harness entry on the main
     /// lane.
-    pub(crate) fn append_message(&mut self, message: AgentMessage) -> Result<(), String> {
+    pub(crate) fn append_message(&mut self, message: AgentMessage) -> Result<String, String> {
         self.append_message_inner(message, true)
     }
 
@@ -1218,7 +1253,7 @@ impl CodingSessionHarness {
     /// occurrence.  It must not apply the legacy last-entry content check,
     /// because two consecutive provider messages can legitimately have the
     /// same serialized value.
-    fn append_synced_message(&mut self, message: AgentMessage) -> Result<(), String> {
+    fn append_synced_message(&mut self, message: AgentMessage) -> Result<String, String> {
         self.append_message_inner(message, false)
     }
 
@@ -1226,16 +1261,14 @@ impl CodingSessionHarness {
         &mut self,
         message: AgentMessage,
         deduplicate_last_entry: bool,
-    ) -> Result<(), String> {
+    ) -> Result<String, String> {
         self.refresh()?;
-        if deduplicate_last_entry
-            && self
-                .store
-                .entries()
-                .last()
-                .is_some_and(|entry| entry.message == message)
-        {
-            return Ok(());
+        if deduplicate_last_entry {
+            if let Some(entry) = self.store.entries().last() {
+                if entry.message == message {
+                    return Ok(entry.id.clone());
+                }
+            }
         }
         let state = Reducer::reduce(&self.store).ok();
         let latest_main_entry = || {
@@ -1301,7 +1334,7 @@ impl CodingSessionHarness {
         };
         self.store
             .append_entry_gated(HarnessEntry {
-                id,
+                id: id.clone(),
                 parent_id,
                 lane: "main".into(),
                 seq,
@@ -1312,7 +1345,8 @@ impl CodingSessionHarness {
             .map_err(|error| error.to_string())?;
         self.store
             .drive_to_completion()
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        Ok(id)
     }
 
     /// Append a message to a named lane (used for subagent results).
@@ -1682,6 +1716,30 @@ impl CodingSessionHarness {
                     content: content.clone(),
                     is_error: *is_error,
                     terminate: *terminate,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        self.store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())
+    }
+
+    /// Finish a freshly executed tool result: record the tool result Entry, ToolFinished, and drive effects.
+    pub(crate) fn finish_tool_result(
+        &mut self,
+        run_id: &str,
+        result: &AgentToolResult,
+    ) -> Result<(), String> {
+        self.refresh()?;
+        self.store
+            .finish_tool(
+                run_id,
+                HarnessToolResult {
+                    call_id: result.tool_call_id.clone(),
+                    name: result.name.clone(),
+                    content: result.content.clone(),
+                    is_error: result.is_error,
+                    terminate: result.terminates(),
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -2238,6 +2296,7 @@ impl CodingSessionHarness {
     /// in the harness store.  Called after each turn to ensure the
     /// canonical session path captures all assistant/tool entries.
     pub(crate) fn sync_messages(&mut self, messages: &[AgentMessage]) -> Result<(), String> {
+        self.refresh()?;
         // The provider gives us the complete conversation, not stable entry
         // IDs.  Track occurrences rather than using a set: two turns can
         // legitimately produce byte-for-byte identical assistant messages,
@@ -2267,20 +2326,29 @@ impl CodingSessionHarness {
             }
             if let AgentMessage::Tool { tool_call_id, .. } = msg {
                 self.refresh()?;
-                let unfinished_run_id =
+                let unfinished_tool =
                     Reducer::reduce(self.store.store()).ok().and_then(|state| {
                         let lane = state.lane("main")?;
                         let run_id = lane.open_operation.as_deref()?;
-                        lane.tools
-                            .iter()
-                            .any(|tool| {
-                                tool.run_id == run_id
-                                    && tool.tool_call_id == *tool_call_id
-                                    && !tool.completed
-                            })
-                            .then(|| run_id.to_owned())
+                        lane.tools.iter().find_map(|tool| {
+                            (tool.run_id == run_id
+                                && tool.tool_call_id == *tool_call_id
+                                && !tool.completed)
+                                .then(|| (run_id.to_owned(), tool.result_entry_id.clone()))
+                        })
                     });
-                if let Some(run_id) = unfinished_run_id {
+                if let Some((run_id, result_entry_id)) = unfinished_tool {
+                    // ToolStarted may be durable while its result entry is
+                    // not, if the process was interrupted between those
+                    // writes. Recreate the entry before closing the intent.
+                    if !self
+                        .store
+                        .entries()
+                        .iter()
+                        .any(|entry| entry.id == result_entry_id)
+                    {
+                        self.append_synced_message(msg.clone())?;
+                    }
                     self.finish_tool_message(&run_id, msg)?;
                     continue;
                 }
@@ -2829,6 +2897,61 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn sync_messages_repairs_a_tool_intent_without_its_result_entry() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        let run_id = harness.unique_run_id("test").unwrap();
+        harness
+            .begin_run(&run_id, AgentMessage::user("inspect", vec![]))
+            .unwrap();
+
+        harness
+            .append_message(AgentMessage::Assistant {
+                content: None,
+                tool_calls: Some(vec![threadlane_provider::openai::ToolCall {
+                    id: "call-1".into(),
+                    r#type: "function".into(),
+                    function: threadlane_provider::openai::ToolCallFunction {
+                        name: "read_file".into(),
+                        arguments: "{\"path\":\"README.md\"}".into(),
+                    },
+                    thought_signature: None,
+                }]),
+                stop_reason: None,
+                deferred_handle: None,
+            })
+            .unwrap();
+        harness
+            .append_tool_intent(
+                &run_id,
+                "call-1",
+                "read_file",
+                serde_json::json!({"path": "README.md"}),
+            )
+            .await
+            .unwrap();
+
+        let result = AgentMessage::Tool {
+            tool_call_id: "call-1".into(),
+            name: "read_file".into(),
+            content: "contents".into(),
+            is_error: false,
+            terminate: false,
+        };
+        harness.sync_messages(&[result.clone()]).unwrap();
+
+        let state = Reducer::reduce(&harness.store).unwrap();
+        assert!(state
+            .lane("main")
+            .unwrap()
+            .tools
+            .iter()
+            .find(|tool| tool.tool_call_id == "call-1")
+            .unwrap()
+            .completed);
+    }
+
     #[test]
     fn sync_messages_persists_provider_visible_queued_user_messages() {
         let (_dir, path) = temp_session();
@@ -3032,5 +3155,58 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn assistant_ready_persists_provider_response_attached_record() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        let run_id = harness.unique_run_id("test").unwrap();
+        harness
+            .begin_run(&run_id, AgentMessage::user("test prompt", vec![]))
+            .unwrap();
+
+        CodingSessionHarness::record_provider_trace_to_path(
+            &path,
+            &run_id,
+            ProviderTraceEvent::AssistantReady {
+                attempt: 1,
+                request_id: "req-123".into(),
+                reasoning: Some("deep thinking".into()),
+                message: AgentMessage::Assistant {
+                    content: Some("final answer".into()),
+                    tool_calls: None,
+                    stop_reason: None,
+                    deferred_handle: None,
+                },
+            },
+        )
+        .unwrap();
+
+        let updated_harness = CodingSessionHarness::open(&path).unwrap();
+        let response_record = updated_harness
+            .store
+            .records()
+            .iter()
+            .find(|record| matches!(record, HarnessRecord::ProviderResponseAttached { .. }))
+            .expect("must record ProviderResponseAttached");
+
+        if let HarnessRecord::ProviderResponseAttached {
+            run_id: rec_run_id,
+            attempt,
+            request_id,
+            entry_id,
+            reasoning_entry_id,
+            ..
+        } = response_record
+        {
+            assert_eq!(rec_run_id, &run_id);
+            assert_eq!(*attempt, 1);
+            assert_eq!(request_id.as_ref().map(|r| r.as_str()), Some("req-123"));
+            assert!(!entry_id.is_empty());
+            assert!(reasoning_entry_id.is_some());
+        } else {
+            panic!("expected ProviderResponseAttached");
+        }
     }
 }

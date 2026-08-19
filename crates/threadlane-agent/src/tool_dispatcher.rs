@@ -278,7 +278,7 @@ impl ToolDispatcher {
                     let Some(result) = slots[index].as_mut() else {
                         continue;
                     };
-                    if let Err(error) = recorder(&result.tool_call_id, result.terminate).await {
+                    if let Err(error) = recorder(result).await {
                         result.content = error;
                         result.is_error = true;
                     }
@@ -327,7 +327,7 @@ impl ToolDispatcher {
         match result {
             Ok(mut result) => {
                 if let Some(recorder) = &self.tool_completion_recorder {
-                    if let Err(error) = recorder(&result.tool_call_id, result.terminate).await {
+                    if let Err(error) = recorder(&result).await {
                         result.content = error;
                         result.is_error = true;
                     }

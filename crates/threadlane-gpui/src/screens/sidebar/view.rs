@@ -292,18 +292,19 @@ impl SidebarView {
             Some(
                 div()
                     .flex()
+                    .flex_none()
                     .items_center()
                     .gap_1()
                     .px_1p5()
                     .py_0p5()
                     .rounded_full()
-                    .bg(theme.accent.opacity(0.15))
+                    .bg(theme.primary.opacity(0.15))
                     .child(gpui_component::spinner::Spinner::new().xsmall())
                     .child(
                         div()
                             .text_xs()
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.accent)
+                            .text_color(theme.primary)
                             .child("Running"),
                     )
                     .into_any_element(),
@@ -430,6 +431,7 @@ impl SidebarView {
                     .child(
                         div()
                             .flex()
+                            .flex_none()
                             .items_center()
                             .gap_1()
                             .children(status_indicator)

@@ -72,7 +72,9 @@ pub fn available_models() -> Vec<ModelOption> {
     available_models_for_project(None)
 }
 
-pub(crate) fn available_models_for_project(project_root: Option<&std::path::Path>) -> Vec<ModelOption> {
+pub(crate) fn available_models_for_project(
+    project_root: Option<&std::path::Path>,
+) -> Vec<ModelOption> {
     let mut models = models_for_credentials(
         has_openai_credentials(),
         threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some(),
@@ -163,7 +165,10 @@ pub fn is_available(model_id: &str) -> bool {
     is_available_for_project(model_id, None)
 }
 
-pub(crate) fn is_available_for_project(model_id: &str, project_root: Option<&std::path::Path>) -> bool {
+pub(crate) fn is_available_for_project(
+    model_id: &str,
+    project_root: Option<&std::path::Path>,
+) -> bool {
     available_option_for_project(model_id, project_root).is_some()
 }
 
@@ -234,8 +239,14 @@ mod tests {
 
     #[test]
     fn context_window_and_token_formatting() {
-        assert_eq!(model_context_window("antigravity/gemini-3.7-flash"), 1_000_000);
-        assert_eq!(model_context_window("antigravity/gemini-3.1-pro"), 2_000_000);
+        assert_eq!(
+            model_context_window("antigravity/gemini-3.7-flash"),
+            1_000_000
+        );
+        assert_eq!(
+            model_context_window("antigravity/gemini-3.1-pro"),
+            2_000_000
+        );
         assert_eq!(format_tokens(850), "850");
         assert_eq!(format_tokens(24_500), "24.5k");
         assert_eq!(format_tokens(1_000_000), "1.0M");

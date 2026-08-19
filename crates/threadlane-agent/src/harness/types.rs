@@ -75,12 +75,75 @@ impl<'de> Deserialize<'de> for BoundedText {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BoundedPromptText(String);
+
+impl BoundedPromptText {
+    pub const MAX_BYTES: usize = 256 * 1024;
+
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        if value.len() > Self::MAX_BYTES {
+            Err(format!(
+                "prompt text exceeds {} byte limit: got {} bytes",
+                Self::MAX_BYTES,
+                value.len()
+            ))
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl std::ops::Deref for BoundedPromptText {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl AsRef<str> for BoundedPromptText {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for BoundedPromptText {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if value.len() > Self::MAX_BYTES {
+            return Err(D::Error::custom(format!(
+                "prompt text exceeds {} byte limit: got {} bytes",
+                Self::MAX_BYTES,
+                value.len()
+            )));
+        }
+        Ok(Self(value))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PromptSnapshot {
     Full {
         /// Deliberately captured resolved system prompt. Producers must apply
         /// their configured redaction policy before constructing this variant.
-        content: String,
+        content: BoundedPromptText,
         sha256: TraceString,
     },
     Redacted {
@@ -512,6 +575,17 @@ pub enum Record {
         duration_ms: Option<u64>,
         usage: Option<TokenUsage>,
     },
+    ProviderResponseAttached {
+        id: String,
+        seq: u64,
+        lane: String,
+        timestamp: u64,
+        run_id: String,
+        attempt: u32,
+        request_id: Option<TraceString>,
+        entry_id: String,
+        reasoning_entry_id: Option<String>,
+    },
     PermissionRequested {
         id: String,
         seq: u64,
@@ -588,6 +662,10 @@ pub enum Record {
         result_entry_id: Option<TraceString>,
         error: Option<TraceString>,
     },
+    /// Observational snapshot of an active streaming provider response.
+    /// Checkpoints are purely observational telemetry for progress tracking and UI telemetry;
+    /// they are NOT model-visible, NOT replayable context, and do not reconstruct partial turns.
+    /// The final committed assistant entry remains the authoritative model record.
     StreamCheckpoint {
         id: String,
         seq: u64,
@@ -922,6 +1000,12 @@ impl Record {
                 }
                 record
             }
+            mut record @ Self::ProviderResponseAttached { .. } => {
+                if let Self::ProviderResponseAttached { seq: current, .. } = &mut record {
+                    *current = seq;
+                }
+                record
+            }
             mut record @ Self::PermissionRequested { .. } => {
                 if let Self::PermissionRequested { seq: current, .. } = &mut record {
                     *current = seq;
@@ -983,6 +1067,7 @@ impl Record {
             | Self::RunContextCaptured { id, .. }
             | Self::ProviderRequestStarted { id, .. }
             | Self::ProviderRequestFinished { id, .. }
+            | Self::ProviderResponseAttached { id, .. }
             | Self::PermissionRequested { id, .. }
             | Self::PermissionResolved { id, .. }
             | Self::ToolExecutionObserved { id, .. }
@@ -1014,6 +1099,7 @@ impl Record {
             | Self::RunContextCaptured { seq, .. }
             | Self::ProviderRequestStarted { seq, .. }
             | Self::ProviderRequestFinished { seq, .. }
+            | Self::ProviderResponseAttached { seq, .. }
             | Self::PermissionRequested { seq, .. }
             | Self::PermissionResolved { seq, .. }
             | Self::ToolExecutionObserved { seq, .. }
@@ -1045,6 +1131,7 @@ impl Record {
             | Self::RunContextCaptured { lane, .. }
             | Self::ProviderRequestStarted { lane, .. }
             | Self::ProviderRequestFinished { lane, .. }
+            | Self::ProviderResponseAttached { lane, .. }
             | Self::PermissionRequested { lane, .. }
             | Self::PermissionResolved { lane, .. }
             | Self::ToolExecutionObserved { lane, .. }
@@ -1072,6 +1159,7 @@ impl Record {
             Self::RunContextCaptured { run_id, .. }
             | Self::ProviderRequestStarted { run_id, .. }
             | Self::ProviderRequestFinished { run_id, .. }
+            | Self::ProviderResponseAttached { run_id, .. }
             | Self::ToolExecutionObserved { run_id, .. }
             | Self::AbortObserved { run_id, .. }
             | Self::StreamCheckpoint { run_id, .. } => Some(run_id),
@@ -1099,9 +1187,50 @@ impl Record {
             | Self::SubagentLifecycle { attempt, .. }
             | Self::StreamCheckpoint { attempt, .. } => *attempt,
             Self::ProviderRequestStarted { attempt, .. }
-            | Self::ProviderRequestFinished { attempt, .. } => Some(*attempt),
+            | Self::ProviderRequestFinished { attempt, .. }
+            | Self::ProviderResponseAttached { attempt, .. } => Some(*attempt),
             _ => None,
         }
+    }
+}
+
+/// Redact secret values and bound oversized payload fields in tool arguments
+/// before persisting them to durable traces.
+pub fn sanitize_tool_args(value: &Value) -> Value {
+    const MAX_FIELD_BYTES: usize = 64 * 1024;
+    match value {
+        Value::Object(map) => {
+            let mut sanitized = serde_json::Map::with_capacity(map.len());
+            for (key, val) in map {
+                let lower = key.to_ascii_lowercase();
+                if lower.contains("token")
+                    || lower.contains("secret")
+                    || lower.contains("password")
+                    || lower.contains("api_key")
+                    || lower.contains("credential")
+                    || lower.contains("auth")
+                    || lower.contains("private_key")
+                {
+                    sanitized.insert(key.clone(), Value::String("[REDACTED]".into()));
+                } else {
+                    sanitized.insert(key.clone(), sanitize_tool_args(val));
+                }
+            }
+            Value::Object(sanitized)
+        }
+        Value::Array(list) => Value::Array(list.iter().map(sanitize_tool_args).collect()),
+        Value::String(s) => {
+            if s.len() > MAX_FIELD_BYTES {
+                let mut end = MAX_FIELD_BYTES;
+                while !s.is_char_boundary(end) {
+                    end -= 1;
+                }
+                Value::String(format!("{}[TRUNCATED {} BYTES]", &s[..end], s.len() - end))
+            } else {
+                Value::String(s.clone())
+            }
+        }
+        other => other.clone(),
     }
 }
 

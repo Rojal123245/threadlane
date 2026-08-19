@@ -54,6 +54,7 @@ pub(crate) struct PermissionManager {
 }
 
 struct PermissionManagerInner {
+    session_prefix: String,
     interactive: AtomicBool,
     next_id: AtomicU64,
     pending: Mutex<HashMap<String, oneshot::Sender<PermissionDecision>>>,
@@ -62,10 +63,14 @@ struct PermissionManagerInner {
     trace_recorder: Mutex<Option<PermissionTraceRecorder>>,
 }
 
-#[derive(Default, Deserialize, Serialize)]
-struct PersistentPermissions {
+/// Persistent permissions remembered across agent runs and restarts.
+///
+/// Persistent grants are currently capability-scoped to network host connections.
+/// Filesystem, execution, and environment capabilities are scoped to the active session.
+#[derive(Default, Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct PersistentPermissions {
     #[serde(default)]
-    network_hosts: HashSet<String>,
+    pub network_hosts: HashSet<String>,
 }
 
 impl PermissionManager {
@@ -73,10 +78,24 @@ impl PermissionManager {
         project_root: PathBuf,
         event_tx: tokio::sync::broadcast::Sender<AgentEvent>,
     ) -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let session_prefix = format!("{}-{:x}", std::process::id(), nanos);
+        Self::with_session_prefix(project_root, session_prefix, event_tx)
+    }
+
+    pub(crate) fn with_session_prefix(
+        project_root: PathBuf,
+        session_prefix: impl Into<String>,
+        event_tx: tokio::sync::broadcast::Sender<AgentEvent>,
+    ) -> Self {
         let persistent = load_permissions(&project_root);
         Self {
             handle: PermissionHandle {
                 inner: Arc::new(PermissionManagerInner {
+                    session_prefix: session_prefix.into(),
                     interactive: AtomicBool::new(false),
                     next_id: AtomicU64::new(1),
                     pending: Mutex::new(HashMap::new()),
@@ -91,6 +110,14 @@ impl PermissionManager {
 
     pub(crate) fn handle(&self) -> PermissionHandle {
         self.handle.clone()
+    }
+
+    fn generate_request_id(&self) -> String {
+        format!(
+            "permission-{}-{}",
+            self.handle.inner.session_prefix,
+            self.handle.inner.next_id.fetch_add(1, Ordering::Relaxed)
+        )
     }
 
     pub(crate) fn network_host_is_approved(&self, host: &str) -> bool {
@@ -120,10 +147,7 @@ impl PermissionManager {
         url: &str,
         persisted: bool,
     ) -> Result<(), String> {
-        let id = format!(
-            "permission-{}",
-            self.handle.inner.next_id.fetch_add(1, Ordering::Relaxed)
-        );
+        let id = self.generate_request_id();
         let source = if persisted {
             threadlane_agent::harness::PermissionTraceSource::PersistedGrant
         } else {
@@ -153,10 +177,7 @@ impl PermissionManager {
     }
 
     pub(crate) async fn request_network_host(&self, host: &str, url: &str) -> PermissionDecision {
-        let id = format!(
-            "permission-{}",
-            self.handle.inner.next_id.fetch_add(1, Ordering::Relaxed)
-        );
+        let id = self.generate_request_id();
         let interactive = self.handle.inner.interactive.load(Ordering::SeqCst);
         let requested = PermissionTraceEvent::Requested {
             request_id: id.clone(),
@@ -319,8 +340,36 @@ fn save_permissions(
         .parent()
         .ok_or_else(|| "permission settings path has no parent".to_string())?;
     fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+
+    if let Ok(metadata) = fs::symlink_metadata(&path) {
+        if metadata.file_type().is_symlink() {
+            return Err("refusing to follow symlink for permissions file".to_string());
+        }
+    }
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let temp_path = parent.join(format!(
+        ".permissions.json.tmp.{}-{nanos}",
+        std::process::id()
+    ));
+
     let bytes = serde_json::to_vec_pretty(permissions).map_err(|error| error.to_string())?;
-    fs::write(path, bytes).map_err(|error| error.to_string())
+    fs::write(&temp_path, &bytes).map_err(|error| error.to_string())?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o600));
+    }
+
+    if let Err(error) = fs::rename(&temp_path, &path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error.to_string());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -413,5 +462,46 @@ mod tests {
         let (event_tx, _) = tokio::sync::broadcast::channel(1);
         let restored = PermissionManager::new(dir.path().to_path_buf(), event_tx);
         assert!(restored.network_host_is_approved("example.com"));
+    }
+
+    #[tokio::test]
+    async fn permission_ids_are_session_scoped_and_unique_across_managers() {
+        let dir = tempdir().unwrap();
+        let (event_tx1, _) = tokio::sync::broadcast::channel(4);
+        let (event_tx2, _) = tokio::sync::broadcast::channel(4);
+        let manager1 = PermissionManager::new(dir.path().to_path_buf(), event_tx1);
+        let manager2 = PermissionManager::new(dir.path().to_path_buf(), event_tx2);
+
+        let id1 = manager1.generate_request_id();
+        let id2 = manager1.generate_request_id();
+        let id3 = manager2.generate_request_id();
+
+        assert_ne!(id1, id2);
+        assert_ne!(id1, id3);
+        assert!(id1.starts_with("permission-"));
+        assert!(id3.starts_with("permission-"));
+    }
+
+    #[test]
+    fn save_permissions_rejects_symlink_destination() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let permissions_dir = root.join(".threadlane");
+        fs::create_dir_all(&permissions_dir).unwrap();
+        let target_file = root.join("other_file.json");
+        fs::write(&target_file, "{}").unwrap();
+
+        let symlink_path = permissions_dir.join("permissions.json");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target_file, &symlink_path).unwrap();
+
+        #[cfg(unix)]
+        {
+            let mut permissions = PersistentPermissions::default();
+            permissions.network_hosts.insert("bad.com".into());
+            let result = save_permissions(root, &permissions);
+            assert!(result.is_err());
+            assert!(result.unwrap_err().contains("symlink"));
+        }
     }
 }

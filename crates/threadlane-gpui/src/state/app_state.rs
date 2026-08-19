@@ -1329,6 +1329,13 @@ impl AppState {
         Ok(session_id)
     }
 
+    /// Hydrates trajectory, token usage, and metrics projections from durable harness records.
+    ///
+    /// Architecture Invariant:
+    /// - The trajectory timeline is an auditable session-wide / run-level projection over the
+    ///   complete chronological harness records (operations, tool executions, provider calls, and permissions).
+    /// - The chat message view reflects conversational turns on the active session branch.
+    /// - Streaming checkpoints and trace observations are non-replayable and observational.
     fn hydrate_session_projection(
         &mut self,
         session_id: &str,
@@ -1571,6 +1578,32 @@ impl AppState {
                         correlation_id: request_id.as_ref().map(|id| id.as_str().to_owned()),
                     })
                 }
+                Record::ProviderResponseAttached {
+                    seq,
+                    lane,
+                    run_id,
+                    attempt,
+                    request_id,
+                    entry_id,
+                    reasoning_entry_id,
+                    ..
+                } => Some(TrajectoryEntry {
+                    seq: Some(*seq),
+                    run_id: Some(run_id.clone()),
+                    turn: Some(*attempt),
+                    category: "Provider".into(),
+                    summary: "Provider response attached".into(),
+                    detail: format!(
+                        "entry {}{}",
+                        entry_id,
+                        reasoning_entry_id
+                            .as_deref()
+                            .map(|id| format!(", thinking {id}"))
+                            .unwrap_or_default()
+                    ),
+                    lane: Some(lane.clone()),
+                    correlation_id: request_id.as_ref().map(|id| id.as_str().to_owned()),
+                }),
                 Record::PermissionRequested {
                     seq,
                     lane,
@@ -2465,6 +2498,9 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use threadlane_agent::harness::{
+        OperationIntent, OperationOutcome, ProviderOutcome, Record, SessionStore, TraceString,
+    };
 
     #[test]
     fn persisted_thinking_message_projects_as_reasoning_content() {
@@ -3356,6 +3392,202 @@ mod tests {
         assert_eq!(older.first().unwrap().content, "message-0");
         assert_eq!(older_start, 0);
         assert!(!has_more);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn startup_hydration_from_project_registry_populates_all_views() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let project_root = std::env::temp_dir().join(format!(
+            "threadlane-gpui-startup-test-{}-{unique}",
+            std::process::id()
+        ));
+        let sessions_dir = project_root.join(".threadlane").join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        let session_file = sessions_dir.join("session_1001.jsonl");
+        let mut tree = SessionTree::new("Startup Project");
+        tree.file_path = Some(session_file.clone());
+        tree.add_message(AgentMessage::User {
+            content: "Hello on startup".into(),
+        });
+        tree.add_message(AgentMessage::Assistant {
+            content: Some("I am ready".into()),
+            tool_calls: None,
+            stop_reason: None,
+            deferred_handle: None,
+        });
+
+        let mut store = threadlane_agent::harness::JsonlStore::open(&session_file).unwrap();
+        store
+            .append_record(Record::OperationStarted {
+                id: "run-start-1".into(),
+                seq: 10,
+                lane: "main".into(),
+                timestamp: 10,
+                source_leaf_id: None,
+                intent: OperationIntent::Run,
+            })
+            .unwrap();
+        store
+            .append_record(Record::ProviderRequestFinished {
+                id: "finish-1".into(),
+                seq: 11,
+                lane: "main".into(),
+                timestamp: 11,
+                run_id: "run-start-1".into(),
+                attempt: 1,
+                request_id: Some(TraceString::new("req-1").unwrap()),
+                outcome: ProviderOutcome::Completed,
+                error: None,
+                duration_ms: Some(100),
+                usage: Some(TokenUsage {
+                    total_tokens: 42,
+                    input_tokens: 30,
+                    output_tokens: 12,
+                    ..Default::default()
+                }),
+            })
+            .unwrap();
+
+        let mut attached_project = AttachedProject::from_path(project_root.clone());
+        attached_project.last_opened_at = 1_000_000;
+
+        let state = AppState::load_from_registry(vec![attached_project]);
+
+        assert_eq!(state.active_session_id.as_deref(), Some("session_1001"));
+        assert_eq!(state.messages.len(), 2);
+        assert_eq!(state.messages[0].content, "Hello on startup");
+        assert_eq!(state.messages[1].content, "I am ready");
+
+        let trajectory = state
+            .trajectory_by_session
+            .get("session_1001")
+            .expect("trajectory must be hydrated on startup");
+        assert!(!trajectory.is_empty());
+        assert!(trajectory.iter().any(|t| t.category == "Operation"));
+        assert!(trajectory.iter().any(|t| t.category == "Provider"));
+
+        let usage = state
+            .session_token_usage
+            .get("session_1001")
+            .expect("token usage must be hydrated on startup");
+        assert_eq!(usage.total_tokens, 42);
+
+        let metrics = state
+            .session_metrics
+            .get("session_1001")
+            .expect("session metrics must be hydrated on startup");
+        assert_eq!(metrics.input_tokens, 30);
+        assert_eq!(metrics.output_tokens, 12);
+
+        let _ = std::fs::remove_dir_all(project_root);
+    }
+
+    #[test]
+    fn branch_consistency_trajectory_is_session_wide_audit_log_while_chat_is_active_branch() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "threadlane-gpui-branch-test-{}-{unique}",
+            std::process::id()
+        ));
+        let path = root.join("session.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        let mut tree = SessionTree::new("Branch Test");
+        tree.file_path = Some(path.clone());
+        let root_msg = tree.add_message(AgentMessage::User {
+            content: "Root question".into(),
+        });
+        let _branch_a = tree.add_message(AgentMessage::Assistant {
+            content: Some("Branch A answer".into()),
+            tool_calls: None,
+            stop_reason: None,
+            deferred_handle: None,
+        });
+
+        tree.switch_active_node(&root_msg);
+        let _branch_b = tree.add_message(AgentMessage::Assistant {
+            content: Some("Branch B alternative answer".into()),
+            tool_calls: None,
+            stop_reason: None,
+            deferred_handle: None,
+        });
+
+        let mut store = threadlane_agent::harness::JsonlStore::open(&path).unwrap();
+        store
+            .append_record(Record::OperationStarted {
+                id: "run-branch-a".into(),
+                seq: 1,
+                lane: "main".into(),
+                timestamp: 1,
+                source_leaf_id: None,
+                intent: OperationIntent::Run,
+            })
+            .unwrap();
+        store
+            .append_record(Record::OperationFinished {
+                id: "finish-branch-a".into(),
+                seq: 2,
+                lane: "main".into(),
+                timestamp: 2,
+                run_id: "run-branch-a".into(),
+                outcome: OperationOutcome::Completed,
+                error: None,
+            })
+            .unwrap();
+        store
+            .append_record(Record::OperationStarted {
+                id: "run-branch-b".into(),
+                seq: 3,
+                lane: "main".into(),
+                timestamp: 3,
+                source_leaf_id: None,
+                intent: OperationIntent::Run,
+            })
+            .unwrap();
+        store
+            .append_record(Record::OperationFinished {
+                id: "finish-branch-b".into(),
+                seq: 4,
+                lane: "main".into(),
+                timestamp: 4,
+                run_id: "run-branch-b".into(),
+                outcome: OperationOutcome::Completed,
+                error: None,
+            })
+            .unwrap();
+
+        let mut state = AppState::load_from_registry(Vec::new());
+        state
+            .hydrate_session_projection("branch-session", &path)
+            .unwrap();
+
+        let branch_messages = tree.get_active_branch_messages();
+        assert_eq!(branch_messages.len(), 2);
+        assert!(matches!(
+            &branch_messages[0],
+            AgentMessage::User { content } if content == "Root question"
+        ));
+        assert!(matches!(
+            &branch_messages[1],
+            AgentMessage::Assistant { content, .. } if content.as_deref() == Some("Branch B alternative answer")
+        ));
+
+        let trajectory = state.trajectory_by_session.get("branch-session").unwrap();
+        assert!(trajectory
+            .iter()
+            .any(|t| t.run_id.as_deref() == Some("run-branch-a")));
+        assert!(trajectory
+            .iter()
+            .any(|t| t.run_id.as_deref() == Some("run-branch-b")));
 
         let _ = std::fs::remove_dir_all(root);
     }

@@ -242,7 +242,11 @@ pub fn inspect(work_dir: &Path) -> Result<GitStatus, GitError> {
     .map(str::to_owned)
     .collect();
     if let Some(current_branch) = status.branch.as_ref() {
-        if !status.branches.iter().any(|branch| branch == current_branch) {
+        if !status
+            .branches
+            .iter()
+            .any(|branch| branch == current_branch)
+        {
             status.branches.push(current_branch.clone());
         }
     }
@@ -340,7 +344,10 @@ pub fn atomic_commit_groups(work_dir: &Path) -> Result<Vec<Vec<String>>, GitErro
 /// Stages and commits each planned atomic group. If any group fails, newly
 /// staged paths are reset so a caller can review and retry without an accidental
 /// combined commit. Previously created commits are intentionally retained.
-pub fn commit_atomic_groups(work_dir: &Path, message_prefix: &str) -> Result<Vec<Vec<String>>, GitError> {
+pub fn commit_atomic_groups(
+    work_dir: &Path,
+    message_prefix: &str,
+) -> Result<Vec<Vec<String>>, GitError> {
     let groups = atomic_commit_groups(work_dir)?;
     if groups.is_empty() {
         return Ok(groups);
@@ -362,7 +369,11 @@ pub fn commit_atomic_groups(work_dir: &Path, message_prefix: &str) -> Result<Vec
         }
         if let Err(error) = command(
             work_dir,
-            &["commit", "-m", &format!("{prefix} ({}/{})", index + 1, groups.len())],
+            &[
+                "commit",
+                "-m",
+                &format!("{prefix} ({}/{})", index + 1, groups.len()),
+            ],
         ) {
             let _ = command(work_dir, &["reset"]);
             return Err(error);
@@ -695,7 +706,12 @@ mod tests {
         std::fs::write(dir.path().join("second.rs"), "fn second() {}\n").unwrap();
         let groups = commit_atomic_groups(dir.path(), "atomic changes").unwrap();
         assert_eq!(groups.len(), 2);
-        assert_eq!(command(dir.path(), &["rev-list", "--count", "HEAD"]).unwrap().trim(), "3");
+        assert_eq!(
+            command(dir.path(), &["rev-list", "--count", "HEAD"])
+                .unwrap()
+                .trim(),
+            "3"
+        );
         assert!(!inspect(dir.path()).unwrap().has_changes);
     }
 

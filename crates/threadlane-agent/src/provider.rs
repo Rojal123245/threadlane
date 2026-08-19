@@ -9,7 +9,7 @@
 //! and are also re-exported from `loop_engine` for backward compatibility.
 
 use crate::compaction::compaction_summary_text;
-use crate::types::{AgentMessage, AgentToolDefinition, TokenUsage, TurnState};
+use crate::types::{AgentMessage, AgentToolDefinition, AgentToolResult, TokenUsage, TurnState};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::fmt;
@@ -472,7 +472,9 @@ pub type ToolIntentRecorder = Arc<
 >;
 
 pub type ToolCompletionRecorder = Arc<
-    dyn Fn(&str, bool) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync,
+    dyn Fn(&AgentToolResult) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>
+        + Send
+        + Sync,
 >;
 
 #[derive(Debug, Clone)]

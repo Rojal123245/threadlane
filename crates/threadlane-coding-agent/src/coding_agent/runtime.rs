@@ -82,7 +82,8 @@ fn durable_prompt_snapshot(content: &str) -> PromptSnapshot {
         }
     } else {
         PromptSnapshot::Full {
-            content: content.into(),
+            content: threadlane_agent::harness::BoundedPromptText::new(content)
+                .expect("system prompt is within byte limit"),
             sha256,
         }
     }
@@ -805,6 +806,16 @@ impl CodingAgent {
             let run_id = tool_run_id.clone();
             Box::pin(async move {
                 HarnessJournal::record_tool_execution_to_path(&path, &run_id, event).await
+            })
+        }));
+        let completion_path = path.clone();
+        let completion_run_id = run_id.clone();
+        self.agent.tool_dispatcher.tool_completion_recorder = Some(Arc::new(move |result| {
+            let path = completion_path.clone();
+            let run_id = completion_run_id.clone();
+            let result = result.clone();
+            Box::pin(async move {
+                HarnessJournal::record_tool_result_to_path(&path, &run_id, &result).await
             })
         }));
         self.permission_handle
@@ -1844,8 +1855,11 @@ impl CodingAgent {
         if harness_persists_messages {
             let durable_messages = self
                 .harness
-                .as_ref()
-                .and_then(|harness| harness.store.model_history("main").ok())
+                .as_mut()
+                .and_then(|harness| {
+                    let _ = harness.refresh();
+                    harness.store.model_history("main").ok()
+                })
                 .map(|entries| {
                     entries
                         .into_iter()

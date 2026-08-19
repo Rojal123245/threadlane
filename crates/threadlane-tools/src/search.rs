@@ -10,7 +10,9 @@ pub fn grep_search(root: &Path, pattern: &str, glob: Option<&str>) -> Result<Str
     files.sort();
     let mut output = Vec::new();
     for path in files {
-        let Ok(content) = fs::read_to_string(&path) else { continue };
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
         for (index, line) in content.lines().enumerate() {
             if line.contains(pattern) {
                 let relative = path.strip_prefix(root).unwrap_or(&path).display();
@@ -25,8 +27,14 @@ pub fn grep_search(root: &Path, pattern: &str, glob: Option<&str>) -> Result<Str
     })
 }
 
-fn collect_files(root: &Path, current: &Path, glob: Option<&str>, out: &mut Vec<PathBuf>) -> Result<(), String> {
-    let entries = fs::read_dir(current).map_err(|e| format!("failed to read {}: {e}", current.display()))?;
+fn collect_files(
+    root: &Path,
+    current: &Path,
+    glob: Option<&str>,
+    out: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    let entries =
+        fs::read_dir(current).map_err(|e| format!("failed to read {}: {e}", current.display()))?;
     for entry in entries {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
@@ -80,12 +88,18 @@ mod tests {
     fn warm_run_benchmark(root: &std::path::Path, pattern: &str) -> SearchBenchmark {
         // Warm filesystem and executable caches outside the measurements.
         let _ = grep_search(root, pattern, None).unwrap();
-        let _ = Command::new("rg").args(["--", pattern, "."]).current_dir(root).output();
+        let _ = Command::new("rg")
+            .args(["--", pattern, "."])
+            .current_dir(root)
+            .output();
         let start = Instant::now();
         let in_process = grep_search(root, pattern, None).unwrap();
         let in_process_elapsed = start.elapsed();
         let rg_start = Instant::now();
-        let rg = Command::new("rg").args(["--", pattern, "."]).current_dir(root).output();
+        let rg = Command::new("rg")
+            .args(["--", pattern, "."])
+            .current_dir(root)
+            .output();
         let rg_elapsed = rg_start.elapsed();
         let (rg, rg_matches) = match rg {
             Ok(output) if output.status.success() => {
@@ -97,7 +111,10 @@ mod tests {
         SearchBenchmark {
             in_process: in_process_elapsed,
             rg,
-            in_process_matches: in_process.lines().filter(|line| *line != "No matches found.").count(),
+            in_process_matches: in_process
+                .lines()
+                .filter(|line| *line != "No matches found.")
+                .count(),
             rg_matches,
         }
     }

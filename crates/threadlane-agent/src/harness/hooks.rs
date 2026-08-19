@@ -243,7 +243,10 @@ impl HookRegistry {
             .remove(hook_id);
     }
 
-    pub(crate) fn restore_resume_data(&self, persisted: &std::collections::BTreeMap<String, String>) {
+    pub(crate) fn restore_resume_data(
+        &self,
+        persisted: &std::collections::BTreeMap<String, String>,
+    ) {
         let hooks = self
             .state
             .hooks

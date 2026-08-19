@@ -10,11 +10,11 @@ fn read_virtual_agent(root: &Path, name: &str) -> String {
     virtual_read::agent(root, name)
 }
 
-use std::sync::{Mutex, OnceLock};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 
 fn tool_definitions() -> Vec<Value> {
     vec![
@@ -327,7 +327,8 @@ struct EditProposal {
 }
 
 fn proposals() -> &'static Mutex<std::collections::HashMap<String, EditProposal>> {
-    static PROPOSALS: OnceLock<Mutex<std::collections::HashMap<String, EditProposal>>> = OnceLock::new();
+    static PROPOSALS: OnceLock<Mutex<std::collections::HashMap<String, EditProposal>>> =
+        OnceLock::new();
     PROPOSALS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -347,7 +348,11 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
                 Some(id) => id,
                 None => return "Error: 'proposal_id' parameter is required".into(),
             };
-            let Some(proposal) = proposals().lock().ok().and_then(|mut map| map.remove(proposal_id)) else {
+            let Some(proposal) = proposals()
+                .lock()
+                .ok()
+                .and_then(|mut map| map.remove(proposal_id))
+            else {
                 return format!("Error: unknown edit proposal '{proposal_id}'");
             };
             match fs::write(&proposal.path, proposal.content) {
@@ -483,11 +488,26 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
             match fs::read_to_string(&validated_path) {
                 Ok(content) => match hashline::apply_hashline_edits(&content, &edits) {
                     Ok(new_content) => {
-                        let interactive = args.get("interactive").and_then(Value::as_bool).unwrap_or(false);
+                        let interactive = args
+                            .get("interactive")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
                         if interactive {
-                            let proposal_id = format!("edit-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
+                            let proposal_id = format!(
+                                "edit-{}",
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_nanos()
+                            );
                             if let Ok(mut map) = proposals().lock() {
-                                map.insert(proposal_id.clone(), EditProposal { path: validated_path, content: new_content });
+                                map.insert(
+                                    proposal_id.clone(),
+                                    EditProposal {
+                                        path: validated_path,
+                                        content: new_content,
+                                    },
+                                );
                             }
                             format!("Proposed edit '{}'. Review the staged result, then call accept_edit with proposal_id.", proposal_id)
                         } else {
@@ -499,7 +519,7 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
                                 Err(e) => format!("Error writing file '{raw_path}': {e}"),
                             }
                         }
-                    },
+                    }
                     Err(e) => format!("Error applying hashline edits to '{raw_path}': {e}"),
                 },
                 Err(e) => format!("Error reading file '{raw_path}': {e}"),
@@ -1018,7 +1038,8 @@ mod tests {
             &serde_json::json!({
                 "path": "src/lib.rs",
                 "content": "pub fn broken() { let _: = 1; }"
-            }).to_string(),
+            })
+            .to_string(),
             dir.path(),
         );
         assert!(result.starts_with("Successfully wrote"));

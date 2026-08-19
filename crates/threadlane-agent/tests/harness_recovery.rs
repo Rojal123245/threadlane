@@ -234,7 +234,9 @@ fn killed_child_lane_resumes_without_duplicate_durable_records() {
     assert_eq!(
         records
             .iter()
-            .filter(|record| matches!(record, Record::OperationStarted { id, .. } if id == "child-run"))
+            .filter(
+                |record| matches!(record, Record::OperationStarted { id, .. } if id == "child-run")
+            )
             .count(),
         1
     );

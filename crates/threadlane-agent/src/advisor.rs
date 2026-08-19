@@ -72,11 +72,19 @@ impl AdvisorEvaluator {
                     turn_transcript.push_str(&format!("[User Input]:\n{}\n\n", content.trim()));
                 }
                 AgentMessage::UserWithImages { content, .. } => {
-                    turn_transcript.push_str(&format!("[User Input (with images)]:\n{}\n\n", content.trim()));
+                    turn_transcript.push_str(&format!(
+                        "[User Input (with images)]:\n{}\n\n",
+                        content.trim()
+                    ));
                 }
-                AgentMessage::Assistant { content, tool_calls, .. } => {
+                AgentMessage::Assistant {
+                    content,
+                    tool_calls,
+                    ..
+                } => {
                     if let Some(text) = content {
-                        turn_transcript.push_str(&format!("[Agent Response]:\n{}\n\n", text.trim()));
+                        turn_transcript
+                            .push_str(&format!("[Agent Response]:\n{}\n\n", text.trim()));
                     }
                     if let Some(calls) = tool_calls {
                         for call in calls {
@@ -87,7 +95,12 @@ impl AdvisorEvaluator {
                         }
                     }
                 }
-                AgentMessage::Tool { name, content, is_error, .. } => {
+                AgentMessage::Tool {
+                    name,
+                    content,
+                    is_error,
+                    ..
+                } => {
                     let preview = if content.len() > 1500 {
                         format!("{}... [truncated]", &content[..1500])
                     } else {
@@ -100,7 +113,10 @@ impl AdvisorEvaluator {
                         preview.trim()
                     ));
                 }
-                AgentMessage::Custom { custom_type, payload } => {
+                AgentMessage::Custom {
+                    custom_type,
+                    payload,
+                } => {
                     if custom_type == "thinking" {
                         if let Some(text) = payload.get("text").and_then(|t| t.as_str()) {
                             let preview = if text.len() > 800 {
@@ -108,7 +124,8 @@ impl AdvisorEvaluator {
                             } else {
                                 text.to_string()
                             };
-                            turn_transcript.push_str(&format!("[Agent Thinking]:\n{}\n\n", preview.trim()));
+                            turn_transcript
+                                .push_str(&format!("[Agent Thinking]:\n{}\n\n", preview.trim()));
                         }
                     }
                 }
@@ -161,7 +178,9 @@ impl AdvisorEvaluator {
         let (tx, mut rx) = mpsc::channel(50);
         let client = self.provider_client.clone();
         tokio::spawn(async move {
-            client.stream_chat_completion(payload_source, None, tx).await;
+            client
+                .stream_chat_completion(payload_source, None, tx)
+                .await;
         });
 
         let mut output = String::new();
@@ -184,7 +203,6 @@ impl AdvisorEvaluator {
         parse_advisor_response(&output)
     }
 }
-
 
 /// Parses the raw JSON response from an Advisor model into an [`AdvisorNote`].
 fn parse_advisor_response(raw: &str) -> Option<AdvisorNote> {
@@ -219,8 +237,16 @@ fn parse_advisor_response(raw: &str) -> Option<AdvisorNote> {
 
     Some(AdvisorNote {
         severity,
-        summary: if summary.is_empty() { "Advisor Observation".into() } else { summary },
-        details: if details.is_empty() { "Please review the previous action.".into() } else { details },
+        summary: if summary.is_empty() {
+            "Advisor Observation".into()
+        } else {
+            summary
+        },
+        details: if details.is_empty() {
+            "Please review the previous action.".into()
+        } else {
+            details
+        },
     })
 }
 

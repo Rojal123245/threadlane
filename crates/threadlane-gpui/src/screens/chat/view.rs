@@ -9,11 +9,11 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::hover_card::HoverCard;
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
+use gpui_component::progress::ProgressCircle;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::theme::ActiveTheme;
-use gpui_component::tooltip::Tooltip;
 use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable};
 
 use crate::app::{actions::AppAction, controller};
@@ -58,7 +58,7 @@ pub struct ChatListView {
     trajectory_search_input: Entity<InputState>,
     trajectory_category: Option<String>,
     trajectory_lane: Option<String>,
-    selected_trajectory_seq: Option<u64>,
+    selected_trajectory_index: Option<usize>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -211,7 +211,7 @@ impl ChatListView {
             trajectory_search_input,
             trajectory_category: None,
             trajectory_lane: None,
-            selected_trajectory_seq: None,
+            selected_trajectory_index: None,
             _subscriptions: vec![sub1, sub2, sub3],
         }
     }
@@ -352,6 +352,8 @@ impl ChatListView {
                     .gap_1()
                     .p(px(2.0))
                     .rounded_md()
+                    .border_1()
+                    .border_color(theme.border)
                     .bg(theme.muted.opacity(0.5))
                     .child(
                         Button::new("trajectory-tab-chat")
@@ -615,6 +617,9 @@ impl ChatListView {
                             .text_color(theme.primary_foreground)
                             .child("Accept")
                             .on_click(move |_event, _window, cx| {
+                                // The accept control is inside the clickable tool row. Prevent
+                                // this click from bubbling up and toggling the row details.
+                                cx.stop_propagation();
                                 model.update(cx, |state, cx| {
                                     controller::dispatch(
                                         state,
@@ -772,7 +777,8 @@ impl ChatListView {
         let query = self.trajectory_search.to_lowercase();
         let entries = all_entries
             .iter()
-            .filter(|entry| {
+            .enumerate()
+            .filter(|(_, entry)| {
                 self.trajectory_category
                     .as_ref()
                     .is_none_or(|category| &entry.category == category)
@@ -791,7 +797,7 @@ impl ChatListView {
                         .iter()
                         .any(|value| value.to_lowercase().contains(&query)))
             })
-            .cloned()
+            .map(|(index, entry)| (index, entry.clone()))
             .collect::<Vec<_>>();
         let theme = cx.theme().colors;
         if entries.is_empty() {
@@ -806,12 +812,12 @@ impl ChatListView {
                 .into_any_element();
         }
         let selected_entry = self
-            .selected_trajectory_seq
-            .and_then(|seq| all_entries.iter().find(|entry| entry.seq == Some(seq)))
+            .selected_trajectory_index
+            .and_then(|index| all_entries.get(index))
             .cloned();
         let mut rows = Vec::new();
         let mut previous_turn = None;
-        for (index, entry) in entries.into_iter().enumerate() {
+        for (all_index, entry) in entries.into_iter() {
             if entry.turn != previous_turn {
                 if let Some(turn) = entry.turn {
                     rows.push(
@@ -831,7 +837,7 @@ impl ChatListView {
                 previous_turn = entry.turn;
             }
             let seq = entry.seq;
-            let selected = seq.is_some() && seq == self.selected_trajectory_seq;
+            let selected = Some(all_index) == self.selected_trajectory_index;
             let preview = if entry.detail.trim().is_empty() {
                 entry.summary.clone()
             } else {
@@ -840,7 +846,7 @@ impl ChatListView {
             let view = cx.entity().clone();
             rows.push(
                 div()
-                    .id(SharedString::from(format!("trajectory-{index}")))
+                    .id(SharedString::from(format!("trajectory-{all_index}")))
                     .h(px(34.0))
                     .w_full()
                     .min_w_0()
@@ -894,7 +900,7 @@ impl ChatListView {
                     }))
                     .on_click(move |_, _, cx| {
                         view.update(cx, |this, cx| {
-                            this.selected_trajectory_seq = seq;
+                            this.selected_trajectory_index = Some(all_index);
                             cx.notify();
                         })
                     })
@@ -956,7 +962,7 @@ impl ChatListView {
                                 .label("×")
                                 .on_click(move |_, _, cx| {
                                     close_view.update(cx, |this, cx| {
-                                        this.selected_trajectory_seq = None;
+                                        this.selected_trajectory_index = None;
                                         cx.notify();
                                     })
                                 }),
@@ -2202,62 +2208,106 @@ impl ChatListView {
         } else {
             theme.accent
         };
-        let context_tooltip = format!(
-            "Context window\n{} of {} tokens ({:.1}%)\nInput: {} • Output: {}",
-            crate::model_catalog::format_tokens(token_usage.total_tokens),
-            crate::model_catalog::format_tokens(context_max),
-            percent,
-            crate::model_catalog::format_tokens(token_usage.input_tokens),
-            crate::model_catalog::format_tokens(token_usage.output_tokens)
-        );
-        let context_meter = div()
-            .id("context-meter-badge")
-            .relative()
-            .flex()
-            .items_center()
-            .justify_center()
-            .size(px(30.0))
-            .rounded_full()
-            .tooltip(move |window, cx| {
-                let text = context_tooltip.clone();
-                Tooltip::element(move |_window, _cx| div().child(text.clone())).build(window, cx)
-            })
-            .children(
-                [
-                    (px(12.0), px(1.0)),
-                    (px(18.0), px(4.0)),
-                    (px(22.0), px(10.0)),
-                    (px(22.0), px(17.0)),
-                    (px(18.0), px(23.0)),
-                    (px(12.0), px(26.0)),
-                    (px(6.0), px(23.0)),
-                    (px(2.0), px(17.0)),
-                    (px(2.0), px(10.0)),
-                    (px(6.0), px(4.0)),
-                ]
-                .into_iter()
-                .enumerate()
-                .map(|(index, (left, top))| {
-                    div()
-                        .absolute()
-                        .left(left)
-                        .top(top)
-                        .size(px(4.0))
-                        .rounded_full()
-                        .bg(if percent >= ((index + 1) as f64 * 10.0) {
-                            meter_color
-                        } else {
-                            theme.border
-                        })
-                }),
-            )
-            .child(
+        let context_metrics = self.model.read(cx).active_session_metrics();
+        let total_processed = context_metrics
+            .input_tokens
+            .saturating_add(context_metrics.output_tokens)
+            .min(u64::from(u32::MAX)) as u32;
+        let context_used = crate::model_catalog::format_tokens(token_usage.total_tokens);
+        let context_limit = crate::model_catalog::format_tokens(context_max);
+        let processed = crate::model_catalog::format_tokens(total_processed);
+        let context_meter = HoverCard::new("context-window-hover-card")
+            .anchor(Anchor::BottomRight)
+            .open_delay(Duration::from_millis(200))
+            .close_delay(Duration::from_millis(300))
+            .trigger(
                 div()
-                    .text_xs()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.foreground)
-                    .child(format!("{percent:.0}")),
-            );
+                    .id("context-meter-badge")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(32.0))
+                    .rounded_full()
+                    .hover(|style| style.bg(theme.accent.opacity(0.1)))
+                    .cursor_pointer()
+                    .child(
+                        ProgressCircle::new("context-meter-circle")
+                            .value(percent as f32)
+                            .color(meter_color)
+                            .size(px(24.0)),
+                    ),
+            )
+            .content(move |_state, _window, _cx| {
+                let bar_width = ((percent / 100.0) * 308.0).clamp(0.0, 308.0);
+                div()
+                    .w(px(340.0))
+                    .p_4()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.background)
+                    .shadow_lg()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.foreground)
+                                    .child("Context Window"),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child(format!("{percent:.0}% · {context_used}/{context_limit}")),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .h(px(5.0))
+                            .rounded_full()
+                            .bg(theme.border)
+                            .child(
+                                div()
+                                    .h_full()
+                                    .w(px(bar_width as f32))
+                                    .rounded_full()
+                                    .bg(meter_color),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child("Total processed"),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child(processed.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("Context is automatically compacted when needed."),
+                    )
+            });
 
         let stashed_draft = active_session_id
             .as_ref()
@@ -2438,9 +2488,9 @@ impl ChatListView {
                             .gap_1()
                             .child(model_picker)
                             .child(effort_picker)
-                            .child(context_meter)
                             .child(div().flex_1())
                             .child(stash_button)
+                            .child(context_meter)
                             .child(
                                 Button::new("send-btn")
                                     .w(px(40.0))
@@ -2538,7 +2588,7 @@ impl Render for ChatListView {
             self.initial_scroll_frames = 6;
             self.trajectory_category = None;
             self.trajectory_lane = None;
-            self.selected_trajectory_seq = None;
+            self.selected_trajectory_index = None;
             self.trajectory_search.clear();
             self.trajectory_search_input.update(cx, |state, cx| {
                 state.set_value("", window, cx);
