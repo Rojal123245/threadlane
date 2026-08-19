@@ -388,7 +388,8 @@ impl Render for TerminalView {
                         let restart_terminal = terminal_actions.clone();
                         move |menu, _window, _cx| {
                             let output = text.clone();
-                            let menu = if let Some(selection) = selection {
+                            let menu = if let Some(selection) = &selection {
+                                let selection = selection.clone();
                                 menu.item(PopupMenuItem::new("Copy Selection").on_click(
                                     move |_event, _window, cx| {
                                         cx.write_to_clipboard(ClipboardItem::new_string(selection.clone()));
@@ -397,6 +398,8 @@ impl Render for TerminalView {
                             } else {
                                 menu
                             };
+                            let clear_terminal = clear_terminal.clone();
+                            let restart_terminal = restart_terminal.clone();
                             menu.item(PopupMenuItem::new("Copy Terminal Output").on_click(
                                 move |_event, _window, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(output.clone()));
