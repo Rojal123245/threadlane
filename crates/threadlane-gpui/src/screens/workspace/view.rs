@@ -8,6 +8,7 @@ use gpui_component::dialog::{
     Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 };
 use gpui_component::input::{Input, InputState};
+use gpui_component::resizable::{h_resizable, resizable_panel, v_resizable};
 use gpui_component::spinner::Spinner;
 use gpui_component::switch::Switch;
 use gpui_component::tag::{Tag, TagVariant};
@@ -1494,6 +1495,78 @@ impl Render for WorkspaceView {
             "Collapse sidebar"
         };
 
+        let chat_page_content = {
+            let upper_content = if self.right_panel_visible {
+                h_resizable("workspace-chat-right-split")
+                    .child(
+                        resizable_panel()
+                            .child(self.chat_list.clone()),
+                    )
+                    .child(
+                        resizable_panel()
+                            .size(px(300.0))
+                            .size_range(px(240.0)..px(800.0))
+                            .child(self.right_panel.clone()),
+                    )
+                    .into_any_element()
+            } else {
+                self.chat_list.clone().into_any_element()
+            };
+
+            let main_content = if self.bottom_panel_visible {
+                let terminal_panel = div()
+                    .size_full()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .bg(theme.background)
+                    .child(
+                        div()
+                            .h(px(36.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .px_3()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child("Terminal"),
+                    )
+                    .child(div().flex_1().min_h_0().child(self.terminal.clone()));
+
+                v_resizable("workspace-main-bottom-split")
+                    .child(
+                        resizable_panel()
+                            .child(upper_content),
+                    )
+                    .child(
+                        resizable_panel()
+                            .size(px(280.0))
+                            .size_range(px(120.0)..px(600.0))
+                            .child(terminal_panel),
+                    )
+                    .into_any_element()
+            } else {
+                upper_content
+            };
+
+            if !self.sidebar_collapsed {
+                h_resizable("workspace-sidebar-main-split")
+                    .child(
+                        resizable_panel()
+                            .size(px(240.0))
+                            .size_range(px(160.0)..px(500.0))
+                            .child(self.sidebar.clone()),
+                    )
+                    .child(
+                        resizable_panel()
+                            .child(main_content),
+                    )
+                    .into_any_element()
+            } else {
+                main_content
+            }
+        };
+
         div()
             .relative()
             .flex()
@@ -1502,60 +1575,8 @@ impl Render for WorkspaceView {
             .on_key_down(cx.listener(Self::command_palette_key_down))
             .on_action(cx.listener(Self::toggle_command_palette))
             .bg(theme.background)
-            .children(
-                (workspace_page == WorkspacePage::Chat && !self.sidebar_collapsed)
-                    .then(|| self.sidebar.clone()),
-            )
             .child(match workspace_page {
-                WorkspacePage::Chat => div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_h_0()
-                            .flex()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(360.0))
-                                    .h_full()
-                                    .child(self.chat_list.clone()),
-                            )
-                            .children(self.right_panel_visible.then(|| {
-                                div()
-                                    .flex_1()
-                                    .min_w(px(360.0))
-                                    .h_full()
-                                    .child(self.right_panel.clone())
-                            })),
-                    )
-                    .children((self.bottom_panel_visible).then(|| {
-                        div()
-                            .flex_none()
-                            .h(px(280.0))
-                            .flex()
-                            .flex_col()
-                            .border_t_1()
-                            .border_color(theme.border)
-                            .bg(theme.background)
-                            .child(
-                                div()
-                                    .h(px(36.0))
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .px_3()
-                                    .text_sm()
-                                    .text_color(theme.muted_foreground)
-                                    .child("Terminal"),
-                            )
-                            .child(div().flex_1().min_h_0().child(self.terminal.clone()))
-                    }))
-                    .into_any_element(),
+                WorkspacePage::Chat => chat_page_content,
                 WorkspacePage::Settings => self.settings.clone().into_any_element(),
             })
             .children((workspace_page == WorkspacePage::Chat).then(|| {
