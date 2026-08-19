@@ -23,6 +23,7 @@ fn open_run_with_assistant() -> MemoryStore {
             lane: "main".into(),
             seq: 2,
             timestamp: 2,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::Assistant {
                 content: None,
                 tool_calls: None,
@@ -152,6 +153,7 @@ fn reducer_rejects_a_tool_intent_with_the_wrong_source_ordinal() {
             lane: "main".into(),
             seq: 2,
             timestamp: 2,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::Assistant {
                 content: None,
                 tool_calls: Some(vec![

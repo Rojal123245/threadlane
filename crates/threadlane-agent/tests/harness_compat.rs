@@ -174,6 +174,7 @@ fn jsonl_store_round_trips_v2_entries_and_records_without_rewriting_legacy_data(
             lane: "main".into(),
             seq: 2,
             timestamp: 2,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::user("v2", vec![]),
             terminate: false,
         })

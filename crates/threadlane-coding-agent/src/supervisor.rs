@@ -2093,6 +2093,7 @@ mod tests {
                 HarnessQueueKind::FollowUp,
                 threadlane_agent::harness::ProvisionedEntry {
                     id: "follow-up-entry".into(),
+                    surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                     parent_id: None,
                     message: AgentMessage::User {
                         content: "next".into(),
@@ -2108,6 +2109,7 @@ mod tests {
                 HarnessQueueKind::Steer,
                 threadlane_agent::harness::ProvisionedEntry {
                     id: "steer-entry".into(),
+                    surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                     parent_id: None,
                     message: AgentMessage::User {
                         content: "urgent".into(),
@@ -2178,6 +2180,7 @@ mod tests {
                 priority: Some(threadlane_agent::SteerPriority::High),
                 target: threadlane_agent::harness::ProvisionedEntry {
                     id: "steer-high-target".into(),
+                    surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                     parent_id: None,
                     message: AgentMessage::User {
                         content: "high-priority-steer".into(),
@@ -2284,6 +2287,7 @@ mod tests {
                     stop_reason: None,
                     deferred_handle: None,
                 },
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
@@ -2326,6 +2330,7 @@ mod tests {
                     is_error: false,
                     terminate: false,
                 },
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
@@ -2446,6 +2451,7 @@ mod tests {
                 seq: 1,
                 timestamp: 1,
                 message: AgentMessage::user("inspect", Vec::new()),
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
@@ -2465,6 +2471,7 @@ mod tests {
                 HarnessQueueKind::FollowUp,
                 threadlane_agent::harness::ProvisionedEntry {
                     id: "queued-follow-up".into(),
+                    surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                     parent_id: None,
                     message: AgentMessage::user("follow up", Vec::new()),
                 },
@@ -2494,6 +2501,7 @@ mod tests {
                 priority: Some(threadlane_agent::SteerPriority::High),
                 target: threadlane_agent::harness::ProvisionedEntry {
                     id: "queued-steer-high".into(),
+                    surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                     parent_id: None,
                     message: AgentMessage::user("urgent", Vec::new()),
                 },
@@ -2584,6 +2592,7 @@ mod tests {
                 seq: 1,
                 timestamp: 1,
                 message: AgentMessage::user("root", Vec::new()),
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
@@ -2600,6 +2609,7 @@ mod tests {
                     stop_reason: None,
                     deferred_handle: None,
                 },
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();

@@ -156,11 +156,27 @@ pub trait SessionStore {
             .lane(lane)
             .and_then(|lane| lane.leaf_id.clone())
             .or_else(|| self.preferred_leaf(lane));
-        let entries: Vec<Entry> = self
+        let raw_entries: Vec<Entry> = self
             .branch(leaf_id.as_deref(), usize::MAX)
             .into_iter()
             .filter(|entry| entry.lane == lane)
             .collect();
+        let mut entries: Vec<Entry> = Vec::new();
+        for entry in raw_entries {
+            match &entry.surface_op {
+                super::types::SurfaceOperation::Append => {
+                    entries.push(entry);
+                }
+                super::types::SurfaceOperation::Replace {
+                    start_seq,
+                    end_seq,
+                    ..
+                } => {
+                    entries.retain(|e| e.seq < *start_seq || e.seq > *end_seq);
+                    entries.push(entry);
+                }
+            }
+        }
         let checkpoint = entries.iter().rev().find_map(|entry| match &entry.message {
             AgentMessage::Custom {
                 custom_type,

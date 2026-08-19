@@ -14,6 +14,7 @@ fn compaction_appends_a_summary_without_rewriting_history() {
             lane: "main".into(),
             seq: 1,
             timestamp: 1,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::user("old context", vec![]),
             terminate: false,
         })
@@ -61,6 +62,7 @@ fn model_context_is_a_branch_projection_not_a_log_replay() {
             lane: "main".into(),
             seq: 1,
             timestamp: 1,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::user("old context", vec![]),
             terminate: false,
         })
@@ -98,6 +100,7 @@ fn transcript_projection_retains_compacted_history_outside_model_context() {
             lane: "main".into(),
             seq: 1,
             timestamp: 1,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::user("old context", vec![]),
             terminate: false,
         })
@@ -127,6 +130,7 @@ fn model_context_and_transcript_diverge_after_compaction_but_remain_ordered() {
             lane: "main".into(),
             seq: 1,
             timestamp: 1,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::user("first request", vec![]),
             terminate: false,
         })
@@ -142,6 +146,7 @@ fn model_context_and_transcript_diverge_after_compaction_but_remain_ordered() {
             lane: "main".into(),
             seq: 7,
             timestamp: 7,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::user("second request", vec![]),
             terminate: false,
         })

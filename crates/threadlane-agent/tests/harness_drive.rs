@@ -270,6 +270,7 @@ fn provider_usage_commits_before_assistant_finalization_without_double_counting(
             lane: "main".into(),
             seq,
             timestamp: seq,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: assistant("done"),
             terminate: false,
         })
@@ -399,6 +400,7 @@ fn a_consumed_retry_finishes_with_the_consumed_attempt_number() {
             lane: "main".into(),
             seq,
             timestamp: seq,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: assistant("retried"),
             terminate: false,
         })
@@ -565,6 +567,7 @@ fn failed_entry_append_does_not_reserve_identity_or_mutate_store() {
         lane: "main".into(),
         seq: 1,
         timestamp: 1,
+        surface_op: threadlane_agent::harness::SurfaceOperation::Append,
         message: AgentMessage::user("bad", vec![]),
         terminate: false,
     };
@@ -576,6 +579,7 @@ fn failed_entry_append_does_not_reserve_identity_or_mutate_store() {
         lane: "main".into(),
         seq: 1,
         timestamp: 1,
+        surface_op: threadlane_agent::harness::SurfaceOperation::Append,
         message: AgentMessage::user("good", vec![]),
         terminate: false,
     };
@@ -589,6 +593,7 @@ fn queue_acceptance_and_cancellation_are_durable_actions() {
     let mut effects = GatedEffects::new();
     let target = ProvisionedEntry {
         id: "entry-follow-up".into(),
+        surface_op: threadlane_agent::harness::SurfaceOperation::Append,
         parent_id: None,
         message: AgentMessage::user("later", vec![]),
     };
@@ -624,6 +629,7 @@ fn queued_input_consumption_is_distinct_and_durable() {
     let mut store = MemoryStore::new("session-1");
     let target = ProvisionedEntry {
         id: "entry-follow-up".into(),
+        surface_op: threadlane_agent::harness::SurfaceOperation::Append,
         parent_id: None,
         message: AgentMessage::user("later", vec![]),
     };
@@ -686,6 +692,7 @@ fn deferred_write_is_accepted_with_its_provisioned_entry() {
         "run-1",
         ProvisionedEntry {
             id: "entry-deferred-1".into(),
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             parent_id: None,
             message: AgentMessage::user("deferred", vec![]),
         },
@@ -713,6 +720,7 @@ fn deferred_write_materializes_once_and_is_marked_applied() {
     });
     let target = ProvisionedEntry {
         id: "entry-deferred-1".into(),
+        surface_op: threadlane_agent::harness::SurfaceOperation::Append,
         parent_id: None,
         message: AgentMessage::user("deferred", vec![]),
     };
@@ -749,6 +757,7 @@ fn deferred_write_uses_the_open_lane_leaf_not_a_sibling_tail() {
             lane: "main".into(),
             seq: 1,
             timestamp: 1,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::user("main", vec![]),
             terminate: false,
         })
@@ -760,6 +769,7 @@ fn deferred_write_uses_the_open_lane_leaf_not_a_sibling_tail() {
             lane: "child".into(),
             seq: 2,
             timestamp: 2,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::user("child", vec![]),
             terminate: false,
         })
@@ -779,6 +789,7 @@ fn deferred_write_uses_the_open_lane_leaf_not_a_sibling_tail() {
         "child-run",
         ProvisionedEntry {
             id: "child-deferred".into(),
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             parent_id: None,
             message: AgentMessage::user("deferred", vec![]),
         },
@@ -823,6 +834,7 @@ fn deferred_assistant_entry_suspends_the_lane_without_finishing_it() {
             lane: "main".into(),
             seq: 2,
             timestamp: 2,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::Assistant {
                 content: None,
                 tool_calls: None,
@@ -874,6 +886,7 @@ fn deferred_redemption_requires_the_same_handle_and_persists_terminal_result() {
             lane: "main".into(),
             seq: 2,
             timestamp: 2,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::Assistant {
                 content: None,
                 tool_calls: None,

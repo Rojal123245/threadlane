@@ -114,6 +114,7 @@ fn unknown_lane_enqueue_rejected_without_writes() {
     let ghost = LaneHandle::new("ghost".into()).unwrap();
     let target = ProvisionedEntry {
         id: "entry-1".into(),
+        surface_op: threadlane_agent::harness::SurfaceOperation::Append,
         parent_id: None,
         message: user("queued task"),
     };
@@ -433,6 +434,7 @@ fn bound_queue_enqueue_and_cancel() {
     // Enqueue a bound entry through the facade.
     let target = ProvisionedEntry {
         id: "queued-1".into(),
+        surface_op: threadlane_agent::harness::SurfaceOperation::Append,
         parent_id: None,
         message: user("queued task"),
     };
@@ -499,6 +501,7 @@ fn unbound_queue_enqueue_and_consume() {
     // Enqueue an unbound entry through the facade.
     let target = ProvisionedEntry {
         id: "queued-2".into(),
+        surface_op: threadlane_agent::harness::SurfaceOperation::Append,
         parent_id: None,
         message: user("unbound task"),
     };
@@ -561,6 +564,7 @@ fn consume_queued_entry_through_facade() {
     // Enqueue a bound entry.
     let target = ProvisionedEntry {
         id: "queued-consume".into(),
+        surface_op: threadlane_agent::harness::SurfaceOperation::Append,
         parent_id: None,
         message: user("to be consumed"),
     };
@@ -604,6 +608,7 @@ fn multi_lane_sequence_uniqueness_with_queued_work() {
     // Enqueue an unbound entry on the main lane before driving.
     let queued_target = ProvisionedEntry {
         id: "queued-pre-drive".into(),
+        surface_op: threadlane_agent::harness::SurfaceOperation::Append,
         parent_id: None,
         message: user("queued before drive"),
     };
@@ -619,6 +624,7 @@ fn multi_lane_sequence_uniqueness_with_queued_work() {
     // Enqueue a bound entry on the child lane.
     let child_target = ProvisionedEntry {
         id: "queued-child".into(),
+        surface_op: threadlane_agent::harness::SurfaceOperation::Append,
         parent_id: None,
         message: user("child queued task"),
     };
@@ -730,6 +736,7 @@ fn unbound_cancel_rejects_bound_entry() {
     // Enqueue a bound entry.
     let target = ProvisionedEntry {
         id: "bound-entry".into(),
+        surface_op: threadlane_agent::harness::SurfaceOperation::Append,
         parent_id: None,
         message: user("bound task"),
     };
@@ -779,6 +786,7 @@ fn unbound_consume_rejects_bound_entry() {
     // Enqueue a bound entry.
     let target = ProvisionedEntry {
         id: "bound-consume-entry".into(),
+        surface_op: threadlane_agent::harness::SurfaceOperation::Append,
         parent_id: None,
         message: user("bound task"),
     };
@@ -828,6 +836,7 @@ fn unbound_cancel_on_truly_unbound_entry_succeeds() {
     // Enqueue an unbound entry.
     let target = ProvisionedEntry {
         id: "unbound-entry".into(),
+        surface_op: threadlane_agent::harness::SurfaceOperation::Append,
         parent_id: None,
         message: user("unbound task"),
     };
@@ -865,6 +874,7 @@ fn unbound_consume_on_truly_unbound_entry_succeeds() {
     // Enqueue an unbound entry.
     let target = ProvisionedEntry {
         id: "unbound-consume-entry".into(),
+        surface_op: threadlane_agent::harness::SurfaceOperation::Append,
         parent_id: None,
         message: user("unbound task"),
     };

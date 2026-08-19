@@ -259,6 +259,7 @@ mod tests {
                     content: "secret payload".into(),
                 },
                 parent_id: None,
+                surface_op: crate::harness::SurfaceOperation::Append,
             },
         });
         let diagnostic = project_recovery(&ReducedState { lanes: vec![lane] });

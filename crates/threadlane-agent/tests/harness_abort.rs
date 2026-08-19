@@ -13,6 +13,7 @@ fn store_with_interrupted_tool() -> MemoryStore {
             lane: "main".into(),
             seq: 1,
             timestamp: 1,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::Assistant {
                 content: None,
                 tool_calls: None,
@@ -89,6 +90,7 @@ fn abort_reconciliation_keeps_tool_results_on_their_lane() {
             lane: "sibling".into(),
             seq: 5,
             timestamp: 5,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::user("other lane", Vec::new()),
             terminate: false,
         })
@@ -195,6 +197,7 @@ fn abort_drains_steer_and_follow_up_but_preserves_next_run() {
             priority: None,
             target: ProvisionedEntry {
                 id: id.into(),
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                 parent_id: Some("assistant-1".into()),
                 message: AgentMessage::user(id, Vec::new()),
             },

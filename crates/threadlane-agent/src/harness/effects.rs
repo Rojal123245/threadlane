@@ -426,6 +426,7 @@ mod tests {
                 seq: 1,
                 timestamp: 1,
                 message: message("one"),
+                surface_op: crate::harness::SurfaceOperation::Append,
                 terminate: false,
             },
         })
@@ -438,6 +439,7 @@ mod tests {
                 seq: 2,
                 timestamp: 2,
                 message: message("two"),
+                surface_op: crate::harness::SurfaceOperation::Append,
                 terminate: false,
             },
         })
@@ -462,6 +464,7 @@ mod tests {
                     seq: 1,
                     timestamp: 1,
                     message: message("late"),
+                    surface_op: crate::harness::SurfaceOperation::Append,
                     terminate: false,
                 },
             }),
@@ -483,6 +486,7 @@ mod tests {
                 seq: 1,
                 timestamp: 1,
                 message: message("bad"),
+                surface_op: crate::harness::SurfaceOperation::Append,
                 terminate: false,
             },
         })
@@ -503,6 +507,7 @@ mod tests {
                     seq: 1,
                     timestamp: 1,
                     message: message("blocked"),
+                    surface_op: crate::harness::SurfaceOperation::Append,
                     terminate: false,
                 },
             }),
@@ -525,6 +530,7 @@ mod tests {
                     seq: 1,
                     timestamp: 1,
                     message: message("production"),
+                    surface_op: crate::harness::SurfaceOperation::Append,
                     terminate: false,
                 },
             })
@@ -542,6 +548,7 @@ mod tests {
             seq,
             timestamp: seq,
             message: message(id),
+            surface_op: crate::harness::SurfaceOperation::Append,
             terminate: false,
         };
         let mut gate = GatedEffects::new();

@@ -15,6 +15,7 @@ fn sqlite_store_round_trips_interleaved_entries_and_records() {
             lane: "main".into(),
             seq: 1,
             timestamp: 1,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::user("hello", vec![]),
             terminate: false,
         })
@@ -36,6 +37,7 @@ fn sqlite_store_round_trips_interleaved_entries_and_records() {
             lane: "main".into(),
             seq: 3,
             timestamp: 3,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::Assistant {
                 content: Some("hi".into()),
                 tool_calls: None,
@@ -82,6 +84,7 @@ fn sqlite_store_rejects_invalid_appends_without_mutating() {
             lane: "main".into(),
             seq: 1,
             timestamp: 1,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::user("bad", vec![]),
             terminate: false,
         })
@@ -104,6 +107,7 @@ fn sqlite_forks_copy_entries_but_not_operation_records() {
                 lane: "main".into(),
                 seq,
                 timestamp: seq,
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                 message: AgentMessage::user(id, vec![]),
                 terminate: false,
             })
@@ -161,6 +165,7 @@ fn sqlite_serializes_concurrent_writers_with_stale_sequence_inputs() {
         lane: "main".into(),
         seq: 1,
         timestamp: 1,
+        surface_op: threadlane_agent::harness::SurfaceOperation::Append,
         message: AgentMessage::user("root", vec![]),
         terminate: false,
     })
@@ -176,6 +181,7 @@ fn sqlite_serializes_concurrent_writers_with_stale_sequence_inputs() {
             lane: "main".into(),
             seq: 2,
             timestamp: 2,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::user("first", vec![]),
             terminate: false,
         })
@@ -189,6 +195,7 @@ fn sqlite_serializes_concurrent_writers_with_stale_sequence_inputs() {
             lane: "main".into(),
             seq: 2,
             timestamp: 2,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::user("second", vec![]),
             terminate: false,
         })

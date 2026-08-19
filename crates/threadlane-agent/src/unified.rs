@@ -425,6 +425,7 @@ impl UnifiedAgent {
                     id: entry_id.clone(),
                     parent_id,
                     message: AgentMessage::user(content, images),
+                    surface_op: crate::harness::SurfaceOperation::Append,
                 },
             )
             .map_err(|error| error.to_string())?;

@@ -242,6 +242,8 @@ impl CodingSessionHarness {
                 .map(TraceString::new)
                 .collect::<Result<Vec<_>, _>>()?,
             git_head: git_head.map(TraceString::new).transpose()?,
+            context_window_limit: None,
+            route_defaults: None,
         };
         self.store
             .append_record_gated(record)
@@ -692,6 +694,7 @@ impl CodingSessionHarness {
                 seq: harness_next_seq(self.store.store()),
                 timestamp: timestamp(),
                 message: prompt_message,
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .map_err(|error| SubagentStartError {
@@ -1233,6 +1236,7 @@ impl CodingSessionHarness {
                         stop_reason: Some("aborted".into()),
                         deferred_handle: None,
                     },
+                    surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                     terminate: false,
                 })
                 .map_err(|error| error.to_string())?;
@@ -1349,6 +1353,7 @@ impl CodingSessionHarness {
                 seq,
                 timestamp: timestamp(),
                 message,
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                 terminate,
             })
             .map_err(|error| error.to_string())?;
@@ -1457,6 +1462,7 @@ impl CodingSessionHarness {
             parent_id,
             timestamp: timestamp(),
             message,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             terminate,
         };
         self.store
@@ -2077,6 +2083,7 @@ impl CodingSessionHarness {
                     is_error: result.is_error,
                     terminate: result.terminates(),
                 },
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                 terminate: result.terminates(),
             })
             .map_err(|error| error.to_string())?;
@@ -2188,6 +2195,7 @@ impl CodingSessionHarness {
                         seq: harness_next_seq(self.store.store()),
                         timestamp: timestamp(),
                         message: node.message.clone(),
+                        surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                         terminate: matches!(
                             node.message,
                             AgentMessage::Tool {

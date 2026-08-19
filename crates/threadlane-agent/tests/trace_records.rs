@@ -43,6 +43,8 @@ fn trace_record_variants_round_trip_without_generic_payloads() {
     });
     fields["prompt_template_ids"] = json!(["review"]);
     fields["git_head"] = json!("deadbeef");
+    fields["context_window_limit"] = Value::Null;
+    fields["route_defaults"] = Value::Null;
     cases.push(("RunContextCaptured", fields));
 
     let mut fields = base("provider-start", 2);

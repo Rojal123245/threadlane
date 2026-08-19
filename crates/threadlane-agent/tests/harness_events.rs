@@ -14,6 +14,7 @@ fn subscription_starts_with_snapshot_and_has_no_live_event_gap() {
             lane: "main".into(),
             seq: 1,
             timestamp: 1,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::user("before", vec![]),
             terminate: false,
         })
@@ -177,6 +178,7 @@ fn direct_entry_commit_events_preserve_the_entry_lane() {
             lane: "child@1".into(),
             seq: 1,
             timestamp: 1,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::user("child", vec![]),
             terminate: false,
         })
@@ -198,6 +200,7 @@ fn effects_publish_commit_events_only_after_store_success() {
                 lane: "main".into(),
                 seq: 1,
                 timestamp: 1,
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                 message: AgentMessage::user("committed", vec![]),
                 terminate: false,
             },
@@ -228,6 +231,7 @@ fn cloned_event_hubs_share_commits_across_harness_adapters() {
             lane: "main".into(),
             seq: 1,
             timestamp: 1,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::user("first", vec![]),
             terminate: false,
         })

@@ -1278,6 +1278,7 @@ mod tests {
                     stop_reason: Some("stop".into()),
                     deferred_handle: None,
                 },
+                surface_op: crate::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();

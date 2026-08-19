@@ -29,6 +29,7 @@ fn entry_committed_projects_to_message_end() {
         lane: "main".into(),
         seq: 1,
         timestamp: 1,
+        surface_op: threadlane_agent::harness::SurfaceOperation::Append,
         message: msg.clone(),
         terminate: false,
     };
@@ -365,6 +366,7 @@ fn unsupported_records_project_to_none() {
         priority: None,
         target: ProvisionedEntry {
             id: "queued-1".into(),
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             parent_id: None,
             message: AgentMessage::user("task", vec![]),
         },
@@ -429,6 +431,7 @@ fn projection_cursor_is_monotonically_increasing() {
         lane: "main".into(),
         seq: 1,
         timestamp: 1,
+        surface_op: threadlane_agent::harness::SurfaceOperation::Append,
         message: AgentMessage::user("one", vec![]),
         terminate: false,
     }));
@@ -438,6 +441,7 @@ fn projection_cursor_is_monotonically_increasing() {
         lane: "main".into(),
         seq: 2,
         timestamp: 2,
+        surface_op: threadlane_agent::harness::SurfaceOperation::Append,
         message: AgentMessage::user("two", vec![]),
         terminate: false,
     }));
@@ -447,6 +451,7 @@ fn projection_cursor_is_monotonically_increasing() {
         lane: "main".into(),
         seq: 3,
         timestamp: 3,
+        surface_op: threadlane_agent::harness::SurfaceOperation::Append,
         message: AgentMessage::user("three", vec![]),
         terminate: false,
     }));
@@ -499,6 +504,7 @@ fn projection_respects_commit_order_in_subscription() {
         lane: "main".into(),
         seq: 1,
         timestamp: 1,
+        surface_op: threadlane_agent::harness::SurfaceOperation::Append,
         message: AgentMessage::user("hi", vec![]),
         terminate: false,
     }));
@@ -609,6 +615,7 @@ fn agent_start_and_end_are_separated_by_commit_events_in_projection() {
         lane: "main".into(),
         seq: 1,
         timestamp: 1,
+        surface_op: threadlane_agent::harness::SurfaceOperation::Append,
         message: AgentMessage::user("mid", vec![]),
         terminate: false,
     }));
@@ -1152,6 +1159,7 @@ fn projection_round_trips_through_harness_event_hub() {
         lane: "main".into(),
         seq: 1,
         timestamp: 1,
+        surface_op: threadlane_agent::harness::SurfaceOperation::Append,
         message: msg.clone(),
         terminate: false,
     };

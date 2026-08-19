@@ -454,6 +454,7 @@ impl PromptProcedure {
                 seq: first_seq + 1,
                 timestamp: first_seq + 1,
                 message: prompt,
+                surface_op: super::types::SurfaceOperation::Append,
                 terminate: false,
             },
         })?;
@@ -545,6 +546,7 @@ impl NoToolRun {
                     seq: first_seq + 1,
                     timestamp: first_seq + 1,
                     message: AgentMessage::user(prompt, Vec::new()),
+                    surface_op: super::types::SurfaceOperation::Append,
                     terminate: false,
                 },
             },
@@ -569,6 +571,7 @@ impl NoToolRun {
                     seq: first_seq + 3,
                     timestamp: first_seq + 3,
                     message: assistant,
+                    surface_op: super::types::SurfaceOperation::Append,
                     terminate: false,
                 },
             },
@@ -641,6 +644,7 @@ impl NoToolRun {
                     seq,
                     timestamp: seq,
                     message: AgentMessage::user(prompt, Vec::new()),
+                    surface_op: super::types::SurfaceOperation::Append,
                     terminate: false,
                 },
             })?;
@@ -673,6 +677,7 @@ impl NoToolRun {
                     seq,
                     timestamp: seq,
                     message: assistant,
+                    surface_op: super::types::SurfaceOperation::Append,
                     terminate: false,
                 },
             })?;
@@ -786,6 +791,7 @@ impl NoToolRun {
                             custom_type: "navigation_summary".into(),
                             payload: serde_json::json!({"text": summary}),
                         },
+                        surface_op: super::types::SurfaceOperation::Append,
                         terminate: false,
                     },
                 })?;
@@ -936,6 +942,7 @@ impl NavigationProcedure {
                         custom_type: "navigation_summary".into(),
                         payload: serde_json::json!({"text": summary}),
                     },
+                    surface_op: super::types::SurfaceOperation::Append,
                     terminate: false,
                 },
             });
@@ -1048,6 +1055,11 @@ impl CompactionProcedure {
                             "checkpoint_kind": "manual",
                             "source_leaf_id": source_leaf_id,
                         }),
+                    },
+                    surface_op: super::types::SurfaceOperation::Replace {
+                        start_seq: 1,
+                        end_seq: first_seq,
+                        source_event_seqs: Vec::new(),
                     },
                     terminate: false,
                 },
@@ -1513,6 +1525,7 @@ impl AbortProcedure {
                             is_error: true,
                             terminate: false,
                         },
+                        surface_op: super::types::SurfaceOperation::Append,
                         terminate: false,
                     },
                 })?;
@@ -1571,6 +1584,7 @@ impl AbortProcedure {
                         stop_reason: Some("aborted".into()),
                         deferred_handle: None,
                     },
+                    surface_op: super::types::SurfaceOperation::Append,
                     terminate: false,
                 },
             })?;
@@ -1701,6 +1715,7 @@ impl DeferredProcedure {
                         seq,
                         timestamp: seq,
                         message: target.message.clone(),
+                        surface_op: super::types::SurfaceOperation::Append,
                         terminate: false,
                     },
                 })?;
@@ -1812,6 +1827,7 @@ impl DeferredProcedure {
                 seq: base,
                 timestamp: base + 1,
                 message,
+                surface_op: super::types::SurfaceOperation::Append,
                 terminate: false,
             },
         })?;
@@ -2117,6 +2133,7 @@ impl ToolBatchProcedure {
                     is_error: result.is_error,
                     terminate: result.terminate,
                 },
+                surface_op: super::types::SurfaceOperation::Append,
                 terminate: result.terminate,
             },
         })?;
@@ -2212,10 +2229,29 @@ impl ToolBatchProcedure {
                 recoveries.push(ToolRecovery::Replay(spec.clone()));
                 continue;
             }
+            let tool_was_started = store.records().iter().any(|record| {
+                if let Record::ToolExecutionObserved {
+                    tool_call_id,
+                    phase,
+                    ..
+                } = record
+                {
+                    tool_call_id.as_str() == spec.call_id
+                        && *phase == super::types::ToolExecutionPhase::Started
+                } else {
+                    false
+                }
+            });
+            let content = if tool_was_started {
+                "Tool execution started but was interrupted before completion (outcome unknown)."
+                    .into()
+            } else {
+                "Tool execution was never started before interruption.".into()
+            };
             let result = ToolResult {
                 call_id: spec.call_id.clone(),
                 name: spec.name.clone(),
-                content: "Tool execution was interrupted before completion.".into(),
+                content,
                 is_error: true,
                 terminate: false,
             };
@@ -2233,6 +2269,7 @@ impl ToolBatchProcedure {
                         is_error: result.is_error,
                         terminate: result.terminate,
                     },
+                    surface_op: super::types::SurfaceOperation::Append,
                     terminate: result.terminate,
                 },
             })?;

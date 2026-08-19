@@ -12,6 +12,7 @@ fn store_with_two_entries() -> MemoryStore {
             lane: "main".into(),
             seq: 1,
             timestamp: 1,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::user("one", vec![]),
             terminate: false,
         })
@@ -23,6 +24,7 @@ fn store_with_two_entries() -> MemoryStore {
             lane: "main".into(),
             seq: 2,
             timestamp: 2,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::user("two", vec![]),
             terminate: false,
         })

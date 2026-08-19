@@ -61,6 +61,7 @@ impl MemoryStore {
             seq: self.next_seq,
             timestamp: self.next_seq,
             message,
+            surface_op: crate::harness::SurfaceOperation::Append,
             terminate: false,
         };
         let id = entry.id.clone();
@@ -197,6 +198,7 @@ mod tests {
                 seq: 5,
                 timestamp: 5,
                 message: AgentMessage::user("prompt", vec![]),
+                surface_op: crate::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();

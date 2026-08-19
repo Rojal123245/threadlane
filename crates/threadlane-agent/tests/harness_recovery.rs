@@ -84,6 +84,7 @@ fn child_lane_entries_do_not_advance_main_leaf() {
             lane: "child".into(),
             seq: 3,
             timestamp: 3,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::Assistant {
                 content: Some("child".into()),
                 tool_calls: None,
@@ -124,6 +125,7 @@ fn operation_acceptance_can_target_a_child_lane() {
             lane: "child".into(),
             seq: 2,
             timestamp: 2,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::user("child", vec![]),
             terminate: false,
         })
@@ -189,6 +191,7 @@ fn killed_child_lane_resumes_without_duplicate_durable_records() {
             lane: "child".into(),
             seq: 2,
             timestamp: 2,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::user("child", vec![]),
             terminate: false,
         })
@@ -264,6 +267,7 @@ fn no_tool_acceptance_writes_prompt_and_result_on_a_child_lane() {
             lane: "child".into(),
             seq: 2,
             timestamp: 2,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::user("child", vec![]),
             terminate: false,
         })
@@ -307,6 +311,7 @@ fn queued_input_is_scoped_to_the_target_lane() {
             lane: "child".into(),
             seq: 2,
             timestamp: 2,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::user("child", vec![]),
             terminate: false,
         })
@@ -328,6 +333,7 @@ fn queued_input_is_scoped_to_the_target_lane() {
             QueueKind::FollowUp,
             ProvisionedEntry {
                 id: "queued-child".into(),
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                 parent_id: Some("child-leaf".into()),
                 message: AgentMessage::user("follow up", vec![]),
             },
@@ -351,6 +357,7 @@ fn tool_intent_and_result_recovery_stay_on_a_child_lane() {
             lane: "child".into(),
             seq: 2,
             timestamp: 2,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::user("child", vec![]),
             terminate: false,
         })
@@ -372,6 +379,7 @@ fn tool_intent_and_result_recovery_stay_on_a_child_lane() {
             lane: "child".into(),
             seq: 4,
             timestamp: 4,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::Assistant {
                 content: None,
                 tool_calls: None,
@@ -429,6 +437,7 @@ fn tool_intent_and_result_recovery_stay_on_a_child_lane() {
             lane: "child".into(),
             seq: 9,
             timestamp: 9,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::Assistant {
                 content: None,
                 tool_calls: None,
@@ -466,6 +475,7 @@ fn compaction_acceptance_targets_the_requested_lane() {
             lane: "child".into(),
             seq: 2,
             timestamp: 2,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::user("child", vec![]),
             terminate: false,
         })
@@ -497,6 +507,7 @@ fn navigation_acceptance_targets_the_requested_lane() {
             lane: "child".into(),
             seq: 2,
             timestamp: 2,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::user("child", vec![]),
             terminate: false,
         })
@@ -556,6 +567,7 @@ fn reducer_matches_tool_completion_by_provisioned_result_id() {
             lane: "main".into(),
             seq: 1,
             timestamp: 1,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::Assistant {
                 content: None,
                 tool_calls: None,
@@ -594,6 +606,7 @@ fn reducer_matches_tool_completion_by_provisioned_result_id() {
             lane: "main".into(),
             seq: 4,
             timestamp: 4,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::Tool {
                 tool_call_id: "call-1".into(),
                 name: "list_dir".into(),
@@ -638,6 +651,7 @@ fn queued_input_is_reduced_by_its_provisioned_entry_identity() {
         priority: None,
         target: ProvisionedEntry {
             id: "entry-queued-1".into(),
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             parent_id: None,
             message: AgentMessage::user("follow up", vec![]),
         },

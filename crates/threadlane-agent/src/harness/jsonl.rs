@@ -567,6 +567,7 @@ fn read_entries(path: &Path) -> io::Result<(Vec<Entry>, Vec<Record>)> {
                 seq: node.seq.unwrap_or((index + 1) as u64),
                 timestamp: node.timestamp,
                 message: node.message,
+                surface_op: super::types::SurfaceOperation::Append,
                 terminate: false,
             });
         }

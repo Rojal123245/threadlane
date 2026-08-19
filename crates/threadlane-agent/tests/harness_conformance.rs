@@ -12,6 +12,7 @@ fn exercise<S: SessionStore>(store: &mut S) {
             lane: "main".into(),
             seq: 1,
             timestamp: 1,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::user("hello", vec![]),
             terminate: false,
         })
@@ -33,6 +34,7 @@ fn exercise<S: SessionStore>(store: &mut S) {
             lane: "main".into(),
             seq: 3,
             timestamp: 3,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::Assistant {
                 content: Some("done".into()),
                 tool_calls: None,
@@ -135,6 +137,7 @@ fn invalid_append_cases<S: SessionStore>(
             lane: "main".into(),
             seq: 1,
             timestamp: 1,
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
             message: AgentMessage::user("root", vec![]),
             terminate: false,
         })
@@ -147,6 +150,7 @@ fn invalid_append_cases<S: SessionStore>(
                 lane: "main".into(),
                 seq: 2,
                 timestamp: 2,
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                 message: AgentMessage::user("duplicate", vec![]),
                 terminate: false,
             })
@@ -158,6 +162,7 @@ fn invalid_append_cases<S: SessionStore>(
                 lane: "main".into(),
                 seq: 2,
                 timestamp: 2,
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                 message: AgentMessage::user("missing", vec![]),
                 terminate: false,
             })

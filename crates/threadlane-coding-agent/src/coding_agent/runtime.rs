@@ -298,6 +298,7 @@ pub(crate) fn recover_v2_subagent_records(
                 run_id: run_id.clone(),
                 target: ProvisionedEntry {
                     id: entry.id.clone(),
+                    surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                     parent_id: entry.parent_id.clone(),
                     message: entry.message.clone(),
                 },
@@ -811,6 +812,24 @@ impl CodingAgent {
         {
             return Err("invalid accepted run proof".into());
         }
+        let prompt_text = self
+            .session_tree
+            .nodes
+            .get(&accepted.prompt_entry_id)
+            .and_then(|node| match &node.message {
+                AgentMessage::User { content } => Some(content.clone()),
+                AgentMessage::UserWithImages { content, .. } => Some(content.clone()),
+                _ => None,
+            });
+        if let Some(prompt) = prompt_text {
+            if prompt.starts_with('/') {
+                match Box::pin(self.handle_input_with_images(&prompt, Vec::new())).await {
+                    Some(Ok(_)) => return Ok(()),
+                    Some(Err(err)) => return Err(err),
+                    None => return Ok(()),
+                }
+            }
+        }
         self.harness_journal_error = None;
         self.agent
             .run_accepted(
@@ -1263,6 +1282,7 @@ impl CodingAgent {
                             seq: harness_next_seq(journal.store.store()),
                             timestamp: now_millis(),
                             message: node.message.clone(),
+                            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                             terminate: matches!(
                                 node.message,
                                 AgentMessage::Tool {
@@ -1916,14 +1936,10 @@ impl CodingAgent {
                 return;
             }
 
-            // Persist new provider messages through the canonical session
-            // harness, then reload the session tree from the updated file.
+            // Provider messages are already persisted step-by-step by the
+            // turn driver. Refresh the harness and reload the session tree.
             if let Some(harness) = self.harness.as_mut() {
-                if let Err(error) = harness.sync_messages(&state_messages) {
-                    self.harness_journal_error = Some(error);
-                    return;
-                }
-                if let Err(error) = harness.assert_model_visible(&state_messages) {
+                if let Err(error) = harness.refresh() {
                     self.harness_journal_error = Some(error);
                     return;
                 }
@@ -3201,7 +3217,16 @@ impl CodingAgent {
             if cmd_name == "subagent" {
                 let task_prompt = cmd_args.trim();
                 if task_prompt.is_empty() {
-                    return Some(Err("Usage: /subagent <task description>".to_string()));
+                    let err = "Usage: /subagent <task description>".to_string();
+                    let run_id = self.harness_run_id.lock().ok().and_then(|r| r.clone());
+                    let _ = self
+                        .finish_harness_run(
+                            run_id.as_deref(),
+                            OperationOutcome::Failed,
+                            Some(err.clone()),
+                        )
+                        .await;
+                    return Some(Err(err));
                 }
                 let task = AgentRunTask {
                     agent: "worker".to_string(),

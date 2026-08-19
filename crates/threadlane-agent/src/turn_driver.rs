@@ -574,15 +574,25 @@ impl<'a> TurnDriver<'a> {
                 return;
             }
 
+            let mut step_messages = Vec::new();
             if !current_reasoning.trim().is_empty() {
                 let thinking = AgentMessage::Custom {
                     custom_type: "thinking".into(),
                     payload: serde_json::json!({ "text": current_reasoning }),
                 };
+                step_messages.push(thinking.clone());
                 self.turn.lock().await.messages.push(thinking);
             }
 
+            step_messages.push(assistant_msg.clone());
             self.turn.lock().await.messages.push(assistant_msg.clone());
+
+            if let Err(error) = self.persist_messages(&step_messages).await {
+                self.emit_event(AgentEvent::AgentError {
+                    error: format!("failed to persist assistant step before continuation: {error}"),
+                });
+                return;
+            }
 
             self.emit_event(AgentEvent::MessageEnd {
                 message: assistant_msg,

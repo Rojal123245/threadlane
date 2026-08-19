@@ -672,6 +672,7 @@ mod tests {
                     stop_reason: None,
                     deferred_handle: None,
                 },
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
@@ -726,6 +727,7 @@ mod tests {
                     stop_reason: None,
                     deferred_handle: None,
                 },
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
@@ -744,6 +746,7 @@ mod tests {
                     is_error: false,
                     terminate: true,
                 },
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                 terminate: true,
             })
             .unwrap();
@@ -835,6 +838,7 @@ mod tests {
                     stop_reason: Some("stop".into()),
                     deferred_handle: None,
                 },
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();

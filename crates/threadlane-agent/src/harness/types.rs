@@ -270,6 +270,24 @@ pub enum StreamCheckpointKind {
     ToolCall,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SurfaceOperation {
+    Append,
+    Replace {
+        start_seq: u64,
+        end_seq: u64,
+        #[serde(default)]
+        source_event_seqs: Vec<u64>,
+    },
+}
+
+impl Default for SurfaceOperation {
+    fn default() -> Self {
+        Self::Append
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
     pub id: String,
@@ -280,7 +298,32 @@ pub struct Entry {
     pub timestamp: u64,
     pub message: AgentMessage,
     #[serde(default)]
+    pub surface_op: SurfaceOperation,
+    #[serde(default)]
     pub terminate: bool,
+}
+
+impl Entry {
+    pub fn new(
+        id: impl Into<String>,
+        parent_id: Option<String>,
+        lane: impl Into<String>,
+        seq: u64,
+        timestamp: u64,
+        message: AgentMessage,
+        terminate: bool,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            parent_id,
+            lane: lane.into(),
+            seq,
+            timestamp,
+            message,
+            surface_op: SurfaceOperation::Append,
+            terminate,
+        }
+    }
 }
 
 fn default_main_lane() -> String {
@@ -292,6 +335,19 @@ pub struct ProvisionedEntry {
     pub id: String,
     pub parent_id: Option<String>,
     pub message: AgentMessage,
+    #[serde(default)]
+    pub surface_op: SurfaceOperation,
+}
+
+impl ProvisionedEntry {
+    pub fn new(id: impl Into<String>, parent_id: Option<String>, message: AgentMessage) -> Self {
+        Self {
+            id: id.into(),
+            parent_id,
+            message,
+            surface_op: SurfaceOperation::Append,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -550,6 +606,10 @@ pub enum Record {
         capabilities: CapabilitySnapshot,
         prompt_template_ids: Vec<TraceString>,
         git_head: Option<TraceString>,
+        #[serde(default)]
+        context_window_limit: Option<usize>,
+        #[serde(default)]
+        route_defaults: Option<TraceString>,
     },
     ProviderRequestStarted {
         id: String,

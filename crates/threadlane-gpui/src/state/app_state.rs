@@ -405,199 +405,35 @@ fn tool_activity_summary(name: &str, arguments: &str) -> String {
 }
 
 fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageInfo> {
-    let mut result = Vec::new();
-    let mut msg_counter = 0;
-
-    for msg in agent_messages {
-        msg_counter += 1;
-        match msg {
-            AgentMessage::User { content } => {
-                let role = if content.starts_with("[ADVISOR NOTE (Aside)]") {
-                    MessageRole::Advisor(threadlane_agent::AdvisorSeverity::Aside)
-                } else if content.starts_with("[ADVISOR NOTE (Concern)]") {
-                    MessageRole::Advisor(threadlane_agent::AdvisorSeverity::Concern)
-                } else if content.starts_with("[ADVISOR NOTE (CRITICAL BLOCKER)]") {
-                    MessageRole::Advisor(threadlane_agent::AdvisorSeverity::Blocker)
-                } else {
-                    MessageRole::User
-                };
-                result.push(ChatMessageInfo {
-                    id: format!("msg_{msg_counter}"),
-                    role,
-                    content,
-                    tool_activities: Vec::new(),
-                    streaming: false,
-                    reasoning_content: None,
-                    reasoning_expanded: false,
-                });
-            }
-            AgentMessage::UserWithImages { content, .. } => {
-                result.push(ChatMessageInfo {
-                    id: format!("msg_{msg_counter}"),
-                    role: MessageRole::User,
-                    content,
-                    tool_activities: Vec::new(),
-                    streaming: false,
-                    reasoning_content: None,
-                    reasoning_expanded: false,
-                });
-            }
-            AgentMessage::Assistant {
-                content,
-                tool_calls,
-                ..
-            } => {
-                let mut tool_activities = Vec::new();
-                if let Some(calls) = tool_calls {
-                    for call in calls {
-                        let category = match call.function.name.as_str() {
-                            "write_file"
-                            | "replace_file_content"
-                            | "multi_replace_file_content" => "Edited".into(),
-                            "create_file" => "Created".into(),
-                            "run_command" | "execute" => "Ran".into(),
-                            "read_file" | "list_dir" => "Loaded".into(),
-                            _ => "Explored".into(),
-                        };
-                        let detail = call.function.arguments.clone();
-                        let title = call.function.name.clone();
-                        tool_activities.push(ToolActivityInfo {
-                            id: call.id.clone(),
-                            category,
-                            summary: tool_activity_summary(&title, &detail),
-                            title,
-                            detail,
-                            is_expanded: false,
-                        });
-                    }
-                }
-                let reasoning_content = result
-                    .last()
-                    .filter(|message| {
-                        message.role == MessageRole::Assistant
-                            && message.content.is_empty()
-                            && message.tool_activities.is_empty()
-                            && message.reasoning_content.is_some()
-                    })
-                    .and_then(|message| message.reasoning_content.clone());
-                if reasoning_content.is_some() {
-                    result.pop();
-                }
-                result.push(ChatMessageInfo {
-                    id: format!("msg_{msg_counter}"),
-                    role: MessageRole::Assistant,
-                    content: content.unwrap_or_default(),
-                    tool_activities,
-                    streaming: false,
-                    reasoning_content,
-                    reasoning_expanded: false,
-                });
-            }
-            AgentMessage::Tool {
-                tool_call_id,
-                name,
-                content,
-                is_error,
-                ..
-            } => {
-                let category = if is_error {
-                    "Error".into()
-                } else {
-                    "Result".into()
-                };
-                if let Some(activity) = result
-                    .iter_mut()
-                    .rev()
-                    .flat_map(|message| message.tool_activities.iter_mut().rev())
-                    .find(|activity| activity.id == tool_call_id)
-                {
-                    activity.category = category;
-                    activity.detail = content;
-                    continue;
-                }
-                let tool_info = ToolActivityInfo {
-                    id: tool_call_id,
-                    category,
-                    summary: tool_activity_summary(&name, ""),
-                    title: name,
-                    detail: content,
+    threadlane_agent::harness::project_chat_messages(&agent_messages)
+        .into_iter()
+        .map(|msg| ChatMessageInfo {
+            id: msg.id,
+            role: match msg.role {
+                threadlane_agent::harness::UiMessageRole::User => MessageRole::User,
+                threadlane_agent::harness::UiMessageRole::Assistant => MessageRole::Assistant,
+                threadlane_agent::harness::UiMessageRole::System => MessageRole::System,
+                threadlane_agent::harness::UiMessageRole::Advisor(sev) => MessageRole::Advisor(sev),
+                threadlane_agent::harness::UiMessageRole::Error => MessageRole::Error,
+            },
+            content: msg.content,
+            tool_activities: msg
+                .tool_activities
+                .into_iter()
+                .map(|act| ToolActivityInfo {
+                    id: act.id,
+                    category: act.category,
+                    title: act.title,
+                    summary: act.summary,
+                    detail: act.detail,
                     is_expanded: false,
-                };
-                if let Some(last) = result.last_mut() {
-                    if last.role == MessageRole::Assistant {
-                        last.tool_activities.push(tool_info);
-                        continue;
-                    }
-                }
-                result.push(ChatMessageInfo {
-                    id: format!("msg_{msg_counter}"),
-                    role: MessageRole::Assistant,
-                    content: String::new(),
-                    tool_activities: vec![tool_info],
-                    streaming: false,
-                    reasoning_content: None,
-                    reasoning_expanded: false,
-                });
-            }
-            AgentMessage::System { content } => {
-                let role = if content.to_lowercase().contains("error")
-                    || content.to_lowercase().contains("failed")
-                {
-                    MessageRole::Error
-                } else {
-                    MessageRole::System
-                };
-                result.push(ChatMessageInfo {
-                    id: format!("msg_{msg_counter}"),
-                    role,
-                    content,
-                    tool_activities: Vec::new(),
-                    streaming: false,
-                    reasoning_content: None,
-                    reasoning_expanded: false,
-                });
-            }
-            AgentMessage::Custom {
-                custom_type,
-                payload,
-            } => {
-                let text = payload
-                    .get("text")
-                    .or_else(|| payload.get("error"))
-                    .and_then(|value| value.as_str())
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| payload.to_string());
-                if custom_type == "thinking" {
-                    result.push(ChatMessageInfo {
-                        id: format!("msg_{msg_counter}"),
-                        role: MessageRole::Assistant,
-                        content: String::new(),
-                        tool_activities: Vec::new(),
-                        streaming: false,
-                        reasoning_content: Some(text),
-                        reasoning_expanded: false,
-                    });
-                    continue;
-                }
-
-                let is_error_type = custom_type == "error" || custom_type == "agent_error";
-                result.push(ChatMessageInfo {
-                    id: format!("msg_{msg_counter}"),
-                    role: if is_error_type {
-                        MessageRole::Error
-                    } else {
-                        MessageRole::System
-                    },
-                    content: text,
-                    tool_activities: Vec::new(),
-                    streaming: false,
-                    reasoning_content: None,
-                    reasoning_expanded: false,
-                });
-            }
-        }
-    }
-    result
+                })
+                .collect(),
+            streaming: false,
+            reasoning_content: msg.reasoning_content,
+            reasoning_expanded: false,
+        })
+        .collect()
 }
 
 fn runtime_status_text(status: SessionRuntimeStatus) -> Option<String> {
@@ -2889,6 +2725,8 @@ mod tests {
         store
             .append_record(Record::RunContextCaptured {
                 id: "context-1".into(),
+                context_window_limit: None,
+                route_defaults: None,
                 seq: 102,
                 lane: "main".into(),
                 timestamp: 102,
@@ -3035,6 +2873,7 @@ mod tests {
                 seq: 2,
                 timestamp: 2,
                 message: AgentMessage::user("inspect", vec![]),
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
@@ -3071,6 +2910,7 @@ mod tests {
                     stop_reason: None,
                     deferred_handle: None,
                 },
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
@@ -3104,6 +2944,7 @@ mod tests {
                     is_error: false,
                     terminate: false,
                 },
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
@@ -3194,6 +3035,7 @@ mod tests {
                     stop_reason: None,
                     deferred_handle: None,
                 },
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
@@ -3227,6 +3069,7 @@ mod tests {
                     is_error: false,
                     terminate: false,
                 },
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
@@ -3425,6 +3268,7 @@ mod tests {
                     is_error: false,
                     terminate: false,
                 },
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();

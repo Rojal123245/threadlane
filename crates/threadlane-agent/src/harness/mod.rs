@@ -6,6 +6,7 @@ mod hooks;
 mod jsonl;
 mod memory;
 mod procedure;
+mod projections;
 mod queue;
 mod reducer;
 mod session;
@@ -36,6 +37,9 @@ pub use procedure::{
     DeferredResolution, NavigationProcedure, NoToolRun, OperationProcedure, ProcedureError,
     PromptProcedure, QueueProcedure, RetryPolicy, RetryProcedure, ToolBatchProcedure, ToolRecovery,
 };
+pub use projections::{
+    project_chat_messages, UiChatMessage, UiMessageRole, UiToolActivity,
+};
 pub use queue::{LaneQueue, SteerItem, SteerPriority};
 pub use reducer::Reducer;
 pub use session::{LaneHandle, SessionAgent};
@@ -51,6 +55,6 @@ pub use types::{
     LaneStatus, OperationIntent, OperationOutcome, PermissionTraceDecision, PermissionTraceScope,
     PermissionTraceSource, PromptSnapshot, ProviderErrorSummary, ProviderOutcome, ProvisionedEntry,
     QueueKind, QueuedEntry, Record, RecoveryResult, ReduceError, ReducedState, RetryState,
-    StreamCheckpointKind, SubagentLifecyclePhase, ToolExecutionOutcome, ToolExecutionPhase,
+    StreamCheckpointKind, SubagentLifecyclePhase, SurfaceOperation, ToolExecutionOutcome, ToolExecutionPhase,
     ToolReplaySafety, ToolResult, ToolSpec, ToolState, TraceString, UsageCause,
 };
