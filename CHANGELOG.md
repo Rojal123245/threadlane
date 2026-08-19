@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.6](https://github.com/wheregmis/threadlane/compare/v0.1.5...v0.1.6) (2026-08-19)
+
+
+### Features
+
+* editor ([7a38055](https://github.com/wheregmis/threadlane/commit/7a380555f35b5b93bf9bf3b9905de5e32ca6cbf5))
+* editor ([5ecd1fd](https://github.com/wheregmis/threadlane/commit/5ecd1fd750e1057002cb6b75ac53e7fb080645b5))
+* resizeable panels ([6849841](https://github.com/wheregmis/threadlane/commit/68498418b1345cd2a3051d7ba1b922fd0852ffb8))
+
 ## [0.1.5](https://github.com/wheregmis/threadlane/compare/v0.1.4...v0.1.5) (2026-08-19)
 
 
