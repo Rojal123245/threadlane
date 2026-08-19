@@ -20,11 +20,11 @@ fn tool_definitions() -> Vec<Value> {
     vec![
         json!({
             "name": "read_file",
-            "description": "Read content of a file with line numbers and hash anchors (e.g. 12:a3f|content), optionally specifying start and end lines (1-indexed).",
+            "description": "Read content of a file or virtual scheme (e.g. pr://70, issue://12, skill://name, agent://name, or GitHub PR/issue URL) with line numbers and hash anchors (e.g. 12:a3f|content), optionally specifying start and end lines (1-indexed).",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Absolute or relative path to the file" },
+                    "path": { "type": "string", "description": "Absolute or relative file path, virtual URI (pr://70, issue://12, skill://name, agent://name), or GitHub PR/issue URL" },
                     "start_line": { "type": "integer", "description": "Optional starting line number (1-based)" },
                     "end_line": { "type": "integer", "description": "Optional ending line number (1-based)" }
                 },
@@ -380,10 +380,16 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
                     return read_virtual_agent(workspace_root, &path[8..]);
                 }
                 Some(path) if path.starts_with("pr://") => {
-                    return virtual_read::github(workspace_root, "pr", &path[5..]);
+                    return virtual_read::github_path(workspace_root, path);
                 }
                 Some(path) if path.starts_with("issue://") => {
-                    return virtual_read::github(workspace_root, "issue", &path[8..]);
+                    return virtual_read::github_path(workspace_root, path);
+                }
+                Some(path)
+                    if path.starts_with("https://github.com/")
+                        || path.starts_with("http://github.com/") =>
+                {
+                    return virtual_read::github_path(workspace_root, path);
                 }
                 Some(p) => p,
                 None => return "Error: 'path' parameter is required".into(),
@@ -1259,9 +1265,30 @@ mod tests {
         let mem_content = execute_tool_in_workspace("manage_memory", &read_payload, root);
         assert!(mem_content.contains("## Architecture"));
         assert!(mem_content.contains("Use GPUI UI components"));
+
         assert!(mem_content.contains("## Gotchas"));
         assert!(mem_content.contains("cargo check requires unsandboxed bypass on macOS"));
         assert!(mem_content.contains("## Verification Commands"));
         assert!(mem_content.contains("cargo test --workspace"));
+    }
+
+    #[test]
+    fn test_read_file_virtual_schemes_and_urls() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        // Test skill:// discovery in .agents/skills/<name>/SKILL.md
+        let skill_dir = root.join(".agents/skills/ponytail");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(skill_dir.join("SKILL.md"), "ponytail instructions").unwrap();
+
+        let read_skill_payload = json!({ "path": "skill://ponytail" }).to_string();
+        let skill_res = execute_tool_in_workspace("read_file", &read_skill_payload, root);
+        assert_eq!(skill_res, "ponytail instructions");
+
+        // Test PR URL parsing error format when gh CLI or git remote is missing
+        let pr_url_payload = json!({ "path": "https://github.com/wheregmis/threadlane/pull/70" }).to_string();
+        let pr_res = execute_tool_in_workspace("read_file", &pr_url_payload, root);
+        assert!(pr_res.contains("pr://70"));
     }
 }
