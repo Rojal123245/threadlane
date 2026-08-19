@@ -565,6 +565,291 @@ impl SettingsView {
             )
     }
 
+    fn render_chatgpt_connections(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().colors;
+        let view = cx.entity().downgrade();
+        let model = self.model.clone();
+        let accounts = threadlane_auth::openai_auth::load_all_codex_accounts();
+        let own_accounts: Vec<_> = accounts
+            .into_iter()
+            .filter(|a| threadlane_auth::openai_auth::is_own_source(&a.source))
+            .collect();
+        let active_account_id =
+            threadlane_auth::openai_auth::get_active_codex_account().map(|a| a.id);
+
+        if own_accounts.is_empty() {
+            return self
+                .render_provider_connection(
+                    "OpenAI / ChatGPT",
+                    "GPT and Codex models via ChatGPT device login or an API key.",
+                    false,
+                    false,
+                    cx,
+                )
+                .into_any_element();
+        }
+
+        let auth_tx = self.auth_tx.clone();
+        let count = own_accounts.len();
+
+        div()
+            .py_4()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_4()
+                            .child(
+                                div()
+                                    .w(px(36.0))
+                                    .h(px(36.0))
+                                    .flex_none()
+                                    .rounded_lg()
+                                    .bg(theme.muted)
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(theme.success)
+                                    .child(IconName::Bot),
+                            )
+                            .child(
+                                div()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(theme.foreground)
+                                                    .child("OpenAI / ChatGPT"),
+                                            )
+                                            .child(
+                                                Tag::new()
+                                                    .child(if count == 1 {
+                                                        "1 Account".to_string()
+                                                    } else {
+                                                        format!("{count} Accounts Connected")
+                                                    })
+                                                    .with_variant(TagVariant::Success)
+                                                    .small(),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .mt_1()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(
+                                                "Manage connected accounts with automatic rate-limit and quota failover.",
+                                            ),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        Button::new("add-chatgpt-account-btn")
+                            .icon(IconName::Plus)
+                            .label("Add Account")
+                            .outline()
+                            .on_click({
+                                let view = view.clone();
+                                let auth_tx = auth_tx.clone();
+                                move |_event, _window, cx| {
+                                    let _ = view.update(cx, |this, cx| {
+                                        let result =
+                                            provider_auth::start_chatgpt_login(auth_tx.clone());
+                                        this.auth_message = Some(match result {
+                                            Ok(()) => {
+                                                "Starting sign-in for additional account...".to_string()
+                                            }
+                                            Err(error) => error,
+                                        });
+                                        cx.notify();
+                                    });
+                                }
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .mt_3()
+                    .pl(px(52.0))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .children(own_accounts.into_iter().enumerate().map(|(idx, acc)| {
+                        let is_active = active_account_id.as_deref() == Some(&acc.id)
+                            || (active_account_id.is_none() && idx == 0);
+                        let acc_id_make_active = acc.id.clone();
+                        let acc_id_remove = acc.id.clone();
+                        let model_active = model.clone();
+                        let model_remove = model.clone();
+                        let view_active = view.clone();
+                        let view_remove = view.clone();
+
+                        let initial = acc
+                            .label
+                            .chars()
+                            .next()
+                            .map(|c| c.to_uppercase().to_string())
+                            .unwrap_or_else(|| "U".to_string());
+
+                        div()
+                            .p_3()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.muted)
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .w(px(28.0))
+                                            .h(px(28.0))
+                                            .rounded_full()
+                                            .bg(theme.title_bar)
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .text_xs()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(if is_active {
+                                                theme.success
+                                            } else {
+                                                theme.muted_foreground
+                                            })
+                                            .child(initial),
+                                    )
+                                    .child(
+                                        div()
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .font_weight(FontWeight::MEDIUM)
+                                                            .text_color(theme.foreground)
+                                                            .child(acc.label.clone()),
+                                                    )
+                                                    .child(
+                                                        Tag::new()
+                                                            .child(if is_active {
+                                                                "Active"
+                                                            } else {
+                                                                "Backup"
+                                                            })
+                                                            .with_variant(if is_active {
+                                                                TagVariant::Success
+                                                            } else {
+                                                                TagVariant::Secondary
+                                                            })
+                                                            .small(),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .mt_1()
+                                                    .text_xs()
+                                                    .text_color(theme.muted_foreground)
+                                                    .child(if is_active {
+                                                        "Primary account for coding and prompt turns"
+                                                    } else {
+                                                        "Standby account — auto-failover on rate limits"
+                                                    }),
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .children((!is_active).then(|| {
+                                        Button::new(format!("make-active-{}", acc.id))
+                                            .icon(IconName::Check)
+                                            .label("Set Active")
+                                            .outline()
+                                            .on_click(move |_event, _window, cx| {
+                                                let acc_id = acc_id_make_active.clone();
+                                                let _ = model_active.update(cx, |state, cx| {
+                                                    controller::dispatch(
+                                                        state,
+                                                        AppAction::SetActiveCodexAccount(acc_id),
+                                                    );
+                                                    cx.notify();
+                                                });
+                                                let _ = view_active.update(cx, |_this, cx| {
+                                                    cx.notify();
+                                                });
+                                            })
+                                    }))
+                                    .child(
+                                        Button::new(format!("remove-acc-{}", acc.id))
+                                            .icon(IconName::Delete)
+                                            .label("Disconnect")
+                                            .ghost()
+                                            .on_click(move |_event, _window, cx| {
+                                                let acc_id = acc_id_remove.clone();
+                                                let _ = model_remove.update(cx, |state, cx| {
+                                                    controller::dispatch(
+                                                        state,
+                                                        AppAction::RemoveCodexAccount(acc_id),
+                                                    );
+                                                    cx.notify();
+                                                });
+                                                let _ = view_remove.update(cx, |_this, cx| {
+                                                    cx.notify();
+                                                });
+                                            }),
+                                    ),
+                            )
+                    })),
+            )
+            .when(count > 1, |el| {
+                el.child(
+                    div()
+                        .mt_3()
+                        .pl(px(52.0))
+                        .child(
+                            div()
+                                .p_2()
+                                .rounded_md()
+                                .bg(theme.muted)
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(
+                                            "⚡ Automatic Failover Active: If your active account hits rate limits or 5-hour quota (HTTP 429), requests seamlessly failover to your backup account.",
+                                        ),
+                                ),
+                        ),
+                )
+            })
+            .into_any_element()
+    }
+
     fn render_key_row(
         &self,
         label: &'static str,
@@ -613,10 +898,6 @@ impl SettingsView {
             (state.selected_model.clone(), state.auth_status_msg.clone())
         };
         let status = self.auth_message.clone().or(state_status);
-        let chatgpt_connected =
-            threadlane_auth::openai_auth::load_credentials().is_some_and(|credentials| {
-                threadlane_auth::openai_auth::is_own_source(&credentials.source)
-            });
         let antigravity_connected =
             threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some();
         let model = self.model.clone();
@@ -789,13 +1070,7 @@ impl SettingsView {
                     .text_color(theme.foreground)
                     .child(TextView::markdown("provider-auth-status", status).selectable(true))
             }))
-            .child(self.render_provider_connection(
-                "OpenAI / ChatGPT",
-                "GPT and Codex models via ChatGPT device login or an API key.",
-                chatgpt_connected,
-                false,
-                cx,
-            ))
+            .child(self.render_chatgpt_connections(cx))
             .child(self.render_provider_connection(
                 "Google Antigravity",
                 "Gemini and other models via Google OAuth PKCE.",

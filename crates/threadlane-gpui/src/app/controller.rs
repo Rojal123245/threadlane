@@ -70,6 +70,14 @@ pub(crate) fn dispatch(state: &mut AppState, action: AppAction) {
         AppAction::SaveOpenCodeKey(key) => {
             let _ = state.save_opencode_key(key);
         }
+        AppAction::SetActiveCodexAccount(id) => {
+            let _ = threadlane_auth::openai_auth::set_active_codex_account(&id);
+            state.reconcile_selected_model();
+        }
+        AppAction::RemoveCodexAccount(id) => {
+            let _ = threadlane_auth::openai_auth::remove_codex_account(&id);
+            state.reconcile_selected_model();
+        }
         AppAction::ToggleReasoningExpanded(msg_id) => {
             if let Some(message) = state.messages.iter_mut().find(|m| m.id == msg_id) {
                 message.reasoning_expanded = !message.reasoning_expanded;

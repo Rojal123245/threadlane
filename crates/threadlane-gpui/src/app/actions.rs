@@ -38,6 +38,8 @@ pub enum AppAction {
     CloseSettings,
     SaveOpenAiKey(String),
     SaveOpenCodeKey(String),
+    SetActiveCodexAccount(String),
+    RemoveCodexAccount(String),
     ToggleReasoningExpanded(String),
     OpenFileInEditor(String),
 }
