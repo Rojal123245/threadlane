@@ -68,6 +68,7 @@ A normal `cargo run` may be unsuitable for testing installation: update installa
 3. Run focused tests for touched logic, then broader workspace tests when warranted.
 4. Do not claim a UI behavior was visually verified unless the application was actually run and observed.
 5. Existing unused-code warnings are not part of unrelated tasks; do not remove meaningful code merely to silence them.
+6. The locked GPUI/Zed revision uses `std::hint::cold_path`, which requires Rust 1.95 or newer. Keep the root `rust-toolchain.toml` and release workflow aligned with that minimum.
 
 ## Rust and Architecture Conventions
 - **Strict reuse gate:** Before implementing anything, search the repository for an existing component, helper, state type, command path, or dependency that already provides the needed behavior. Reuse or extend the existing implementation whenever possible. Do not create a duplicate component, abstraction, utility, or parallel state path unless you document why the existing one cannot satisfy the requirement.

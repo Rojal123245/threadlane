@@ -155,7 +155,8 @@ flowchart TD
 
 ### Prerequisites
 
-- Current stable Rust toolchain (`rustup update stable`).
+- Rust 1.95.0 or later (the repository pins 1.95.0 automatically through
+  `rust-toolchain.toml`; install it with `rustup toolchain install 1.95.0`).
 - WebAssembly target: `rustup target add wasm32-wasip1`.
 - Native C toolchain (standard Xcode Command Line Tools on macOS; `build-essential` on Ubuntu).
 
