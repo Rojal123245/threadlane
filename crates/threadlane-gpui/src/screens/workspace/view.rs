@@ -20,6 +20,7 @@ use crate::app::actions::AppAction;
 use crate::app::controller;
 use crate::screens::chat::ChatListView;
 use crate::screens::right_panel::RightPanelView;
+use crate::screens::terminal::TerminalView;
 use crate::screens::settings::SettingsView;
 use crate::screens::sidebar::SidebarView;
 use crate::services::updater::{self, UpdaterEvent};
@@ -67,8 +68,10 @@ pub struct WorkspaceView {
     chat_list: Entity<ChatListView>,
     settings: Entity<SettingsView>,
     right_panel: Entity<RightPanelView>,
+    terminal: Entity<TerminalView>,
     sidebar_collapsed: bool,
     right_panel_visible: bool,
+    bottom_panel_visible: bool,
     environment_open: bool,
     command_palette_open: bool,
     command_palette_selected: usize,
@@ -94,6 +97,8 @@ impl WorkspaceView {
         let chat_list = cx.new(|cx| ChatListView::new(model.clone(), window, cx));
         let settings = cx.new(|cx| SettingsView::new(model.clone(), window, cx));
         let right_panel = cx.new(|cx| RightPanelView::new(model.clone(), window, cx));
+        let terminal_project = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let terminal = cx.new(|cx| TerminalView::new(terminal_project, cx));
         let git_message_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Commit message"));
         let command_palette_scroll_handle = ScrollHandle::new();
@@ -147,8 +152,10 @@ impl WorkspaceView {
                 chat_list,
                 settings,
                 right_panel,
+                terminal,
                 sidebar_collapsed: false,
                 right_panel_visible: false,
+                bottom_panel_visible: false,
                 environment_open: false,
                 command_palette_open: false,
                 command_palette_selected: 0,
@@ -1303,6 +1310,9 @@ impl Render for WorkspaceView {
                 .update(cx, |input, cx| input.set_value(message, window, cx));
         }
         let workspace_page = self.model.read(cx).workspace_page;
+        if let Some(project) = self.model.read(cx).active_work_dir.clone() {
+            self.terminal.update(cx, |terminal, cx| terminal.set_project(project, cx));
+        }
         let theme = cx.theme().colors;
         let sidebar_tooltip = if self.sidebar_collapsed {
             "Show sidebar"
@@ -1328,19 +1338,48 @@ impl Render for WorkspaceView {
                     .min_w_0()
                     .h_full()
                     .flex()
+                    .flex_col()
                     .child(
                         div()
                             .flex_1()
-                            .min_w(px(360.0))
-                            .h_full()
-                            .child(self.chat_list.clone()),
+                            .min_h_0()
+                            .flex()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(360.0))
+                                    .h_full()
+                                    .child(self.chat_list.clone()),
+                            )
+                            .children(self.right_panel_visible.then(|| {
+                                div()
+                                    .flex_1()
+                                    .min_w(px(360.0))
+                                    .h_full()
+                                    .child(self.right_panel.clone())
+                            })),
                     )
-                    .children(self.right_panel_visible.then(|| {
+                    .children((self.bottom_panel_visible).then(|| {
                         div()
-                            .flex_1()
-                            .min_w(px(360.0))
-                            .h_full()
-                            .child(self.right_panel.clone())
+                            .flex_none()
+                            .h(px(280.0))
+                            .flex()
+                            .flex_col()
+                            .border_t_1()
+                            .border_color(theme.border)
+                            .bg(theme.background)
+                            .child(
+                                div()
+                                    .h(px(36.0))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .px_3()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child("Terminal"),
+                            )
+                            .child(div().flex_1().min_h_0().child(self.terminal.clone()))
                     }))
                     .into_any_element(),
                 WorkspacePage::Settings => self.settings.clone().into_any_element(),
@@ -1354,7 +1393,7 @@ impl Render for WorkspaceView {
                     .xsmall()
                     .absolute()
                     .top(px(9.0))
-                    .right(px(84.0))
+                    .right(px(120.0))
                     .on_click(cx.listener(|this, _event, window, cx| {
                         this.command_palette_open = !this.command_palette_open;
                         this.command_palette_selected = 0;
@@ -1362,6 +1401,29 @@ impl Render for WorkspaceView {
                             this.command_palette_input
                                 .update(cx, |input, cx| input.focus(window, cx));
                         }
+                        cx.notify();
+                    }))
+            }))
+            .children((workspace_page == WorkspacePage::Chat).then(|| {
+                Button::new("bottom-panel-toggle")
+                    .icon(if self.bottom_panel_visible {
+                        IconName::PanelBottomOpen
+                    } else {
+                        IconName::PanelBottom
+                    })
+                    .tooltip(if self.bottom_panel_visible {
+                        "Hide terminal"
+                    } else {
+                        "Show terminal"
+                    })
+                    .ghost()
+                    .selected(self.bottom_panel_visible)
+                    .xsmall()
+                    .absolute()
+                    .top(px(9.0))
+                    .right(px(84.0))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.bottom_panel_visible = !this.bottom_panel_visible;
                         cx.notify();
                     }))
             }))
