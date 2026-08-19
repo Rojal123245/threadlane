@@ -314,7 +314,7 @@ impl EditorView {
         }
     }
 
-    pub fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn remove_tab_at(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.tabs.len() {
             self.tabs.remove(index);
             if self.tabs.is_empty() {
@@ -331,21 +331,149 @@ impl EditorView {
         }
     }
 
+    pub fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.tabs.len() {
+            return;
+        }
+
+        let tab = &self.tabs[index];
+        if tab.is_dirty && !tab.is_diff {
+            let file_name = tab.file_name.clone();
+            let target_path = tab.relative_path.clone();
+
+            cx.spawn(async move |this, cx| {
+                let result = rfd::AsyncMessageDialog::new()
+                    .set_title("Discard unsaved changes?")
+                    .set_description(format!(
+                        "Do you want to discard unsaved changes to \"{file_name}\"?"
+                    ))
+                    .set_buttons(rfd::MessageButtons::YesNo)
+                    .show()
+                    .await;
+                if matches!(result, rfd::MessageDialogResult::Yes) {
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(pos) = this
+                            .tabs
+                            .iter()
+                            .position(|t| t.relative_path == target_path)
+                        {
+                            this.remove_tab_at(pos, cx);
+                        }
+                    });
+                }
+            })
+            .detach();
+        } else {
+            self.remove_tab_at(index, cx);
+        }
+    }
+
     pub fn close_other_tabs(&mut self, keep_index: usize, cx: &mut Context<Self>) {
-        if keep_index < self.tabs.len() {
+        if keep_index >= self.tabs.len() {
+            return;
+        }
+
+        let dirty_names: Vec<String> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(i, t)| *i != keep_index && t.is_dirty && !t.is_diff)
+            .map(|(_, t)| t.file_name.clone())
+            .collect();
+
+        if dirty_names.is_empty() {
             let kept = self.tabs.remove(keep_index);
             self.tabs = vec![kept];
             self.active_tab_index = Some(0);
             self.status_msg = None;
             cx.notify();
+        } else {
+            let keep_path = self.tabs[keep_index].relative_path.clone();
+            let description = if dirty_names.len() == 1 {
+                format!(
+                    "Do you want to discard unsaved changes to \"{}\"?",
+                    dirty_names[0]
+                )
+            } else {
+                format!(
+                    "Do you want to discard unsaved changes to {} files ({})?",
+                    dirty_names.len(),
+                    dirty_names.join(", ")
+                )
+            };
+
+            cx.spawn(async move |this, cx| {
+                let result = rfd::AsyncMessageDialog::new()
+                    .set_title("Discard unsaved changes?")
+                    .set_description(description)
+                    .set_buttons(rfd::MessageButtons::YesNo)
+                    .show()
+                    .await;
+                if matches!(result, rfd::MessageDialogResult::Yes) {
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(pos) = this
+                            .tabs
+                            .iter()
+                            .position(|t| t.relative_path == keep_path)
+                        {
+                            let kept = this.tabs.remove(pos);
+                            this.tabs = vec![kept];
+                            this.active_tab_index = Some(0);
+                            this.status_msg = None;
+                            cx.notify();
+                        }
+                    });
+                }
+            })
+            .detach();
         }
     }
 
     pub fn close_all_tabs(&mut self, cx: &mut Context<Self>) {
-        self.tabs.clear();
-        self.active_tab_index = None;
-        self.status_msg = None;
-        cx.notify();
+        let dirty_names: Vec<String> = self
+            .tabs
+            .iter()
+            .filter(|t| t.is_dirty && !t.is_diff)
+            .map(|t| t.file_name.clone())
+            .collect();
+
+        if dirty_names.is_empty() {
+            self.tabs.clear();
+            self.active_tab_index = None;
+            self.status_msg = None;
+            cx.notify();
+        } else {
+            let description = if dirty_names.len() == 1 {
+                format!(
+                    "Do you want to discard unsaved changes to \"{}\"?",
+                    dirty_names[0]
+                )
+            } else {
+                format!(
+                    "Do you want to discard unsaved changes to {} files ({})?",
+                    dirty_names.len(),
+                    dirty_names.join(", ")
+                )
+            };
+
+            cx.spawn(async move |this, cx| {
+                let result = rfd::AsyncMessageDialog::new()
+                    .set_title("Discard unsaved changes?")
+                    .set_description(description)
+                    .set_buttons(rfd::MessageButtons::YesNo)
+                    .show()
+                    .await;
+                if matches!(result, rfd::MessageDialogResult::Yes) {
+                    let _ = this.update(cx, |this, cx| {
+                        this.tabs.clear();
+                        this.active_tab_index = None;
+                        this.status_msg = None;
+                        cx.notify();
+                    });
+                }
+            })
+            .detach();
+        }
     }
 
     pub fn save_active_file(&mut self, cx: &mut Context<Self>) {
