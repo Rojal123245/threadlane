@@ -2,6 +2,7 @@ use crate::antigravity::AntigravityClient;
 use crate::openai::{OpenAIClient, StreamEvent};
 use crate::opencode::OpenCodeGoClient;
 use crate::title_generator::{title_payload, TITLE_REQUEST_TIMEOUT};
+use crate::traits::ModelProvider;
 use futures_util::future::BoxFuture;
 use serde_json::Value;
 use std::sync::Arc;
@@ -35,6 +36,7 @@ pub enum PayloadFormat {
 
 pub type LazyPayloadBuilder = Arc<dyn Fn(PayloadFormat) -> BoxFuture<'static, Value> + Send + Sync>;
 
+#[derive(Clone)]
 pub enum PayloadSource {
     Eager {
         chat_payload: Value,
@@ -100,14 +102,41 @@ impl From<(Value, Value)> for PayloadSource {
 #[derive(Clone)]
 pub struct ProviderClient {
     openai: OpenAIClient,
+    openai_fallback: Option<OpenAIClient>,
     antigravity: AntigravityClient,
     opencode: OpenCodeGoClient,
 }
 
 impl ProviderClient {
     pub fn new(api_key: impl Into<String>, account_id: Option<String>) -> Self {
+        let api_key = api_key.into();
+        let fallback = if let Some(backup) = threadlane_auth::openai_auth::get_backup_codex_accounts().first() {
+            if backup.access_token != api_key {
+                Some(OpenAIClient::new(backup.access_token.clone(), backup.account_id.clone()))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Self {
+            openai: OpenAIClient::new(api_key, account_id),
+            openai_fallback: fallback,
+            antigravity: AntigravityClient::new(),
+            opencode: OpenCodeGoClient::new(),
+        }
+    }
+
+    pub fn with_fallback_account(
+        api_key: impl Into<String>,
+        account_id: Option<String>,
+        fallback_api_key: impl Into<String>,
+        fallback_account_id: Option<String>,
+    ) -> Self {
         Self {
             openai: OpenAIClient::new(api_key.into(), account_id),
+            openai_fallback: Some(OpenAIClient::new(fallback_api_key.into(), fallback_account_id)),
             antigravity: AntigravityClient::new(),
             opencode: OpenCodeGoClient::new(),
         }
@@ -144,16 +173,51 @@ impl ProviderClient {
     ) {
         let source = payload_source.into();
         let model = source.model().to_string();
-        let provider: Arc<dyn crate::traits::ModelProvider> = if is_antigravity_model(&model) {
-            Arc::new(self.antigravity.clone())
-        } else if is_opencode_model(&model) {
-            Arc::new(self.opencode.clone())
-        } else {
-            Arc::new(self.openai.clone())
-        };
-        provider
-            .stream_chat_completion(source, prompt_cache_key, event_tx)
+        if is_antigravity_model(&model) {
+            let provider = Arc::new(self.antigravity.clone());
+            provider
+                .stream_chat_completion(source, prompt_cache_key, event_tx)
+                .await;
+            return;
+        }
+        if is_opencode_model(&model) {
+            let provider = Arc::new(self.opencode.clone());
+            provider
+                .stream_chat_completion(source, prompt_cache_key, event_tx)
+                .await;
+            return;
+        }
+
+        if let Some(fallback_client) = &self.openai_fallback {
+            let primary = self.openai.clone();
+            let fallback = fallback_client.clone();
+            let source_primary = source.clone();
+            let source_fallback = source;
+            let key_primary = prompt_cache_key.clone();
+            let key_fallback = prompt_cache_key;
+
+            self.stream_with_fallback(
+                |tx| async move {
+                    let provider: Arc<dyn crate::traits::ModelProvider> = Arc::new(primary);
+                    provider
+                        .stream_chat_completion(source_primary, key_primary, tx)
+                        .await;
+                },
+                |tx| async move {
+                    let provider: Arc<dyn crate::traits::ModelProvider> = Arc::new(fallback);
+                    provider
+                        .stream_chat_completion(source_fallback, key_fallback, tx)
+                        .await;
+                },
+                event_tx,
+            )
             .await;
+        } else {
+            let provider: Arc<dyn crate::traits::ModelProvider> = Arc::new(self.openai.clone());
+            provider
+                .stream_chat_completion(source, prompt_cache_key, event_tx)
+                .await;
+        }
     }
 
     /// Returns true for provider errors where retrying the identical request on
@@ -480,5 +544,17 @@ mod tests {
         let payload = title_payload("opencode-go/deepseek-v4-flash", "Fix the login flow", false);
         assert!(payload.get("messages").is_some());
         assert!(payload.get("input").is_none());
+    }
+
+    #[test]
+    fn test_provider_client_with_fallback_account_creation() {
+        let client = ProviderClient::with_fallback_account(
+            "key1",
+            Some("acc1".into()),
+            "key2",
+            Some("acc2".into()),
+        );
+        assert_eq!(client.provider_kind("gpt-4o"), "codex");
+        assert!(client.openai_fallback.is_some());
     }
 }

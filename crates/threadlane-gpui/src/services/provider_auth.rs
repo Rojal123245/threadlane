@@ -1,6 +1,5 @@
 use std::sync::mpsc::Sender;
 use std::sync::OnceLock;
-use std::time::Duration;
 
 #[derive(Clone, Debug)]
 pub enum ProviderAuthEvent {
@@ -24,38 +23,33 @@ fn executor() -> Result<&'static tokio::runtime::Runtime, String> {
 }
 
 pub(crate) fn start_chatgpt_login(tx: Sender<ProviderAuthEvent>) -> Result<(), String> {
-    executor()?.spawn(async move {
-        match threadlane_auth::openai_auth::start_device_login().await {
-            Ok(response) => {
-                let _ = robius_open::Uri::new(&response.verification_uri).open();
-                let _ = tx.send(ProviderAuthEvent::Status(format!(
-                    "Enter code {} in the browser to finish signing in.",
-                    response.user_code
-                )));
+    let (verifier, challenge) = threadlane_auth::antigravity_auth::generate_pkce_pair();
+    let (state, _) = threadlane_auth::antigravity_auth::generate_pkce_pair();
+    let authorization_url =
+        threadlane_auth::openai_auth::build_browser_oauth_url(&challenge, &state);
 
-                loop {
-                    tokio::time::sleep(Duration::from_secs(response.interval.max(3))).await;
-                    match threadlane_auth::openai_auth::poll_device_token(
-                        &response.device_auth_id,
-                        &response.user_code,
-                    )
-                    .await
-                    {
-                        Ok(_) => {
-                            let _ = tx.send(ProviderAuthEvent::Connected(
-                                "Connected to ChatGPT.".to_string(),
-                            ));
-                            break;
-                        }
-                        Err(error) if error == "authorization_pending" => {}
-                        Err(error) => {
-                            let _ = tx.send(ProviderAuthEvent::Error(format!(
-                                "ChatGPT sign-in failed: {error}"
-                            )));
-                            break;
-                        }
-                    }
-                }
+    robius_open::Uri::new(&authorization_url)
+        .open()
+        .map_err(|error| format!("Failed to open ChatGPT sign-in: {error:?}"))?;
+
+    let _ = tx.send(ProviderAuthEvent::Status(
+        "Finish signing in to ChatGPT in your browser (select Personal Workspace if prompted).".to_string(),
+    ));
+
+    executor()?.spawn(async move {
+        let result = async {
+            let code =
+                threadlane_auth::openai_auth::listen_for_browser_oauth_callback(state).await?;
+            threadlane_auth::openai_auth::exchange_browser_code_for_tokens(&code, &verifier).await
+        }
+        .await;
+
+        match result {
+            Ok(account) => {
+                let _ = tx.send(ProviderAuthEvent::Connected(format!(
+                    "Connected ChatGPT account ({}).",
+                    account.label
+                )));
             }
             Err(error) => {
                 let _ = tx.send(ProviderAuthEvent::Error(format!(
