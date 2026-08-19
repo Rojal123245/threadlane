@@ -6,16 +6,55 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::input::{Editor, EditorState, InputEvent, TabSize};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::separator::Separator;
+use gpui_component::tag::Tag;
 use gpui_component::text::{TextView, TextViewState};
-use gpui_component::{ActiveTheme, IconName, Selectable, Sizable};
+use gpui_component::{ActiveTheme, Disableable, IconName, Selectable, Sizable};
 use threadlane_git::GitFile;
 
 use crate::screens::terminal::TerminalView;
 use crate::state::AppState;
 
+
+fn detect_language(path_str: &str) -> &'static str {
+    let path = Path::new(path_str);
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|s| s.to_lowercase())
+        .as_deref()
+    {
+        Some("rs") => "rust",
+        Some("py") => "python",
+        Some("js" | "mjs" | "cjs") => "javascript",
+        Some("ts" | "mts" | "cts" | "jsx" | "tsx") => "typescript",
+        Some("json") => "json",
+        Some("toml") => "toml",
+        Some("yaml" | "yml") => "yaml",
+        Some("html" | "htm") => "html",
+        Some("css") => "css",
+        Some("md" | "markdown") => "markdown",
+        Some("sh" | "bash" | "zsh") => "bash",
+        Some("go") => "go",
+        Some("c" | "h") => "c",
+        Some("cpp" | "hpp" | "cc" | "cxx" | "hh") => "cpp",
+        Some("diff" | "patch") => "diff",
+        Some("zig") => "zig",
+        _ => match path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|s| s.to_lowercase())
+            .as_deref()
+        {
+            Some("dockerfile") => "bash",
+            Some("cargo.lock") => "toml",
+            _ => "text",
+        },
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Surface {
     Review,
@@ -76,6 +115,11 @@ pub struct RightPanelView {
     review_error: Option<String>,
     document_title: Option<String>,
     document_state: Entity<TextViewState>,
+    editor_state: Option<Entity<EditorState>>,
+    editor_subscription: Option<Subscription>,
+    saved_content: String,
+    is_dirty: bool,
+    pending_document: Option<(String, String)>,
     terminal_sessions: HashMap<PathBuf, Entity<TerminalView>>,
     event_tx: mpsc::Sender<PanelEvent>,
     _subscriptions: Vec<Subscription>,
@@ -119,6 +163,11 @@ impl RightPanelView {
             review_error: None,
             document_title: None,
             document_state,
+            editor_state: None,
+            editor_subscription: None,
+            saved_content: String::new(),
+            is_dirty: false,
+            pending_document: None,
             terminal_sessions: HashMap::new(),
             event_tx,
             _subscriptions: vec![observe_model],
@@ -219,9 +268,79 @@ impl RightPanelView {
 
     fn close_document(&mut self, cx: &mut Context<Self>) {
         self.document_title = None;
+        self.editor_state = None;
+        self.editor_subscription = None;
+        self.saved_content.clear();
+        self.is_dirty = false;
+        self.pending_document = None;
         self.document_state
             .update(cx, |state, cx| state.set_text("", cx));
         cx.notify();
+    }
+
+    fn sync_pending_document(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((title, content)) = self.pending_document.take() else {
+            return;
+        };
+        self.document_title = Some(title.clone());
+        self.saved_content = content.clone();
+        self.is_dirty = false;
+
+        if title.starts_with("Review ·") {
+            self.editor_state = None;
+            self.editor_subscription = None;
+            let markdown = format!("```diff\n{}\n```", content.replace("```", "` ` `"));
+            self.document_state
+                .update(cx, |state, cx| state.set_text(&markdown, cx));
+        } else {
+            let lang = detect_language(&title);
+            let editor = cx.new(|cx| {
+                EditorState::new(lang, window, cx)
+                    .line_number(true)
+                    .folding(true)
+                    .show_whitespaces(false)
+                    .tab_size(TabSize {
+                        tab_size: 4,
+                        hard_tabs: false,
+                    })
+                    .default_value(&content)
+            });
+            let subscription = cx.subscribe(&editor, |this, editor, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let current = editor.read(cx).value();
+                    let dirty = current.as_str() != this.saved_content.as_str();
+                    if this.is_dirty != dirty {
+                        this.is_dirty = dirty;
+                        cx.notify();
+                    }
+                }
+            });
+            self.editor_state = Some(editor);
+            self.editor_subscription = Some(subscription);
+        }
+    }
+
+    fn save_active_document(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor_state.as_ref() else {
+            return;
+        };
+        let Some(title) = self.document_title.as_ref() else {
+            return;
+        };
+        let Some(project) = self.project.as_ref() else {
+            return;
+        };
+
+        let content = editor.read(cx).value().to_string();
+        let file_path = project.join(title);
+
+        if let Err(err) = std::fs::write(&file_path, &content) {
+            log::error!("Failed to save file {}: {}", file_path.display(), err);
+        } else {
+            self.saved_content = content;
+            self.is_dirty = false;
+            cx.notify();
+        }
     }
 
     fn open_diff(&self, relative_path: String) {
@@ -240,7 +359,7 @@ impl RightPanelView {
         });
     }
 
-    fn apply_event(&mut self, event: PanelEvent, cx: &mut Context<Self>) {
+    fn apply_event(&mut self, event: PanelEvent, _cx: &mut Context<Self>) {
         match event {
             PanelEvent::FilesLoaded { project, entries }
                 if self.project.as_ref() == Some(&project) =>
@@ -260,10 +379,7 @@ impl RightPanelView {
                 title,
                 content,
             } if self.project.as_ref() == Some(&project) => {
-                self.document_title = Some(title);
-                let markdown = format!("```diff\n{}\n```", content.replace("```", "` ` `"));
-                self.document_state
-                    .update(cx, |state, cx| state.set_text(&markdown, cx));
+                self.pending_document = Some((title, content));
             }
             _ => {}
         }
@@ -383,6 +499,9 @@ impl RightPanelView {
         let theme = cx.theme().colors;
         let project = self.project.clone();
         if let Some(title) = &self.document_title {
+            let is_dirty = self.is_dirty;
+            let has_editor = self.editor_state.is_some();
+            let lang = detect_language(title);
             return div()
                 .flex_1()
                 .min_h_0()
@@ -394,39 +513,92 @@ impl RightPanelView {
                         .px_2()
                         .flex()
                         .items_center()
-                        .gap_1()
-                        .child(
-                            Button::new("right-panel-document-back")
-                                .icon(IconName::ArrowLeft)
-                                .tooltip(match self.active_surface {
-                                    Some(Surface::Review) => "Back to changed files",
-                                    _ => "Back to project files",
-                                })
-                                .ghost()
-                                .xsmall()
-                                .on_click(cx.listener(|this, _event, _window, cx| {
-                                    this.close_document(cx);
-                                })),
-                        )
-                        .child(IconName::File)
+                        .justify_between()
                         .child(
                             div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
                                 .min_w_0()
                                 .flex_1()
-                                .truncate()
-                                .text_xs()
-                                .child(title.clone()),
+                                .child(
+                                    Button::new("right-panel-document-back")
+                                        .icon(IconName::ArrowLeft)
+                                        .tooltip(match self.active_surface {
+                                            Some(Surface::Review) => "Back to changed files",
+                                            _ => "Back to project files",
+                                        })
+                                        .ghost()
+                                        .xsmall()
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            this.close_document(cx);
+                                        })),
+                                )
+                                .child(IconName::File)
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_xs()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child(title.clone()),
+                                )
+                                .children(is_dirty.then(|| {
+                                    Tag::warning()
+                                        .child("modified")
+                                        .xsmall()
+                                }))
+                                .children(has_editor.then(|| {
+                                    Tag::secondary()
+                                        .child(lang)
+                                        .outline()
+                                        .xsmall()
+                                })),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .children(has_editor.then(|| {
+                                    Button::new("save-document")
+                                        .small()
+                                        .label("Save")
+                                        .icon(IconName::Check)
+                                        .disabled(!is_dirty)
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            this.save_active_document(cx);
+                                        }))
+                                }))
+                                .child(
+                                    Button::new("close-document")
+                                        .small()
+                                        .ghost()
+                                        .icon(IconName::Close)
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            this.close_document(cx);
+                                        })),
+                                ),
                         ),
                 )
                 .child(Separator::horizontal())
-                .child(
+                .child(if let Some(ref editor) = self.editor_state {
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .h_full()
+                        .child(Editor::new(editor).bordered(false).size_full())
+                        .into_any_element()
+                } else {
                     div()
                         .flex_1()
                         .min_h_0()
                         .overflow_y_scrollbar()
                         .p_3()
-                        .child(TextView::new(&self.document_state).selectable(true)),
-                )
+                        .child(TextView::new(&self.document_state).selectable(true))
+                        .into_any_element()
+                })
                 .into_any_element();
         }
         div()
@@ -718,8 +890,9 @@ impl RightPanelView {
 }
 
 impl Render for RightPanelView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_project(cx);
+        self.sync_pending_document(window, cx);
         let theme = cx.theme().colors;
         let body = match self.active_surface {
             None => self.render_chooser(cx).into_any_element(),
