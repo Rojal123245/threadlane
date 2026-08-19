@@ -130,6 +130,7 @@ pub(crate) struct TurnDriver<'a> {
     /// Persists model-visible messages before they may affect another provider
     /// request. Durable runtimes install the canonical session-journal writer.
     pub(crate) message_recorder: Option<crate::provider::AssistantMessageRecorder>,
+    pub(crate) model_context_refresh: Option<crate::provider::ModelContextRefresh>,
     pub(crate) stream_rules: Vec<(StreamRule, Regex)>,
     pub(crate) steering_queue: &'a mut Vec<AgentMessage>,
     pub(crate) follow_up_queue: &'a mut Vec<AgentMessage>,
@@ -160,6 +161,18 @@ impl<'a> TurnDriver<'a> {
 
         'turns: loop {
             turn_number += 1;
+
+            // A durable recorder is the canonical projection boundary. Refresh
+            // the transient request copy before every provider attempt so
+            // continuations cannot rely on stale in-memory history.
+            if let Some(refresh) = self.model_context_refresh.as_ref() {
+                if let Err(error) = refresh(self.turn.clone()).await {
+                    self.emit_event(AgentEvent::AgentError {
+                        error: format!("failed to refresh canonical model context: {error}"),
+                    });
+                    return;
+                }
+            }
 
             // Drain steering queue into turn state.
             if !self.steering_queue.is_empty() {
@@ -580,19 +593,21 @@ impl<'a> TurnDriver<'a> {
                     custom_type: "thinking".into(),
                     payload: serde_json::json!({ "text": current_reasoning }),
                 };
-                step_messages.push(thinking.clone());
-                self.turn.lock().await.messages.push(thinking);
+                step_messages.push(thinking);
             }
 
             step_messages.push(assistant_msg.clone());
-            self.turn.lock().await.messages.push(assistant_msg.clone());
 
+            // Persist the typed assistant transition before exposing it to the
+            // next continuation. The transient turn copy is updated only
+            // after the canonical commit succeeds.
             if let Err(error) = self.persist_messages(&step_messages).await {
                 self.emit_event(AgentEvent::AgentError {
                     error: format!("failed to persist assistant step before continuation: {error}"),
                 });
                 return;
             }
+            self.turn.lock().await.messages.extend(step_messages.iter().cloned());
 
             self.emit_event(AgentEvent::MessageEnd {
                 message: assistant_msg,

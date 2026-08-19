@@ -1,4 +1,6 @@
+use std::fs;
 use tempfile::tempdir;
+use threadlane_agent::harness::SessionStore;
 use threadlane_agent::{
     compact_messages, repair_interrupted_tool_turn, AgentMessage, AgentToolDefinition,
     CompactionOptions, ImageAttachment, SessionTree, TokenUsage,
@@ -31,27 +33,45 @@ fn test_session_tree_persistence_and_branching() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("session.jsonl");
 
-    let mut tree = SessionTree::new("sess_1");
-    tree.file_path = Some(file_path.clone());
+    fs::write(&file_path, "").unwrap();
+    let mut store = threadlane_agent::harness::JsonlStore::open(&file_path).unwrap();
+    store
+        .append_entry(threadlane_agent::harness::Entry::new(
+            "node_1",
+            None,
+            "main",
+            1,
+            100,
+            AgentMessage::User {
+                content: "Hello".to_string(),
+            },
+            false,
+        ))
+        .unwrap();
+    store
+        .append_entry(threadlane_agent::harness::Entry::new(
+            "node_2",
+            Some("node_1".into()),
+            "main",
+            2,
+            101,
+            AgentMessage::Assistant {
+                content: Some("Hi there".to_string()),
+                tool_calls: None,
+                stop_reason: None,
+                deferred_handle: None,
+            },
+            false,
+        ))
+        .unwrap();
 
-    let n1 = tree.add_message(AgentMessage::User {
-        content: "Hello".to_string(),
-    });
-    let _n2 = tree.add_message(AgentMessage::Assistant {
-        content: Some("Hi there".to_string()),
-        tool_calls: None,
-        stop_reason: None,
-        deferred_handle: None,
-    });
-
-    assert_eq!(tree.nodes.len(), 2);
-    let loaded = SessionTree::load_from_file(&file_path).unwrap();
+    let mut loaded = SessionTree::load_from_file(&file_path).unwrap();
     assert_eq!(loaded.nodes.len(), 2);
 
-    let forked = tree.fork_branch(&n1).unwrap();
+    let forked = loaded.fork_branch("node_1").unwrap();
     assert_eq!(forked.nodes.len(), 1);
-    assert_eq!(forked.parent_session_id.as_deref(), Some("sess_1"));
-    assert!(forked.session_id.starts_with("sess_1_fork_"));
+    assert_eq!(forked.parent_session_id.as_deref(), Some("session"));
+    assert!(forked.session_id.starts_with("session_fork_"));
 }
 
 #[test]

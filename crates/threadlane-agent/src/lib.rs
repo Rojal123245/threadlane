@@ -8,6 +8,7 @@ pub mod events;
 pub mod harness;
 pub mod loop_engine;
 pub mod provider;
+pub mod provider_executor;
 pub mod rules;
 pub mod session_tree;
 pub mod tool_dispatcher;
@@ -32,8 +33,8 @@ pub use events::{
     AgentEvent, HarnessMetrics, PermissionRequest, PermissionScope, SubagentRecoveryStatus,
 };
 pub use harness::{
-    has_open_subagent_lanes, interrupted_subagent_lanes, InterruptedSubagentLane, LaneQueue,
-    OperationOutcome, QueueKind, Record, RecoveryResult, SteerItem, SteerPriority,
+    has_open_subagent_lanes, interrupted_subagent_lanes, AcceptedRun, InterruptedSubagentLane,
+    LaneQueue, OperationOutcome, QueueKind, Record, RecoveryResult, SteerItem, SteerPriority,
     ToolReplaySafety,
 };
 pub use loop_engine::repair_interrupted_tool_turn;
@@ -44,6 +45,7 @@ pub use provider::{
     ToolCompletionRecorder, ToolExecutionTraceEvent, ToolExecutionTraceRecorder,
     ToolIntentRecorder,
 };
+pub use provider_executor::ProviderRunExecutor;
 pub use rules::*;
 pub use session_tree::{SessionNode, SessionTree};
 pub use tool_dispatcher::ToolDispatcher;

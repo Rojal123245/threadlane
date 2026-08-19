@@ -13,14 +13,15 @@ use threadlane_agent::harness::{
     AbortInitiator, AbortObservation, AbortTarget, AgentHarness, BoundedText, CapabilitySnapshot,
     DeferredResolution, EffectAction, Entry as HarnessEntry, ErrorCategory, EventPayload,
     HarnessEventHub, HookContext, HookKind, HookRegistry, JsonlStore, OperationOutcome,
-    PromptSnapshot, ProviderErrorSummary, ProviderOutcome, Record as HarnessRecord, ReduceError,
-    Reducer, RetryPolicy, SessionIdGenerator, SessionStore, Snapshot, SubagentLifecyclePhase,
-    ToolExecutionOutcome, ToolExecutionPhase, ToolReplaySafety as HarnessToolReplaySafety,
-    ToolResult as HarnessToolResult, ToolSpec, TraceString,
+    PromptSnapshot, ProviderErrorSummary, ProviderOutcome, ProvisionedEntry, QueueKind,
+    Record as HarnessRecord, ReduceError, Reducer, RetryPolicy, SessionIdGenerator, SessionStore,
+    Snapshot, SubagentLifecyclePhase, ToolExecutionOutcome, ToolExecutionPhase,
+    ToolReplaySafety as HarnessToolReplaySafety, ToolResult as HarnessToolResult, ToolSpec,
+    TraceString,
 };
 use threadlane_agent::session_tree::SessionTree;
 use threadlane_agent::{
-    AgentMessage, AgentToolResult, ProviderTraceEvent, ReasoningEffort, TokenUsage,
+    AgentMessage, AgentToolResult, ImageAttachment, ProviderTraceEvent, ReasoningEffort, TokenUsage,
     ToolExecutionTraceEvent,
 };
 
@@ -89,15 +90,7 @@ pub(crate) struct SubagentStartError {
     pub(crate) error: String,
 }
 
-/// Proof that a run prompt has been committed to the canonical session log.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AcceptedRun {
-    pub(crate) run_id: String,
-    pub(crate) lane: String,
-    pub(crate) prompt_entry_id: String,
-    pub(crate) assistant_entry_id: String,
-    pub(crate) accepted_through_seq: u64,
-}
+pub(crate) use threadlane_agent::AcceptedRun;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum InterruptedSubagentRecoveryState {
@@ -251,6 +244,23 @@ impl CodingSessionHarness {
         self.store
             .drive_to_completion()
             .map_err(|error| error.to_string())
+    }
+
+    pub fn model_context(
+        &self,
+        lane: &str,
+    ) -> Result<threadlane_agent::harness::ModelContextProjection, String> {
+        self.store
+            .store()
+            .model_context(lane)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn transcript(
+        &self,
+        lane: &str,
+    ) -> threadlane_agent::harness::TranscriptProjection {
+        self.store.store().transcript(lane)
     }
 
     pub(crate) fn record_provider_trace_to_path(
@@ -874,7 +884,7 @@ impl CodingSessionHarness {
 
     /// Start a foreground operation and accept the user prompt.
     ///
-    /// Returns `Ok(())` after `accept_prompt` is driven to completion
+    /// Returns `Ok(AcceptedRun)` after `accept_prompt` is driven to completion
     /// (committed to the JSONL store).
     pub(crate) fn begin_run(
         &mut self,
@@ -882,30 +892,116 @@ impl CodingSessionHarness {
         prompt: AgentMessage,
     ) -> Result<AcceptedRun, String> {
         self.refresh()?;
-        let assistant_entry_id = self
-            .store
-            .accept_prompt(run_id, prompt)
+        self.store
+            .accept_prompt_and_drive_on_lane(&self.main_lane_name, run_id, prompt)
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn begin_run_text(
+        &mut self,
+        prompt: &str,
+    ) -> Result<AcceptedRun, String> {
+        let run_id = format!(
+            "run-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        );
+        self.begin_run(&run_id, AgentMessage::user(prompt.to_string(), Vec::new()))
+    }
+
+    pub(crate) fn enqueue_unbound_with_images(
+        &mut self,
+        queue: QueueKind,
+        content: String,
+        images: Vec<ImageAttachment>,
+    ) -> Result<String, String> {
+        self.refresh()?;
+        let id = format!(
+            "entry-queue-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        );
+        let target = ProvisionedEntry::new(
+            &id,
+            None,
+            AgentMessage::user(content, images),
+        );
+        self.store
+            .enqueue_unbound(queue, target)
             .map_err(|error| error.to_string())?;
         self.store
             .drive_to_completion()
             .map_err(|error| error.to_string())?;
-        let accepted_through_seq = self
-            .store
-            .store()
-            .entries()
+        Ok(id)
+    }
+
+    pub(crate) fn consume_first_unbound_queue(&mut self, queue: QueueKind) -> Result<(), String> {
+        self.refresh()?;
+        let state = Reducer::reduce(self.store.store()).map_err(|error| format!("reduce failed: {error:?}"))?;
+        let entry_id = state
+            .lane(&self.main_lane_name)
+            .and_then(|lane| lane.queued.iter().find(|q| q.run_id.is_none() && q.queue == queue))
+            .map(|queued| queued.target.id.clone());
+        let Some(entry_id) = entry_id else { return Ok(()); };
+        self.store.consume_unbound(&entry_id).map_err(|error| error.to_string())?;
+        self.store.drive_to_completion().map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub(crate) fn consume_unbound_queue_entry(
+        &mut self,
+        queue: QueueKind,
+        entry_id: &str,
+    ) -> Result<Option<AgentMessage>, String> {
+        self.refresh()?;
+        let state = Reducer::reduce(self.store.store())
+            .map_err(|error| format!("reduce failed: {error:?}"))?;
+        let lane = state.lane(&self.main_lane_name).ok_or_else(|| {
+            format!("unknown lane: {}", self.main_lane_name)
+        })?;
+        let Some(queued) = lane
+            .queued
             .iter()
-            .chain(std::iter::empty())
-            .map(|entry| entry.seq)
-            .chain(self.store.store().records().iter().map(|record| record.seq()))
-            .max()
-            .unwrap_or(0);
-        Ok(AcceptedRun {
-            run_id: run_id.to_owned(),
-            lane: self.main_lane_name.clone(),
-            prompt_entry_id: format!("entry-{run_id}-user"),
-            assistant_entry_id,
-            accepted_through_seq,
-        })
+            .find(|q| q.run_id.is_none() && q.queue == queue && q.target.id == entry_id)
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        let message = queued.target.message.clone();
+        self.store
+            .consume_unbound(&queued.target.id)
+            .map_err(|error| error.to_string())?;
+        self.store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())?;
+        Ok(Some(message))
+    }
+
+    pub(crate) fn cancel_queued_unbound(
+        &mut self,
+        entry_id: &str,
+    ) -> Result<(), String> {
+        self.refresh()?;
+        self.store
+            .cancel_unbound(entry_id)
+            .map_err(|error| error.to_string())?;
+        self.store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())
+    }
+
+    /// Validate an accepted run token against the session journal and reduced state.
+    pub(crate) fn validate_accepted_run(
+        &self,
+        accepted: &AcceptedRun,
+    ) -> Result<(), String> {
+        self.store
+            .validate_accepted_run(accepted)
+            .map_err(|error| error.to_string())
     }
 
     /// Append a tool intent.
@@ -2309,9 +2405,12 @@ impl CodingSessionHarness {
             + 1
     }
 
-    /// Persist any messages from the provider that are not yet recorded
-    /// in the harness store.  Called after each turn to ensure the
-    /// canonical session path captures all assistant/tool entries.
+    /// Legacy test/repair helper for journal-free or recovery-only callers.
+    ///
+    /// Production provider execution must commit typed transitions through the
+    /// run-scoped recorders before the next request; it must not reconcile a
+    /// complete mutable provider transcript after the fact.
+    #[cfg(test)]
     pub(crate) fn sync_messages(&mut self, messages: &[AgentMessage]) -> Result<(), String> {
         self.refresh()?;
         // The provider gives us the complete conversation, not stable entry
@@ -2400,6 +2499,107 @@ impl CodingSessionHarness {
             logged.len(),
             expected.len()
         ))
+    }
+
+    pub(crate) fn commit_assistant_message(
+        &mut self,
+        lane: &str,
+        run_id: &str,
+        content: Option<String>,
+        stop_reason: Option<String>,
+    ) -> Result<String, String> {
+        self.append_message_to_lane(
+            lane,
+            run_id,
+            AgentMessage::Assistant {
+                content,
+                tool_calls: None,
+                stop_reason,
+                deferred_handle: None,
+            },
+        )
+    }
+
+    pub(crate) fn commit_thinking(
+        &mut self,
+        lane: &str,
+        run_id: &str,
+        reasoning: String,
+    ) -> Result<String, String> {
+        self.append_message_to_lane(
+            lane,
+            run_id,
+            AgentMessage::Custom {
+                custom_type: "thinking".to_string(),
+                payload: Value::String(reasoning),
+            },
+        )
+    }
+
+    pub(crate) fn commit_tool_calls(
+        &mut self,
+        lane: &str,
+        run_id: &str,
+        tool_calls: Vec<threadlane_provider::openai::ToolCall>,
+    ) -> Result<String, String> {
+        self.append_message_to_lane(
+            lane,
+            run_id,
+            AgentMessage::Assistant {
+                content: None,
+                tool_calls: Some(tool_calls),
+                stop_reason: None,
+                deferred_handle: None,
+            },
+        )
+    }
+
+    pub(crate) fn commit_tool_results(
+        &mut self,
+        lane: &str,
+        run_id: &str,
+        results: &[AgentToolResult],
+    ) -> Result<Vec<String>, String> {
+        let mut committed = Vec::new();
+        for result in results {
+            let msg = AgentMessage::Tool {
+                tool_call_id: result.tool_call_id.clone(),
+                name: result.name.clone(),
+                content: result.content.clone(),
+                is_error: result.is_error,
+                terminate: result.terminates(),
+            };
+            let entry_id = self.append_message_to_lane(lane, run_id, msg)?;
+            let _ = self.finish_tool_result(run_id, result);
+            committed.push(entry_id);
+        }
+        Ok(committed)
+    }
+
+    pub(crate) fn commit_follow_up(
+        &mut self,
+        lane: &str,
+        run_id: &str,
+        message: AgentMessage,
+    ) -> Result<String, String> {
+        self.append_message_to_lane(lane, run_id, message)
+    }
+
+    pub(crate) fn commit_provider_failure(
+        &mut self,
+        _lane: &str,
+        run_id: &str,
+        error: String,
+    ) -> Result<(), String> {
+        self.finish_run(run_id, OperationOutcome::Failed, Some(error))
+    }
+
+    pub(crate) fn plan_recovery(&mut self, lane: &str) -> Result<threadlane_agent::harness::RecoveryPlan, String> {
+        self.refresh()?;
+        let agent = threadlane_agent::harness::SessionAgent::new(AgentHarness::new(self.store.store().clone()));
+        let lane_handle = threadlane_agent::harness::LaneHandle::new(lane.to_string())
+            .map_err(|error| error.to_string())?;
+        agent.plan_recovery(&lane_handle).map_err(|error| error.to_string())
     }
 
     /// Run hooks of the given kind for the main lane.
@@ -2874,6 +3074,8 @@ mod tests {
         assert!(finished_record.is_some(), "should have OperationFinished");
     }
 
+    // Legacy-only reconciliation tests. Production provider execution uses
+    // typed append/finish operations and never calls sync_messages.
     // ── Sync messages deduplicates correctly ──────────────────────────
     #[test]
     fn sync_messages_deduplicates_existing_entries() {

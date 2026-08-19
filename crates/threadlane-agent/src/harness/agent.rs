@@ -282,6 +282,93 @@ impl<S: SessionStore> AgentHarness<S> {
         PromptProcedure::accept_on_lane(&self.store, lane, run_id, prompt, &mut self.effects)
     }
 
+    pub fn accept_prompt_and_drive(
+        &mut self,
+        run_id: &str,
+        prompt: AgentMessage,
+    ) -> Result<super::AcceptedRun, ProcedureError> {
+        self.accept_prompt_and_drive_on_lane("main", run_id, prompt)
+    }
+
+    pub fn accept_prompt_and_drive_on_lane(
+        &mut self,
+        lane: &str,
+        run_id: &str,
+        prompt: AgentMessage,
+    ) -> Result<super::AcceptedRun, ProcedureError> {
+        let assistant_entry_id = self.accept_prompt_on_lane(lane, run_id, prompt)?;
+        self.drive_to_completion_on_lane(lane)?;
+        let accepted_through_seq = self
+            .store
+            .entries()
+            .iter()
+            .map(|entry| entry.seq)
+            .chain(self.store.records().iter().map(|record| record.seq()))
+            .max()
+            .unwrap_or(0);
+        let prompt_entry_id = format!("entry-{run_id}-user");
+        Ok(super::AcceptedRun {
+            session_id: self.store.session_id().to_string(),
+            run_id: run_id.to_string(),
+            lane: lane.to_string(),
+            prompt_entry_id,
+            assistant_entry_id,
+            accepted_through_seq,
+        })
+    }
+
+    pub fn validate_accepted_run(&self, accepted: &super::AcceptedRun) -> Result<(), ReduceError> {
+        let session_id = self.store.session_id();
+        if !session_id.is_empty()
+            && !accepted.session_id.is_empty()
+            && accepted.session_id != session_id
+        {
+            return Err(ReduceError::InvalidLane(format!(
+                "accepted run session mismatch: expected {session_id}, got {}",
+                accepted.session_id
+            )));
+        }
+        if accepted.run_id.trim().is_empty() || accepted.lane.trim().is_empty() {
+            return Err(ReduceError::InvalidLane(
+                "accepted run id or lane is empty".into(),
+            ));
+        }
+        if accepted.prompt_entry_id.trim().is_empty()
+            || accepted.assistant_entry_id.trim().is_empty()
+        {
+            return Err(ReduceError::InvalidLane(
+                "accepted prompt or assistant entry id is empty".into(),
+            ));
+        }
+        if accepted.accepted_through_seq == 0 {
+            return Err(ReduceError::InvalidLane(
+                "accepted_through_seq must be > 0".into(),
+            ));
+        }
+        let state = super::Reducer::reduce(&self.store)?;
+        let lane = state.lane(&accepted.lane).ok_or_else(|| {
+            ReduceError::InvalidLane(format!("lane {} not found in reduced state", accepted.lane))
+        })?;
+        if lane.open_operation.as_deref() != Some(&accepted.run_id) {
+            return Err(ReduceError::InvalidLane(format!(
+                "lane {} open operation is {:?}, expected {}",
+                accepted.lane, lane.open_operation, accepted.run_id
+            )));
+        }
+        let has_prompt = self
+            .store
+            .entries()
+            .iter()
+            .any(|e| e.id == accepted.prompt_entry_id && e.lane == accepted.lane);
+        if !has_prompt {
+            return Err(ReduceError::InvalidLane(format!(
+                "prompt entry {} not found in store for lane {}",
+                accepted.prompt_entry_id, accepted.lane
+            )));
+        }
+        Ok(())
+    }
+
     pub fn append_entry_gated(&mut self, entry: super::Entry) -> Result<(), ProcedureError> {
         self.effects
             .park(EffectAction::AppendEntry { entry })
@@ -413,7 +500,7 @@ impl<S: SessionStore> AgentHarness<S> {
         QueueProcedure::enqueue(&self.store, run_id, queue, target, &mut self.effects)
     }
 
-    pub(crate) fn enqueue_unbound(
+    pub fn enqueue_unbound(
         &mut self,
         queue: QueueKind,
         target: ProvisionedEntry,
@@ -444,7 +531,7 @@ impl<S: SessionStore> AgentHarness<S> {
         QueueProcedure::cancel(&self.store, run_id, entry_id, &mut self.effects)
     }
 
-    pub(crate) fn cancel_queued_on_lane(
+    pub fn cancel_queued_on_lane(
         &mut self,
         lane: &str,
         run_id: &str,
@@ -457,7 +544,7 @@ impl<S: SessionStore> AgentHarness<S> {
         QueueProcedure::cancel_unbound(&self.store, entry_id, &mut self.effects)
     }
 
-    pub(crate) fn cancel_unbound_on_lane(
+    pub fn cancel_unbound_on_lane(
         &mut self,
         lane: &str,
         entry_id: &str,
@@ -469,7 +556,7 @@ impl<S: SessionStore> AgentHarness<S> {
         QueueProcedure::consume(&self.store, run_id, entry_id, &mut self.effects)
     }
 
-    pub(crate) fn consume_queued_on_lane(
+    pub fn consume_queued_on_lane(
         &mut self,
         lane: &str,
         run_id: &str,
@@ -478,11 +565,11 @@ impl<S: SessionStore> AgentHarness<S> {
         QueueProcedure::consume_on_lane(&self.store, lane, run_id, entry_id, &mut self.effects)
     }
 
-    pub(crate) fn consume_unbound(&mut self, entry_id: &str) -> Result<(), ProcedureError> {
+    pub fn consume_unbound(&mut self, entry_id: &str) -> Result<(), ProcedureError> {
         QueueProcedure::consume_unbound(&self.store, entry_id, &mut self.effects)
     }
 
-    pub(crate) fn consume_unbound_on_lane(
+    pub fn consume_unbound_on_lane(
         &mut self,
         lane: &str,
         entry_id: &str,

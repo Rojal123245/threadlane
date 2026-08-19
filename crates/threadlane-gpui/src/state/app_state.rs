@@ -2587,9 +2587,20 @@ mod tests {
         std::fs::create_dir_all(&first_project).unwrap();
         let session_file = recent_project.join(".threadlane/sessions/recent-session.jsonl");
         std::fs::create_dir_all(session_file.parent().unwrap()).unwrap();
-        let mut tree = SessionTree::new("recent-session");
-        tree.file_path = Some(session_file);
-        tree.add_message(AgentMessage::user("recent prompt", Vec::new()));
+        let mut store = threadlane_agent::harness::JsonlStore::open(&session_file).unwrap();
+        store
+            .append_entry(threadlane_agent::harness::Entry {
+                id: "node_1".into(),
+                parent_id: None,
+                lane: "main".into(),
+                seq: 1,
+                timestamp: 1,
+                message: AgentMessage::user("recent prompt", Vec::new()),
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
+        drop(store);
 
         let state = AppState::load_from_registry(vec![
             AttachedProject {
@@ -2648,36 +2659,6 @@ mod tests {
         let session_file = work_dir.join(".threadlane/sessions/hydration-test.jsonl");
         std::fs::create_dir_all(session_file.parent().unwrap()).unwrap();
 
-        let mut tree = SessionTree::new("hydration-test");
-        tree.file_path = Some(session_file.clone());
-        tree.add_message(AgentMessage::User {
-            content: "Inspect the project".into(),
-        });
-        tree.add_message(AgentMessage::Custom {
-            custom_type: "thinking".into(),
-            payload: serde_json::json!({"text": "Reading the relevant files"}),
-        });
-        tree.add_message(AgentMessage::Assistant {
-            content: Some("The issue is fixed.".into()),
-            tool_calls: Some(vec![ToolCall {
-                id: "call-read".into(),
-                r#type: "function".into(),
-                function: ToolCallFunction {
-                    name: "read_file".into(),
-                    arguments: r#"{"path":"src/main.rs"}"#.into(),
-                },
-                thought_signature: None,
-            }]),
-            stop_reason: None,
-            deferred_handle: None,
-        });
-        tree.add_message(AgentMessage::Tool {
-            tool_call_id: "call-read".into(),
-            name: "read_file".into(),
-            content: "file contents".into(),
-            is_error: false,
-            terminate: false,
-        });
         let usage = TokenUsage {
             input_tokens: 17,
             output_tokens: 9,
@@ -2686,6 +2667,78 @@ mod tests {
             total_tokens: 32,
         };
         let mut store = threadlane_agent::harness::JsonlStore::open(&session_file).unwrap();
+        store
+            .append_entry(threadlane_agent::harness::Entry {
+                id: "node_1".into(),
+                parent_id: None,
+                lane: "main".into(),
+                seq: 1,
+                timestamp: 1,
+                message: AgentMessage::User {
+                    content: "Inspect the project".into(),
+                },
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
+        store
+            .append_entry(threadlane_agent::harness::Entry {
+                id: "node_2".into(),
+                parent_id: Some("node_1".into()),
+                lane: "main".into(),
+                seq: 2,
+                timestamp: 2,
+                message: AgentMessage::Custom {
+                    custom_type: "thinking".into(),
+                    payload: serde_json::json!({"text": "Reading the relevant files"}),
+                },
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
+        store
+            .append_entry(threadlane_agent::harness::Entry {
+                id: "assistant-1".into(),
+                parent_id: Some("node_2".into()),
+                lane: "main".into(),
+                seq: 3,
+                timestamp: 3,
+                message: AgentMessage::Assistant {
+                    content: Some("The issue is fixed.".into()),
+                    tool_calls: Some(vec![ToolCall {
+                        id: "call-read".into(),
+                        r#type: "function".into(),
+                        function: ToolCallFunction {
+                            name: "read_file".into(),
+                            arguments: r#"{"path":"src/main.rs"}"#.into(),
+                        },
+                        thought_signature: None,
+                    }]),
+                    stop_reason: None,
+                    deferred_handle: None,
+                },
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
+        store
+            .append_entry(threadlane_agent::harness::Entry {
+                id: "node_4".into(),
+                parent_id: Some("assistant-1".into()),
+                lane: "main".into(),
+                seq: 4,
+                timestamp: 4,
+                message: AgentMessage::Tool {
+                    tool_call_id: "call-read".into(),
+                    name: "read_file".into(),
+                    content: "file contents".into(),
+                    is_error: false,
+                    terminate: false,
+                },
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
         store
             .append_record(Record::OperationStarted {
                 id: "run-1".into(),
@@ -3473,13 +3526,27 @@ mod tests {
         ));
         let path = root.join("session.jsonl");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let mut tree = SessionTree::new("paged");
-        tree.file_path = Some(path.clone());
+        let mut store = threadlane_agent::harness::JsonlStore::open(&path).unwrap();
+        let mut parent_id = None;
         for index in 0..45 {
-            tree.add_message(AgentMessage::User {
-                content: format!("message-{index}"),
-            });
+            let id = format!("node_{index}");
+            store
+                .append_entry(threadlane_agent::harness::Entry {
+                    id: id.clone(),
+                    parent_id,
+                    lane: "main".into(),
+                    seq: (index + 1) as u64,
+                    timestamp: (index + 1) as u64,
+                    message: AgentMessage::User {
+                        content: format!("message-{index}"),
+                    },
+                    surface_op: threadlane_agent::harness::SurfaceOperation::Append,
+                    terminate: false,
+                })
+                .unwrap();
+            parent_id = Some(id);
         }
+        drop(store);
 
         let (messages, start, has_older) = load_session_message_page(&path, usize::MAX);
         assert_eq!(messages.len(), CHAT_HISTORY_PAGE_SIZE);
@@ -3511,19 +3578,38 @@ mod tests {
         std::fs::create_dir_all(&sessions_dir).unwrap();
 
         let session_file = sessions_dir.join("session_1001.jsonl");
-        let mut tree = SessionTree::new("Startup Project");
-        tree.file_path = Some(session_file.clone());
-        tree.add_message(AgentMessage::User {
-            content: "Hello on startup".into(),
-        });
-        tree.add_message(AgentMessage::Assistant {
-            content: Some("I am ready".into()),
-            tool_calls: None,
-            stop_reason: None,
-            deferred_handle: None,
-        });
-
         let mut store = threadlane_agent::harness::JsonlStore::open(&session_file).unwrap();
+        store
+            .append_entry(threadlane_agent::harness::Entry {
+                id: "node_1".into(),
+                parent_id: None,
+                lane: "main".into(),
+                seq: 1,
+                timestamp: 1,
+                message: AgentMessage::User {
+                    content: "Hello on startup".into(),
+                },
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
+        store
+            .append_entry(threadlane_agent::harness::Entry {
+                id: "node_2".into(),
+                parent_id: Some("node_1".into()),
+                lane: "main".into(),
+                seq: 2,
+                timestamp: 2,
+                message: AgentMessage::Assistant {
+                    content: Some("I am ready".into()),
+                    tool_calls: None,
+                    stop_reason: None,
+                    deferred_handle: None,
+                },
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
         store
             .append_record(Record::OperationStarted {
                 id: "run-start-1".into(),

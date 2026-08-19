@@ -1,6 +1,6 @@
 use crate::capabilities::CapabilityCatalog;
 use std::path::Path;
-use threadlane_agent::{SessionTree, UnifiedAgent};
+use threadlane_agent::{ProviderRunExecutor, SessionTree};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlashCommandInfo {
@@ -85,7 +85,7 @@ pub enum CommandAction {
     CloneSession,
     InvokeSkill(String),
     PromptTemplate(String),
-
+    Subagent(String),
     Quit,
     Unknown(String),
 }
@@ -113,6 +113,7 @@ pub fn parse_slash_command(input: &str) -> Option<CommandAction> {
         "clone" => Some(CommandAction::CloneSession),
         "skill" => Some(CommandAction::InvokeSkill(arg)),
         "prompt" => Some(CommandAction::PromptTemplate(arg)),
+        "subagent" => Some(CommandAction::Subagent(arg)),
 
         "quit" | "exit" => Some(CommandAction::Quit),
         other => Some(CommandAction::Unknown(other.to_string())),
@@ -121,7 +122,7 @@ pub fn parse_slash_command(input: &str) -> Option<CommandAction> {
 
 pub async fn execute_slash_command(
     action: CommandAction,
-    agent: &mut UnifiedAgent,
+    agent: &mut ProviderRunExecutor,
     session_tree: &mut SessionTree,
 ) -> String {
     match action {
@@ -219,7 +220,7 @@ pub async fn execute_slash_command(
         CommandAction::Compact => {
             if !agent.compact_history(None).await {
                 "Nothing to compact yet.".to_string()
-            } else if agent.harness().store().entries().is_empty() {
+            } else if session_tree.file_path.is_none() {
                 // Legacy in-memory sessions have no canonical journal yet.
                 let state = agent.get_state().await;
                 session_tree.replace_active_branch(state.messages);
@@ -244,7 +245,7 @@ pub async fn execute_slash_command(
         }
         CommandAction::SwitchTreeBranch(node_id) => {
             if session_tree.switch_active_node(&node_id) {
-                if agent.harness().store().entries().is_empty() {
+                if session_tree.file_path.is_none() {
                     let branch_msgs = session_tree.get_active_branch_messages();
                     let mut st = agent.turn.lock().await;
                     st.messages = branch_msgs;
@@ -273,6 +274,14 @@ pub async fn execute_slash_command(
         }
         CommandAction::InvokeSkill(skill) => format!("Invoking skill: {}", skill),
         CommandAction::PromptTemplate(tmpl) => format!("Prompt template: {}", tmpl),
+        CommandAction::Subagent(task) => {
+            let trimmed = task.trim();
+            if trimmed.is_empty() {
+                "Usage: /subagent <task description>".to_string()
+            } else {
+                format!("Delegating subagent task: {trimmed}")
+            }
+        }
 
         CommandAction::Quit => "Quitting threadlane agent.".to_string(),
         CommandAction::Unknown(cmd) => format!("Unknown command: /{}", cmd),

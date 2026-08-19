@@ -1444,12 +1444,21 @@ mod tests {
     async fn recovered_subagent_branch_uses_persisted_parent_lineage() {
         let dir = tempfile::tempdir().unwrap();
         let session_file = dir.path().join("session.jsonl");
-        let mut options = coding_agent_options(dir.path().to_path_buf());
-        options.session_file = Some(session_file.clone());
-        let mut original = CodingAgent::new(options);
-        let parent = original.session_tree.add_message(AgentMessage::User {
-            content: "originating parent".into(),
-        });
+        let parent = "node_1".to_string();
+        let mut store = JsonlStore::open(&session_file).unwrap();
+        store.append_entry(threadlane_agent::harness::Entry {
+            id: parent.clone(),
+            parent_id: None,
+            lane: "main".into(),
+            seq: 1,
+            timestamp: 1,
+            message: AgentMessage::User {
+                content: "originating parent".into(),
+            },
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
+            terminate: false,
+        }).unwrap();
+        drop(store);
         let mut journal = HarnessJournal::open(&session_file).unwrap();
         let identity = journal
             .start_subagent_lane("subagent-1:0", "finish the audit", Some(&parent))
@@ -1463,7 +1472,6 @@ mod tests {
                 }],
             )
             .unwrap();
-        drop(original);
         drop(journal);
 
         let mut restarted_options = coding_agent_options(dir.path().to_path_buf());
@@ -1905,11 +1913,23 @@ mod tests {
                 content: "B".into(),
             },
         ];
-        let mut tree = SessionTree::new("session");
-        tree.file_path = Some(session_file.clone());
-        for message in &messages {
-            tree.add_message(message.clone());
+        let mut store = JsonlStore::open(&session_file).unwrap();
+        let mut parent_id = None;
+        for (i, message) in messages.iter().enumerate() {
+            let id = format!("node_{}", i + 1);
+            store.append_entry(threadlane_agent::harness::Entry {
+                id: id.clone(),
+                parent_id,
+                lane: "main".into(),
+                seq: (i + 1) as u64,
+                timestamp: (i + 1) as u64,
+                message: message.clone(),
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
+                terminate: false,
+            }).unwrap();
+            parent_id = Some(id);
         }
+        drop(store);
 
         let mut options = coding_agent_options(dir.path().to_path_buf());
         options.session_file = Some(session_file);
@@ -1992,13 +2012,29 @@ mod tests {
     async fn persisted_session_model_overrides_constructor_default() {
         let dir = tempfile::tempdir().unwrap();
         let session_file = dir.path().join("session.jsonl");
-        let mut tree = SessionTree::new("session");
-        tree.file_path = Some(session_file.clone());
-        tree.add_message(AgentMessage::User {
-            content: "continue".into(),
-        });
-        tree.set_model("antigravity/claude-opus-4-6".into())
-            .unwrap();
+        let mut store = JsonlStore::open(&session_file).unwrap();
+        store.append_entry(threadlane_agent::harness::Entry {
+            id: "node_1".into(),
+            parent_id: None,
+            lane: "main".into(),
+            seq: 1,
+            timestamp: 1,
+            message: AgentMessage::User {
+                content: "continue".into(),
+            },
+            surface_op: threadlane_agent::harness::SurfaceOperation::Append,
+            terminate: false,
+        }).unwrap();
+        store.append_record(threadlane_agent::Record::FactSet {
+            id: "fact-model".into(),
+            seq: 2,
+            lane: "main".into(),
+            timestamp: 2,
+            run_id: None,
+            key: "model".into(),
+            value: "antigravity/claude-opus-4-6".into(),
+        }).unwrap();
+        drop(store);
 
         let mut options = coding_agent_options(dir.path().to_path_buf());
         options.model = "fallback-model".into();
@@ -2050,12 +2086,25 @@ mod tests {
         let mut options = coding_agent_options(dir.path().to_path_buf());
         options.session_file = Some(session_file.clone());
 
-        let mut coding_agent = CodingAgent::new(options);
+        let coding_agent = CodingAgent::new(options);
 
         assert_eq!(coding_agent.session_tree.session_id, "session-42");
-        coding_agent.session_tree.add_message(AgentMessage::User {
-            content: "persist me".into(),
-        });
+        let mut store = JsonlStore::open(&session_file).unwrap();
+        store
+            .append_entry(threadlane_agent::harness::Entry {
+                id: "node_1".into(),
+                parent_id: None,
+                lane: "main".into(),
+                seq: 1,
+                timestamp: 1,
+                message: AgentMessage::User {
+                    content: "persist me".into(),
+                },
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
+        drop(store);
         assert_eq!(
             serde_json::to_value(
                 SessionTree::load_from_file(&session_file)
@@ -2074,37 +2123,41 @@ mod tests {
     async fn v2_reload_uses_harness_leaf_when_metadata_is_stale() {
         let dir = tempfile::tempdir().unwrap();
         let session_file = dir.path().join("session.jsonl");
-        let mut tree = SessionTree::new("session");
-        tree.file_path = Some(session_file.clone());
-        let first = tree.add_message(AgentMessage::User {
-            content: "first".into(),
-        });
-        let second = tree.add_message(AgentMessage::Assistant {
-            content: Some("second".into()),
-            tool_calls: None,
-            stop_reason: None,
-            deferred_handle: None,
-        });
-        assert_ne!(first, second);
-
-        let contents = fs::read_to_string(&session_file).unwrap();
-        let stale = contents
-            .lines()
-            .map(|line| {
-                if line.contains("\"type\":\"session_metadata\"") {
-                    serde_json::from_str::<Value>(line)
-                        .map(|mut value| {
-                            value["active_node_id"] = Value::String(first.clone());
-                            serde_json::to_string(&value).unwrap()
-                        })
-                        .unwrap()
-                } else {
-                    line.to_owned()
-                }
+        let mut store = JsonlStore::open(&session_file).unwrap();
+        let first = "node_1".to_string();
+        let second = "node_2".to_string();
+        store
+            .append_entry(threadlane_agent::harness::Entry {
+                id: first.clone(),
+                parent_id: None,
+                lane: "main".into(),
+                seq: 1,
+                timestamp: 1,
+                message: AgentMessage::User {
+                    content: "first".into(),
+                },
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
+                terminate: false,
             })
-            .collect::<Vec<_>>()
-            .join("\n");
-        fs::write(&session_file, format!("{stale}\n")).unwrap();
+            .unwrap();
+        store
+            .append_entry(threadlane_agent::harness::Entry {
+                id: second.clone(),
+                parent_id: Some(first.clone()),
+                lane: "main".into(),
+                seq: 2,
+                timestamp: 2,
+                message: AgentMessage::Assistant {
+                    content: Some("second".into()),
+                    tool_calls: None,
+                    stop_reason: None,
+                    deferred_handle: None,
+                },
+                surface_op: threadlane_agent::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
+        drop(store);
 
         let mut harness = AgentHarness::new(JsonlStore::open(&session_file).unwrap());
         harness
@@ -2846,7 +2899,7 @@ mod tests {
         options.session_file = Some(session_file.clone());
         let mut coding_agent = CodingAgent::new(options);
         let observed = Arc::new(Mutex::new(Vec::new()));
-        coding_agent.agent_work.set_test_observer(observed);
+        coding_agent.agent_work.set_test_observer(observed.clone());
 
         coding_agent
             .work_handle()
@@ -2862,6 +2915,10 @@ mod tests {
         )));
 
         coding_agent.run_scheduled_agent_work().await;
+        assert!(observed.lock().unwrap().iter().any(|work| matches!(
+            work,
+            AgentWork::DurableQueueWake { queue: QueueKind::FollowUp, .. }
+        )));
         let consumed = JsonlStore::open(&session_file).unwrap();
         assert!(consumed
             .records()
@@ -2899,13 +2956,10 @@ mod tests {
         )));
 
         coding_agent.run_scheduled_agent_work().await;
-        assert_eq!(
-            *observed.lock().unwrap(),
-            vec![AgentWork::SteerMessage {
-                content: "durable steer".into(),
-                images: Vec::new(),
-            }]
-        );
+        assert!(observed.lock().unwrap().iter().any(|work| matches!(
+            work,
+            AgentWork::DurableQueueWake { queue: QueueKind::Steer, .. }
+        )));
         let consumed = JsonlStore::open(&session_file).unwrap();
         assert!(consumed
             .records()
@@ -2917,6 +2971,33 @@ mod tests {
             .unwrap()
             .queued
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn durable_queue_wakes_after_runtime_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("session.jsonl");
+        let mut options = coding_agent_options(dir.path().to_path_buf());
+        options.session_file = Some(session_file.clone());
+        let first = CodingAgent::new(options.clone());
+        first
+            .work_handle()
+            .try_queue_follow_up_with_images("survives restart", Vec::new())
+            .unwrap();
+        let queued = JsonlStore::open(&session_file).unwrap();
+        assert_eq!(Reducer::reduce(&queued).unwrap().lane("main").unwrap().queued.len(), 1);
+        drop(first);
+
+        let mut reopened = CodingAgent::new(options);
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        reopened.agent_work.set_test_observer(observed.clone());
+        reopened.run_scheduled_agent_work().await;
+        assert!(observed.lock().unwrap().iter().any(|work| matches!(
+            work,
+            AgentWork::DurableQueueWake { queue: QueueKind::FollowUp, .. }
+        )));
+        let consumed = JsonlStore::open(&session_file).unwrap();
+        assert!(Reducer::reduce(&consumed).unwrap().lane("main").unwrap().queued.is_empty());
     }
 
     #[tokio::test]
@@ -2943,13 +3024,10 @@ mod tests {
         )));
 
         coding_agent.run_scheduled_agent_work().await;
-        assert_eq!(
-            *observed.lock().unwrap(),
-            vec![AgentWork::NextRunMessage {
-                content: "durable next run".into(),
-                images: Vec::new(),
-            }]
-        );
+        assert!(observed.lock().unwrap().iter().any(|work| matches!(
+            work,
+            AgentWork::DurableQueueWake { queue: QueueKind::NextRun, .. }
+        )));
         let consumed = JsonlStore::open(&session_file).unwrap();
         assert!(Reducer::reduce(&consumed)
             .unwrap()

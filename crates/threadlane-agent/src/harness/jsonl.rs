@@ -345,21 +345,16 @@ impl SessionStore for JsonlStore {
 
 impl JsonlStore {
     pub fn append_plan(&mut self, plan: &crate::SessionPlan) -> Result<(), ReduceError> {
-        if !self.writable {
-            return Err(ReduceError::Storage("session store is read-only".into()));
-        }
-        let claim = self.claim.clone();
-        let _guard = claim
-            .gate
-            .lock()
-            .map_err(|error| ReduceError::Storage(error.to_string()))?;
-        let record = serde_json::json!({
-            "type": "session_plan",
-            "explanation": plan.explanation,
-            "items": plan.items,
-        });
-        append_json_line(&self.path, &record)?;
-        self.reload_unlocked()
+        let record = Record::FactSet {
+            id: format!("fact-plan-{}", self.next_sequence()),
+            seq: self.next_sequence(),
+            lane: "main".into(),
+            timestamp: 0,
+            run_id: None,
+            key: "session_plan".into(),
+            value: serde_json::to_string(plan).map_err(|e| ReduceError::InvalidRecord(e.to_string()))?,
+        };
+        self.append_record(record)
     }
 
     pub fn fork_branch(
@@ -406,30 +401,39 @@ impl JsonlStore {
             .write(true)
             .open(path)
             .map_err(|error| ReduceError::Storage(error.to_string()))?;
-        let session_id = _session_id.into();
-        append_json_line(
-            path,
-            &serde_json::json!({
-                "type": "session_metadata",
-                "session_id": session_id,
-                "parent_session_id": self.session_id(),
-                "name": self.tree.name,
-                "model": self.tree.model,
-                "active_node_id": null,
-                "title_attempted": false
-            }),
-        )?;
-        if self.tree.plan() != &crate::SessionPlan::default() {
-            append_json_line(
-                path,
-                &serde_json::json!({
-                    "type": "session_plan",
-                    "explanation": self.tree.plan().explanation,
-                    "items": self.tree.plan().items,
-                }),
-            )?;
-        }
+        let _session_id = _session_id.into();
         let mut fork = Self::open(path).map_err(|error| ReduceError::Storage(error.to_string()))?;
+        fork.append_record(Record::FactSet {
+            id: "fact-main-parent_session_id".into(),
+            seq: fork.next_sequence(),
+            lane: "main".into(),
+            timestamp: 0,
+            run_id: None,
+            key: "parent_session_id".into(),
+            value: self.session_id().to_string(),
+        })?;
+        if let Some(model) = &self.tree.model {
+            fork.append_record(Record::FactSet {
+                id: "fact-main-model".into(),
+                seq: fork.next_sequence(),
+                lane: "main".into(),
+                timestamp: 0,
+                run_id: None,
+                key: "model".into(),
+                value: model.clone(),
+            })?;
+        }
+        if let Some(name) = &self.tree.name {
+            fork.append_record(Record::FactSet {
+                id: "fact-main-name".into(),
+                seq: fork.next_sequence(),
+                lane: "main".into(),
+                timestamp: 0,
+                run_id: None,
+                key: "name".into(),
+                value: name.clone(),
+            })?;
+        }
         for source in self
             .entries
             .iter()
@@ -599,6 +603,9 @@ fn validate_harness_records(records: &[Record], path: &Path) -> io::Result<()> {
 }
 
 fn validate_session_lines(path: &Path) -> io::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
     let data = fs::read_to_string(path)?;
     for (index, line) in data.split('\n').enumerate() {
         if line.trim().is_empty() {

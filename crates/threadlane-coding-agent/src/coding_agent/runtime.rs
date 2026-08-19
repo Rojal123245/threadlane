@@ -10,6 +10,7 @@ use super::harness::{
     harness_cancellation_state, HarnessWatch, InterruptedSubagentRecoveryState,
     SubagentLaneIdentity, SubagentStartError,
 };
+use super::CodingSessionHarness;
 use super::CodingSessionHarness as HarnessJournal;
 use super::ManagedProcessRegistry;
 use crate::agents::{discover_agents, AgentDefinition, AgentScope};
@@ -40,7 +41,8 @@ use threadlane_agent::harness::{
 };
 use threadlane_agent::{
     repair_interrupted_tool_turn, AgentEvent, AgentMessage, AgentToolResult, ImageAttachment,
-    ReasoningEffort, SessionTree, SubagentRecoveryStatus, TokenUsage, TurnState, UnifiedAgent,
+    ProviderRunExecutor, ReasoningEffort, SessionTree, SubagentRecoveryStatus, TokenUsage,
+    TurnState,
 };
 #[cfg(test)]
 use threadlane_agent::{AgentToolDefinition, ToolExecutor};
@@ -161,6 +163,10 @@ use crate::policy::ToolPolicy;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AgentWork {
     RequestTurn(String),
+    DurableQueueWake {
+        queue: QueueKind,
+        entry_id: String,
+    },
     SteerMessage {
         content: String,
         images: Vec<ImageAttachment>,
@@ -199,15 +205,8 @@ fn enqueue_harness_queue(
     content: String,
     images: Vec<ImageAttachment>,
 ) -> Result<String, String> {
-    let mut agent = UnifiedAgent::new(
-        "dummy",
-        None,
-        "dummy",
-        session_file,
-        threadlane_agent::AgentConfig::default(),
-    )
-    .map_err(|e| e.to_string())?;
-    agent.enqueue_harness_queue(queue, content, images)
+    let mut harness = CodingSessionHarness::open(session_file)?;
+    harness.enqueue_unbound_with_images(queue, content, images)
 }
 
 pub(crate) fn enqueue_harness_follow_up(
@@ -219,15 +218,8 @@ pub(crate) fn enqueue_harness_follow_up(
 }
 
 fn consume_harness_queue(session_file: &Path, queue: QueueKind) -> Result<(), String> {
-    let mut agent = UnifiedAgent::new(
-        "dummy",
-        None,
-        "dummy",
-        session_file,
-        threadlane_agent::AgentConfig::default(),
-    )
-    .map_err(|e| e.to_string())?;
-    agent.consume_harness_queue(queue)
+    let mut harness = CodingSessionHarness::open(session_file)?;
+    harness.consume_first_unbound_queue(queue)
 }
 
 fn consume_harness_follow_ups(session_file: &Path) -> Result<(), String> {
@@ -488,7 +480,7 @@ impl AgentWorkScheduler {
         }
     }
 
-    async fn run_unified(&self, agent: &mut UnifiedAgent) -> bool {
+    async fn run_executor(&self, agent: &mut ProviderRunExecutor, session_file: Option<&Path>) -> bool {
         let pending = self.drain();
         if pending.is_empty() {
             return false;
@@ -502,7 +494,25 @@ impl AgentWorkScheduler {
         }
         for work in pending {
             match work {
-                AgentWork::RequestTurn(prompt) => agent.prompt(&prompt).await,
+                AgentWork::RequestTurn(prompt) => {
+                    agent.follow_up(AgentMessage::user(prompt, Vec::new()));
+                    agent.run_follow_up().await;
+                }
+                AgentWork::DurableQueueWake { queue, entry_id } => {
+                    let Some(path) = session_file else { continue };
+                    if let Ok(mut harness) = CodingSessionHarness::open(path) {
+                        if let Ok(Some(message)) = harness.consume_unbound_queue_entry(queue.clone(), &entry_id) {
+                            match queue {
+                                QueueKind::Steer => agent.steer(message),
+                                QueueKind::FollowUp | QueueKind::NextRun => agent.follow_up(message),
+                            }
+                            match queue {
+                                QueueKind::Steer => agent.run_steer().await,
+                                QueueKind::FollowUp | QueueKind::NextRun => agent.run_follow_up().await,
+                            }
+                        }
+                    }
+                }
                 AgentWork::SteerMessage { content, images } => {
                     agent.steer(AgentMessage::user(content, images));
                     agent.run_steer().await;
@@ -568,13 +578,17 @@ impl CodingAgentWorkHandle {
     ) {
         let content = content.into();
         if let Some(path) = self.session_file.as_deref() {
-            if let Err(error) = enqueue_harness_follow_up(path, content.clone(), images.clone()) {
-                warn!("Failed to persist queued follow-up: {error}");
-                return;
+            match enqueue_harness_follow_up(path, content, images) {
+                Ok(entry_id) => self.scheduler.schedule(AgentWork::DurableQueueWake {
+                    queue: QueueKind::FollowUp,
+                    entry_id,
+                }),
+                Err(error) => warn!("Failed to persist queued follow-up: {error}"),
             }
+        } else {
+            self.scheduler
+                .schedule(AgentWork::QueueMessage { content, images });
         }
-        self.scheduler
-            .schedule(AgentWork::QueueMessage { content, images });
     }
 
     pub fn queue_steer_with_images(
@@ -584,10 +598,15 @@ impl CodingAgentWorkHandle {
     ) -> Result<(), String> {
         let content = content.into();
         if let Some(path) = self.session_file.as_deref() {
-            enqueue_harness_queue(path, QueueKind::Steer, content.clone(), images.clone())?;
+            let entry_id = enqueue_harness_queue(path, QueueKind::Steer, content, images)?;
+            self.scheduler.schedule(AgentWork::DurableQueueWake {
+                queue: QueueKind::Steer,
+                entry_id,
+            });
+        } else {
+            self.scheduler
+                .schedule(AgentWork::SteerMessage { content, images });
         }
-        self.scheduler
-            .schedule(AgentWork::SteerMessage { content, images });
         Ok(())
     }
 
@@ -598,10 +617,15 @@ impl CodingAgentWorkHandle {
     ) -> Result<(), String> {
         let content = content.into();
         if let Some(path) = self.session_file.as_deref() {
-            enqueue_harness_queue(path, QueueKind::NextRun, content.clone(), images.clone())?;
+            let entry_id = enqueue_harness_queue(path, QueueKind::NextRun, content, images)?;
+            self.scheduler.schedule(AgentWork::DurableQueueWake {
+                queue: QueueKind::NextRun,
+                entry_id,
+            });
+        } else {
+            self.scheduler
+                .schedule(AgentWork::NextRunMessage { content, images });
         }
-        self.scheduler
-            .schedule(AgentWork::NextRunMessage { content, images });
         Ok(())
     }
 
@@ -612,10 +636,15 @@ impl CodingAgentWorkHandle {
     ) -> Result<(), String> {
         let content = content.into();
         if let Some(path) = self.session_file.as_deref() {
-            enqueue_harness_follow_up(path, content.clone(), images.clone())?;
+            let entry_id = enqueue_harness_follow_up(path, content, images)?;
+            self.scheduler.schedule(AgentWork::DurableQueueWake {
+                queue: QueueKind::FollowUp,
+                entry_id,
+            });
+        } else {
+            self.scheduler
+                .schedule(AgentWork::QueueMessage { content, images });
         }
-        self.scheduler
-            .schedule(AgentWork::QueueMessage { content, images });
         Ok(())
     }
 
@@ -623,15 +652,8 @@ impl CodingAgentWorkHandle {
         let Some(path) = self.session_file.as_deref() else {
             return Err("session persistence is unavailable".into());
         };
-        let mut agent = UnifiedAgent::new(
-            "dummy",
-            None,
-            "dummy",
-            path,
-            threadlane_agent::AgentConfig::default(),
-        )
-        .map_err(|e| e.to_string())?;
-        agent.cancel_harness_queue_entry(entry_id)
+        let mut harness = CodingSessionHarness::open(path)?;
+        harness.cancel_queued_unbound(entry_id)
     }
 }
 
@@ -707,7 +729,7 @@ pub struct CodingAgentOptions {
 }
 
 pub struct CodingAgent {
-    pub(crate) agent: UnifiedAgent,
+    pub(crate) agent: ProviderRunExecutor,
     pub session_tree: SessionTree,
     pub wasi_extensions: Arc<WasiExtensionManager>,
     tool_policy: Arc<tokio::sync::Mutex<ToolPolicy>>,
@@ -803,7 +825,7 @@ impl CodingAgent {
 
     pub(crate) async fn execute_accepted_run(
         &mut self,
-        accepted: &super::harness::AcceptedRun,
+        accepted: &threadlane_agent::harness::AcceptedRun,
     ) -> Result<(), String> {
         if accepted.lane != "main"
             || accepted.accepted_through_seq == 0
@@ -812,32 +834,88 @@ impl CodingAgent {
         {
             return Err("invalid accepted run proof".into());
         }
-        let prompt_text = self
-            .session_tree
-            .nodes
-            .get(&accepted.prompt_entry_id)
-            .and_then(|node| match &node.message {
+        if let Some(harness) = self.harness.as_ref() {
+            harness.validate_accepted_run(accepted)?;
+        }
+        self.sync_turn_from_model_context().await?;
+        let last_prompt = {
+            let turn = self.agent.turn.lock().await;
+            turn.messages.iter().rev().find_map(|m| match m {
                 AgentMessage::User { content } => Some(content.clone()),
-                AgentMessage::UserWithImages { content, .. } => Some(content.clone()),
                 _ => None,
-            });
-        if let Some(prompt) = prompt_text {
-            if prompt.starts_with('/') {
-                match Box::pin(self.handle_input_with_images(&prompt, Vec::new())).await {
-                    Some(Ok(_)) => return Ok(()),
-                    Some(Err(err)) => return Err(err),
-                    None => return Ok(()),
+            })
+        };
+        if let Some(ref prompt) = last_prompt {
+            let trimmed = prompt.trim();
+            if let Some(command_input) = trimmed.strip_prefix('/') {
+                let mut parts = command_input.split_whitespace();
+                let cmd_name = parts.next().unwrap_or("");
+                let cmd_args = parts.collect::<Vec<&str>>().join(" ");
+                if cmd_name == "subagent" {
+                    let task_prompt = cmd_args.trim();
+                    if task_prompt.is_empty() {
+                        return Err("Usage: /subagent <task description>".into());
+                    }
+                    let task = AgentRunTask {
+                        agent: "worker".to_string(),
+                        task: task_prompt.to_string(),
+                        instructions: None,
+                        tools: None,
+                        model: None,
+                    };
+                    let parent_leaf = self.prompt_parent_leaf(
+                        AgentMessage::user(prompt, Vec::new()),
+                        true,
+                    );
+                    *self.dispatch_parent_leaf.lock().unwrap() = parent_leaf;
+                    let result = match (self.agent_runner)(vec![task], false, None).await {
+                        Ok(result) => result,
+                        Err(err) => {
+                            *self.dispatch_parent_leaf.lock().unwrap() = None;
+                            return Err(format!("Subagent Error: {err}"));
+                        }
+                    };
+                    let output = result["output"].as_str().unwrap_or_default().to_string();
+                    if let Err(error) = self.commit_completed_subagent_lanes() {
+                        *self.dispatch_parent_leaf.lock().unwrap() = None;
+                        return Err(format!("Subagent Sync Error: {error}"));
+                    }
+                    *self.dispatch_parent_leaf.lock().unwrap() = None;
+
+                    if let Some(harness) = self.harness.as_mut() {
+                        let _ = harness.append_message_to_lane(
+                            "main",
+                            &accepted.run_id,
+                            AgentMessage::Assistant {
+                                content: Some(output),
+                                tool_calls: None,
+                                stop_reason: None,
+                                deferred_handle: None,
+                            },
+                        );
+                    }
+                    return Ok(());
                 }
+            }
+            if let Some(cmd_action) = parse_slash_command(prompt) {
+                let output = execute_slash_command(cmd_action, &mut self.agent, &mut self.session_tree).await;
+                if let Some(harness) = self.harness.as_mut() {
+                    let _ = harness.append_message_to_lane(
+                        "main",
+                        &accepted.run_id,
+                        AgentMessage::Assistant {
+                            content: Some(output),
+                            tool_calls: None,
+                            stop_reason: None,
+                            deferred_handle: None,
+                        },
+                    );
+                }
+                return Ok(());
             }
         }
         self.harness_journal_error = None;
-        self.agent
-            .run_accepted(
-                &accepted.run_id,
-                &accepted.lane,
-                accepted.accepted_through_seq,
-            )
-            .await;
+        self.agent.execute_accepted(accepted).await;
         self.sync_session_tree_and_dispatch_assistant_hooks().await;
         if let Some(error) = self.harness_journal_error.take() {
             return Err(error);
@@ -848,7 +926,7 @@ impl CodingAgent {
     pub(crate) async fn begin_harness_run(
         &mut self,
         prompt: AgentMessage,
-    ) -> Result<Option<super::harness::AcceptedRun>, String> {
+    ) -> Result<Option<threadlane_agent::harness::AcceptedRun>, String> {
         if let Some(run_id) = self
             .harness_run_id
             .lock()
@@ -963,7 +1041,7 @@ impl CodingAgent {
 
     pub(crate) fn adopt_harness_run(
         &mut self,
-        accepted: &super::harness::AcceptedRun,
+        accepted: &threadlane_agent::harness::AcceptedRun,
     ) -> Result<(), String> {
         let run_id = accepted.run_id.as_str();
         if accepted.lane != "main" || accepted.accepted_through_seq == 0 {
@@ -1318,8 +1396,7 @@ impl CodingAgent {
                 self.session_tree = SessionTree::load_from_file(&path)
                     .map_err(|error| format!("failed to reload navigated session: {error}"))?;
                 self.session_tree.switch_active_node(&target_entry_id);
-                self.agent
-                    .sync_turn_from_model_context()
+                self.sync_turn_from_model_context()
                     .await
                     .map_err(|error| format!("failed to project navigated context: {error}"))?;
                 return Ok(format!("Switched session tree to node: {node_id}"));
@@ -1333,6 +1410,21 @@ impl CodingAgent {
         } else {
             Err(format!("Node ID not found in session tree: {node_id}"))
         }
+    }
+
+    pub async fn sync_turn_from_model_context(&self) -> Result<(), String> {
+        let Some(harness) = self.harness.as_ref() else {
+            return Ok(());
+        };
+        let context = harness.model_context("main")?;
+        let mut turn = self.agent.turn.lock().await;
+        let system_prompt = turn.system_prompt.clone();
+        turn.messages = std::iter::once(AgentMessage::System {
+            content: system_prompt,
+        })
+        .chain(context.messages())
+        .collect();
+        Ok(())
     }
 
     pub(crate) fn set_credentials(&mut self, api_key: String, account_id: Option<String>) {
@@ -1380,7 +1472,7 @@ impl CodingAgent {
 
     pub(crate) async fn sync_session_history(&mut self) {
         if self.harness.is_some() {
-            if let Err(error) = self.agent.sync_turn_from_model_context().await {
+            if let Err(error) = self.sync_turn_from_model_context().await {
                 warn!("Failed to project canonical model context: {error}");
             }
             return;
@@ -1479,6 +1571,11 @@ impl CodingAgent {
             if let Some(name) = h.store.facts().get("name") {
                 session_tree.name = Some(name.clone());
             }
+            if let Some(plan_json) = h.store.facts().get("session_plan") {
+                if let Ok(plan) = serde_json::from_str::<threadlane_agent::SessionPlan>(plan_json) {
+                    session_tree.plan = plan;
+                }
+            }
             // V2 owns the durable active leaf. Legacy metadata may still
             // point at the previous turn, which makes a reopened session hide
             // prompts that were already committed to the harness journal.
@@ -1516,43 +1613,39 @@ impl CodingAgent {
         };
         let plan_store =
             SessionPlanStore::new(session_tree.plan().clone(), session_tree.file_path.clone());
-        // Try to create a unified agent backed by the session file. If the
-        // file is unavailable (e.g., directory, permission error), fall back
-        // to an in-memory harness via a temp file.
-        let session_path = session_tree.file_path.clone().unwrap_or_else(|| {
-            std::env::temp_dir().join(format!(
-                "threadlane-draft-{}.jsonl",
-                session_tree.session_id
-            ))
-        });
-        let (mut agent, _creation_error) = match UnifiedAgent::new(
+        let mut agent = ProviderRunExecutor::new(
             &options.api_key,
             options.account_id.clone(),
             &effective_model,
-            &session_path,
             agent_config.clone(),
-        ) {
-            Ok(a) => (a, None),
-            Err(error) => {
-                let fallback = std::env::temp_dir().join(format!(
-                    "threadlane-fallback-{}.jsonl",
-                    session_tree.session_id
-                ));
-                let a = UnifiedAgent::new(
-                    &options.api_key,
-                    options.account_id.clone(),
-                    &effective_model,
-                    &fallback,
-                    agent_config,
-                )
-                .map_err(|e| format!("{e}"))
-                .expect("Failed to create fallback unified agent");
-                (a, Some(error.to_string()))
-            }
-        };
+        );
         agent.session_id = session_tree.session_id.clone();
         if let Some(h) = harness.as_ref() {
             agent.hook_registry = h.store.hooks().clone();
+            agent.harness_event_hub = h.events.clone();
+            let store = h.store.store().clone();
+            let system_prompt = agent_config.default_system_prompt().to_owned();
+            agent.set_model_context_projector(Some(Arc::new(move || {
+                store
+                    .model_context("main")
+                    .map(|projection| {
+                        std::iter::once(AgentMessage::System {
+                            content: system_prompt.clone(),
+                        })
+                        .chain(projection.messages())
+                        .collect()
+                    })
+                    .unwrap_or_default()
+            })));
+            let refresh_store = h.store.store().clone();
+            agent.set_model_context_refresh(Some(Arc::new(move |turn| {
+                let store = refresh_store.clone();
+                Box::pin(async move {
+                    let projection = store.model_context("main").map_err(|e| e.to_string())?;
+                    turn.lock().await.messages = projection.messages();
+                    Ok(())
+                })
+            })));
         }
         let harness_run_id: Arc<std::sync::Mutex<Option<String>>> =
             Arc::new(std::sync::Mutex::new(None));
@@ -1577,6 +1670,20 @@ impl CodingAgent {
         let tool_policy = Arc::new(tokio::sync::Mutex::new(initial_tool_policy));
         let wasi_extensions = Arc::new(wasi_extensions);
         let agent_work = AgentWorkScheduler::default();
+        if let Some(h) = harness.as_ref() {
+            if let Ok(state) = Reducer::reduce(&h.store) {
+                if let Some(lane) = state.lane("main") {
+                    for queued in &lane.queued {
+                        if queued.run_id.is_none() {
+                            agent_work.schedule(AgentWork::DurableQueueWake {
+                                queue: queued.queue.clone(),
+                                entry_id: queued.target.id.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
         #[cfg(test)]
         let subagent_work_observer = Arc::new(std::sync::Mutex::new(None));
         #[cfg(test)]
@@ -1758,7 +1865,11 @@ impl CodingAgent {
     }
 
     pub(crate) async fn run_scheduled_agent_work(&mut self) {
-        while self.agent_work.run_unified(&mut self.agent).await {
+        while self
+            .agent_work
+            .run_executor(&mut self.agent, self.session_tree.file_path.as_deref())
+            .await
+        {
             self.sync_session_tree_and_dispatch_assistant_hooks().await;
             if let Some(path) = self.session_tree.file_path.as_deref() {
                 if let Err(error) = consume_harness_follow_ups(path) {
@@ -1845,9 +1956,7 @@ impl CodingAgent {
     }
 
     pub async fn resume_interrupted_turn(&mut self) -> Result<usize, String> {
-        let count = self.recover_interrupted_subagent_lanes().await?;
-        self.repair_interrupted_history().await;
-        Ok(count)
+        self.recover_interrupted_subagent_lanes().await
     }
 
     async fn dispatch_assistant_hook(&self, message: &AgentMessage) {
@@ -1936,8 +2045,10 @@ impl CodingAgent {
                 return;
             }
 
-            // Provider messages are already persisted step-by-step by the
-            // turn driver. Refresh the harness and reload the session tree.
+            // Provider messages are committed step-by-step by the turn
+            // driver. This method is now reconciliation-only: it refreshes
+            // compatibility projections and dispatches hooks; it never
+            // synchronizes a mutable provider history back into the journal.
             if let Some(harness) = self.harness.as_mut() {
                 if let Err(error) = harness.refresh() {
                     self.harness_journal_error = Some(error);
@@ -2071,6 +2182,13 @@ impl CodingAgent {
                 }),
             });
             messages.extend(lane.messages.clone());
+            if let Some(path) = self.session_tree.file_path.as_deref() {
+                if let Ok(mut journal) = CodingSessionHarness::open(path) {
+                    for msg in &messages {
+                        let _ = journal.append_message_to_lane(&lane.lane_name, &lane.run_id, msg.clone());
+                    }
+                }
+            }
             if let Err(error) = self
                 .session_tree
                 .append_passive_branch(lane.parent_leaf_id.as_deref(), messages)
@@ -2524,74 +2642,6 @@ impl CodingAgent {
         result
     }
 
-    async fn repair_interrupted_history(&mut self) -> bool {
-        if let Some(path) = self.session_tree.file_path.clone() {
-            if self.harness.is_some() {
-                // Recovery starts from the same selected model-context branch
-                // used for provider requests, never from the UI session tree.
-                let Ok(tree) = SessionTree::load_from_file(&path) else {
-                    return false;
-                };
-                let Some(journal) = self.harness.as_mut() else {
-                    return false;
-                };
-                if journal.refresh().is_err() {
-                    return false;
-                }
-                let Ok(projection) = journal.store.model_context("main") else {
-                    return false;
-                };
-                let mut state = self.agent.turn.lock().await;
-                let mut messages = Vec::with_capacity(projection.entries.len() + 1);
-                messages.push(AgentMessage::System {
-                    content: state.system_prompt.clone(),
-                });
-                messages.extend(projection.messages());
-                let repaired = repair_interrupted_tool_turn(&mut messages);
-                let changed = state.messages != messages;
-                self.session_tree = tree;
-                if repaired {
-                    // The harness owns durable persistence. This in-memory tree
-                    // update only keeps legacy UI reconciliation coherent.
-                    self.session_tree.replace_active_branch_in_memory(
-                        messages
-                            .iter()
-                            .filter(|message| !matches!(message, AgentMessage::System { .. }))
-                            .cloned()
-                            .collect(),
-                    );
-                }
-                state.messages = messages;
-                return changed;
-            }
-        }
-        let repaired_branch = {
-            let mut state = self.agent.turn.lock().await;
-            if !repair_interrupted_tool_turn(&mut state.messages) {
-                return false;
-            }
-            state
-                .messages
-                .iter()
-                .filter(|message| !matches!(message, AgentMessage::System { .. }))
-                .cloned()
-                .collect::<Vec<_>>()
-        };
-
-        let persisted_branch = self.session_tree.get_active_branch_messages();
-        if serde_json::to_value(&persisted_branch).ok()
-            != serde_json::to_value(&repaired_branch).ok()
-        {
-            if self.harness.is_some() {
-                self.session_tree
-                    .replace_active_branch_in_memory(repaired_branch);
-            } else {
-                self.session_tree.replace_active_branch(repaired_branch);
-            }
-        }
-        true
-    }
-
     pub async fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
         self.agent.set_reasoning_effort(effort).await;
     }
@@ -2602,6 +2652,16 @@ impl CodingAgent {
             return Err("model cannot be empty".into());
         }
         if self.harness.is_none() {
+            let mut state = self.agent.turn.lock().await;
+            if repair_interrupted_tool_turn(&mut state.messages) {
+                let repaired = state
+                    .messages
+                    .iter()
+                    .filter(|m| !matches!(m, AgentMessage::System { .. }))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                self.session_tree.replace_active_branch_in_memory(repaired);
+            }
             self.session_tree
                 .set_model(model.to_string())
                 .map_err(|error| format!("Could not persist model switch: {error}"))?;
@@ -2619,6 +2679,7 @@ impl CodingAgent {
             self.session_tree
                 .set_model_in_memory(model.to_string())
                 .map_err(|error| format!("Could not update model switch: {error}"))?;
+            self.sync_turn_from_model_context().await?;
         }
         self.agent.turn.lock().await.model = model.to_string();
         Ok(())
@@ -3131,9 +3192,19 @@ impl CodingAgent {
                     Ok(_) => {}
                     Err(error) => return Some(Err(format!("Harness Error: {error}"))),
                 }
+            } else {
+                let mut state = self.agent.turn.lock().await;
+                if repair_interrupted_tool_turn(&mut state.messages) {
+                    let repaired = state
+                        .messages
+                        .iter()
+                        .filter(|m| !matches!(m, AgentMessage::System { .. }))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    self.session_tree.replace_active_branch_in_memory(repaired);
+                }
             }
         }
-        self.repair_interrupted_history().await;
         *self.dispatch_parent_leaf.lock().unwrap() =
             self.session_tree.active_node_id().map(str::to_owned);
         let trimmed = input.trim();
@@ -3181,9 +3252,14 @@ impl CodingAgent {
                             harness_run_id.is_some(),
                         );
                         *self.dispatch_parent_leaf.lock().unwrap() = parent_leaf;
-                        self.agent
-                            .prompt_message(AgentMessage::user(prompt, images.clone()))
-                            .await;
+                        if let Some(accepted) = harness_run_id.as_ref() {
+                            if let Err(error) = self.execute_accepted_run(accepted).await {
+                                self.harness_journal_error = Some(error);
+                            }
+                        } else {
+                            self.agent.steer(AgentMessage::user(prompt, images.clone()));
+                            self.agent.run_steer().await;
+                        }
                         self.sync_session_tree_and_dispatch_assistant_hooks().await;
                         self.run_scheduled_agent_work().await;
                         if let Err(error) = self.commit_completed_subagent_lanes() {
@@ -3436,7 +3512,8 @@ impl CodingAgent {
                                         }
                                     }
                                     WasiLegacyEffect::RequestModelTurn { prompt } => {
-                                        self.agent.prompt(&prompt).await;
+                                        self.agent.follow_up(AgentMessage::user(prompt, Vec::new()));
+                                        self.agent.run_follow_up().await;
                                         self.sync_session_tree_and_dispatch_assistant_hooks().await;
                                     }
                                 }
@@ -3668,7 +3745,8 @@ impl CodingAgent {
                 self.harness_journal_error = Some(error);
             }
         } else {
-            self.agent.prompt_message(msg).await;
+            self.agent.steer(msg);
+            self.agent.run_steer().await;
             self.sync_session_tree_and_dispatch_assistant_hooks().await;
         }
         if let Some(error) = self.harness_journal_error.clone() {
@@ -4250,14 +4328,12 @@ async fn run_subagent_task(
         .session_file
         .clone()
         .unwrap_or_else(|| std::env::temp_dir().join(format!("subagent-{lane_name}.jsonl")));
-    let mut agent = UnifiedAgent::new(
+    let mut agent = ProviderRunExecutor::new(
         context.api_key.clone(),
         context.account_id.clone(),
         &model,
-        &subagent_session,
         threadlane_agent::AgentConfig::default(),
-    )
-    .map_err(|e| format!("Failed to create subagent: {e}"))?;
+    );
 
     if let Some(tools) = config.tools.clone() {
         agent.set_allowed_tool_names(Some(tools.into_iter().collect()));
@@ -4372,7 +4448,7 @@ async fn run_subagent_task(
             }
         });
         let observed_model = model.clone();
-        let _ = scheduler.run_unified(&mut agent).await;
+        let _ = scheduler.run_executor(&mut agent, None).await;
         let mut messages = if is_recovery {
             resume_messages.clone()
         } else {
@@ -4427,14 +4503,26 @@ async fn run_subagent_task(
 
     // Preserve provider and tool-loop errors in the command result as well.
     let mut events = agent.subscribe();
-    agent
-        .prompt(if is_recovery {
-            SUBAGENT_RECOVERY_PROMPT
-        } else {
-            &task
-        })
-        .await;
-    while agent_work.run_unified(&mut agent).await {}
+    let prompt_text = if is_recovery {
+        SUBAGENT_RECOVERY_PROMPT
+    } else {
+        &task
+    };
+    if let Some(session_path) = session_file_for_checkpoint.as_deref() {
+        let mut subagent_harness = CodingSessionHarness::open(session_path)
+            .map_err(|error| format!("Failed to open subagent harness: {error}"))?;
+        let accepted = subagent_harness
+            .begin_run_text(prompt_text)
+            .map_err(|error| format!("Failed to accept subagent run: {error}"))?;
+        subagent_harness
+            .validate_accepted_run(&accepted)
+            .map_err(|error| format!("Invalid subagent accepted run token: {error}"))?;
+        agent.execute_accepted(&accepted).await;
+    } else {
+        agent.steer(AgentMessage::user(prompt_text.to_string(), Vec::new()));
+        agent.run_steer().await;
+    }
+    while agent_work.run_executor(&mut agent, None).await {}
 
     let mut checkpoint_cursor = checkpoint_task
         .await

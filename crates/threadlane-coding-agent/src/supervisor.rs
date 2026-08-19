@@ -572,7 +572,7 @@ impl HarnessSupervisor {
     // ── Project / task management ────────────────────────────────────────
 
     fn load_registry(&self) {
-        let records = load_project_registry_from(&self.global_dir, false);
+        let records = load_project_registry_from(&self.global_dir);
         let mut lock = self.projects.lock().unwrap();
         for record in records {
             lock.insert(record.id.clone(), record);

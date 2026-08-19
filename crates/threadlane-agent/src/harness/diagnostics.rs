@@ -25,6 +25,21 @@ pub struct QueuedWorkDiagnostic {
     pub queue: QueueKind,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecoveryPlan {
+    pub session_id: String,
+    pub lane: String,
+    pub source_sequence: u64,
+    pub decision: RecoveryDecision,
+    pub open_operation: Option<String>,
+    pub interrupted_tools: Vec<InterruptedToolDiagnostic>,
+    pub queued_work: Vec<QueuedWorkDiagnostic>,
+    pub open_operation_ids: Vec<String>,
+    pub safe_tools_to_replay: Vec<crate::Record>,
+    pub unreplayable_tools: usize,
+    pub abort_requested_operation_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaneRecoveryDiagnostic {
     pub lane: String,

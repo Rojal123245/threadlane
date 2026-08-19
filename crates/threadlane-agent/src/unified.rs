@@ -216,19 +216,24 @@ impl UnifiedAgent {
     /// Replace the in-memory provider working copy from the canonical active
     /// event-log projection. The system prompt stays runtime-owned because it
     /// is captured separately in `RunContextCaptured`.
-    pub async fn sync_turn_from_model_context(&self) -> Result<(), AgentError> {
+    pub async fn projected_messages(&self) -> Result<Vec<AgentMessage>, AgentError> {
         let context = self
             .harness
             .store()
             .model_context("main")
             .map_err(|error| AgentError::Session(error.to_string()))?;
-        let mut turn = self.turn.lock().await;
-        let system_prompt = turn.system_prompt.clone();
-        turn.messages = std::iter::once(AgentMessage::System {
+        let system_prompt = self.turn.lock().await.system_prompt.clone();
+        Ok(std::iter::once(AgentMessage::System {
             content: system_prompt,
         })
         .chain(context.messages())
-        .collect();
+        .collect())
+    }
+
+    pub async fn sync_turn_from_model_context(&self) -> Result<(), AgentError> {
+        let messages = self.projected_messages().await?;
+        let mut turn = self.turn.lock().await;
+        turn.messages = messages;
         Ok(())
     }
 
@@ -285,13 +290,8 @@ impl UnifiedAgent {
     /// Builds provider payloads for testing (delegates to the router).
     pub async fn build_api_payloads(&self) -> (serde_json::Value, serde_json::Value) {
         let mut turn = self.turn.lock().await.clone();
-        if let Ok(context) = self.harness.store().model_context("main") {
-            let system_prompt = turn.system_prompt.clone();
-            turn.messages = std::iter::once(AgentMessage::System {
-                content: system_prompt,
-            })
-            .chain(context.messages())
-            .collect();
+        if let Ok(messages) = self.projected_messages().await {
+            turn.messages = messages;
         }
         let tools: Vec<_> = self.configured_tool_definitions();
         let chat = self.provider_router.build_payload(
@@ -369,6 +369,19 @@ impl UnifiedAgent {
             harness_event_hub: self.harness.events().clone(),
             provider_trace_recorder: self.provider_trace_recorder.clone(),
             message_recorder: self.message_recorder.clone(),
+            model_context_refresh: Some(Arc::new({
+                let harness = self.harness.store().clone();
+                move |turn| {
+                    let harness = harness.clone();
+                    Box::pin(async move {
+                        let projection = harness
+                            .model_context("main")
+                            .map_err(|error| error.to_string())?;
+                        turn.lock().await.messages = projection.messages();
+                        Ok(())
+                    })
+                }
+            })),
             stream_rules: self.stream_rules.clone(),
             steering_queue: &mut self.steering_queue,
             follow_up_queue: &mut self.follow_up_queue,

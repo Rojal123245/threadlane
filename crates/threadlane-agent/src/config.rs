@@ -73,6 +73,10 @@ impl Default for AgentConfig {
 }
 
 impl AgentConfig {
+    pub fn default_system_prompt(&self) -> &str {
+        &self.default_system_prompt
+    }
+
     /// Creates a new [`AgentConfigBuilder`].
     pub fn builder() -> AgentConfigBuilder {
         AgentConfigBuilder::default()
@@ -120,7 +124,7 @@ impl AgentConfigBuilder {
         self
     }
 
-    pub fn default_system_prompt(mut self, value: impl Into<String>) -> Self {
+    pub fn with_default_system_prompt(mut self, value: impl Into<String>) -> Self {
         self.config.default_system_prompt = value.into();
         self
     }

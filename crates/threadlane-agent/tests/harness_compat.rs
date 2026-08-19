@@ -9,11 +9,20 @@ use threadlane_agent::{AgentMessage, SessionTree};
 fn legacy_global_facts_are_present_in_the_reduced_main_lane() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("chat.jsonl");
-    let mut tree = SessionTree::new("chat");
-    tree.file_path = Some(path.clone());
-    tree.set_fact("model", "gpt-test").unwrap();
+    fs::write(&path, "").unwrap();
+    let mut store = JsonlStore::open(&path).unwrap();
+    store
+        .append_record(Record::FactSet {
+            id: "fact-model".into(),
+            seq: store.next_sequence(),
+            lane: "main".into(),
+            timestamp: 1,
+            run_id: None,
+            key: "model".into(),
+            value: "gpt-test".into(),
+        })
+        .unwrap();
 
-    let store = JsonlStore::open(&path).unwrap();
     assert_eq!(
         threadlane_agent::harness::Reducer::reduce(&store)
             .unwrap()
@@ -28,33 +37,60 @@ fn legacy_global_facts_are_present_in_the_reduced_main_lane() {
 fn jsonl_fork_copies_a_branch_and_facts_without_operation_history() {
     let dir = tempdir().unwrap();
     let source_path = dir.path().join("source.jsonl");
-    let mut tree = SessionTree::new("source");
-    tree.file_path = Some(source_path.clone());
-    tree.set_model("antigravity/test-model".into()).unwrap();
-    let root = tree.add_message(AgentMessage::user("root", vec![]));
-    let child = tree.add_message(AgentMessage::user("child", vec![]));
-    tree.set_fact("model", "gpt-test").unwrap();
-
+    fs::write(&source_path, "").unwrap();
     let mut source = JsonlStore::open(&source_path).unwrap();
+    source
+        .append_record(Record::FactSet {
+            id: "fact-model".into(),
+            seq: source.next_sequence(),
+            lane: "main".into(),
+            timestamp: 1,
+            run_id: None,
+            key: "model".into(),
+            value: "gpt-test".into(),
+        })
+        .unwrap();
+    source
+        .append_entry(Entry::new(
+            "root",
+            None,
+            "main",
+            source.next_sequence(),
+            10,
+            AgentMessage::user("root", vec![]),
+            false,
+        ))
+        .unwrap();
+    source
+        .append_entry(Entry::new(
+            "child",
+            Some("root".into()),
+            "main",
+            source.next_sequence(),
+            11,
+            AgentMessage::user("child", vec![]),
+            false,
+        ))
+        .unwrap();
     source
         .append_record(Record::OperationStarted {
             id: "run".into(),
             seq: source.next_sequence(),
             lane: "main".into(),
-            timestamp: 10,
-            source_leaf_id: Some(child.clone()),
+            timestamp: 12,
+            source_leaf_id: Some("child".into()),
             intent: OperationIntent::Run,
         })
         .unwrap();
     let branch = source
-        .fork_branch(dir.path().join("branch.jsonl"), "branch", &child)
+        .fork_branch(dir.path().join("branch.jsonl"), "branch", "child")
         .unwrap();
 
     assert_eq!(branch.session_id(), "branch");
     assert_eq!(branch.parent_session_id(), Some("source"));
     assert_eq!(branch.tree().model.as_deref(), Some("gpt-test"));
     assert_eq!(branch.entries().len(), 2);
-    assert_eq!(branch.entries()[0].id, root);
+    assert_eq!(branch.entries()[0].id, "root");
     assert_eq!(branch.entries()[0].parent_id, None);
     assert_eq!(
         branch.entries()[1].parent_id,
@@ -73,47 +109,83 @@ fn jsonl_fork_copies_a_branch_and_facts_without_operation_history() {
 fn legacy_model_images_and_passive_branches_survive_harness_open() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("chat.jsonl");
-    let mut tree = SessionTree::new("chat");
-    tree.file_path = Some(path.clone());
-    tree.set_model("antigravity/test-model".into()).unwrap();
-    tree.set_fact("provider", "antigravity").unwrap();
-    let root = tree.add_message(AgentMessage::user(
-        "inspect this",
-        vec![threadlane_agent::ImageAttachment {
-            display_name: "diagram.png".into(),
-            data_url: "data:image/png;base64,AA==".into(),
-        }],
-    ));
-    tree.append_passive_branch(
-        Some(&root),
-        vec![AgentMessage::Assistant {
-            content: Some("background result".into()),
-            tool_calls: None,
-            stop_reason: Some("stop".into()),
-            deferred_handle: None,
-        }],
-    )
-    .unwrap();
+    fs::write(&path, "").unwrap();
+    let mut store = JsonlStore::open(&path).unwrap();
+    store
+        .append_record(Record::FactSet {
+            id: "fact-model".into(),
+            seq: store.next_sequence(),
+            lane: "main".into(),
+            timestamp: 1,
+            run_id: None,
+            key: "model".into(),
+            value: "antigravity/test-model".into(),
+        })
+        .unwrap();
+    store
+        .append_record(Record::FactSet {
+            id: "fact-provider".into(),
+            seq: store.next_sequence(),
+            lane: "main".into(),
+            timestamp: 2,
+            run_id: None,
+            key: "provider".into(),
+            value: "antigravity".into(),
+        })
+        .unwrap();
+    store
+        .append_entry(Entry::new(
+            "entry-1",
+            None,
+            "main",
+            store.next_sequence(),
+            10,
+            AgentMessage::user(
+                "inspect this",
+                vec![threadlane_agent::ImageAttachment {
+                    display_name: "diagram.png".into(),
+                    data_url: "data:image/png;base64,AA==".into(),
+                }],
+            ),
+            false,
+        ))
+        .unwrap();
+    store
+        .append_entry(Entry::new(
+            "entry-2",
+            Some("entry-1".into()),
+            "subagent",
+            store.next_sequence(),
+            11,
+            AgentMessage::Assistant {
+                content: Some("background result".into()),
+                tool_calls: None,
+                stop_reason: Some("stop".into()),
+                deferred_handle: None,
+            },
+            false,
+        ))
+        .unwrap();
 
-    let store = JsonlStore::open(&path).unwrap();
+    let reopened = JsonlStore::open(&path).unwrap();
     assert_eq!(
-        store.tree().model.as_deref(),
+        reopened.tree().model.as_deref(),
         Some("antigravity/test-model")
     );
     assert_eq!(
-        store
+        reopened
             .tree()
             .global_facts
             .get("provider")
             .map(String::as_str),
         Some("antigravity")
     );
-    let active = store.tree().get_active_branch_messages();
+    let active = reopened.tree().get_active_branch_messages();
     assert!(matches!(
         &active[0],
         AgentMessage::UserWithImages { images, .. } if images[0].display_name == "diagram.png"
     ));
-    assert_eq!(store.tree().nodes.len(), 2);
+    assert_eq!(reopened.tree().nodes.len(), 2);
 }
 
 #[test]
@@ -128,7 +200,7 @@ fn checked_in_legacy_fixture_opens_idle_without_rewriting() {
     assert_eq!(state.lane("main").unwrap().status, LaneStatus::Idle);
     assert_eq!(
         state.lane("main").unwrap().leaf_id.as_deref(),
-        Some("node_2")
+        Some("node_3")
     );
     assert_eq!(
         store.tree().model.as_deref(),
@@ -277,6 +349,7 @@ fn jsonl_store_reads_v2_records_embedded_in_the_session_file() {
 fn compatibility_tree_can_follow_v2_without_a_second_durable_append() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("chat.jsonl");
+    fs::write(&path, "initial").unwrap();
     let mut tree = SessionTree::new("chat");
     tree.file_path = Some(path.clone());
     tree.add_message(AgentMessage::user("before", vec![]));

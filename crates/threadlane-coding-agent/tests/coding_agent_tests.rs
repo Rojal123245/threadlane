@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::Write;
 use tempfile::tempdir;
-use threadlane_agent::{AgentMessage, ModelRoles, SessionTree, UnifiedAgent};
+use threadlane_agent::{AgentMessage, ModelRoles, ProviderRunExecutor, SessionTree};
 use threadlane_coding_agent::{
     execute_slash_command, parse_slash_command, CommandAction, ProjectContext,
 };
@@ -25,16 +25,12 @@ fn test_project_context_discovery() {
 
 #[tokio::test]
 async fn compact_command_stays_in_current_session() {
-    let tmp = tempdir().unwrap();
-    let session_file = tmp.path().join("test.jsonl");
-    let mut agent = UnifiedAgent::new(
+    let mut agent = ProviderRunExecutor::new(
         "fake",
         None,
         "gpt-4o",
-        &session_file,
         threadlane_agent::AgentConfig::default(),
-    )
-    .unwrap();
+    );
     let mut tree = SessionTree::new("current_session");
     for index in 0..60 {
         let message = AgentMessage::User {
@@ -56,16 +52,12 @@ async fn compact_command_stays_in_current_session() {
 
 #[tokio::test]
 async fn roles_command_updates_task_plan_and_advisor_roles() {
-    let tmp = tempdir().unwrap();
-    let session_file = tmp.path().join("roles.jsonl");
-    let mut agent = UnifiedAgent::new(
+    let mut agent = ProviderRunExecutor::new(
         "fake",
         None,
         "base-model",
-        &session_file,
         threadlane_agent::AgentConfig::default(),
-    )
-    .unwrap();
+    );
     let mut tree = SessionTree::new("roles_session");
 
     let output = execute_slash_command(
@@ -140,6 +132,10 @@ fn test_slash_command_parsing() {
     assert_eq!(
         parse_slash_command("/prompt tpl arg1 arg2"),
         Some(CommandAction::PromptTemplate("tpl arg1 arg2".to_string()))
+    );
+    assert_eq!(
+        parse_slash_command("/subagent test task"),
+        Some(CommandAction::Subagent("test task".to_string()))
     );
 
     assert_eq!(

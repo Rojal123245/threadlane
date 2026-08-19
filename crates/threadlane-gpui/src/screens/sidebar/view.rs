@@ -70,18 +70,8 @@ fn build_diagnostic_export(
     let runtime_status = runtime.map(|runtime| format!("{:?}", runtime.status()));
     let log = if include_log {
         let canonical = read_jsonl_for_export(session_file)?;
-        let legacy_path = session_file.with_extension("harness.jsonl");
-        let legacy_harness_records = if legacy_path.exists() {
-            read_jsonl_for_export(&legacy_path)?
-        } else {
-            Vec::new()
-        };
         Some(serde_json::json!({
             "canonical_records": canonical,
-            "legacy_harness_sidecar": {
-                "path": legacy_path.display().to_string(),
-                "records": legacy_harness_records,
-            },
         }))
     } else {
         None

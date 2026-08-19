@@ -19,7 +19,7 @@ pub use agent::AgentHarness;
 pub use diagnostics::{
     project_recovery, project_session_diagnostics, DurableEventDiagnostic, DurableEventKind,
     InterruptedToolDiagnostic, LaneRecoveryDiagnostic, ModelContextDiagnostic,
-    QueuedWorkDiagnostic, RecoveryDecision, SessionDiagnostics,
+    QueuedWorkDiagnostic, RecoveryDecision, RecoveryPlan, SessionDiagnostics,
 };
 pub use effects::{EffectAction, EffectsError, GatedEffects};
 pub use events::{
@@ -50,11 +50,12 @@ pub use store::{
 };
 pub use telemetry::{ExecutionContext, NoopTelemetry, TelemetrySink};
 pub use types::{
-    sanitize_tool_args, AbortInitiator, AbortObservation, AbortTarget, BoundedPromptText,
-    BoundedText, CapabilitySnapshot, Entry, ErrorCategory, InterruptedSubagentLane, LaneState,
-    LaneStatus, OperationIntent, OperationOutcome, PermissionTraceDecision, PermissionTraceScope,
-    PermissionTraceSource, PromptSnapshot, ProviderErrorSummary, ProviderOutcome, ProvisionedEntry,
-    QueueKind, QueuedEntry, Record, RecoveryResult, ReduceError, ReducedState, RetryState,
-    StreamCheckpointKind, SubagentLifecyclePhase, SurfaceOperation, ToolExecutionOutcome, ToolExecutionPhase,
+    sanitize_tool_args, AbortInitiator, AbortObservation, AbortTarget, AcceptedRun,
+    BoundedPromptText, BoundedText, CapabilitySnapshot, Entry, ErrorCategory,
+    InterruptedSubagentLane, LaneState, LaneStatus, OperationIntent, OperationOutcome,
+    PermissionTraceDecision, PermissionTraceScope, PermissionTraceSource, PromptSnapshot,
+    ProviderErrorSummary, ProviderOutcome, ProvisionedEntry, QueueKind, QueuedEntry, Record,
+    RecoveryResult, ReduceError, ReducedState, RetryState, StreamCheckpointKind,
+    SubagentLifecyclePhase, SurfaceOperation, ToolExecutionOutcome, ToolExecutionPhase,
     ToolReplaySafety, ToolResult, ToolSpec, ToolState, TraceString, UsageCause,
 };

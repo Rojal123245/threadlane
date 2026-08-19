@@ -42,7 +42,7 @@ impl ProjectRecord {
 }
 
 pub fn load_project_registry() -> Vec<ProjectRecord> {
-    load_project_registry_from(&default_global_dir(), true)
+    load_project_registry_from(&default_global_dir())
 }
 
 pub fn save_project_registry(projects: &[ProjectRecord]) -> Result<(), String> {
@@ -59,7 +59,7 @@ pub fn register_project(raw_path: &Path) -> Result<ProjectRecord, String> {
         )
     })?;
     let global_dir = default_global_dir();
-    let mut projects = load_project_registry_from(&global_dir, true);
+    let mut projects = load_project_registry_from(&global_dir);
     if let Some(project) = projects
         .iter_mut()
         .find(|project| same_path(&project.path, &canonical))
@@ -84,7 +84,7 @@ pub fn select_project(raw_path: &Path, session_id: Option<&str>) -> Result<Proje
         )
     })?;
     let global_dir = default_global_dir();
-    let mut projects = load_project_registry_from(&global_dir, true);
+    let mut projects = load_project_registry_from(&global_dir);
     let index = if let Some(index) = projects
         .iter()
         .position(|project| same_path(&project.path, &canonical))
@@ -108,7 +108,7 @@ pub(crate) fn merge_and_save_project_registry_to(
     incoming: &[ProjectRecord],
 ) -> Result<(), String> {
     let _guard = registry_lock().lock().map_err(|error| error.to_string())?;
-    let mut merged = load_project_registry_from(global_dir, false);
+    let mut merged = load_project_registry_from(global_dir);
     for mut record in incoming.iter().cloned() {
         if let Some(index) = merged
             .iter()
@@ -136,26 +136,11 @@ pub(crate) fn merge_and_save_project_registry_to(
     save_project_registry_to(global_dir, &merged)
 }
 
-pub(crate) fn load_project_registry_from(
-    global_dir: &Path,
-    migrate_legacy_gui: bool,
-) -> Vec<ProjectRecord> {
+pub(crate) fn load_project_registry_from(global_dir: &Path) -> Vec<ProjectRecord> {
     let canonical_file = global_dir.join("projects.json");
-    let mut projects = fs::read(&canonical_file)
+    let projects = fs::read(&canonical_file)
         .map(|contents| parse_project_records(&contents))
         .unwrap_or_default();
-
-    if migrate_legacy_gui {
-        let legacy_file = global_dir.join("gui").join("projects.json");
-        if let Ok(contents) = fs::read(&legacy_file) {
-            for legacy in parse_project_records(&contents) {
-                merge_project(&mut projects, legacy);
-            }
-            if save_project_registry_to(global_dir, &projects).is_ok() {
-                let _ = fs::remove_file(legacy_file);
-            }
-        }
-    }
 
     normalize_projects(projects)
 }
@@ -198,31 +183,6 @@ fn normalize_projects(projects: Vec<ProjectRecord>) -> Vec<ProjectRecord> {
         .collect()
 }
 
-fn merge_project(projects: &mut Vec<ProjectRecord>, legacy: ProjectRecord) {
-    if let Some(current) = projects
-        .iter_mut()
-        .find(|current| same_path(&current.path, &legacy.path))
-    {
-        current.attached_at = match (current.attached_at, legacy.attached_at) {
-            (0, value) | (value, 0) => value,
-            (left, right) => left.min(right),
-        };
-        if legacy.last_opened_at > current.last_opened_at {
-            current.last_opened_at = legacy.last_opened_at;
-            if legacy.last_session_id.is_some() {
-                current.last_session_id = legacy.last_session_id;
-            }
-        } else if current.last_session_id.is_none() {
-            current.last_session_id = legacy.last_session_id;
-        }
-        if current.name.is_empty() {
-            current.name = legacy.name;
-        }
-    } else {
-        projects.push(legacy);
-    }
-}
-
 fn same_path(left: &Path, right: &Path) -> bool {
     fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf())
         == fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf())
@@ -259,34 +219,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_gui_registry_migrates_into_the_canonical_registry() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        let gui_dir = dir.path().join("gui");
-        fs::create_dir_all(&gui_dir).unwrap();
-        fs::write(
-            gui_dir.join("projects.json"),
-            serde_json::json!([{
-                "path": project,
-                "display_name": "project",
-                "attached_at": 1,
-                "last_opened_at": 9,
-                "last_session_id": "session-1"
-            }])
-            .to_string(),
-        )
-        .unwrap();
-
-        let projects = load_project_registry_from(dir.path(), true);
-
-        assert_eq!(projects.len(), 1);
-        assert_eq!(projects[0].last_session_id.as_deref(), Some("session-1"));
-        assert!(dir.path().join("projects.json").exists());
-        assert!(!gui_dir.join("projects.json").exists());
-    }
-
-    #[test]
     fn stale_supervisor_save_preserves_newer_project_selection() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
@@ -302,39 +234,9 @@ mod tests {
         stale_supervisor.last_selected_task_id = Some("task-3".into());
         merge_and_save_project_registry_to(dir.path(), &[stale_supervisor]).unwrap();
 
-        let projects = load_project_registry_from(dir.path(), false);
+        let projects = load_project_registry_from(dir.path());
         assert_eq!(projects[0].last_opened_at, 20);
         assert_eq!(projects[0].last_session_id.as_deref(), Some("session-2"));
-        assert_eq!(projects[0].last_selected_task_id.as_deref(), Some("task-3"));
-    }
-
-    #[test]
-    fn canonical_task_metadata_is_preserved_when_legacy_gui_metadata_merges() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        let mut canonical = ProjectRecord::from_path(project.clone());
-        canonical.last_selected_task_id = Some("task-1".into());
-        canonical.last_opened_at = 2;
-        save_project_registry_to(dir.path(), &[canonical]).unwrap();
-        let gui_dir = dir.path().join("gui");
-        fs::create_dir_all(&gui_dir).unwrap();
-        fs::write(
-            gui_dir.join("projects.json"),
-            serde_json::json!([{
-                "path": project,
-                "display_name": "project",
-                "last_opened_at": 10,
-                "last_session_id": "session-2"
-            }])
-            .to_string(),
-        )
-        .unwrap();
-
-        let projects = load_project_registry_from(dir.path(), true);
-
-        assert_eq!(projects[0].last_selected_task_id.as_deref(), Some("task-1"));
-        assert_eq!(projects[0].last_session_id.as_deref(), Some("session-2"));
-        assert_eq!(projects[0].last_opened_at, 10);
+        assert!(&projects[0].last_selected_task_id.as_deref() == &Some("task-3"));
     }
 }

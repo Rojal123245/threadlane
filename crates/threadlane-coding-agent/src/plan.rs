@@ -199,16 +199,11 @@ impl SessionPlanStore {
             .lock()
             .map_err(|_| "Session plan state is unavailable".to_string())?;
         if let Some(path) = &state.session_file {
-            if path.exists() {
-                let mut store = JsonlStore::open(path)
-                    .map_err(|error| format!("Failed to open session for plan update: {error}"))?;
-                store
-                    .append_plan(&plan)
-                    .map_err(|error| format!("Failed to persist session plan: {error}"))?;
-            } else {
-                SessionTree::append_plan_to_file(path, &plan)
-                    .map_err(|error| format!("Failed to persist session plan: {error}"))?;
-            }
+            let mut store = JsonlStore::open(path)
+                .map_err(|error| format!("Failed to open session for plan update: {error}"))?;
+            store
+                .append_plan(&plan)
+                .map_err(|error| format!("Failed to persist session plan: {error}"))?;
         }
         state.plan = plan;
         Ok(())

@@ -227,6 +227,27 @@ impl<S: SessionStore> SessionAgent<S> {
             .accept_prompt_on_lane(lane.name(), run_id, prompt)
     }
 
+    /// Accept a user prompt and drive effects to completion, returning the canonical AcceptedRun token.
+    pub fn accept_prompt_and_drive(
+        &mut self,
+        lane: &LaneHandle,
+        run_id: &str,
+        prompt: AgentMessage,
+    ) -> Result<crate::harness::AcceptedRun, ProcedureError> {
+        self.validate_lane(lane)
+            .map_err(|e| ProcedureError::Invalid(e.to_string()))?;
+        self.harness
+            .accept_prompt_and_drive_on_lane(lane.name(), run_id, prompt)
+    }
+
+    /// Validate an AcceptedRun token against this session's state and store.
+    pub fn validate_accepted_run(
+        &self,
+        accepted: &crate::harness::AcceptedRun,
+    ) -> Result<(), ReduceError> {
+        self.harness.validate_accepted_run(accepted)
+    }
+
     /// Enqueue a provisioning target on the lane.
     ///
     /// When `run_id` is `Some` the entry is bound to that run; `None`
@@ -364,5 +385,114 @@ impl<S: SessionStore> SessionAgent<S> {
     pub fn drive_to_completion(&mut self, lane: &LaneHandle) -> Result<(), EffectsError> {
         self.validate_lane(lane).map_err(EffectsError::from)?;
         self.harness.drive_to_completion_on_lane(lane.name())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Recovery planning and execution
+// ---------------------------------------------------------------------------
+
+impl<S: SessionStore> SessionAgent<S> {
+    /// Plan recovery for the given lane from the reduced session state.
+    pub fn plan_recovery(&self, lane: &LaneHandle) -> Result<super::RecoveryPlan, ReduceError> {
+        let state = Reducer::reduce(self.harness.store())?;
+        let lane_state = state
+            .lane(lane.name())
+            .ok_or_else(|| ReduceError::InvalidLane(lane.name().to_string()))?;
+
+        let open_operation_ids = lane_state.open_operation.iter().cloned().collect::<Vec<_>>();
+        let mut safe_tools_to_replay = Vec::new();
+        let mut unreplayable_tools = 0;
+
+        for tool in &lane_state.tools {
+            if !tool.completed {
+                if let Some(record) = self.harness.store().records().iter().find(|r| {
+                    if let super::Record::ToolStarted { tool_call_id, .. } = r {
+                        tool_call_id == &tool.tool_call_id
+                    } else {
+                        false
+                    }
+                }) {
+                    safe_tools_to_replay.push(record.clone());
+                } else {
+                    unreplayable_tools += 1;
+                }
+            }
+        }
+
+        let mut abort_requested_operation_ids = Vec::new();
+        if lane_state.abort_requested {
+            if let Some(ref op) = lane_state.open_operation {
+                abort_requested_operation_ids.push(op.clone());
+            }
+        }
+
+        let source_sequence = self
+            .harness
+            .store()
+            .entries()
+            .iter()
+            .map(|e| e.seq)
+            .chain(self.harness.store().records().iter().map(super::Record::seq))
+            .max()
+            .unwrap_or(0);
+
+        let decision = if unreplayable_tools > 0 {
+            super::RecoveryDecision::AbortUnsafeTool
+        } else if !safe_tools_to_replay.is_empty() {
+            super::RecoveryDecision::ReplaySafeToolsThenResume
+        } else if lane_state.open_operation.is_some() {
+            super::RecoveryDecision::ResumeFromLeaf
+        } else {
+            super::RecoveryDecision::None
+        };
+        Ok(super::RecoveryPlan {
+            session_id: self.harness.store().session_id().to_string(),
+            lane: lane.name().to_string(),
+            source_sequence,
+            decision,
+            open_operation: lane_state.open_operation.clone(),
+            interrupted_tools: Vec::new(),
+            queued_work: lane_state
+                .queued
+                .iter()
+                .map(|queued| super::QueuedWorkDiagnostic {
+                    entry_id: queued.target.id.clone(),
+                    queue: queued.queue.clone(),
+                })
+                .collect(),
+            open_operation_ids,
+
+            safe_tools_to_replay,
+            unreplayable_tools,
+            abort_requested_operation_ids,
+        })
+    }
+
+    /// Execute a recovery plan on the session.
+    pub fn execute_recovery(
+        &mut self,
+        plan: &super::RecoveryPlan,
+    ) -> Result<super::RecoveryResult, ProcedureError> {
+        let lane = LaneHandle::new(plan.lane.clone())
+            .map_err(|e| ProcedureError::Invalid(e.to_string()))?;
+        self.validate_lane(&lane)
+            .map_err(|e| ProcedureError::Invalid(e.to_string()))?;
+
+        let mut recovered_open_operations = 0;
+        for op_id in &plan.open_operation_ids {
+            if plan.abort_requested_operation_ids.contains(op_id) {
+                let _ = self.harness.reconcile_abort_run(op_id);
+            }
+            recovered_open_operations += 1;
+        }
+
+        Ok(super::RecoveryResult {
+            recovered_open_operations,
+            open_operation_ids: plan.open_operation_ids.clone(),
+            abort_requested_operation_ids: plan.abort_requested_operation_ids.clone(),
+            unreplayable_tools: plan.unreplayable_tools,
+            safe_tools_to_replay: plan.safe_tools_to_replay.clone(),
+        })
     }
 }

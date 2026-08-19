@@ -160,6 +160,17 @@ pub struct CapabilitySnapshot {
     pub fingerprint: Option<TraceString>,
 }
 
+/// Proof that a run prompt has been committed to the canonical session log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcceptedRun {
+    pub session_id: String,
+    pub run_id: String,
+    pub lane: String,
+    pub prompt_entry_id: String,
+    pub assistant_entry_id: String,
+    pub accepted_through_seq: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProviderOutcome {
     Completed,
@@ -352,8 +363,8 @@ impl ProvisionedEntry {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueuedEntry {
-    pub(crate) id: String,
-    pub(crate) run_id: Option<String>,
+    pub id: String,
+    pub run_id: Option<String>,
     pub queue: QueueKind,
     #[serde(default)]
     pub priority: Option<SteerPriority>,
@@ -1387,4 +1398,15 @@ pub struct InterruptedSubagentLane {
     pub messages: Vec<AgentMessage>,
     pub safe_tools: Vec<Record>,
     pub unsafe_tools: Vec<Record>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecoveryPlan {
+    pub session_id: String,
+    pub lane: String,
+    pub open_operation_ids: Vec<String>,
+    pub safe_tools_to_replay: Vec<Record>,
+    pub unreplayable_tools: usize,
+    pub abort_requested_operation_ids: Vec<String>,
+    pub source_sequence: u64,
 }

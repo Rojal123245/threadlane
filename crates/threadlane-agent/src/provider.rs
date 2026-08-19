@@ -568,6 +568,12 @@ pub type AssistantMessageRecorder = Arc<
     dyn Fn(AgentMessage) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync,
 >;
 
+pub type ModelContextRefresh = Arc<
+    dyn Fn(Arc<tokio::sync::Mutex<TurnState>>) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>
+        + Send
+        + Sync,
+>;
+
 #[cfg(test)]
 mod tests {
     use super::*;

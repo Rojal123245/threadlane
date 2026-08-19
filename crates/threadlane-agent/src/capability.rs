@@ -71,7 +71,7 @@ impl CapabilityRegistry {
     /// Wires all capabilities into the given agent loop: registers tool
     /// executors and hooks. Returns the count of successfully registered
     /// items and any errors encountered.
-    pub fn wire_all(&self, agent: &mut crate::unified::UnifiedAgent) -> (usize, Vec<String>) {
+    pub fn wire_all(&self, agent: &mut crate::provider_executor::ProviderRunExecutor) -> (usize, Vec<String>) {
         let mut tool_count = 0;
         let mut hook_count = 0;
         let mut errors = Vec::new();
