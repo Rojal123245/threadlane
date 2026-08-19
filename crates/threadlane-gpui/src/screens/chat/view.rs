@@ -335,18 +335,25 @@ impl ChatListView {
             .bg(theme.title_bar)
             .child(
                 div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_start()
                     .min_w_0()
-                    .max_w(px(360.0))
-                    .truncate()
-                    .text_size(px(13.0))
-                    .line_height(px(18.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.foreground)
-                    .child(active_title),
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(13.0))
+                            .line_height(px(18.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.foreground)
+                            .child(active_title),
+                    ),
             )
             .child(
                 div()
                     .h(px(28.0))
+                    .flex_none()
                     .flex()
                     .items_center()
                     .gap_1()

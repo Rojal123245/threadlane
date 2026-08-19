@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -15,7 +15,6 @@ use gpui_component::text::{TextView, TextViewState};
 use gpui_component::{ActiveTheme, Disableable, IconName, Selectable, Sizable};
 use threadlane_git::GitFile;
 
-use crate::screens::terminal::TerminalView;
 use crate::state::AppState;
 
 
@@ -59,7 +58,6 @@ fn detect_language(path_str: &str) -> &'static str {
 enum Surface {
     Review,
     Files,
-    Terminal,
 }
 
 impl Surface {
@@ -67,7 +65,6 @@ impl Surface {
         match self {
             Self::Review => "Review",
             Self::Files => "Files",
-            Self::Terminal => "Terminal",
         }
     }
 
@@ -75,7 +72,6 @@ impl Surface {
         match self {
             Self::Review => IconName::File,
             Self::Files => IconName::Folder,
-            Self::Terminal => IconName::SquareTerminal,
         }
     }
 }
@@ -120,7 +116,6 @@ pub struct RightPanelView {
     saved_content: String,
     is_dirty: bool,
     pending_document: Option<(String, String)>,
-    terminal_sessions: HashMap<PathBuf, Entity<TerminalView>>,
     event_tx: mpsc::Sender<PanelEvent>,
     _subscriptions: Vec<Subscription>,
 }
@@ -168,7 +163,6 @@ impl RightPanelView {
             saved_content: String::new(),
             is_dirty: false,
             pending_document: None,
-            terminal_sessions: HashMap::new(),
             event_tx,
             _subscriptions: vec![observe_model],
         }
@@ -187,11 +181,6 @@ impl RightPanelView {
         self.document_title = None;
         self.document_state
             .update(cx, |state, cx| state.set_text("", cx));
-        if let Some(project) = self.project.clone() {
-            self.terminal_sessions
-                .entry(project.clone())
-                .or_insert_with(|| cx.new(|cx| TerminalView::new(project, cx)));
-        }
         self.refresh_active_surface();
     }
 
@@ -238,7 +227,6 @@ impl RightPanelView {
                     error,
                 });
             }
-            Surface::Terminal => {}
         });
     }
 
@@ -398,7 +386,7 @@ impl RightPanelView {
             .border_b_1()
             .border_color(theme.border)
             .children(
-                [Surface::Review, Surface::Files, Surface::Terminal].map(|surface| {
+                [Surface::Review, Surface::Files].map(|surface| {
                     Button::new(SharedString::from(format!(
                         "right-panel-tab-{}",
                         surface.label().to_lowercase()
@@ -458,7 +446,7 @@ impl RightPanelView {
                             .child("Choose what to show in the right panel"),
                     )
                     .child(div().mt_4().w_full().flex().gap_2().children(
-                        [Surface::Review, Surface::Files, Surface::Terminal].map(|surface| {
+                        [Surface::Review, Surface::Files].map(|surface| {
                             Button::new(SharedString::from(format!(
                                 "right-panel-card-{}",
                                 surface.label().to_lowercase()
@@ -847,22 +835,6 @@ impl RightPanelView {
             .into_any_element()
     }
 
-    fn render_terminal(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(project) = self.project.as_ref() else {
-            return self.render_empty(
-                "No project attached",
-                "Attach a project to start a terminal.",
-                cx,
-            );
-        };
-        self.terminal_sessions
-            .get(project)
-            .cloned()
-            .map(Entity::into_any_element)
-            .unwrap_or_else(|| {
-                self.render_empty("Starting terminal", "Opening a project shell…", cx)
-            })
-    }
 
     fn render_empty(&self, title: &str, description: &str, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().colors;
@@ -898,7 +870,6 @@ impl Render for RightPanelView {
             None => self.render_chooser(cx).into_any_element(),
             Some(Surface::Review) => self.render_review(cx),
             Some(Surface::Files) => self.render_files(cx),
-            Some(Surface::Terminal) => self.render_terminal(cx),
         };
         div()
             .w_full()
