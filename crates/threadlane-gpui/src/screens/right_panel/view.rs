@@ -811,18 +811,19 @@ impl RightPanelView {
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 let target_path = path.clone();
                                 let Some(project) = this.project.clone() else { return; };
+                                let diff_project = project.clone();
                                 let model = this.model.clone();
                                 cx.spawn(async move |_this, cx| {
                                     let diff_target = target_path.clone();
                                     let content = cx
                                         .background_executor()
                                         .spawn(async move {
-                                            threadlane_git::diff_file(&project, &diff_target)
+                                            threadlane_git::diff_file(&diff_project, &diff_target)
                                                 .unwrap_or_else(|error| error.to_string())
                                         })
                                         .await;
                                     let _ = model.update(cx, |state, cx| {
-                                        state.request_open_diff(target_path, content);
+                                        state.request_open_diff(project, target_path, content);
                                         cx.notify();
                                     });
                                 })
@@ -842,6 +843,7 @@ impl RightPanelView {
                                         PopupMenuItem::new("Open Diff in Editor Tab").on_click(
                                             move |_event, _window, cx| {
                                                 let Some(proj) = project_ref.clone() else { return; };
+                                                let diff_project = proj.clone();
                                                 let target = diff_path.clone();
                                                 let m = model_ref.clone();
                                                 cx.spawn(async move |cx| {
@@ -849,12 +851,12 @@ impl RightPanelView {
                                                     let content = cx
                                                         .background_executor()
                                                         .spawn(async move {
-                                                            threadlane_git::diff_file(&proj, &diff_target)
+                                                            threadlane_git::diff_file(&diff_project, &diff_target)
                                                                 .unwrap_or_else(|error| error.to_string())
                                                         })
                                                         .await;
                                                     let _ = m.update(cx, |state, cx| {
-                                                        state.request_open_diff(target, content);
+                                                        state.request_open_diff(proj, target, content);
                                                         cx.notify();
                                                     });
                                                 })

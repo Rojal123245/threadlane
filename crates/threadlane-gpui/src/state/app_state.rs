@@ -109,7 +109,11 @@ pub enum ChatStreamEvent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RequestedEditorTarget {
     File(String),
-    Diff { path: String, content: String },
+    Diff {
+        project: PathBuf,
+        path: String,
+        content: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1042,8 +1046,14 @@ impl AppState {
         self.requested_editor_target = Some(RequestedEditorTarget::File(relative_path));
     }
 
-    pub(crate) fn request_open_diff(&mut self, relative_path: String, content: String) {
+    pub(crate) fn request_open_diff(
+        &mut self,
+        project: PathBuf,
+        relative_path: String,
+        content: String,
+    ) {
         self.requested_editor_target = Some(RequestedEditorTarget::Diff {
+            project,
             path: relative_path,
             content,
         });

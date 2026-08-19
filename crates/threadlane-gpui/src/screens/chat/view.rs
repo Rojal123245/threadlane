@@ -102,10 +102,12 @@ impl ChatListView {
                             editor.open_file(&path, cx);
                         });
                     }
-                    crate::state::RequestedEditorTarget::Diff { path, content } => {
-                        this.editor.update(cx, |editor, cx| {
-                            editor.open_diff(&path, &content, cx);
-                        });
+                    crate::state::RequestedEditorTarget::Diff { project, path, content } => {
+                        if model.read(cx).active_work_dir.as_ref() == Some(&project) {
+                            this.editor.update(cx, |editor, cx| {
+                                editor.open_diff(&path, &content, cx);
+                            });
+                        }
                     }
                 }
             }
@@ -336,6 +338,14 @@ impl ChatListView {
         if pasted > 0 {
             cx.notify();
         }
+    }
+
+    pub(crate) fn set_composer_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.current_tab = CentralTab::Chat;
+        self.input_state.update(cx, |input, cx| {
+            input.set_value(text, window, cx);
+        });
+        cx.notify();
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {

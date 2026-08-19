@@ -5,6 +5,8 @@ edition = "2021"
 description = "Project-local Git operations and status parsing for threadlane agent"
 
 [dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 
 [dev-dependencies]
 tempfile = "3.8"

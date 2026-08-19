@@ -78,6 +78,7 @@ fn smart_tab_title(path_str: &str, is_diff: bool) -> String {
 }
 
 pub struct EditorTab {
+    pub project_dir: PathBuf,
     pub relative_path: String,
     pub file_name: String,
     pub language: &'static str,
@@ -196,6 +197,12 @@ impl EditorView {
         let tab_title = smart_tab_title(relative_path, true);
 
         self.tabs.push(EditorTab {
+            project_dir: self
+                .model
+                .read(cx)
+                .active_work_dir
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(".")),
             relative_path: tab_key,
             file_name: tab_title,
             language: "diff",
@@ -280,6 +287,7 @@ impl EditorView {
         let tab_title = smart_tab_title(relative_path, false);
 
         self.tabs.push(EditorTab {
+            project_dir: base_dir,
             relative_path: relative_path.to_string(),
             file_name: tab_title,
             language: lang,
@@ -358,14 +366,7 @@ impl EditorView {
             return;
         };
 
-        let base_dir = self
-            .model
-            .read(cx)
-            .active_work_dir
-            .clone()
-            .unwrap_or_else(|| PathBuf::from("."));
-
-        let file_path = base_dir.join(&tab.relative_path);
+        let file_path = tab.project_dir.join(&tab.relative_path);
         let content = editor.read(cx).value().to_string();
 
         match std::fs::write(&file_path, &content) {
