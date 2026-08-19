@@ -8,7 +8,6 @@ use gpui_component::dialog::{
     Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 };
 use gpui_component::input::{Input, InputState};
-use gpui_component::scroll::ScrollableElement;
 use gpui_component::spinner::Spinner;
 use gpui_component::switch::Switch;
 use gpui_component::tag::{Tag, TagVariant};
@@ -1113,6 +1112,7 @@ impl WorkspaceView {
                     || desc.to_lowercase().contains(&query)
             })
             .collect();
+        let index_offset = matching_commands.len();
 
         div()
             .id("command-palette-backdrop")
@@ -1162,83 +1162,31 @@ impl WorkspaceView {
                     )
                     .child(
                         div()
-                            .id("command-palette-results")
-                            .track_scroll(&self.command_palette_scroll_handle)
-                            .overflow_y_scroll()
-                            .vertical_scrollbar(&self.command_palette_scroll_handle)
+                            .id("command-palette-container")
+                            .relative()
+                            .w_full()
                             .max_h(px(420.0))
-                            .py_2()
-                            .children(matching_commands.into_iter().enumerate().map(
-                                |(index, (name, desc, action_key))| {
-                                    div()
-                                        .id(SharedString::from(format!("palette-cmd-{action_key}")))
-                                        .mx_2()
-                                        .my_0p5()
-                                        .px_3()
-                                        .py_2()
-                                        .rounded_lg()
-                                        .hover(|style| style.bg(theme.list_hover))
-                                        .when(index == self.command_palette_selected, |style| {
-                                            style.bg(theme.list_hover)
-                                        })
-                                        .cursor_pointer()
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .child(
+                            .child(
+                                div()
+                                    .id("command-palette-results")
+                                    .size_full()
+                                    .max_h(px(420.0))
+                                    .track_scroll(&self.command_palette_scroll_handle)
+                                    .overflow_y_scroll()
+                                    .py_2()
+                                    .children(matching_commands.into_iter().enumerate().map(
+                                        |(index, (name, desc, action_key))| {
                                             div()
-                                                .flex()
-                                                .flex_col()
-                                                .gap_0p5()
-                                                .child(
-                                                    div()
-                                                        .text_sm()
-                                                        .font_weight(FontWeight::MEDIUM)
-                                                        .child(name),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(theme.muted_foreground)
-                                                        .child(desc),
-                                                ),
-                                        )
-                                        .on_click(cx.listener(move |this, _event, window, cx| {
-                                            this.command_palette_open = false;
-                                            this.command_palette_selected = 0;
-                                            this.execute_palette_action(action_key, window, cx);
-                                        }))
-                                },
-                            ))
-                            .when(!session_results.is_empty(), |list| {
-                                list.child(
-                                    div()
-                                        .mt_2()
-                                        .px_3()
-                                        .py_1()
-                                        .text_xs()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(theme.muted_foreground)
-                                        .child("Sessions"),
-                                )
-                                .children(
-                                    session_results.into_iter().take(8).map(
-                                        |(work_dir, session_id, title, project)| {
-                                            let model = self.model.clone();
-                                            div()
-                                                .id(SharedString::from(format!(
-                                                    "palette-session-{session_id}"
-                                                )))
+                                                .id(SharedString::from(format!("palette-cmd-{action_key}")))
                                                 .mx_2()
                                                 .my_0p5()
                                                 .px_3()
                                                 .py_2()
                                                 .rounded_lg()
                                                 .hover(|style| style.bg(theme.list_hover))
-                                                .cursor_pointer()
-                                                .flex()
-                                                .items_center()
-                                                .justify_between()
+                                                .when(index == self.command_palette_selected, |style| {
+                                                    style.bg(theme.list_active)
+                                                })
                                                 .child(
                                                     div()
                                                         .flex()
@@ -1248,38 +1196,103 @@ impl WorkspaceView {
                                                             div()
                                                                 .text_sm()
                                                                 .font_weight(FontWeight::MEDIUM)
-                                                                .child(title),
+                                                                .child(name),
                                                         )
                                                         .child(
                                                             div()
                                                                 .text_xs()
                                                                 .text_color(theme.muted_foreground)
-                                                                .child(project),
+                                                                .child(desc),
                                                         ),
                                                 )
-                                                .on_click(cx.listener(
-                                                    move |this, _event, _window, cx| {
-                                                        this.command_palette_open = false;
-                                                        let work_dir = work_dir.clone();
-                                                        let session_id = session_id.clone();
-                                                        model.update(cx, |state, _cx| {
-                                                            controller::dispatch(
-                                                                state,
-                                                                AppAction::SelectSession {
-                                                                    work_dir,
-                                                                    session_id,
-                                                                },
-                                                            );
-                                                        });
-                                                        cx.notify();
-                                                    },
-                                                ))
+                                                .on_click(cx.listener(move |this, _event, window, cx| {
+                                                    this.command_palette_open = false;
+                                                    this.command_palette_selected = 0;
+                                                    this.execute_palette_action(action_key, window, cx);
+                                                }))
                                         },
-                                    ),
-                                )
-                            }),
-                    ),
+                                    ))
+                                    .when(!session_results.is_empty(), |list| {
+                                        list.child(
+                                            div()
+                                                .mt_2()
+                                                .px_3()
+                                                .py_1()
+                                                .text_xs()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(theme.muted_foreground)
+                                                .child("Sessions"),
+                                        )
+                                        .children(
+                                            session_results.into_iter().enumerate().take(8).map(
+                                                |(session_idx, (work_dir, session_id, title, project))| {
+                                                    let model = self.model.clone();
+                                                    div()
+                                                        .id(SharedString::from(format!(
+                                                            "palette-session-{session_id}"
+                                                        )))
+                                                        .mx_2()
+                                                        .my_0p5()
+                                                        .px_3()
+                                                        .py_2()
+                                                        .rounded_lg()
+                                                        .hover(|style| style.bg(theme.list_hover))
+                                                        .when(
+                                                            index_offset + session_idx
+                                                                == self.command_palette_selected,
+                                                            |style| style.bg(theme.list_active),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .flex()
+                                                                .flex_col()
+                                                                .gap_0p5()
+                                                                .child(
+                                                                    div()
+                                                                        .text_sm()
+                                                                        .font_weight(FontWeight::MEDIUM)
+                                                                        .child(title),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .text_xs()
+                                                                        .text_color(theme.muted_foreground)
+                                                                        .child(project),
+                                                                ),
+                                                        )
+                                                        .on_click(cx.listener(
+                                                            move |this, _event, _window, cx| {
+                                                                this.command_palette_open = false;
+                                                                let work_dir = work_dir.clone();
+                                                                let session_id = session_id.clone();
+                                                                model.update(cx, |state, _cx| {
+                                                                    controller::dispatch(
+                                                                        state,
+                                                                        AppAction::SelectSession {
+                                                                            work_dir,
+                                                                            session_id,
+                                                                        },
+                                                                    );
+                                                                });
+                                                                cx.notify();
+                                                            },
+                                                        ))
+                                                },
+                                            ),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .child(gpui_component::scroll::Scrollbar::vertical(
+                                        &self.command_palette_scroll_handle,
+                                    )),
+                            ),
+                    )
             )
+            .into_any_element()
     }
 }
 

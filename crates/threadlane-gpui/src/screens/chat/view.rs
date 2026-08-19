@@ -1185,14 +1185,27 @@ impl ChatListView {
                     .flex()
                     .child(
                         div()
-                            .id("trajectory-events-scroll")
+                            .id("trajectory-events-container")
+                            .relative()
                             .flex_1()
                             .min_w_0()
                             .min_h_0()
-                            .track_scroll(&self.trajectory_scroll_handle)
-                            .overflow_y_scroll()
-                            .vertical_scrollbar(&self.trajectory_scroll_handle)
-                            .child(div().w_full().children(rows)),
+                            .child(
+                                div()
+                                    .id("trajectory-events-scroll")
+                                    .size_full()
+                                    .track_scroll(&self.trajectory_scroll_handle)
+                                    .overflow_y_scroll()
+                                    .child(div().w_full().children(rows)),
+                            )
+                            .child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .child(gpui_component::scroll::Scrollbar::vertical(
+                                        &self.trajectory_scroll_handle,
+                                    )),
+                            ),
                     )
                     .children(inspector),
             )
@@ -2656,22 +2669,33 @@ impl Render for ChatListView {
                     .into_any_element()
             } else {
                 div()
-                    .id("chat-transcript")
+                    .id("chat-transcript-container")
+                    .relative()
                     .w_full()
                     .flex_1()
                     .min_w_0()
                     .min_h_0()
-                    .track_scroll(&self.scroll_handle)
-                    .overflow_y_scroll()
-                    .vertical_scrollbar(&self.scroll_handle)
-                    .pt_3()
-                    .pb_6()
                     .child(
                         div()
-                            .w_full()
-                            .max_w(px(CHAT_CONTENT_MAX_WIDTH))
-                            .mx_auto()
-                            .children(transcript_rows),
+                            .id("chat-transcript")
+                            .size_full()
+                            .track_scroll(&self.scroll_handle)
+                            .overflow_y_scroll()
+                            .pt_3()
+                            .pb_6()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .max_w(px(CHAT_CONTENT_MAX_WIDTH))
+                                    .mx_auto()
+                                    .children(transcript_rows),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .child(gpui_component::scroll::Scrollbar::vertical(&self.scroll_handle)),
                     )
                     .into_any_element()
             })
