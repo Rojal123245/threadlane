@@ -824,10 +824,27 @@ mod tests {
         run_git(dir.path(), &["add", "tracked.txt"]);
         run_git(dir.path(), &["commit", "-qm", "initial"]);
         fs::write(dir.path().join("tracked.txt"), "changed\n").unwrap();
-        run_git(dir.path(), &["config", "diff.external", "false"]);
+
+        let helper_path = if cfg!(windows) {
+            let path = dir.path().join("external-diff.cmd");
+            fs::write(&path, "@echo external-diff-sentinel\r\n").unwrap();
+            path
+        } else {
+            let path = dir.path().join("external-diff.sh");
+            fs::write(&path, "#!/bin/sh\necho \"external-diff-sentinel\"\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            path
+        };
+        let helper_arg = helper_path.to_str().unwrap();
+        run_git(dir.path(), &["config", "diff.external", helper_arg]);
 
         let diff = diff_file(dir.path(), "tracked.txt").unwrap();
 
+        assert!(!diff.contains("external-diff-sentinel"));
         assert!(diff.contains("-original"));
         assert!(diff.contains("+changed"));
     }
