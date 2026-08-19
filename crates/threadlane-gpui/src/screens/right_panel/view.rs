@@ -696,13 +696,6 @@ impl RightPanelView {
 
     fn render_review(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().colors;
-        if self
-            .document_title
-            .as_deref()
-            .is_some_and(|title| title.starts_with("Review ·"))
-        {
-            return self.render_files(cx);
-        }
         if let Some(error) = &self.review_error {
             return self.render_empty("Review unavailable", error, cx);
         }
@@ -815,14 +808,60 @@ impl RightPanelView {
                                     .text_color(theme.warning)
                                     .child(status),
                             )
-                            .on_click(cx.listener(move |this, _event, _window, _cx| {
-                                this.open_diff(path.clone());
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                let target_path = path.clone();
+                                let Some(project) = this.project.clone() else { return; };
+                                let model = this.model.clone();
+                                cx.spawn(async move |_this, cx| {
+                                    let diff_target = target_path.clone();
+                                    let content = cx
+                                        .background_executor()
+                                        .spawn(async move {
+                                            threadlane_git::diff_file(&project, &diff_target)
+                                                .unwrap_or_else(|error| error.to_string())
+                                        })
+                                        .await;
+                                    let _ = model.update(cx, |state, cx| {
+                                        state.request_open_diff(target_path, content);
+                                        cx.notify();
+                                    });
+                                })
+                                .detach();
                             }))
                             .context_menu({
                                 let path = context_path.clone();
                                 let absolute_path = absolute_path.clone();
+                                let project = self.project.clone();
+                                let model = self.model.clone();
                                 move |menu, _window, _cx| {
                                     let text = path.clone();
+                                    let diff_path = path.clone();
+                                    let project_ref = project.clone();
+                                    let model_ref = model.clone();
+                                    let menu = menu.item(
+                                        PopupMenuItem::new("Open Diff in Editor Tab").on_click(
+                                            move |_event, _window, cx| {
+                                                let Some(proj) = project_ref.clone() else { return; };
+                                                let target = diff_path.clone();
+                                                let m = model_ref.clone();
+                                                cx.spawn(async move |cx| {
+                                                    let diff_target = target.clone();
+                                                    let content = cx
+                                                        .background_executor()
+                                                        .spawn(async move {
+                                                            threadlane_git::diff_file(&proj, &diff_target)
+                                                                .unwrap_or_else(|error| error.to_string())
+                                                        })
+                                                        .await;
+                                                    let _ = m.update(cx, |state, cx| {
+                                                        state.request_open_diff(target, content);
+                                                        cx.notify();
+                                                    });
+                                                })
+                                                .detach();
+                                            },
+                                        ),
+                                    );
                                     let menu = menu.item(
                                         PopupMenuItem::new("Copy Relative Path").on_click(
                                             move |_event, _window, cx| {

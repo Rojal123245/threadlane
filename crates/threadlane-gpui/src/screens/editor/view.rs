@@ -5,6 +5,8 @@ use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Editor, EditorState, InputEvent, TabSize};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
+use gpui_component::scroll::ScrollableElement;
+use gpui_component::text::{TextView, TextViewState};
 use gpui_component::{ActiveTheme, Disableable, IconName, Sizable};
 
 use crate::state::AppState;
@@ -46,21 +48,58 @@ fn detect_language(path_str: &str) -> &'static str {
     }
 }
 
+fn smart_tab_title(path_str: &str, is_diff: bool) -> String {
+    let clean_path = path_str.strip_prefix("diff:").unwrap_or(path_str);
+    let path = Path::new(clean_path);
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(clean_path);
+    let parent_name = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str());
+
+    let label = if let Some(parent) = parent_name {
+        if !parent.is_empty() && parent != "." {
+            format!("{parent}/{file_name}")
+        } else {
+            file_name.to_string()
+        }
+    } else {
+        file_name.to_string()
+    };
+
+    if is_diff {
+        format!("Diff · {label}")
+    } else {
+        label
+    }
+}
+
 pub struct EditorTab {
     pub relative_path: String,
     pub file_name: String,
     pub language: &'static str,
     pub saved_content: String,
     pub is_dirty: bool,
-    pub editor_state: Entity<EditorState>,
-    pub _subscription: Subscription,
+    pub is_diff: bool,
+    pub editor_state: Option<Entity<EditorState>>,
+    pub text_view_state: Option<Entity<TextViewState>>,
+    pub _subscription: Option<Subscription>,
+}
+
+#[derive(Clone, Debug)]
+enum PendingOpen {
+    File(String),
+    Diff { path: String, content: String },
 }
 
 pub struct EditorView {
     model: Entity<AppState>,
     tabs: Vec<EditorTab>,
     active_tab_index: Option<usize>,
-    pending_open_path: Option<String>,
+    pending_open: Option<PendingOpen>,
     status_msg: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
@@ -76,7 +115,7 @@ impl EditorView {
             model,
             tabs: Vec::new(),
             active_tab_index: None,
-            pending_open_path: None,
+            pending_open: None,
             status_msg: None,
             _subscriptions: vec![sub],
         }
@@ -93,19 +132,83 @@ impl EditorView {
     pub fn is_active_dirty(&self) -> bool {
         self.active_tab_index
             .and_then(|idx| self.tabs.get(idx))
-            .map(|tab| tab.is_dirty)
+            .map(|tab| tab.is_dirty && !tab.is_diff)
+            .unwrap_or(false)
+    }
+
+    pub fn is_active_diff(&self) -> bool {
+        self.active_tab_index
+            .and_then(|idx| self.tabs.get(idx))
+            .map(|tab| tab.is_diff)
             .unwrap_or(false)
     }
 
     fn sync_pending_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(relative_path) = self.pending_open_path.take() else {
+        let Some(pending) = self.pending_open.take() else {
             return;
         };
-        self.open_file_internal(&relative_path, window, cx);
+        match pending {
+            PendingOpen::File(path) => self.open_file_internal(&path, window, cx),
+            PendingOpen::Diff { path, content } => {
+                self.open_diff_internal(&path, &content, window, cx)
+            }
+        }
     }
 
     pub fn open_file(&mut self, relative_path: &str, cx: &mut Context<Self>) {
-        self.pending_open_path = Some(relative_path.to_string());
+        self.pending_open = Some(PendingOpen::File(relative_path.to_string()));
+        cx.notify();
+    }
+
+    pub fn open_diff(&mut self, relative_path: &str, content: &str, cx: &mut Context<Self>) {
+        self.pending_open = Some(PendingOpen::Diff {
+            path: relative_path.to_string(),
+            content: content.to_string(),
+        });
+        cx.notify();
+    }
+
+    fn open_diff_internal(
+        &mut self,
+        relative_path: &str,
+        content: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let tab_key = format!("diff:{relative_path}");
+        let markdown = format!("```diff\n{}\n```", content.replace("```", "` ` `"));
+
+        if let Some(existing_idx) = self.tabs.iter().position(|t| t.relative_path == tab_key) {
+            if let Some(tab) = self.tabs.get_mut(existing_idx) {
+                tab.saved_content = content.to_string();
+                if let Some(ref text_view) = tab.text_view_state {
+                    text_view.update(cx, |state, cx| {
+                        state.set_text(&markdown, cx);
+                    });
+                }
+            }
+            self.active_tab_index = Some(existing_idx);
+            cx.notify();
+            return;
+        }
+
+        let markdown_state = cx.new(|cx| TextViewState::markdown(&markdown, cx));
+        let tab_title = smart_tab_title(relative_path, true);
+
+        self.tabs.push(EditorTab {
+            relative_path: tab_key,
+            file_name: tab_title,
+            language: "diff",
+            saved_content: content.to_string(),
+            is_dirty: false,
+            is_diff: true,
+            editor_state: None,
+            text_view_state: Some(markdown_state),
+            _subscription: None,
+        });
+
+        self.active_tab_index = Some(self.tabs.len() - 1);
+        self.status_msg = None;
         cx.notify();
     }
 
@@ -174,20 +277,18 @@ impl EditorView {
             }
         });
 
-        let file_name = Path::new(relative_path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(relative_path)
-            .to_string();
+        let tab_title = smart_tab_title(relative_path, false);
 
         self.tabs.push(EditorTab {
             relative_path: relative_path.to_string(),
-            file_name,
+            file_name: tab_title,
             language: lang,
             saved_content: content_for_sub,
             is_dirty: false,
-            editor_state: editor,
-            _subscription: subscription,
+            is_diff: false,
+            editor_state: Some(editor),
+            text_view_state: None,
+            _subscription: Some(subscription),
         });
 
         self.active_tab_index = Some(self.tabs.len() - 1);
@@ -249,6 +350,14 @@ impl EditorView {
             return;
         };
 
+        if tab.is_diff {
+            return;
+        }
+
+        let Some(ref editor) = tab.editor_state else {
+            return;
+        };
+
         let base_dir = self
             .model
             .read(cx)
@@ -257,7 +366,7 @@ impl EditorView {
             .unwrap_or_else(|| PathBuf::from("."));
 
         let file_path = base_dir.join(&tab.relative_path);
-        let content = tab.editor_state.read(cx).value().to_string();
+        let content = editor.read(cx).value().to_string();
 
         match std::fs::write(&file_path, &content) {
             Ok(_) => {
@@ -277,6 +386,7 @@ impl EditorView {
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
         let is_active_dirty = self.is_active_dirty();
+        let is_active_diff = self.is_active_diff();
         let view_entity = cx.entity().clone();
 
         div()
@@ -316,6 +426,13 @@ impl EditorView {
                         let menu_view = view_entity.clone();
                         let close_view = view_entity.clone();
 
+                        let raw_path = tab.relative_path.strip_prefix("diff:").unwrap_or(&tab.relative_path);
+                        let tooltip_text = if tab.is_diff {
+                            format!("Git Diff: {raw_path}")
+                        } else {
+                            raw_path.to_string()
+                        };
+
                         div()
                             .id(SharedString::from(format!("editor-tab-{}", idx)))
                             .h(px(26.0))
@@ -335,7 +452,9 @@ impl EditorView {
                             .when(!is_selected, |this| {
                                 this.hover(|s| s.bg(theme.muted.opacity(0.5)))
                             })
-                            .cursor_pointer()
+                            .tooltip(move |window, cx| {
+                                gpui_component::tooltip::Tooltip::new(tooltip_text.clone()).build(window, cx)
+                            })
                             .on_click(move |_event, _window, cx| {
                                 select_view.update(cx, |this, cx| this.select_tab(idx, cx));
                             })
@@ -368,7 +487,11 @@ impl EditorView {
                             .child(
                                 div()
                                     .text_size(px(11.0))
-                                    .text_color(text_color)
+                                    .text_color(if tab.is_diff {
+                                        theme.warning
+                                    } else {
+                                        text_color
+                                    })
                                     .child(IconName::File),
                             )
                             .child(
@@ -382,7 +505,7 @@ impl EditorView {
                                     .text_color(text_color)
                                     .child(tab.file_name.clone()),
                             )
-                            .child(if tab.is_dirty {
+                            .child(if tab.is_dirty && !tab.is_diff {
                                 div()
                                     .size(px(6.0))
                                     .rounded_full()
@@ -424,9 +547,13 @@ impl EditorView {
                             .ghost()
                             .xsmall()
                             .icon(IconName::Check)
-                            .label("Save")
-                            .disabled(!is_active_dirty)
-                            .tooltip("Save file (Cmd+S)")
+                            .label(if is_active_diff { "Diff" } else { "Save" })
+                            .disabled(!is_active_dirty || is_active_diff)
+                            .tooltip(if is_active_diff {
+                                "Diff view (read-only)"
+                            } else {
+                                "Save file (Cmd+S)"
+                            })
                             .on_click({
                                 let save_view = view_entity.clone();
                                 move |_event, _window, cx| {
@@ -473,7 +600,7 @@ impl EditorView {
                     .text_center()
                     .text_size(px(12.0))
                     .text_color(theme.muted_foreground)
-                    .child("Right-click a file in the Files panel and choose 'Open in Editor Tab' to open and edit here."),
+                    .child("Click a file in the Files panel or a changed file in Review to open and view here."),
             )
     }
 }
@@ -495,13 +622,31 @@ impl Render for EditorView {
             .children(self.has_tabs().then(|| self.render_tab_bar(cx)))
             .child(if let Some(idx) = self.active_tab_index {
                 if let Some(active_tab) = self.tabs.get(idx) {
-                    div()
-                        .flex_1()
-                        .min_h_0()
-                        .w_full()
-                        .h_full()
-                        .child(Editor::new(&active_tab.editor_state).bordered(false).size_full())
-                        .into_any_element()
+                    if active_tab.is_diff {
+                        if let Some(ref text_view) = active_tab.text_view_state {
+                            div()
+                                .flex_1()
+                                .min_h_0()
+                                .w_full()
+                                .h_full()
+                                .p_4()
+                                .overflow_y_scrollbar()
+                                .child(TextView::new(text_view).selectable(true))
+                                .into_any_element()
+                        } else {
+                            self.render_empty_state(cx).into_any_element()
+                        }
+                    } else if let Some(ref editor) = active_tab.editor_state {
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .w_full()
+                            .h_full()
+                            .child(Editor::new(editor).bordered(false).size_full())
+                            .into_any_element()
+                    } else {
+                        self.render_empty_state(cx).into_any_element()
+                    }
                 } else {
                     self.render_empty_state(cx).into_any_element()
                 }

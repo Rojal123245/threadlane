@@ -94,11 +94,20 @@ impl ChatListView {
         let editor = cx.new(|cx| EditorView::new(model.clone(), window, cx));
 
         let sub1 = cx.observe(&model, |this, model, cx| {
-            if let Some(requested_file) = model.update(cx, |state, _cx| state.requested_editor_file.take()) {
+            if let Some(target) = model.update(cx, |state, _cx| state.requested_editor_target.take()) {
                 this.current_tab = CentralTab::Editor;
-                this.editor.update(cx, |editor, cx| {
-                    editor.open_file(&requested_file, cx);
-                });
+                match target {
+                    crate::state::RequestedEditorTarget::File(path) => {
+                        this.editor.update(cx, |editor, cx| {
+                            editor.open_file(&path, cx);
+                        });
+                    }
+                    crate::state::RequestedEditorTarget::Diff { path, content } => {
+                        this.editor.update(cx, |editor, cx| {
+                            editor.open_diff(&path, &content, cx);
+                        });
+                    }
+                }
             }
             cx.notify();
         });

@@ -434,13 +434,21 @@ pub fn unstage_file(work_dir: &Path, path: &str) -> Result<(), GitError> {
 }
 
 pub fn diff_file(work_dir: &Path, path: &str) -> Result<String, GitError> {
-    let unstaged = command(work_dir, &["diff", "--", path]).unwrap_or_default();
-    let staged = command(work_dir, &["diff", "--cached", "--", path]).unwrap_or_default();
+    // 1. Try diff against HEAD (both staged and unstaged combined)
+    if let Ok(head_diff) = command(work_dir, &["diff", "--no-ext-diff", "HEAD", "--", path]) {
+        if !head_diff.trim().is_empty() {
+            return Ok(head_diff);
+        }
+    }
+
+    // 2. Try unstaged + staged separately (e.g. if HEAD is unborn or detached)
     let mut diff = String::new();
+    let staged = command(work_dir, &["diff", "--no-ext-diff", "--cached", "--", path]).unwrap_or_default();
     if !staged.trim().is_empty() {
         diff.push_str("# Staged changes\n");
         diff.push_str(&staged);
     }
+    let unstaged = command(work_dir, &["diff", "--no-ext-diff", "--", path]).unwrap_or_default();
     if !unstaged.trim().is_empty() {
         if !diff.is_empty() {
             diff.push('\n');
@@ -448,26 +456,38 @@ pub fn diff_file(work_dir: &Path, path: &str) -> Result<String, GitError> {
         diff.push_str("# Unstaged changes\n");
         diff.push_str(&unstaged);
     }
-    if diff.is_empty() && command(work_dir, &["ls-files", "--error-unmatch", "--", path]).is_err() {
-        let null_source = if cfg!(windows) { "NUL" } else { "/dev/null" };
-        let output = Command::new("git")
-            .args(["diff", "--no-index", "--", null_source, path])
-            .current_dir(work_dir)
-            .output()
-            .map_err(|error| GitError {
-                work_dir: work_dir.to_path_buf(),
-                message: format!("could not start git: {error}"),
-            })?;
+    if !diff.trim().is_empty() {
+        return Ok(diff);
+    }
+
+    // 3. If untracked or new file, show whole file as additions via git diff --no-index
+    let null_source = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    if let Ok(output) = Command::new("git")
+        .args(["diff", "--no-ext-diff", "--no-index", "--", null_source, path])
+        .current_dir(work_dir)
+        .output()
+    {
         let new_file_diff = String::from_utf8_lossy(&output.stdout);
         if !new_file_diff.trim().is_empty() {
-            diff.push_str("# New file\n");
-            diff.push_str(&new_file_diff);
+            return Ok(new_file_diff.into_owned());
         }
     }
-    if diff.is_empty() {
-        diff.push_str("No textual diff available for this file.\n");
+
+    // 4. Fallback: if file exists on disk and is untracked, synthesize additions
+    let full_path = work_dir.join(path);
+    if full_path.is_file() {
+        if let Ok(content) = std::fs::read_to_string(&full_path) {
+            let mut synth = format!("diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n", content.lines().count());
+            for line in content.lines() {
+                synth.push('+');
+                synth.push_str(line);
+                synth.push('\n');
+            }
+            return Ok(synth);
+        }
     }
-    Ok(diff)
+
+    Ok("No textual diff available for this file.\n".to_owned())
 }
 
 /// Return the changes most likely to be included in the next commit.
@@ -586,6 +606,24 @@ mod tests {
             args,
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[test]
+    fn diff_file_uses_builtin_text_diff_when_external_diff_is_configured() {
+        let dir = tempdir().unwrap();
+        run_git(dir.path(), &["init", "-q"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Threadlane"]);
+        fs::write(dir.path().join("tracked.txt"), "original\n").unwrap();
+        run_git(dir.path(), &["add", "tracked.txt"]);
+        run_git(dir.path(), &["commit", "-qm", "initial"]);
+        fs::write(dir.path().join("tracked.txt"), "changed\n").unwrap();
+        run_git(dir.path(), &["config", "diff.external", "false"]);
+
+        let diff = diff_file(dir.path(), "tracked.txt").unwrap();
+
+        assert!(diff.contains("-original"));
+        assert!(diff.contains("+changed"));
     }
 
     #[test]
