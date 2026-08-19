@@ -8,7 +8,7 @@ use gpui_component::dialog::{
     Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 };
 use gpui_component::input::{Input, InputState};
-use gpui_component::resizable::{h_resizable, resizable_panel, v_resizable};
+use gpui_component::resizable::{h_resizable, resizable_panel, v_resizable, ResizableState};
 use gpui_component::spinner::Spinner;
 use gpui_component::switch::Switch;
 use gpui_component::tag::{Tag, TagVariant};
@@ -86,6 +86,9 @@ pub struct WorkspaceView {
     git_status: Option<GitStatus>,
     git_feedback: Option<String>,
     git_message_input: Entity<InputState>,
+    sidebar_resizable_state: Entity<ResizableState>,
+    right_panel_resizable_state: Entity<ResizableState>,
+    bottom_panel_resizable_state: Entity<ResizableState>,
     git_event_tx: mpsc::Sender<GitEvent>,
     updater_tx: mpsc::Sender<UpdaterEvent>,
     _subscriptions: Vec<Subscription>,
@@ -100,6 +103,9 @@ impl WorkspaceView {
         let right_panel = cx.new(|cx| RightPanelView::new(model.clone(), window, cx));
         let terminal_project = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let terminal = cx.new(|cx| TerminalView::new(terminal_project, cx));
+        let sidebar_resizable_state = cx.new(|_cx| ResizableState::default());
+        let right_panel_resizable_state = cx.new(|_cx| ResizableState::default());
+        let bottom_panel_resizable_state = cx.new(|_cx| ResizableState::default());
         let git_message_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Commit message"));
         let command_palette_scroll_handle = ScrollHandle::new();
@@ -170,6 +176,9 @@ impl WorkspaceView {
                 git_status: None,
                 git_feedback: None,
                 git_message_input,
+                sidebar_resizable_state,
+                right_panel_resizable_state,
+                bottom_panel_resizable_state,
                 git_event_tx,
                 updater_tx,
                 _subscriptions: vec![sub],
@@ -1498,6 +1507,7 @@ impl Render for WorkspaceView {
         let chat_page_content = {
             let upper_content = if self.right_panel_visible {
                 h_resizable("workspace-chat-right-split")
+                    .with_state(&self.right_panel_resizable_state)
                     .child(
                         resizable_panel()
                             .child(self.chat_list.clone()),
@@ -1534,6 +1544,7 @@ impl Render for WorkspaceView {
                     .child(div().flex_1().min_h_0().child(self.terminal.clone()));
 
                 v_resizable("workspace-main-bottom-split")
+                    .with_state(&self.bottom_panel_resizable_state)
                     .child(
                         resizable_panel()
                             .child(upper_content),
@@ -1551,6 +1562,7 @@ impl Render for WorkspaceView {
 
             if !self.sidebar_collapsed {
                 h_resizable("workspace-sidebar-main-split")
+                    .with_state(&self.sidebar_resizable_state)
                     .child(
                         resizable_panel()
                             .size(px(240.0))
