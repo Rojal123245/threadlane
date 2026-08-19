@@ -543,6 +543,9 @@ impl WorkspaceView {
 
     fn render_environment_popover(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
+        let status = self.git_status.as_ref();
+
+        let pr_info = status.and_then(|s| s.pr.clone());
 
         div()
             .id("environment-popover")
@@ -550,7 +553,7 @@ impl WorkspaceView {
             .on_mouse_down(MouseButton::Left, |_event, _window, _cx| {})
             .top(px(48.0))
             .right(px(44.0))
-            .w(px(276.0))
+            .w(px(290.0))
             .rounded_xl()
             .border_1()
             .border_color(theme.border)
@@ -560,20 +563,39 @@ impl WorkspaceView {
             .flex()
             .flex_col()
             .gap_1()
+            // 1. Header: "Environment" + "+" Button
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
                     .px_3()
                     .pt_2()
                     .pb_1()
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.muted_foreground)
-                    .child("Environment"),
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.muted_foreground)
+                            .child("Environment"),
+                    )
+                    .child(
+                        Button::new("env-new-branch-btn")
+                            .icon(IconName::Plus)
+                            .ghost()
+                            .xsmall()
+                            .tooltip("New branch or worktree")
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.environment_open = false;
+                                this.open_git_dialog(cx);
+                            })),
+                    ),
             )
+            // 2. Commit or Push Row
             .child(
                 div()
                     .id("environment-commit")
-                    .h(px(44.0))
+                    .h(px(38.0))
                     .w_full()
                     .px_3()
                     .rounded_lg()
@@ -603,48 +625,200 @@ impl WorkspaceView {
                         this.open_git_dialog(cx);
                     })),
             )
-            .child(
+            // 6. PR Card / Details (if PR detected)
+            .children(pr_info.map(|pr| {
+                let pr_url = pr.url.clone();
+                let pr_num = pr.number;
+                let pr_title = pr.title.clone();
+                let pr_title_display = if pr.title.is_empty() {
+                    format!("PR #{pr_num}")
+                } else {
+                    pr.title.clone()
+                };
+
+                let failing_checks = pr.failing_checks;
+                let pending_checks = pr.pending_checks;
+                let total_checks = pr.total_checks;
+                let comments_count = pr.comments_count;
+
+                let failing_check_names: Vec<String> = pr.checks.iter().filter(|c| {
+                    let concl = c.conclusion.as_deref().unwrap_or("").to_uppercase();
+                    matches!(concl.as_str(), "FAILURE" | "TIMED_OUT" | "ACTION_REQUIRED" | "CANCELLED" | "ERROR")
+                }).map(|c| c.name.clone()).collect();
+                let failed_summary = failing_check_names.join(", ");
+
                 div()
-                    .id("environment-compare")
-                    .h(px(44.0))
-                    .w_full()
-                    .px_3()
-                    .rounded_lg()
                     .flex()
-                    .items_center()
-                    .gap_3()
-                    .cursor_pointer()
-                    .hover(|row| row.bg(theme.list_hover))
+                    .flex_col()
+                    .gap_1()
+                    .pt_1()
+                    .child(div().h(px(1.0)).w_full().bg(theme.border).my_1())
+                    // PR Title Row
                     .child(
                         div()
-                            .size(px(18.0))
+                            .id("environment-pr-title")
+                            .h(px(36.0))
+                            .w_full()
+                            .px_3()
+                            .rounded_lg()
                             .flex()
                             .items_center()
-                            .justify_center()
-                            .text_color(theme.muted_foreground)
-                            .child(Icon::default().path("icons/git/compare.svg")),
+                            .gap_3()
+                            .cursor_pointer()
+                            .hover(|row| row.bg(theme.list_hover))
+                            .child(
+                                div()
+                                    .size(px(18.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(theme.muted_foreground)
+                                    .child(Icon::default().path("icons/git/actions.svg")),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(pr_title_display),
+                            )
+                            .child(
+                                div()
+                                    .size(px(14.0))
+                                    .text_color(theme.muted_foreground)
+                                    .child(IconName::ExternalLink),
+                            )
+                            .on_click({
+                                let target_url = pr_url.clone();
+                                move |_event, _window, cx| {
+                                    if !target_url.is_empty() {
+                                        cx.open_url(&target_url);
+                                    }
+                                }
+                            }),
                     )
+                    // CI Checks Row
                     .child(
                         div()
-                            .flex_1()
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child("Compare branch"),
+                            .id("environment-pr-ci")
+                            .h(px(36.0))
+                            .w_full()
+                            .px_3()
+                            .rounded_lg()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .size(px(18.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(if failing_checks > 0 {
+                                        theme.danger
+                                    } else if pending_checks > 0 {
+                                        theme.warning
+                                    } else {
+                                        theme.success
+                                    })
+                                    .child(if failing_checks > 0 {
+                                        IconName::Close
+                                    } else if pending_checks > 0 {
+                                        IconName::Asterisk
+                                    } else {
+                                        IconName::Check
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_xs()
+                                    .child(if failing_checks > 0 {
+                                        format!("{failing_checks} failing check{}", if failing_checks == 1 { "" } else { "s" })
+                                    } else if pending_checks > 0 {
+                                        format!("{pending_checks} in progress")
+                                    } else {
+                                        format!("All {} checks passed", total_checks.max(1))
+                                    }),
+                            )
+                            .child(if failing_checks > 0 {
+                                let fix_pr_num = pr_num;
+                                let fix_pr_title = pr_title.clone();
+                                let fix_failed_summary = failed_summary.clone();
+                                Button::new("fix-ci-btn")
+                                    .ghost()
+                                    .xsmall()
+                                    .label("Fix")
+                                    .tooltip("Ask AI to fix failing CI checks")
+                                    .on_click(cx.listener(move |this, _event, window, cx| {
+                                        this.environment_open = false;
+                                        let prompt = format!(
+                                            "Please inspect and fix the failing CI check on PR #{fix_pr_num} ({fix_pr_title}): {fix_failed_summary}"
+                                        );
+                                        this.chat_list.update(cx, |chat, cx| {
+                                            chat.set_composer_text(&prompt, window, cx);
+                                        });
+                                        cx.notify();
+                                    }))
+                                    .into_any_element()
+                            } else {
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(format!("{}/{}", pr.passing_checks, pr.total_checks))
+                                    .into_any_element()
+                            }),
                     )
+                    // Comments Row
                     .child(
                         div()
-                            .size(px(16.0))
-                            .text_color(theme.muted_foreground)
-                            .child(Icon::new(IconName::ExternalLink)),
+                            .id("environment-pr-comments")
+                            .h(px(36.0))
+                            .w_full()
+                            .px_3()
+                            .rounded_lg()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .cursor_pointer()
+                            .hover(|row| row.bg(theme.list_hover))
+                            .child(
+                                div()
+                                    .size(px(18.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(theme.muted_foreground)
+                                    .child(IconName::File),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_xs()
+                                    .child(format!("{comments_count} comment{}", if comments_count == 1 { "" } else { "s" })),
+                            )
+                            .on_click({
+                                let comments_pr_num = pr_num;
+                                let comments_pr_title = pr_title.clone();
+                                cx.listener(move |this, _event, window, cx| {
+                                    this.environment_open = false;
+                                    let prompt = format!(
+                                        "Please review and address comments and feedback on PR #{comments_pr_num} ({comments_pr_title})."
+                                    );
+                                    this.chat_list.update(cx, |chat, cx| {
+                                        chat.set_composer_text(&prompt, window, cx);
+                                    });
+                                    cx.notify();
+                                })
+                            }),
                     )
-                    .on_click(cx.listener(|this, _event, _window, cx| {
-                        this.environment_open = false;
-                        this.right_panel_visible = true;
-                        this.right_panel
-                            .update(cx, |panel, cx| panel.open_review(cx));
-                        cx.notify();
-                    })),
-            )
+            }))
     }
 
     fn render_git_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1439,6 +1613,9 @@ impl Render for WorkspaceView {
                     .right(px(48.0))
                     .on_click(cx.listener(|this, _event, _window, cx| {
                         this.environment_open = !this.environment_open;
+                        if this.environment_open {
+                            this.refresh_git_status(cx);
+                        }
                         cx.notify();
                     }))
             }))

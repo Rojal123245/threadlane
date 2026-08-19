@@ -227,7 +227,7 @@ behavioral (fail for the right reason), not wall-clock.
    first-try-edit and token-savings wins, pinned by a behavioral test (process-count or
    record-count), not a timing test.
 4. **Parity:** the P3 checklist asserts the same tool set and session model across
-   GPUI, TUI, and headless.
+   GPUI and headless.
 
 ---
 

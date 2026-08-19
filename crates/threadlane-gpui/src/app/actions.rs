@@ -39,4 +39,5 @@ pub enum AppAction {
     SaveOpenAiKey(String),
     SaveOpenCodeKey(String),
     ToggleReasoningExpanded(String),
+    OpenFileInEditor(String),
 }

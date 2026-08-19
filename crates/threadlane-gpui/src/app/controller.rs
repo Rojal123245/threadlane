@@ -75,5 +75,6 @@ pub(crate) fn dispatch(state: &mut AppState, action: AppAction) {
                 message.reasoning_expanded = !message.reasoning_expanded;
             }
         }
+        AppAction::OpenFileInEditor(path) => state.request_open_file(path),
     }
 }
