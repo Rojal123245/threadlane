@@ -3,11 +3,11 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+use threadlane_agent::harness::SessionStore;
 use threadlane_agent::{
     AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, SessionPlan, SessionTree,
     TokenUsage,
 };
-use threadlane_agent::harness::SessionStore;
 
 use crate::adapters::agent_events::{adapt_agent_event, ChatAgentUpdate};
 use crate::persistence::load_project_registry;
@@ -78,6 +78,41 @@ pub struct SessionMetricsInfo {
     pub(crate) tool_calls: usize,
     pub(crate) input_tokens: u64,
     pub(crate) output_tokens: u64,
+    pub(crate) cache_read_tokens: u64,
+    pub(crate) cache_write_tokens: u64,
+}
+
+impl SessionMetricsInfo {
+    pub(crate) fn billed_input_tokens(&self) -> u64 {
+        self.input_tokens
+            .saturating_add(self.cache_read_tokens)
+            .saturating_add(self.cache_write_tokens)
+    }
+
+    pub(crate) fn cache_hit_percent(&self) -> Option<u64> {
+        let billed_input = self.billed_input_tokens();
+        (billed_input > 0).then(|| {
+            self.cache_read_tokens
+                .saturating_mul(100)
+                .saturating_add(billed_input / 2)
+                / billed_input
+        })
+    }
+
+    fn accumulate_usage(&mut self, usage: &TokenUsage) {
+        self.input_tokens = self
+            .input_tokens
+            .saturating_add(u64::from(usage.input_tokens));
+        self.output_tokens = self
+            .output_tokens
+            .saturating_add(u64::from(usage.output_tokens));
+        self.cache_read_tokens = self
+            .cache_read_tokens
+            .saturating_add(u64::from(usage.cache_read_tokens));
+        self.cache_write_tokens = self
+            .cache_write_tokens
+            .saturating_add(u64::from(usage.cache_write_tokens));
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1481,12 +1516,7 @@ impl AppState {
                 }
                 Record::Usage { cause, usage, .. } => {
                     if matches!(cause, threadlane_agent::harness::UsageCause::Provider) {
-                        metrics.input_tokens = metrics
-                            .input_tokens
-                            .saturating_add(u64::from(usage.input_tokens));
-                        metrics.output_tokens = metrics
-                            .output_tokens
-                            .saturating_add(u64::from(usage.output_tokens));
+                        metrics.accumulate_usage(usage);
                         durable_usage.accumulate(usage);
                     }
                     None
@@ -1569,12 +1599,7 @@ impl AppState {
                 } => {
                     if !provider_usage_keys.contains(&(run_id.clone(), *attempt)) {
                         if let Some(usage) = usage {
-                            metrics.input_tokens = metrics
-                                .input_tokens
-                                .saturating_add(u64::from(usage.input_tokens));
-                            metrics.output_tokens = metrics
-                                .output_tokens
-                                .saturating_add(u64::from(usage.output_tokens));
+                            metrics.accumulate_usage(usage);
                             durable_usage.accumulate(usage);
                         }
                     }
@@ -1983,6 +2008,85 @@ impl AppState {
         }
     }
 
+    pub(crate) fn active_model_context_diagnostics(&self) -> Vec<TrajectoryEntry> {
+        let Some(session_file) = self.history_session_file.as_ref() else {
+            return Vec::new();
+        };
+        let Ok(store) = threadlane_agent::harness::JsonlStore::open_read_only(session_file) else {
+            return Vec::new();
+        };
+        let Ok(projection) = store.model_context("main") else {
+            return Vec::new();
+        };
+        projection
+            .entries
+            .into_iter()
+            .map(|entry| TrajectoryEntry {
+                seq: Some(entry.seq),
+                run_id: None,
+                turn: None,
+                category: "Model Context".into(),
+                summary: format!("{} · {}", entry.id, entry.message.role_str()),
+                detail: format!("{:?}", entry.message),
+                lane: Some(entry.lane),
+                correlation_id: Some(entry.id),
+            })
+            .collect()
+    }
+
+    pub(crate) fn active_durable_event_diagnostics(&self) -> Vec<TrajectoryEntry> {
+        let Some(session_file) = self.history_session_file.as_ref() else {
+            return Vec::new();
+        };
+        let Ok(store) = threadlane_agent::harness::JsonlStore::open_read_only(session_file) else {
+            return Vec::new();
+        };
+        let mut rows = store
+            .entries()
+            .iter()
+            .map(|entry| TrajectoryEntry {
+                seq: Some(entry.seq),
+                run_id: None,
+                turn: None,
+                category: "Entry".into(),
+                summary: format!("{} · {}", entry.id, entry.message.role_str()),
+                detail: format!("parent={:?}", entry.parent_id),
+                lane: Some(entry.lane.clone()),
+                correlation_id: Some(entry.id.clone()),
+            })
+            .collect::<Vec<_>>();
+        rows.extend(store.records().iter().map(|record| TrajectoryEntry {
+            seq: Some(record.seq()),
+            run_id: record.run_id().map(str::to_owned),
+            turn: record.turn(),
+            category: "Record".into(),
+            summary: format!("{} · durable record", record.id()),
+            detail: format!(
+                "seq={} lane={} run={}",
+                record.seq(),
+                record.lane(),
+                record.run_id().unwrap_or("—")
+            ),
+            lane: Some(record.lane().to_owned()),
+            correlation_id: Some(record.id().to_owned()),
+        }));
+        rows.sort_by_key(|entry| entry.seq.unwrap_or(u64::MAX));
+        rows
+    }
+
+    pub(crate) fn active_recovery_diagnostics(&self) -> Vec<TrajectoryEntry> {
+        let Some(session_file) = self.history_session_file.as_ref() else {
+            return Vec::new();
+        };
+        let Ok(store) = threadlane_agent::harness::JsonlStore::open_read_only(session_file) else {
+            return Vec::new();
+        };
+        let Ok(state) = threadlane_agent::harness::Reducer::reduce(&store) else {
+            return Vec::new();
+        };
+        project_recovery_diagnostics(&state)
+    }
+
     pub(crate) fn active_trajectory(&self) -> &[TrajectoryEntry] {
         self.active_session_id
             .as_ref()
@@ -2063,14 +2167,7 @@ impl AppState {
                         AgentEvent::ToolExecutionStart { .. } => {
                             metrics.tool_calls = metrics.tool_calls.saturating_add(1)
                         }
-                        AgentEvent::AgentEnd { usage } => {
-                            metrics.input_tokens = metrics
-                                .input_tokens
-                                .saturating_add(u64::from(usage.input_tokens));
-                            metrics.output_tokens = metrics
-                                .output_tokens
-                                .saturating_add(u64::from(usage.output_tokens));
-                        }
+                        AgentEvent::AgentEnd { usage } => metrics.accumulate_usage(usage),
                         _ => {}
                     }
                     match adapt_agent_event(event) {
@@ -2530,6 +2627,87 @@ impl AppState {
     }
 }
 
+fn project_recovery_diagnostics(
+    state: &threadlane_agent::harness::ReducedState,
+) -> Vec<TrajectoryEntry> {
+    let mut rows = Vec::new();
+    for lane in &state.lanes {
+        let decision = match lane.status {
+            threadlane_agent::harness::LaneStatus::SuspendedCrash => {
+                if lane.tools.iter().any(|tool| {
+                    !tool.completed
+                        && matches!(
+                            tool.replay,
+                            threadlane_agent::harness::ToolReplaySafety::Never
+                        )
+                }) {
+                    "Abort interrupted run; unsafe tool cannot be replayed"
+                } else if lane.tools.iter().any(|tool| {
+                    !tool.completed
+                        && matches!(
+                            tool.replay,
+                            threadlane_agent::harness::ToolReplaySafety::Safe
+                        )
+                }) {
+                    "Replay safe interrupted tools, then resume"
+                } else {
+                    "Resume interrupted operation from durable leaf"
+                }
+            }
+            threadlane_agent::harness::LaneStatus::SuspendedDeferred => {
+                "Wait for deferred provider result"
+            }
+            threadlane_agent::harness::LaneStatus::Failed => "Keep failed; require explicit retry",
+            threadlane_agent::harness::LaneStatus::Completed
+            | threadlane_agent::harness::LaneStatus::Idle => "No recovery required",
+        };
+        rows.push(TrajectoryEntry {
+            seq: None,
+            run_id: lane.open_operation.clone(),
+            turn: None,
+            category: "Decision".into(),
+            summary: format!("{} · {decision}", lane.name),
+            detail: format!(
+                "status={:?} attempts={} abort_requested={} leaf={}",
+                lane.status,
+                lane.attempts,
+                lane.abort_requested,
+                lane.leaf_id.as_deref().unwrap_or("—")
+            ),
+            lane: Some(lane.name.clone()),
+            correlation_id: lane.open_operation.clone(),
+        });
+        for tool in lane.tools.iter().filter(|tool| !tool.completed) {
+            rows.push(TrajectoryEntry {
+                seq: None,
+                run_id: Some(tool.run_id.clone()),
+                turn: None,
+                category: "Interrupted Tool".into(),
+                summary: format!("{} · replay {:?}", tool.tool_name, tool.replay),
+                detail: format!(
+                    "call={} result_entry={} terminate={}",
+                    tool.tool_call_id, tool.result_entry_id, tool.terminate
+                ),
+                lane: Some(lane.name.clone()),
+                correlation_id: Some(tool.tool_call_id.clone()),
+            });
+        }
+        for queued in &lane.queued {
+            rows.push(TrajectoryEntry {
+                seq: None,
+                run_id: lane.open_operation.clone(),
+                turn: None,
+                category: "Queued Work".into(),
+                summary: format!("{:?} · {}", queued.queue, queued.target.id),
+                detail: format!("priority={:?}", queued.priority),
+                lane: Some(lane.name.clone()),
+                correlation_id: Some(queued.target.id.clone()),
+            });
+        }
+    }
+    rows
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2823,8 +3001,13 @@ mod tests {
         );
         assert_eq!(state.session_metrics["hydration-test"].turns, 1);
         assert_eq!(state.session_metrics["hydration-test"].tool_calls, 1);
-        assert_eq!(state.session_metrics["hydration-test"].input_tokens, 17);
-        assert_eq!(state.session_metrics["hydration-test"].output_tokens, 9);
+        let metrics = &state.session_metrics["hydration-test"];
+        assert_eq!(metrics.input_tokens, 17);
+        assert_eq!(metrics.output_tokens, 9);
+        assert_eq!(metrics.cache_read_tokens, 4);
+        assert_eq!(metrics.cache_write_tokens, 2);
+        assert_eq!(metrics.billed_input_tokens(), 23);
+        assert_eq!(metrics.cache_hit_percent(), Some(17));
         assert_eq!(state.current_session_token_usage(), usage);
 
         drop(state);
@@ -3510,10 +3693,11 @@ mod tests {
                 error: None,
                 duration_ms: Some(100),
                 usage: Some(TokenUsage {
-                    total_tokens: 42,
-                    input_tokens: 30,
+                    total_tokens: 50,
+                    input_tokens: 20,
                     output_tokens: 12,
-                    ..Default::default()
+                    cache_read_tokens: 15,
+                    cache_write_tokens: 3,
                 }),
             })
             .unwrap();
@@ -3540,14 +3724,18 @@ mod tests {
             .session_token_usage
             .get("session_1001")
             .expect("token usage must be hydrated on startup");
-        assert_eq!(usage.total_tokens, 42);
+        assert_eq!(usage.total_tokens, 50);
 
         let metrics = state
             .session_metrics
             .get("session_1001")
             .expect("session metrics must be hydrated on startup");
-        assert_eq!(metrics.input_tokens, 30);
+        assert_eq!(metrics.input_tokens, 20);
         assert_eq!(metrics.output_tokens, 12);
+        assert_eq!(metrics.cache_read_tokens, 15);
+        assert_eq!(metrics.cache_write_tokens, 3);
+        assert_eq!(metrics.billed_input_tokens(), 38);
+        assert_eq!(metrics.cache_hit_percent(), Some(39));
 
         let _ = std::fs::remove_dir_all(project_root);
     }
