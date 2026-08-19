@@ -2,6 +2,9 @@ use crate::coding_agent::harness::CodingSessionHarness;
 use crate::coding_agent::{
     abort_open_subagent_operations, CodingAgent, CodingAgentOptions, SubagentCancellationGuard,
 };
+use crate::project_registry::{
+    load_project_registry_from, merge_and_save_project_registry_to, ProjectRecord,
+};
 use log::error;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -74,14 +77,6 @@ impl Lane {
             accumulated_usage: TokenUsage::default(),
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectRecord {
-    pub id: String,
-    path: PathBuf,
-    name: String,
-    last_selected_task_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -266,12 +261,7 @@ impl HarnessSupervisor {
             .clone()
     }
 
-    fn get_or_create_sub_lane(
-        &self,
-        session_id: &str,
-        lane_name: &str,
-        parent_lane: &str,
-    ) -> Lane {
+    fn get_or_create_sub_lane(&self, session_id: &str, lane_name: &str, parent_lane: &str) -> Lane {
         let key = format!("{session_id}:{lane_name}");
         let mut lock = self.lanes.lock().unwrap();
         let lane = lock.entry(key).or_insert_with(|| {
@@ -581,33 +571,17 @@ impl HarnessSupervisor {
 
     // ── Project / task management ────────────────────────────────────────
 
-    fn registry_file(&self) -> PathBuf {
-        self.global_dir.join("projects.json")
-    }
-
     fn load_registry(&self) {
-        let file = self.registry_file();
-        if file.exists() {
-            if let Ok(contents) = fs::read_to_string(&file) {
-                if let Ok(records) = serde_json::from_str::<Vec<ProjectRecord>>(&contents) {
-                    let mut lock = self.projects.lock().unwrap();
-                    for rec in records {
-                        lock.insert(rec.id.clone(), rec);
-                    }
-                }
-            }
+        let records = load_project_registry_from(&self.global_dir, false);
+        let mut lock = self.projects.lock().unwrap();
+        for record in records {
+            lock.insert(record.id.clone(), record);
         }
     }
 
     fn save_registry(&self) {
         let records: Vec<ProjectRecord> = self.projects.lock().unwrap().values().cloned().collect();
-        let file = self.registry_file();
-        if let Ok(json) = serde_json::to_string_pretty(&records) {
-            let tmp = file.with_extension("json.tmp");
-            if fs::write(&tmp, json).is_ok() {
-                let _ = fs::rename(tmp, file);
-            }
-        }
+        let _ = merge_and_save_project_registry_to(&self.global_dir, &records);
     }
 
     pub fn register_project(&self, raw_path: &Path) -> Result<ProjectRecord, String> {
@@ -618,22 +592,11 @@ impl HarnessSupervisor {
             )
         })?;
 
-        let id = md5_hash(&canonical.to_string_lossy());
-        let name = canonical
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "project".into());
-
-        let record = ProjectRecord {
-            id: id.clone(),
-            path: canonical,
-            name,
-            last_selected_task_id: None,
-        };
+        let record = ProjectRecord::from_path(canonical);
 
         {
             let mut lock = self.projects.lock().unwrap();
-            lock.insert(id.clone(), record.clone());
+            lock.insert(record.id.clone(), record.clone());
         }
         self.save_registry();
         Ok(record)
@@ -1055,24 +1018,15 @@ impl HarnessSupervisor {
                 let completion_session_file = session_file.to_path_buf();
                 let completion_run_id = run_id_for_run.clone();
                 agent.set_tool_completion_recorder(Some(Arc::new(
-                    move |tool_call_id, terminate| {
+                    move |result: &threadlane_agent::AgentToolResult| {
                         let completion_session_file = completion_session_file.clone();
                         let completion_run_id = completion_run_id.clone();
-                        let tool_call_id = tool_call_id.to_owned();
+                        let result = result.clone();
                         Box::pin(async move {
                             let mut harness = CodingSessionHarness::open(&completion_session_file)
                                 .map_err(|e| e.to_string())?;
                             harness
-                                .finish_tool_message(
-                                    &completion_run_id,
-                                    &AgentMessage::Tool {
-                                        tool_call_id: tool_call_id.clone(),
-                                        name: String::new(),
-                                        content: String::new(),
-                                        is_error: false,
-                                        terminate,
-                                    },
-                                )
+                                .finish_tool_result(&completion_run_id, &result)
                                 .map_err(|e| e.to_string())
                         })
                     },
@@ -1495,10 +1449,6 @@ fn apply_subagent_event(
         }
         _ => false,
     }
-}
-
-fn md5_hash(input: &str) -> String {
-    format!("{:x}", md5::compute(input))
 }
 
 #[cfg(test)]

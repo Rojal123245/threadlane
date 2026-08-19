@@ -58,6 +58,7 @@ pub fn repair_interrupted_tool_turn(messages: &mut Vec<AgentMessage>) -> bool {
 
 pub use crate::provider::{
     convert_to_codex_llm, convert_to_llm, AssistantMessageRecorder, ProviderDiscardedUsageRecorder,
-    ProviderHookRecorder, ProviderUsageRecorder, StreamingStateRecorder, ToolCompletionRecorder,
-    ToolIntentRecorder,
+    ProviderHookRecorder, ProviderTraceEvent, ProviderTraceRecorder, ProviderUsageRecorder,
+    StreamingStateRecorder, ToolCompletionRecorder, ToolExecutionTraceEvent,
+    ToolExecutionTraceRecorder, ToolIntentRecorder,
 };

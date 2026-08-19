@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::scroll::ScrollableElement;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
+use gpui_component::scroll::ScrollableElement;
 use gpui_component::{ActiveTheme, Sizable};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
@@ -313,7 +313,9 @@ impl Render for TerminalView {
                             let output = text.clone();
                             menu.item(PopupMenuItem::new("Copy Terminal Output").on_click(
                                 move |_event, _window, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(output.clone()));
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        output.clone(),
+                                    ));
                                 },
                             ))
                         }

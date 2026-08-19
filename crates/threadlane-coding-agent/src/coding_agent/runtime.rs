@@ -23,6 +23,7 @@ use async_trait::async_trait;
 use log::warn;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -34,8 +35,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use threadlane_agent::harness::{
     DeferredResolution, Entry as HarnessEntry, HookContext, HookKind, JsonlStore, OperationOutcome,
-    ProvisionedEntry, QueueKind, Record as HarnessRecord, Reducer, SessionStore, Snapshot,
-    ToolRecovery, ToolSpec,
+    PromptSnapshot, ProvisionedEntry, QueueKind, Record as HarnessRecord, Reducer, SessionStore,
+    Snapshot, ToolRecovery, ToolSpec,
 };
 use threadlane_agent::{
     repair_interrupted_tool_turn, AgentEvent, AgentMessage, AgentToolResult, ImageAttachment,
@@ -56,6 +57,37 @@ pub(crate) const MAX_SUBAGENT_TASK_CHARS: usize = 32_000;
 const SUBAGENT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const SUBAGENT_RECOVERY_PROMPT: &str =
     "Continue from the recovered checkpoint and finish the assigned task.";
+const MAX_PERSISTED_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn durable_prompt_snapshot(content: &str) -> PromptSnapshot {
+    let sha256 = threadlane_agent::harness::TraceString::new(sha256_hex(content.as_bytes()))
+        .expect("sha256 digest is bounded");
+    let explicitly_redacted = std::env::var("THREADLANE_REDACT_SYSTEM_PROMPTS")
+        .ok()
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
+    if explicitly_redacted || content.len() > MAX_PERSISTED_SYSTEM_PROMPT_BYTES {
+        PromptSnapshot::Redacted {
+            sha256,
+            byte_len: content.len(),
+            reason: threadlane_agent::harness::TraceString::new(if explicitly_redacted {
+                "configured_redaction"
+            } else {
+                "size_limit"
+            })
+            .expect("redaction reason is bounded"),
+        }
+    } else {
+        PromptSnapshot::Full {
+            content: threadlane_agent::harness::BoundedPromptText::new(content)
+                .expect("system prompt is within byte limit"),
+            sha256,
+        }
+    }
+}
 
 fn active_branch_with_detached_tool_results(tree: &SessionTree) -> Vec<AgentMessage> {
     let branch = tree.get_active_branch_messages();
@@ -214,7 +246,7 @@ fn enqueue_harness_queue(
     agent.enqueue_harness_queue(queue, content, images)
 }
 
-fn enqueue_harness_follow_up(
+pub(crate) fn enqueue_harness_follow_up(
     session_file: &Path,
     content: String,
     images: Vec<ImageAttachment>,
@@ -400,16 +432,25 @@ impl CodingAgentCancellation {
     }
 
     pub fn cancel(&self) -> Result<(), String> {
-        if let Some(path) = self.harness_session_file.as_deref() {
+        let durable_run_id = if let Some(path) = self.harness_session_file.as_deref() {
             let mut journal = HarnessJournal::open(path)?;
-            let _ = journal.request_abort();
-        }
+            journal.request_abort()?
+        } else {
+            None
+        };
         let handle = {
             let mut state = self.state.lock().map_err(|error| error.to_string())?;
             state.active.take().map(|active| active.handle)
         };
+        let acknowledged = handle.is_some();
         if let Some(handle) = handle {
             handle.abort();
+        }
+        if let (Some(path), Some(run_id)) = (
+            self.harness_session_file.as_deref(),
+            durable_run_id.as_deref(),
+        ) {
+            HarnessJournal::open(path)?.observe_abort_signal(run_id, acknowledged)?;
         }
         let _ = self.event_tx.send(AgentEvent::AgentError {
             error: "Generation cancelled".into(),
@@ -629,6 +670,63 @@ impl CodingAgentWorkHandle {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessCompositionSnapshot {
+    pub active_lane: String,
+    pub session_file: Option<String>,
+    pub model: String,
+    pub provider: String,
+    pub skills: Vec<String>,
+    pub extensions: Vec<String>,
+    pub sandbox_policy: String,
+}
+
+impl HarnessCompositionSnapshot {
+    pub fn from_options(options: &CodingAgentOptions) -> Self {
+        let provider = if options.model.starts_with("antigravity/") {
+            "antigravity"
+        } else if options.model.starts_with("opencode-go/") {
+            "opencode-go"
+        } else if options.model.starts_with("acp/") {
+            "acp"
+        } else {
+            "openai"
+        };
+        Self {
+            active_lane: "main".into(),
+            session_file: options
+                .session_file
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            model: options.model.clone(),
+            provider: provider.into(),
+            skills: Vec::new(),
+            extensions: Vec::new(),
+            sandbox_policy: "workspace-scoped capabilities".into(),
+        }
+    }
+
+    pub fn resolved(
+        options: &CodingAgentOptions,
+        skills: &SkillRegistry,
+        extensions: &WasiExtensionManager,
+    ) -> Self {
+        let mut snapshot = Self::from_options(options);
+        snapshot.skills = skills
+            .list_skills()
+            .into_iter()
+            .filter(|skill| skill.enabled && skill.is_valid)
+            .map(|skill| skill.id)
+            .collect();
+        snapshot.extensions = extensions
+            .extension_manifests()
+            .into_iter()
+            .map(|extension| extension.name)
+            .collect();
+        snapshot
+    }
+}
+
 #[derive(Clone)]
 pub struct CodingAgentOptions {
     pub api_key: String,
@@ -665,7 +763,6 @@ pub struct CodingAgent {
     harness_run_id: Arc<std::sync::Mutex<Option<String>>>,
     cancellation: CodingAgentCancellation,
     pub(crate) interrupted_subagent_recovery: InterruptedSubagentRecoveryState,
-    config: crate::config::CodingAgentConfig,
     #[cfg(test)]
     subagent_work_observer: SubagentObserverState,
     #[cfg(test)]
@@ -691,7 +788,50 @@ impl CodingAgent {
         self.agent.tool_dispatcher.tool_completion_recorder = recorder;
     }
 
-    async fn begin_harness_run(&mut self, prompt: AgentMessage) -> Result<Option<String>, String> {
+    fn install_run_trace_recorders(&mut self, path: PathBuf, run_id: String) {
+        let provider_path = path.clone();
+        let provider_run_id = run_id.clone();
+        self.agent
+            .set_provider_trace_recorder(Some(Arc::new(move |event| {
+                let path = provider_path.clone();
+                let run_id = provider_run_id.clone();
+                Box::pin(async move {
+                    HarnessJournal::record_provider_trace_to_path(&path, &run_id, event)
+                })
+            })));
+        let tool_path = path.clone();
+        let tool_run_id = run_id.clone();
+        self.agent.tool_dispatcher.tool_execution_trace_recorder = Some(Arc::new(move |event| {
+            let path = tool_path.clone();
+            let run_id = tool_run_id.clone();
+            Box::pin(async move {
+                HarnessJournal::record_tool_execution_to_path(&path, &run_id, event).await
+            })
+        }));
+        let completion_path = path.clone();
+        let completion_run_id = run_id.clone();
+        self.agent.tool_dispatcher.tool_completion_recorder = Some(Arc::new(move |result| {
+            let path = completion_path.clone();
+            let run_id = completion_run_id.clone();
+            let result = result.clone();
+            Box::pin(async move {
+                HarnessJournal::record_tool_result_to_path(&path, &run_id, &result).await
+            })
+        }));
+        self.permission_handle
+            .set_trace_recorder(Some(Arc::new(move |event| {
+                let path = path.clone();
+                let run_id = run_id.clone();
+                Box::pin(async move {
+                    HarnessJournal::record_permission_trace_to_path(&path, Some(&run_id), event)
+                })
+            })));
+    }
+
+    pub(crate) async fn begin_harness_run(
+        &mut self,
+        prompt: AgentMessage,
+    ) -> Result<Option<String>, String> {
         if let Some(run_id) = self
             .harness_run_id
             .lock()
@@ -700,11 +840,79 @@ impl CodingAgent {
         {
             return Ok(Some(run_id));
         }
+        let turn = self.agent.get_state().await;
+        let model = self
+            .agent
+            .config()
+            .model_roles
+            .resolve_task(&turn.model)
+            .to_string();
+        let provider = self
+            .agent
+            .provider_client()
+            .provider_kind(&model)
+            .to_string();
+        let tool_definitions = self.agent.configured_tool_definitions();
+        let tool_schema = serde_json::to_vec(&tool_definitions)
+            .map_err(|error| format!("failed to serialize resolved tool schema: {error}"))?;
+        let enabled_tool_names = tool_definitions
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>();
+        let mut capabilities = enabled_tool_names
+            .iter()
+            .map(|name| format!("tool:{name}"))
+            .collect::<Vec<_>>();
+        capabilities.extend(
+            self.skills
+                .list_skills()
+                .into_iter()
+                .filter(|skill| skill.enabled && skill.is_valid)
+                .map(|skill| format!("skill:{}", skill.id)),
+        );
+        capabilities.extend(
+            self.wasi_extensions
+                .extension_manifests()
+                .into_iter()
+                .map(|extension| format!("extension:{}", extension.name)),
+        );
+        capabilities.push(format!("tool_policy:{:?}", *self.tool_policy.lock().await));
+        capabilities.sort();
+        capabilities.dedup();
+        let capability_sha256 = sha256_hex(capabilities.join("\n").as_bytes());
+        let prompt_template_ids = self
+            .prompt_templates
+            .as_ref()
+            .map(|templates| {
+                templates
+                    .iter()
+                    .map(|template| template.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let system_prompt = durable_prompt_snapshot(&turn.system_prompt);
+        let work_dir = self.work_dir.to_string_lossy().into_owned();
         let Some(journal) = self.harness.as_mut() else {
             return Ok(None);
         };
         let run_id = journal.unique_run_id("foreground")?;
         journal.begin_run(&run_id, prompt)?;
+        journal.capture_run_context(
+            &run_id,
+            "main",
+            model,
+            provider,
+            turn.reasoning_effort(),
+            self.agent.prompt_cache_enabled(),
+            work_dir,
+            system_prompt,
+            sha256_hex(&tool_schema),
+            enabled_tool_names,
+            capabilities,
+            Some(capability_sha256),
+            prompt_template_ids,
+            None,
+        )?;
         let context = HookContext {
             session_id: journal.store.session_id().to_owned(),
             lane: "main".into(),
@@ -728,6 +936,11 @@ impl CodingAgent {
             .harness_run_id
             .lock()
             .map_err(|_| "Harness run state is unavailable".to_string())? = Some(run_id.clone());
+        if let Some(path) = self.session_tree.file_path.clone() {
+            self.session_tree = SessionTree::load_from_file(&path)
+                .map_err(|error| format!("failed to reload accepted prompt: {error}"))?;
+            self.install_run_trace_recorders(path, run_id.clone());
+        }
         Ok(Some(run_id))
     }
 
@@ -746,6 +959,89 @@ impl CodingAgent {
         if open_run != run_id {
             return Err(format!("harness operation {run_id} is not open on main"));
         }
+        let has_context = journal.store.records().iter().any(|record| {
+            matches!(
+                record,
+                HarnessRecord::RunContextCaptured {
+                    run_id: captured_run_id,
+                    ..
+                } if captured_run_id == run_id
+            )
+        });
+        if !has_context {
+            let turn = self
+                .agent
+                .turn
+                .try_lock()
+                .map_err(|_| "adopted run context is currently locked".to_string())?;
+            let model = self
+                .agent
+                .config()
+                .model_roles
+                .resolve_task(&turn.model)
+                .to_string();
+            let provider = self
+                .agent
+                .provider_client()
+                .provider_kind(&model)
+                .to_string();
+            let tool_definitions = self.agent.configured_tool_definitions();
+            let tool_schema = serde_json::to_vec(&tool_definitions)
+                .map_err(|error| format!("failed to serialize resolved tool schema: {error}"))?;
+            let enabled_tool_names = tool_definitions
+                .iter()
+                .map(|tool| tool.name.clone())
+                .collect::<Vec<_>>();
+            let mut capabilities = enabled_tool_names
+                .iter()
+                .map(|name| format!("tool:{name}"))
+                .collect::<Vec<_>>();
+            capabilities.extend(
+                self.skills
+                    .list_skills()
+                    .into_iter()
+                    .filter(|skill| skill.enabled && skill.is_valid)
+                    .map(|skill| format!("skill:{}", skill.id)),
+            );
+            capabilities.extend(
+                self.wasi_extensions
+                    .extension_manifests()
+                    .into_iter()
+                    .map(|extension| format!("extension:{}", extension.name)),
+            );
+            if let Ok(policy) = self.tool_policy.try_lock() {
+                capabilities.push(format!("tool_policy:{policy:?}"));
+            }
+            capabilities.sort();
+            capabilities.dedup();
+            let capability_sha256 = sha256_hex(capabilities.join("\n").as_bytes());
+            let prompt_template_ids = self
+                .prompt_templates
+                .as_ref()
+                .map(|templates| {
+                    templates
+                        .iter()
+                        .map(|template| template.name.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            journal.capture_run_context(
+                run_id,
+                "main",
+                model,
+                provider,
+                turn.reasoning_effort(),
+                self.agent.prompt_cache_enabled(),
+                self.work_dir.to_string_lossy().into_owned(),
+                durable_prompt_snapshot(&turn.system_prompt),
+                sha256_hex(&tool_schema),
+                enabled_tool_names,
+                capabilities,
+                Some(capability_sha256),
+                prompt_template_ids,
+                None,
+            )?;
+        }
         if let Some(path) = self.session_tree.file_path.clone() {
             self.session_tree = SessionTree::load_from_file(&path)
                 .map_err(|error| format!("failed to refresh adopted session: {error}"))?;
@@ -753,6 +1049,7 @@ impl CodingAgent {
             if self.session_tree.nodes.contains_key(&prompt_entry_id) {
                 self.session_tree.switch_active_node(&prompt_entry_id);
             }
+            self.install_run_trace_recorders(path, run_id.into());
         }
         *self
             .harness_run_id
@@ -761,7 +1058,7 @@ impl CodingAgent {
         Ok(())
     }
 
-    async fn finish_harness_run(
+    pub(crate) async fn finish_harness_run(
         &mut self,
         run_id: Option<&str>,
         outcome: OperationOutcome,
@@ -770,6 +1067,20 @@ impl CodingAgent {
         let (Some(journal), Some(run_id)) = (self.harness.as_mut(), run_id) else {
             return Ok(());
         };
+        if matches!(
+            outcome,
+            OperationOutcome::Failed | OperationOutcome::Aborted
+        ) {
+            if let Some(message) = error
+                .as_deref()
+                .filter(|message| !message.trim().is_empty())
+            {
+                journal.append_message(AgentMessage::Custom {
+                    custom_type: "agent_error".into(),
+                    payload: serde_json::json!({ "error": message }),
+                })?;
+            }
+        }
         let result = journal.finish_run(run_id, outcome, error);
         if result.is_ok() {
             let context = HookContext {
@@ -797,17 +1108,38 @@ impl CodingAgent {
                 *active = None;
             }
         }
+        self.agent.set_provider_trace_recorder(None);
+        self.agent.tool_dispatcher.tool_execution_trace_recorder = None;
+        self.permission_handle.set_trace_recorder(None);
         result
     }
 
     fn append_command_message(&mut self, message: AgentMessage) -> Result<(), String> {
         if let Some(journal) = self.harness.as_mut() {
-            journal.append_message(message.clone())?;
-            self.session_tree.add_message_in_memory(message);
+            journal.append_message(message)?;
+            if let Some(path) = self.session_tree.file_path.clone() {
+                self.session_tree = SessionTree::load_from_file(&path)
+                    .map_err(|error| format!("failed to reload command message: {error}"))?;
+            }
         } else {
             self.session_tree.add_message(message);
         }
         Ok(())
+    }
+
+    fn prompt_parent_leaf(
+        &mut self,
+        message: AgentMessage,
+        harness_persisted: bool,
+    ) -> Option<String> {
+        if !harness_persisted {
+            return Some(self.session_tree.add_message(message));
+        }
+        let leaf = self.session_tree.active_node_id().map(str::to_owned);
+        if self.session_tree.get_active_branch_messages().last() != Some(&message) {
+            warn!("Persisted prompt is not the active session leaf; subagents will use the canonical active leaf");
+        }
+        leaf
     }
 
     async fn compact_history_with_harness(&mut self) -> Result<bool, String> {
@@ -1276,6 +1608,7 @@ impl CodingAgent {
             agent.event_tx.clone(),
             agent_work.clone(),
             Some(agent_runner.clone()),
+            options.session_file.clone(),
         );
         // ── Capability registry: register tools + hooks declaratively ──
         let mcp_manager = Arc::new(McpManager::new(
@@ -1370,7 +1703,6 @@ impl CodingAgent {
             harness_run_id,
             cancellation,
             interrupted_subagent_recovery,
-            config: coding_config,
             #[cfg(test)]
             subagent_work_observer,
             #[cfg(test)]
@@ -1420,6 +1752,16 @@ impl CodingAgent {
 
     pub fn harness_error(&self) -> Option<&str> {
         self.harness_journal_error.as_deref()
+    }
+
+    /// Returns the fully built system prompt used by this runtime when the
+    /// agent state is not currently locked by an active turn.
+    pub fn system_prompt_snapshot(&self) -> Option<String> {
+        self.agent
+            .turn
+            .try_lock()
+            .ok()
+            .map(|state| state.system_prompt.clone())
     }
 
     pub(crate) fn watch_harness(&mut self) -> Result<Option<HarnessWatch>, String> {
@@ -1511,11 +1853,57 @@ impl CodingAgent {
             .collect();
 
         if harness_persists_messages {
+            let durable_messages = self
+                .harness
+                .as_mut()
+                .and_then(|harness| {
+                    let _ = harness.refresh();
+                    harness.store.model_history("main").ok()
+                })
+                .map(|entries| {
+                    entries
+                        .into_iter()
+                        .map(|entry| entry.message)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if requires_harness_compaction_reset(&durable_messages, &state_messages) {
+                let summary = state_messages
+                    .iter()
+                    .find_map(threadlane_agent::compaction_summary_text)
+                    .expect("compaction reset requires a summary")
+                    .to_owned();
+                let retained_tail = compaction_retained_tail(&state_messages);
+                if let Err(error) = self.persist_harness_compaction(&summary, &retained_tail) {
+                    self.harness_journal_error = Some(error);
+                    return;
+                }
+                if let Some(path) = self.session_tree.file_path.clone() {
+                    match SessionTree::load_from_file(&path) {
+                        Ok(tree) => self.session_tree = tree,
+                        Err(error) => warn!("Failed to reload compacted session: {error}"),
+                    }
+                }
+                if let Some(last_assistant) = state_messages
+                    .iter()
+                    .rev()
+                    .find(|message| matches!(message, AgentMessage::Assistant { .. }))
+                {
+                    self.dispatch_assistant_hook(last_assistant).await;
+                }
+                return;
+            }
+
             // Persist new provider messages through the canonical session
             // harness, then reload the session tree from the updated file.
             if let Some(harness) = self.harness.as_mut() {
                 if let Err(error) = harness.sync_messages(&state_messages) {
                     self.harness_journal_error = Some(error);
+                    return;
+                }
+                if let Err(error) = harness.assert_model_visible(&state_messages) {
+                    self.harness_journal_error = Some(error);
+                    return;
                 }
             }
             if let Some(path) = self.session_tree.file_path.clone() {
@@ -1600,11 +1988,7 @@ impl CodingAgent {
 
         for message in state_messages.into_iter().skip(start_index) {
             self.dispatch_assistant_hook(&message).await;
-            if harness_persists_messages {
-                self.session_tree.add_message_in_memory(message.clone());
-            } else {
-                self.session_tree.add_message(message.clone());
-            }
+            self.session_tree.add_message(message.clone());
         }
     }
 
@@ -2746,14 +3130,11 @@ impl CodingAgent {
                             Ok(run_id) => run_id,
                             Err(error) => return Some(Err(format!("Harness Error: {error}"))),
                         };
-                        let parent_leaf = if harness_run_id.is_some() {
-                            self.session_tree
-                                .add_message_in_memory(AgentMessage::user(input, images.clone()))
-                        } else {
-                            self.session_tree
-                                .add_message(AgentMessage::user(input, images.clone()))
-                        };
-                        *self.dispatch_parent_leaf.lock().unwrap() = Some(parent_leaf);
+                        let parent_leaf = self.prompt_parent_leaf(
+                            AgentMessage::user(input, images.clone()),
+                            harness_run_id.is_some(),
+                        );
+                        *self.dispatch_parent_leaf.lock().unwrap() = parent_leaf;
                         self.agent
                             .prompt_message(AgentMessage::user(prompt, images.clone()))
                             .await;
@@ -2818,14 +3199,11 @@ impl CodingAgent {
                         }
                     }
                 }
-                let parent_leaf = if harness_run_id.is_some() {
-                    self.session_tree
-                        .add_message_in_memory(AgentMessage::user(input, images.clone()))
-                } else {
-                    self.session_tree
-                        .add_message(AgentMessage::user(input, images.clone()))
-                };
-                *self.dispatch_parent_leaf.lock().unwrap() = Some(parent_leaf);
+                let parent_leaf = self.prompt_parent_leaf(
+                    AgentMessage::user(input, images.clone()),
+                    harness_run_id.is_some(),
+                );
+                *self.dispatch_parent_leaf.lock().unwrap() = parent_leaf;
                 let result = match (self.agent_runner)(vec![task], false, None).await {
                     Ok(result) => result,
                     Err(err) => {
@@ -2878,7 +3256,16 @@ impl CodingAgent {
                     }
                 }
                 if harness_run_id.is_some() {
-                    self.session_tree.add_message_in_memory(assistant);
+                    if let Some(path) = self.session_tree.file_path.clone() {
+                        match SessionTree::load_from_file(&path) {
+                            Ok(tree) => self.session_tree = tree,
+                            Err(error) => {
+                                return Some(Err(format!(
+                                    "Harness Error: failed to reload subagent response: {error}"
+                                )))
+                            }
+                        }
+                    }
                 } else {
                     self.session_tree.add_message(assistant);
                 }
@@ -2905,14 +3292,11 @@ impl CodingAgent {
                     Ok(run_id) => run_id,
                     Err(error) => return Some(Err(format!("Harness Error: {error}"))),
                 };
-                let parent_leaf = if harness_run_id.is_some() {
-                    self.session_tree
-                        .add_message_in_memory(AgentMessage::user(input, images.clone()))
-                } else {
-                    self.session_tree
-                        .add_message(AgentMessage::user(input, images.clone()))
-                };
-                *self.dispatch_parent_leaf.lock().unwrap() = Some(parent_leaf);
+                let parent_leaf = self.prompt_parent_leaf(
+                    AgentMessage::user(input, images.clone()),
+                    harness_run_id.is_some(),
+                );
+                *self.dispatch_parent_leaf.lock().unwrap() = parent_leaf;
                 return match res {
                     Ok(result) => {
                         let message = if result.message.is_empty() {
@@ -3213,30 +3597,8 @@ impl CodingAgent {
                 return Some(Err(message));
             }
         };
-        let parent_leaf = if self
-            .session_tree
-            .get_active_branch_messages()
-            .last()
-            .is_some_and(|message| message == &msg)
-        {
-            self.session_tree
-                .active_node_id()
-                .map(str::to_owned)
-                .unwrap_or_else(|| {
-                    if harness_run_id.is_some() {
-                        self.session_tree.add_message_in_memory(msg.clone())
-                    } else {
-                        self.session_tree.add_message(msg.clone())
-                    }
-                })
-        } else {
-            if harness_run_id.is_some() {
-                self.session_tree.add_message_in_memory(msg.clone())
-            } else {
-                self.session_tree.add_message(msg.clone())
-            }
-        };
-        *self.dispatch_parent_leaf.lock().unwrap() = Some(parent_leaf);
+        let parent_leaf = self.prompt_parent_leaf(msg.clone(), harness_run_id.is_some());
+        *self.dispatch_parent_leaf.lock().unwrap() = parent_leaf;
         if let (Some(run_id), Some(harness)) = (harness_run_id.as_deref(), self.harness.as_mut()) {
             if let Err(error) = harness.prepare_assistant_attempt(run_id) {
                 let _ = self
@@ -3357,6 +3719,136 @@ impl CodingAgent {
         }
 
         None
+    }
+}
+
+fn requires_harness_compaction_reset(
+    durable_messages: &[AgentMessage],
+    state_messages: &[AgentMessage],
+) -> bool {
+    state_messages
+        .iter()
+        .any(|message| threadlane_agent::compaction_summary_text(message).is_some())
+        && !state_messages.starts_with(durable_messages)
+}
+
+#[cfg(test)]
+mod compaction_sync_tests {
+    use super::{
+        durable_prompt_snapshot, requires_harness_compaction_reset, CodingAgent,
+        CodingAgentOptions, CompletedSubagentLane, SubagentLaneStatus,
+        MAX_PERSISTED_SYSTEM_PROMPT_BYTES,
+    };
+    use crate::system_prompt::SystemPromptConfig;
+    use threadlane_agent::{harness::JsonlStore, AgentMessage};
+
+    fn summary() -> AgentMessage {
+        AgentMessage::Custom {
+            custom_type: "compaction_summary".into(),
+            payload: serde_json::json!({"summary": "older context"}),
+        }
+    }
+
+    #[test]
+    fn oversized_system_prompt_is_redacted_with_a_digest() {
+        let content = "x".repeat(MAX_PERSISTED_SYSTEM_PROMPT_BYTES + 1);
+        assert!(matches!(
+            durable_prompt_snapshot(&content),
+            threadlane_agent::harness::PromptSnapshot::Redacted {
+                sha256,
+                byte_len,
+                ..
+            } if sha256.as_str().len() == 64 && byte_len == content.len()
+        ));
+    }
+
+    #[test]
+    fn in_loop_compaction_requires_a_durable_branch_reset() {
+        let durable = vec![
+            AgentMessage::user("old prompt", vec![]),
+            AgentMessage::Assistant {
+                content: Some("old response".into()),
+                tool_calls: None,
+                stop_reason: None,
+                deferred_handle: None,
+            },
+        ];
+        let state = vec![summary(), AgentMessage::user("current prompt", vec![])];
+
+        assert!(requires_harness_compaction_reset(&durable, &state));
+    }
+
+    #[test]
+    fn already_persisted_compaction_uses_normal_incremental_sync() {
+        let durable = vec![summary(), AgentMessage::user("current prompt", vec![])];
+        let mut state = durable.clone();
+        state.push(AgentMessage::Assistant {
+            content: Some("new response".into()),
+            tool_calls: None,
+            stop_reason: None,
+            deferred_handle: None,
+        });
+
+        assert!(!requires_harness_compaction_reset(&durable, &state));
+    }
+
+    #[tokio::test]
+    async fn invalid_compatibility_source_does_not_break_delayed_passive_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut agent = CodingAgent::new(CodingAgentOptions {
+            api_key: "test-key".into(),
+            account_id: None,
+            model: "test-model".into(),
+            work_dir: dir.path().to_path_buf(),
+            session_file: Some(path.clone()),
+            system_prompt: SystemPromptConfig::default(),
+            agent_config: None,
+            coding_config: None,
+        });
+        agent
+            .begin_harness_run(AgentMessage::user("prompt", vec![]))
+            .await
+            .unwrap();
+
+        let identity = agent
+            .harness
+            .as_mut()
+            .unwrap()
+            .start_subagent_lane("worker", "inspect", Some("node_69"))
+            .unwrap();
+        assert!(identity.source_leaf_id.is_none());
+        agent
+            .completed_subagent_lanes
+            .lock()
+            .unwrap()
+            .push(CompletedSubagentLane {
+                lane_name: identity.lane_name,
+                run_id: identity.run_id,
+                parent_leaf_id: identity.source_leaf_id,
+                task: "inspect".into(),
+                agent: "worker".into(),
+                status: SubagentLaneStatus::Completed,
+                messages: vec![AgentMessage::Assistant {
+                    content: Some("done".into()),
+                    tool_calls: None,
+                    stop_reason: Some("end_turn".into()),
+                    deferred_handle: None,
+                }],
+                error: None,
+            });
+
+        agent.commit_completed_subagent_lanes().unwrap();
+
+        let store = JsonlStore::open(&path).unwrap();
+        assert!(store.entries().iter().any(|entry| matches!(
+            &entry.message,
+            AgentMessage::Custom { custom_type, .. } if custom_type == "subagent_lane"
+        )));
+        assert!(store
+            .entries()
+            .iter()
+            .all(|entry| entry.parent_id.as_deref() != Some("node_69")));
     }
 }
 
@@ -3749,6 +4241,7 @@ async fn run_subagent_task(
         agent.event_tx.clone(),
         agent_work.clone(),
         None,
+        Some(subagent_session.clone()),
     );
     agent
         .hook_registry

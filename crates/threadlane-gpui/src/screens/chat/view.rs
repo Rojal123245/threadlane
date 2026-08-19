@@ -7,14 +7,14 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::hover_card::HoverCard;
-use gpui_component::input::{InputEvent, Textarea, TextareaState};
+use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
+use gpui_component::progress::ProgressCircle;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::theme::ActiveTheme;
-use gpui_component::tooltip::Tooltip;
-use gpui_component::{Disableable, Icon, IconName, Sizable};
+use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable};
 
 use crate::app::{actions::AppAction, controller};
 use crate::state::{AppState, ChatMessageInfo, MessageRole, ToolActivityInfo};
@@ -26,7 +26,6 @@ actions!(threadlane_composer, [PasteClipboard]);
 const INPUT_KEY_CONTEXT: &str = "Input";
 
 const CHAT_CONTENT_MAX_WIDTH: f32 = 1040.0;
-const AGENT_CONTENT_MAX_WIDTH: f32 = 760.0;
 const USER_BUBBLE_MAX_WIDTH: f32 = 680.0;
 
 pub fn init(cx: &mut App) {
@@ -44,6 +43,7 @@ pub struct ChatListView {
     pub(crate) input_state: Entity<TextareaState>,
     pub(crate) header_left_padding: Pixels,
     scroll_handle: ScrollHandle,
+    trajectory_scroll_handle: ScrollHandle,
     expanded_activity_groups: HashSet<String>,
     markdown_states: HashMap<String, (String, Entity<TextViewState>)>,
     pasted_images: Vec<ImageAttachment>,
@@ -53,12 +53,23 @@ pub struct ChatListView {
     last_session_key: Option<(std::path::PathBuf, String)>,
     initial_scroll_frames: u8,
     older_load_pending: bool,
+    show_trajectory: bool,
+    trajectory_search: String,
+    trajectory_search_input: Entity<InputState>,
+    trajectory_category: Option<String>,
+    trajectory_lane: Option<String>,
+    selected_trajectory_index: Option<usize>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl ChatListView {
-    pub(crate) fn new(model: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        model: Entity<AppState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let scroll_handle = ScrollHandle::new();
+        let trajectory_scroll_handle = ScrollHandle::new();
         let input_state = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder("Do anything...")
@@ -66,6 +77,9 @@ impl ChatListView {
                 .submit_on_enter(true)
                 .soft_wrap(true)
         });
+
+        let trajectory_search_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search trajectory…"));
 
         let sub1 = cx.observe(&model, |_this, _model, cx| {
             cx.notify();
@@ -172,11 +186,17 @@ impl ChatListView {
         })
         .detach();
 
+        let sub3 = cx.observe(&trajectory_search_input, |this, input, cx| {
+            this.trajectory_search = input.read(cx).value().to_string();
+            cx.notify();
+        });
+
         Self {
             model,
             input_state,
             header_left_padding: px(14.0),
             scroll_handle,
+            trajectory_scroll_handle,
             expanded_activity_groups: HashSet::new(),
             markdown_states: HashMap::new(),
             pasted_images: Vec::new(),
@@ -186,7 +206,13 @@ impl ChatListView {
             last_session_key: None,
             initial_scroll_frames: 0,
             older_load_pending: false,
-            _subscriptions: vec![sub1, sub2],
+            show_trajectory: false,
+            trajectory_search: String::new(),
+            trajectory_search_input,
+            trajectory_category: None,
+            trajectory_lane: None,
+            selected_trajectory_index: None,
+            _subscriptions: vec![sub1, sub2, sub3],
         }
     }
 
@@ -294,19 +320,23 @@ impl ChatListView {
         let theme = cx.theme().colors;
 
         div()
-            .h(px(48.0))
+            .h(px(52.0))
             .flex_none()
             .flex()
-            .items_start()
-            .pt(px(9.0))
+            .items_center()
+            .gap_3()
+            .px_4()
             .pl(self.header_left_padding)
-            .pr_4()
+            // The workspace owns the rightmost 120px for command palette,
+            // environment, and panel buttons rendered as absolute overlays.
+            .pr(px(128.0))
             .border_b_1()
             .border_color(theme.title_bar_border)
             .bg(theme.title_bar)
             .child(
                 div()
                     .min_w_0()
+                    .max_w(px(360.0))
                     .truncate()
                     .text_size(px(13.0))
                     .line_height(px(18.0))
@@ -314,6 +344,41 @@ impl ChatListView {
                     .text_color(theme.foreground)
                     .child(active_title),
             )
+            .child(
+                div()
+                    .h(px(28.0))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .p(px(2.0))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.muted.opacity(0.5))
+                    .child(
+                        Button::new("trajectory-tab-chat")
+                            .ghost()
+                            .xsmall()
+                            .selected(!self.show_trajectory)
+                            .label("Chat")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show_trajectory = false;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("trajectory-tab-events")
+                            .ghost()
+                            .xsmall()
+                            .selected(self.show_trajectory)
+                            .label("Trajectory")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show_trajectory = true;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(div().flex_1())
     }
 
     /// Renders the 16px status circle used for a plan step: a bordered ✓ for
@@ -467,6 +532,12 @@ impl ChatListView {
         let tool_call_id = activity.id.clone();
         let has_detail = !activity.detail.trim().is_empty();
         let row_id = SharedString::from(activity.id.clone());
+        let proposal_id = activity
+            .detail
+            .split("proposal_id=")
+            .nth(1)
+            .and_then(|value| value.split_whitespace().next())
+            .map(str::to_owned);
 
         div()
             .w_full()
@@ -532,6 +603,32 @@ impl ChatListView {
                             .text_color(theme.muted_foreground)
                             .child(activity.summary.clone()),
                     )
+                    .children(proposal_id.as_ref().map(|proposal_id| {
+                        let model = self.model.clone();
+                        let proposal_id = proposal_id.clone();
+                        div()
+                            .id(SharedString::from(format!("accept-edit-{proposal_id}")))
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .bg(theme.primary)
+                            .text_xs()
+                            .text_color(theme.primary_foreground)
+                            .child("Accept")
+                            .on_click(move |_event, _window, cx| {
+                                // The accept control is inside the clickable tool row. Prevent
+                                // this click from bubbling up and toggling the row details.
+                                cx.stop_propagation();
+                                model.update(cx, |state, cx| {
+                                    controller::dispatch(
+                                        state,
+                                        AppAction::AcceptEditProposal(proposal_id.clone()),
+                                    );
+                                    cx.notify();
+                                });
+                            })
+                    }))
                     .children(has_detail.then(|| {
                         div()
                             .flex_none()
@@ -588,7 +685,6 @@ impl ChatListView {
                 div()
                     .w_full()
                     .min_w_0()
-                    .max_w(px(AGENT_CONTENT_MAX_WIDTH))
                     .flex()
                     .flex_col()
                     .children((hidden_count > 0).then(|| {
@@ -628,7 +724,6 @@ impl ChatListView {
                 div()
                     .w_full()
                     .min_w_0()
-                    .max_w(px(AGENT_CONTENT_MAX_WIDTH))
                     .flex()
                     .items_center()
                     .gap_2()
@@ -660,6 +755,459 @@ impl ChatListView {
                             .text_color(theme.muted_foreground)
                             .child("Working…"),
                     ),
+            )
+            .into_any_element()
+    }
+
+    fn render_trajectory(&self, cx: &mut Context<Self>) -> AnyElement {
+        let all_entries = self.model.read(cx).active_trajectory().to_vec();
+        let mut categories = all_entries
+            .iter()
+            .map(|entry| entry.category.clone())
+            .collect::<Vec<_>>();
+        categories.sort();
+        categories.dedup();
+        let mut lane_latest = std::collections::BTreeMap::<String, String>::new();
+        for entry in &all_entries {
+            if let Some(lane) = &entry.lane {
+                lane_latest.insert(lane.clone(), entry.summary.clone());
+            }
+        }
+        let lanes = lane_latest.keys().cloned().collect::<Vec<_>>();
+        let query = self.trajectory_search.to_lowercase();
+        let entries = all_entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                self.trajectory_category
+                    .as_ref()
+                    .is_none_or(|category| &entry.category == category)
+                    && self
+                        .trajectory_lane
+                        .as_ref()
+                        .is_none_or(|lane| entry.lane.as_ref() == Some(lane))
+                    && (query.is_empty()
+                        || [
+                            entry.category.as_str(),
+                            entry.summary.as_str(),
+                            entry.detail.as_str(),
+                            entry.lane.as_deref().unwrap_or(""),
+                            entry.correlation_id.as_deref().unwrap_or(""),
+                        ]
+                        .iter()
+                        .any(|value| value.to_lowercase().contains(&query)))
+            })
+            .map(|(index, entry)| (index, entry.clone()))
+            .collect::<Vec<_>>();
+        let theme = cx.theme().colors;
+        if entries.is_empty() {
+            return div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child("No canonical trajectory events have been observed in this session yet.")
+                .into_any_element();
+        }
+        let selected_entry = self
+            .selected_trajectory_index
+            .and_then(|index| all_entries.get(index))
+            .cloned();
+        let mut rows = Vec::new();
+        let mut previous_turn = None;
+        for (all_index, entry) in entries.into_iter() {
+            if entry.turn != previous_turn {
+                if let Some(turn) = entry.turn {
+                    rows.push(
+                        div()
+                            .h(px(22.0))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .border_b_1()
+                            .border_color(theme.border.opacity(0.5))
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(format!("Turn {turn}"))
+                            .into_any_element(),
+                    );
+                }
+                previous_turn = entry.turn;
+            }
+            let seq = entry.seq;
+            let selected = Some(all_index) == self.selected_trajectory_index;
+            let preview = if entry.detail.trim().is_empty() {
+                entry.summary.clone()
+            } else {
+                format!("{}  {}", entry.summary, entry.detail.replace('\n', " "))
+            };
+            let view = cx.entity().clone();
+            rows.push(
+                div()
+                    .id(SharedString::from(format!("trajectory-{all_index}")))
+                    .h(px(34.0))
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .border_b_1()
+                    .border_color(theme.border.opacity(0.45))
+                    .cursor_pointer()
+                    .when(selected, |this| {
+                        this.bg(theme.accent.opacity(0.16))
+                            .border_l_2()
+                            .border_color(theme.accent)
+                    })
+                    .hover(|style| style.bg(theme.muted.opacity(0.65)))
+                    .child(div().size(px(6.0)).flex_none().rounded_full().bg(
+                        if entry.category == "Tool" {
+                            theme.warning
+                        } else if entry.category == "Error" {
+                            theme.danger
+                        } else {
+                            theme.primary
+                        },
+                    ))
+                    .child(
+                        div()
+                            .w(px(74.0))
+                            .flex_none()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.muted_foreground)
+                            .child(entry.category.to_uppercase()),
+                    )
+                    .child(div().min_w_0().flex_1().text_sm().truncate().child(preview))
+                    .children(entry.lane.clone().map(|lane| {
+                        div()
+                            .max_w(px(110.0))
+                            .truncate()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(lane)
+                    }))
+                    .children(seq.map(|seq| {
+                        div()
+                            .w(px(52.0))
+                            .text_right()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(format!("#{seq}"))
+                    }))
+                    .on_click(move |_, _, cx| {
+                        view.update(cx, |this, cx| {
+                            this.selected_trajectory_index = Some(all_index);
+                            cx.notify();
+                        })
+                    })
+                    .into_any_element(),
+            );
+        }
+        let inspector = selected_entry.map(|entry| {
+            let close_view = cx.entity().clone();
+            let metadata = [
+                entry.seq.map(|value| ("Sequence", format!("#{value}"))),
+                entry.turn.map(|value| ("Turn", value.to_string())),
+                entry.run_id.clone().map(|value| ("Run", value)),
+                entry.lane.clone().map(|value| ("Lane", value)),
+                entry.correlation_id.clone().map(|value| ("Call", value)),
+            ]
+            .into_iter()
+            .flatten();
+            div()
+                .w(px(390.0))
+                .min_w(px(300.0))
+                .h_full()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .border_l_1()
+                .border_color(theme.border)
+                .bg(theme.secondary)
+                .child(
+                    div()
+                        .h(px(44.0))
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .child(
+                            div()
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .bg(theme.accent.opacity(0.18))
+                                .text_xs()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(entry.category.to_uppercase()),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .truncate()
+                                .text_sm()
+                                .child(entry.summary.clone()),
+                        )
+                        .child(
+                            Button::new("close-trajectory-inspector")
+                                .ghost()
+                                .xsmall()
+                                .label("×")
+                                .on_click(move |_, _, cx| {
+                                    close_view.update(cx, |this, cx| {
+                                        this.selected_trajectory_index = None;
+                                        cx.notify();
+                                    })
+                                }),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scrollbar()
+                        .p_4()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        .child(div().flex().flex_col().gap_2().children(metadata.map(
+                            |(label, value)| {
+                                div()
+                                    .flex()
+                                    .gap_2()
+                                    .text_sm()
+                                    .child(
+                                        div()
+                                            .w(px(82.0))
+                                            .flex_none()
+                                            .text_color(theme.muted_foreground)
+                                            .child(label),
+                                    )
+                                    .child(div().min_w_0().flex_1().child(value))
+                            },
+                        )))
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.muted_foreground)
+                                .child("DETAIL"),
+                        )
+                        .child(div().text_sm().child(if entry.detail.is_empty() {
+                            "No additional detail".into()
+                        } else {
+                            entry.detail
+                        })),
+                )
+        });
+        let overview_lane = |label: &'static str, category: &'static str, color: Hsla| {
+            let markers = all_entries
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| match category {
+                    "Input" => matches!(entry.category.as_str(), "Input" | "Context" | "Queue"),
+                    "Model" => matches!(
+                        entry.category.as_str(),
+                        "Operation" | "Step" | "Retry" | "Turn" | "Error"
+                    ),
+                    _ => entry.category == "Tool",
+                })
+                .map(|(index, _)| {
+                    let position = index * 48 / all_entries.len().max(1);
+                    (position, color)
+                })
+                .collect::<HashMap<_, _>>();
+            div()
+                .h(px(18.0))
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .w(px(48.0))
+                        .flex_none()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .h(px(12.0))
+                        .flex()
+                        .items_end()
+                        .gap(px(2.0))
+                        .children((0..48).map(|index| {
+                            div()
+                                .flex_1()
+                                .h(if markers.contains_key(&index) {
+                                    px(10.0)
+                                } else {
+                                    px(2.0)
+                                })
+                                .rounded_sm()
+                                .bg(markers
+                                    .get(&index)
+                                    .copied()
+                                    .unwrap_or(theme.border.opacity(0.35)))
+                        })),
+                )
+        };
+        let overview = div()
+            .h(px(58.0))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .px_3()
+            .py_1()
+            .border_b_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .child(overview_lane("Input", "Input", theme.success))
+            .child(overview_lane("Model", "Model", theme.primary))
+            .child(overview_lane("Tools", "Tools", theme.warning));
+        let category_label = self
+            .trajectory_category
+            .clone()
+            .unwrap_or_else(|| "All events".into());
+        let lane_label = self
+            .trajectory_lane
+            .clone()
+            .unwrap_or_else(|| format!("{} lanes", lanes.len()));
+        let category_view = cx.entity().clone();
+        let lane_view = cx.entity().clone();
+        let toolbar = div()
+            .h(px(38.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_3()
+            .border_b_1()
+            .border_color(theme.border)
+            .bg(theme.secondary)
+            .child(
+                Button::new("trajectory-category-filter")
+                    .ghost()
+                    .small()
+                    .label(category_label)
+                    .dropdown_caret(true)
+                    .dropdown_menu(move |menu, _, _| {
+                        let all_view = category_view.clone();
+                        let mut menu = menu.item(PopupMenuItem::new("All events").on_click(
+                            move |_, _, cx| {
+                                all_view.update(cx, |this, cx| {
+                                    this.trajectory_category = None;
+                                    cx.notify();
+                                });
+                            },
+                        ));
+                        for category in categories.clone() {
+                            let selected = category.clone();
+                            let view = category_view.clone();
+                            menu = menu.item(PopupMenuItem::new(category).on_click(
+                                move |_, _, cx| {
+                                    view.update(cx, |this, cx| {
+                                        this.trajectory_category = Some(selected.clone());
+                                        cx.notify();
+                                    });
+                                },
+                            ));
+                        }
+                        menu
+                    }),
+            )
+            .child(
+                Button::new("trajectory-lane-filter")
+                    .ghost()
+                    .small()
+                    .label(lane_label)
+                    .dropdown_caret(true)
+                    .dropdown_menu(move |menu, _, _| {
+                        let all_view = lane_view.clone();
+                        let mut menu =
+                            menu.item(PopupMenuItem::new("All lanes").on_click(move |_, _, cx| {
+                                all_view.update(cx, |this, cx| {
+                                    this.trajectory_lane = None;
+                                    cx.notify();
+                                });
+                            }));
+                        for lane in lanes.clone() {
+                            let selected = lane.clone();
+                            let view = lane_view.clone();
+                            let latest = lane_latest.get(&lane).cloned().unwrap_or_default();
+                            menu = menu.item(
+                                PopupMenuItem::new(format!("{lane} — {latest}")).on_click(
+                                    move |_, _, cx| {
+                                        view.update(cx, |this, cx| {
+                                            this.trajectory_lane = Some(selected.clone());
+                                            cx.notify();
+                                        });
+                                    },
+                                ),
+                            );
+                        }
+                        menu
+                    }),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .w(px(280.0))
+                    .h(px(32.0))
+                    .px_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.background)
+                    .child(Input::new(&self.trajectory_search_input).appearance(false)),
+            );
+        div()
+            .id("session-trajectory")
+            .w_full()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(overview)
+            .child(toolbar)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .child(
+                        div()
+                            .id("trajectory-events-container")
+                            .relative()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .child(
+                                div()
+                                    .id("trajectory-events-scroll")
+                                    .size_full()
+                                    .track_scroll(&self.trajectory_scroll_handle)
+                                    .overflow_y_scroll()
+                                    .child(div().w_full().children(rows)),
+                            )
+                            .child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .child(gpui_component::scroll::Scrollbar::vertical(
+                                        &self.trajectory_scroll_handle,
+                                    )),
+                            ),
+                    )
+                    .children(inspector),
             )
             .into_any_element()
     }
@@ -912,7 +1460,6 @@ impl ChatListView {
                         div()
                             .w_full()
                             .min_w_0()
-                            .max_w(px(AGENT_CONTENT_MAX_WIDTH))
                             .flex()
                             .flex_col()
                             .gap_2()
@@ -1013,7 +1560,6 @@ impl ChatListView {
 
                 div().w_full().flex().justify_center().my_2().px_4().child(
                     div()
-                        .max_w(px(AGENT_CONTENT_MAX_WIDTH))
                         .w_full()
                         .p_3()
                         .rounded_lg()
@@ -1055,7 +1601,6 @@ impl ChatListView {
             }
             MessageRole::Error => div().flex().justify_center().my_2().px_4().child(
                 div()
-                    .max_w(px(AGENT_CONTENT_MAX_WIDTH))
                     .w_full()
                     .p_3()
                     .rounded_lg()
@@ -1318,6 +1863,15 @@ impl ChatListView {
                 state.active_session_id.clone(),
             )
         };
+        let metrics = self.model.read(cx).active_session_metrics();
+        let lane_count = self
+            .model
+            .read(cx)
+            .active_trajectory()
+            .iter()
+            .filter_map(|entry| entry.lane.as_deref())
+            .collect::<std::collections::HashSet<_>>()
+            .len();
         let has_prompt =
             !self.input_state.read(cx).value().trim().is_empty() || !self.pasted_images.is_empty();
         let project_root = self.model.read(cx).active_work_dir.clone();
@@ -1667,62 +2221,106 @@ impl ChatListView {
         } else {
             theme.accent
         };
-        let context_tooltip = format!(
-            "Context window\n{} of {} tokens ({:.1}%)\nInput: {} • Output: {}",
-            crate::model_catalog::format_tokens(token_usage.total_tokens),
-            crate::model_catalog::format_tokens(context_max),
-            percent,
-            crate::model_catalog::format_tokens(token_usage.input_tokens),
-            crate::model_catalog::format_tokens(token_usage.output_tokens)
-        );
-        let context_meter = div()
-            .id("context-meter-badge")
-            .relative()
-            .flex()
-            .items_center()
-            .justify_center()
-            .size(px(30.0))
-            .rounded_full()
-            .tooltip(move |window, cx| {
-                let text = context_tooltip.clone();
-                Tooltip::element(move |_window, _cx| div().child(text.clone())).build(window, cx)
-            })
-            .children(
-                [
-                    (px(12.0), px(1.0)),
-                    (px(18.0), px(4.0)),
-                    (px(22.0), px(10.0)),
-                    (px(22.0), px(17.0)),
-                    (px(18.0), px(23.0)),
-                    (px(12.0), px(26.0)),
-                    (px(6.0), px(23.0)),
-                    (px(2.0), px(17.0)),
-                    (px(2.0), px(10.0)),
-                    (px(6.0), px(4.0)),
-                ]
-                .into_iter()
-                .enumerate()
-                .map(|(index, (left, top))| {
-                    div()
-                        .absolute()
-                        .left(left)
-                        .top(top)
-                        .size(px(4.0))
-                        .rounded_full()
-                        .bg(if percent >= ((index + 1) as f64 * 10.0) {
-                            meter_color
-                        } else {
-                            theme.border
-                        })
-                }),
-            )
-            .child(
+        let context_metrics = self.model.read(cx).active_session_metrics();
+        let total_processed = context_metrics
+            .input_tokens
+            .saturating_add(context_metrics.output_tokens)
+            .min(u64::from(u32::MAX)) as u32;
+        let context_used = crate::model_catalog::format_tokens(token_usage.total_tokens);
+        let context_limit = crate::model_catalog::format_tokens(context_max);
+        let processed = crate::model_catalog::format_tokens(total_processed);
+        let context_meter = HoverCard::new("context-window-hover-card")
+            .anchor(Anchor::BottomRight)
+            .open_delay(Duration::from_millis(200))
+            .close_delay(Duration::from_millis(300))
+            .trigger(
                 div()
-                    .text_xs()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.foreground)
-                    .child(format!("{percent:.0}")),
-            );
+                    .id("context-meter-badge")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(32.0))
+                    .rounded_full()
+                    .hover(|style| style.bg(theme.accent.opacity(0.1)))
+                    .cursor_pointer()
+                    .child(
+                        ProgressCircle::new("context-meter-circle")
+                            .value(percent as f32)
+                            .color(meter_color)
+                            .size(px(24.0)),
+                    ),
+            )
+            .content(move |_state, _window, _cx| {
+                let bar_width = ((percent / 100.0) * 308.0).clamp(0.0, 308.0);
+                div()
+                    .w(px(340.0))
+                    .p_4()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.background)
+                    .shadow_lg()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.foreground)
+                                    .child("Context Window"),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child(format!("{percent:.0}% · {context_used}/{context_limit}")),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .h(px(5.0))
+                            .rounded_full()
+                            .bg(theme.border)
+                            .child(
+                                div()
+                                    .h_full()
+                                    .w(px(bar_width as f32))
+                                    .rounded_full()
+                                    .bg(meter_color),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child("Total processed"),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child(processed.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("Context is automatically compacted when needed."),
+                    )
+            });
 
         let stashed_draft = active_session_id
             .as_ref()
@@ -1848,6 +2446,27 @@ impl ChatListView {
             .pb_2()
             .bg(theme.background)
             .children(pending_preview)
+            .when(
+                metrics.turns > 0 || metrics.tool_calls > 0 || metrics.input_tokens > 0 || metrics.output_tokens > 0 || lane_count > 0,
+                |this| this.child(
+                    div()
+                        .w_full()
+                        .max_w(px(1000.0))
+                        .mx_auto()
+                        .pb_2()
+                        .px_1()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(format!(
+                            "{} turns · {} tool calls · {} input / {} output tokens · {} subagent lanes",
+                            metrics.turns,
+                            metrics.tool_calls,
+                            metrics.input_tokens,
+                            metrics.output_tokens,
+                            lane_count,
+                        )),
+                ),
+            )
             .child(
                 div()
                     .w_full()
@@ -1882,9 +2501,9 @@ impl ChatListView {
                             .gap_1()
                             .child(model_picker)
                             .child(effort_picker)
-                            .child(context_meter)
                             .child(div().flex_1())
                             .child(stash_button)
+                            .child(context_meter)
                             .child(
                                 Button::new("send-btn")
                                     .w(px(40.0))
@@ -1963,7 +2582,7 @@ impl ChatListView {
 }
 
 impl Render for ChatListView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (messages, is_new_task, active_plan, session_key, has_older) = {
             let state = self.model.read(cx);
             (
@@ -1980,6 +2599,13 @@ impl Render for ChatListView {
         if session_key != self.last_session_key {
             self.last_session_key = session_key;
             self.initial_scroll_frames = 6;
+            self.trajectory_category = None;
+            self.trajectory_lane = None;
+            self.selected_trajectory_index = None;
+            self.trajectory_search.clear();
+            self.trajectory_search_input.update(cx, |state, cx| {
+                state.set_value("", window, cx);
+            });
         }
         if self.initial_scroll_frames > 0 {
             self.scroll_handle.scroll_to_bottom();
@@ -2024,7 +2650,9 @@ impl Render for ChatListView {
             .min_h_0()
             .bg(theme.background)
             .child(self.render_header(cx))
-            .child(if is_new_task {
+            .child(if self.show_trajectory {
+                self.render_trajectory(cx)
+            } else if is_new_task {
                 self.render_new_task(cx)
             } else if messages.is_empty() {
                 div()
@@ -2041,27 +2669,46 @@ impl Render for ChatListView {
                     .into_any_element()
             } else {
                 div()
-                    .id("chat-transcript")
+                    .id("chat-transcript-container")
+                    .relative()
                     .w_full()
                     .flex_1()
                     .min_w_0()
                     .min_h_0()
-                    .track_scroll(&self.scroll_handle)
-                    .overflow_y_scroll()
-                    .vertical_scrollbar(&self.scroll_handle)
-                    .pt_3()
-                    .pb_6()
                     .child(
                         div()
-                            .w_full()
-                            .max_w(px(CHAT_CONTENT_MAX_WIDTH))
-                            .mx_auto()
-                            .children(transcript_rows),
+                            .id("chat-transcript")
+                            .size_full()
+                            .track_scroll(&self.scroll_handle)
+                            .overflow_y_scroll()
+                            .pt_3()
+                            .pb_6()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .max_w(px(CHAT_CONTENT_MAX_WIDTH))
+                                    .mx_auto()
+                                    .children(transcript_rows),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .child(gpui_component::scroll::Scrollbar::vertical(&self.scroll_handle)),
                     )
                     .into_any_element()
             })
-            .children(self.render_plan_tracker(&active_plan, cx))
-            .children(self.render_permission_prompt(cx))
-            .child(self.render_composer(cx))
+            .children(
+                (!self.show_trajectory)
+                    .then(|| self.render_plan_tracker(&active_plan, cx))
+                    .flatten(),
+            )
+            .children(
+                (!self.show_trajectory)
+                    .then(|| self.render_permission_prompt(cx))
+                    .flatten(),
+            )
+            .children((!self.show_trajectory).then(|| self.render_composer(cx)))
     }
 }

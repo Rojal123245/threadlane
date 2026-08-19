@@ -23,6 +23,7 @@ pub use hooks::{
     HookContext, HookEffect, HookFailure, HookHandler, HookKind, HookRegistry, HookRun,
 };
 pub use jsonl::JsonlStore;
+pub(crate) use jsonl::{append_session_json_line, with_session_writer_gate};
 pub use memory::MemoryStore;
 pub use procedure::{
     AbortProcedure, AssistantAttemptProcedure, CompactionProcedure, DeferredProcedure,
@@ -36,7 +37,11 @@ pub use sqlite::SqliteStore;
 pub use store::{SessionIdGenerator, SessionStore};
 pub use telemetry::{ExecutionContext, NoopTelemetry, TelemetrySink};
 pub use types::{
-    Entry, InterruptedSubagentLane, LaneState, LaneStatus, OperationIntent, OperationOutcome,
-    ProvisionedEntry, QueueKind, QueuedEntry, Record, RecoveryResult, ReduceError, ReducedState,
-    RetryState, ToolReplaySafety, ToolResult, ToolSpec, ToolState, UsageCause,
+    sanitize_tool_args, AbortInitiator, AbortObservation, AbortTarget, BoundedPromptText,
+    BoundedText, CapabilitySnapshot, Entry, ErrorCategory, InterruptedSubagentLane, LaneState,
+    LaneStatus, OperationIntent, OperationOutcome, PermissionTraceDecision, PermissionTraceScope,
+    PermissionTraceSource, PromptSnapshot, ProviderErrorSummary, ProviderOutcome, ProvisionedEntry,
+    QueueKind, QueuedEntry, Record, RecoveryResult, ReduceError, ReducedState, RetryState,
+    StreamCheckpointKind, SubagentLifecyclePhase, ToolExecutionOutcome, ToolExecutionPhase,
+    ToolReplaySafety, ToolResult, ToolSpec, ToolState, TraceString, UsageCause,
 };

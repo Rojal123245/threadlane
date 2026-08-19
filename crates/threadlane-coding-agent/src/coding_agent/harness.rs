@@ -6,16 +6,23 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
+use crate::permission::PermissionTraceEvent;
 use threadlane_agent::harness::{
-    AgentHarness, DeferredResolution, EffectAction, Entry as HarnessEntry, EventPayload,
+    AbortInitiator, AbortObservation, AbortTarget, AgentHarness, BoundedText, CapabilitySnapshot,
+    DeferredResolution, EffectAction, Entry as HarnessEntry, ErrorCategory, EventPayload,
     HarnessEventHub, HookContext, HookKind, HookRegistry, JsonlStore, OperationOutcome,
-    Record as HarnessRecord, ReduceError, Reducer, RetryPolicy, SessionIdGenerator, SessionStore,
-    Snapshot, ToolReplaySafety as HarnessToolReplaySafety, ToolResult as HarnessToolResult,
-    ToolSpec,
+    PromptSnapshot, ProviderErrorSummary, ProviderOutcome, Record as HarnessRecord, ReduceError,
+    Reducer, RetryPolicy, SessionIdGenerator, SessionStore, Snapshot, SubagentLifecyclePhase,
+    ToolExecutionOutcome, ToolExecutionPhase, ToolReplaySafety as HarnessToolReplaySafety,
+    ToolResult as HarnessToolResult, ToolSpec, TraceString,
 };
 use threadlane_agent::session_tree::SessionTree;
-use threadlane_agent::{AgentMessage, AgentToolResult, TokenUsage};
+use threadlane_agent::{
+    AgentMessage, AgentToolResult, ProviderTraceEvent, ReasoningEffort, TokenUsage,
+    ToolExecutionTraceEvent,
+};
 
 use threadlane_agent::harness::{EventError, HarnessEvent, OperationIntent, Subscription};
 
@@ -170,7 +177,369 @@ impl CodingSessionHarness {
 
     pub(crate) fn append_message_to_path(path: &Path, message: AgentMessage) -> Result<(), String> {
         let mut journal = Self::open(path)?;
-        journal.append_message(message)
+        journal.append_message(message).map(|_| ())
+    }
+
+    pub(crate) fn capture_run_context(
+        &mut self,
+        run_id: &str,
+        lane: &str,
+        model: String,
+        provider: String,
+        reasoning_effort: ReasoningEffort,
+        prompt_cache_enabled: bool,
+        work_dir: String,
+        system_prompt: PromptSnapshot,
+        tool_schema_sha256: String,
+        enabled_tool_names: Vec<String>,
+        capabilities: Vec<String>,
+        capability_sha256: Option<String>,
+        prompt_template_ids: Vec<String>,
+        git_head: Option<String>,
+    ) -> Result<(), String> {
+        self.refresh()?;
+        let trace = |value: String| TraceString::new(value);
+        let record = HarnessRecord::RunContextCaptured {
+            id: format!("run-context-{run_id}"),
+            seq: harness_next_seq(self.store.store()),
+            lane: lane.into(),
+            timestamp: timestamp(),
+            run_id: run_id.into(),
+            attempt: None,
+            model: trace(model)?,
+            provider: trace(provider)?,
+            reasoning_effort,
+            prompt_cache_enabled,
+            work_dir: trace(work_dir)?,
+            system_prompt,
+            tool_schema_sha256: trace(tool_schema_sha256)?,
+            enabled_tool_names: enabled_tool_names
+                .into_iter()
+                .take(256)
+                .map(TraceString::new)
+                .collect::<Result<Vec<_>, _>>()?,
+            capabilities: CapabilitySnapshot {
+                capabilities: capabilities
+                    .into_iter()
+                    .take(256)
+                    .map(TraceString::new)
+                    .collect::<Result<Vec<_>, _>>()?,
+                fingerprint: capability_sha256.map(TraceString::new).transpose()?,
+            },
+            prompt_template_ids: prompt_template_ids
+                .into_iter()
+                .take(256)
+                .map(TraceString::new)
+                .collect::<Result<Vec<_>, _>>()?,
+            git_head: git_head.map(TraceString::new).transpose()?,
+        };
+        self.store
+            .append_record_gated(record)
+            .map_err(|error| error.to_string())?;
+        self.store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn record_provider_trace_to_path(
+        path: &Path,
+        run_id: &str,
+        event: ProviderTraceEvent,
+    ) -> Result<(), String> {
+        let mut journal = Self::open(path)?;
+        journal.refresh()?;
+        let event = match event {
+            ProviderTraceEvent::AssistantReady {
+                attempt,
+                request_id,
+                reasoning,
+                message,
+            } => {
+                let reasoning_entry_id = if let Some(reasoning) =
+                    reasoning.filter(|reasoning| !reasoning.trim().is_empty())
+                {
+                    Some(journal.append_message(AgentMessage::Custom {
+                        custom_type: "thinking".into(),
+                        payload: serde_json::json!({ "text": reasoning }),
+                    })?)
+                } else {
+                    None
+                };
+                let entry_id = journal.append_message(message)?;
+                let seq = harness_next_seq(journal.store.store());
+                let record = HarnessRecord::ProviderResponseAttached {
+                    id: format!("provider-response-{run_id}-{request_id}"),
+                    seq,
+                    lane: "main".into(),
+                    timestamp: timestamp(),
+                    run_id: run_id.into(),
+                    attempt,
+                    request_id: Some(TraceString::new(request_id)?),
+                    entry_id,
+                    reasoning_entry_id,
+                };
+                journal
+                    .store
+                    .append_record_gated(record)
+                    .map_err(|error| error.to_string())?;
+                journal
+                    .store
+                    .drive_to_completion()
+                    .map_err(|error| error.to_string())?;
+                return Ok(());
+            }
+            event => event,
+        };
+        let seq = harness_next_seq(journal.store.store());
+        let record = match event {
+            ProviderTraceEvent::AssistantReady { .. } => unreachable!(),
+            ProviderTraceEvent::Started {
+                attempt,
+                request_id,
+                model,
+                provider,
+            } => HarnessRecord::ProviderRequestStarted {
+                id: format!("provider-start-{run_id}-{request_id}"),
+                seq,
+                lane: "main".into(),
+                timestamp: timestamp(),
+                run_id: run_id.into(),
+                attempt,
+                provider: TraceString::new(provider)?,
+                model: TraceString::new(model)?,
+                request_id: Some(TraceString::new(request_id)?),
+            },
+            ProviderTraceEvent::Checkpoint {
+                attempt,
+                request_id,
+                checkpoint_index,
+                text,
+                reasoning,
+            } => {
+                let mut digest = Sha256::new();
+                digest.update(text.as_bytes());
+                if let Some(reasoning) = reasoning.as_deref() {
+                    digest.update(reasoning.as_bytes());
+                }
+                HarnessRecord::StreamCheckpoint {
+                    id: format!("stream-checkpoint-{run_id}-{request_id}-{checkpoint_index}"),
+                    seq,
+                    lane: "main".into(),
+                    timestamp: timestamp(),
+                    run_id: run_id.into(),
+                    attempt: Some(attempt),
+                    request_id: TraceString::new(request_id)?,
+                    assistant_entry_id: None,
+                    text: (!text.is_empty()).then(|| BoundedText::truncated(&text)),
+                    reasoning: reasoning
+                        .as_deref()
+                        .filter(|reasoning| !reasoning.is_empty())
+                        .map(BoundedText::truncated),
+                    checkpoint_index,
+                    byte_count: text.len() as u64
+                        + reasoning.as_ref().map_or(0, String::len) as u64,
+                    fingerprint: TraceString::new(format!("{:x}", digest.finalize()))?,
+                }
+            }
+            ProviderTraceEvent::Finished {
+                attempt,
+                request_id,
+                outcome,
+                error,
+                duration_ms,
+                usage,
+            } => HarnessRecord::ProviderRequestFinished {
+                id: format!("provider-finish-{run_id}-{request_id}"),
+                seq,
+                lane: "main".into(),
+                timestamp: timestamp(),
+                run_id: run_id.into(),
+                attempt,
+                request_id: Some(TraceString::new(request_id)?),
+                outcome,
+                error,
+                duration_ms: Some(duration_ms),
+                usage,
+            },
+        };
+        journal
+            .store
+            .append_record_gated(record)
+            .map_err(|error| error.to_string())?;
+        journal
+            .store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn record_permission_trace_to_path(
+        path: &Path,
+        run_id: Option<&str>,
+        event: PermissionTraceEvent,
+    ) -> Result<(), String> {
+        let mut journal = Self::open(path)?;
+        journal.refresh()?;
+        let state = Reducer::reduce(journal.store.store()).map_err(|error| error.to_string())?;
+        let attempt = run_id.and_then(|_| state.lane("main").map(|lane| lane.attempts));
+        let seq = harness_next_seq(journal.store.store());
+        let record = match event {
+            PermissionTraceEvent::Requested {
+                request_id,
+                capability,
+                scopes,
+                detail_sha256,
+                source,
+            } => HarnessRecord::PermissionRequested {
+                id: format!("permission-request-{request_id}-{seq}"),
+                seq,
+                lane: "main".into(),
+                timestamp: timestamp(),
+                run_id: run_id.map(str::to_owned),
+                attempt,
+                request_id: TraceString::new(request_id)?,
+                capability: TraceString::new(capability)?,
+                scopes,
+                detail_sha256: TraceString::new(detail_sha256)?,
+                source,
+            },
+            PermissionTraceEvent::Resolved {
+                request_id,
+                decision,
+                scope,
+                source,
+                remembered,
+            } => HarnessRecord::PermissionResolved {
+                id: format!("permission-resolved-{request_id}-{seq}"),
+                seq,
+                lane: "main".into(),
+                timestamp: timestamp(),
+                run_id: run_id.map(str::to_owned),
+                attempt,
+                request_id: TraceString::new(request_id)?,
+                decision,
+                scope,
+                source,
+                remembered,
+            },
+        };
+        journal
+            .store
+            .append_record_gated(record)
+            .map_err(|error| error.to_string())?;
+        journal
+            .store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) async fn record_tool_execution_to_path(
+        path: &Path,
+        run_id: &str,
+        event: ToolExecutionTraceEvent,
+    ) -> Result<(), String> {
+        let mut journal = Self::open(path)?;
+        journal.refresh()?;
+        if let ToolExecutionTraceEvent::Started {
+            tool_call_id,
+            tool_name,
+            effective_arguments,
+            ..
+        } = &event
+        {
+            let has_intent = journal.store.records().iter().any(|record| {
+                matches!(
+                    record,
+                    HarnessRecord::ToolStarted {
+                        run_id: intent_run_id,
+                        tool_call_id: intent_call_id,
+                        ..
+                    } if intent_run_id == run_id && intent_call_id == tool_call_id
+                )
+            });
+            if !has_intent {
+                let effective_args = serde_json::from_str(effective_arguments)
+                    .unwrap_or_else(|_| Value::String(effective_arguments.clone()));
+                journal
+                    .append_tool_intent_after_hook(run_id, tool_call_id, tool_name, effective_args)
+                    .await?;
+                journal.refresh()?;
+            }
+        }
+        let state = Reducer::reduce(journal.store.store()).map_err(|error| error.to_string())?;
+        let attempt = state.lane("main").map(|lane| lane.attempts);
+        let seq = harness_next_seq(journal.store.store());
+        let record = match event {
+            ToolExecutionTraceEvent::Started {
+                tool_call_id,
+                tool_name,
+                executor_kind,
+                effective_arguments: _,
+                started_at_ms,
+            } => HarnessRecord::ToolExecutionObserved {
+                id: format!("tool-execution-start-{run_id}-{tool_call_id}-{seq}"),
+                seq,
+                lane: "main".into(),
+                timestamp: timestamp(),
+                run_id: run_id.into(),
+                attempt,
+                tool_call_id: TraceString::new(tool_call_id)?,
+                tool_name: TraceString::new(tool_name)?,
+                executor_kind: TraceString::new(executor_kind)?,
+                phase: ToolExecutionPhase::Started,
+                started_at_ms: Some(started_at_ms),
+                duration_ms: None,
+                outcome: None,
+                exit_code: None,
+                cancelled: false,
+                is_error: None,
+                terminate: None,
+                output_sha256: None,
+                output_bytes: None,
+            },
+            ToolExecutionTraceEvent::Finished {
+                tool_call_id,
+                tool_name,
+                executor_kind,
+                started_at_ms,
+                duration_ms,
+                is_error,
+                terminate,
+                output_sha256,
+                output_bytes,
+            } => HarnessRecord::ToolExecutionObserved {
+                id: format!("tool-execution-finish-{run_id}-{tool_call_id}-{seq}"),
+                seq,
+                lane: "main".into(),
+                timestamp: timestamp(),
+                run_id: run_id.into(),
+                attempt,
+                tool_call_id: TraceString::new(tool_call_id)?,
+                tool_name: TraceString::new(tool_name)?,
+                executor_kind: TraceString::new(executor_kind)?,
+                phase: ToolExecutionPhase::Finished,
+                started_at_ms: Some(started_at_ms),
+                duration_ms: Some(duration_ms),
+                outcome: Some(if is_error {
+                    ToolExecutionOutcome::Failed
+                } else {
+                    ToolExecutionOutcome::Succeeded
+                }),
+                exit_code: None,
+                cancelled: false,
+                is_error: Some(is_error),
+                terminate: Some(terminate),
+                output_sha256: Some(TraceString::new(output_sha256)?),
+                output_bytes: Some(output_bytes),
+            },
+        };
+        journal
+            .store
+            .append_record_gated(record)
+            .map_err(|error| error.to_string())?;
+        journal
+            .store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())
     }
 
     pub(crate) async fn append_tool_intent_to_path(
@@ -184,6 +553,15 @@ impl CodingSessionHarness {
         journal
             .append_tool_intent_after_hook(run_id, tool_call_id, tool_name, effective_args)
             .await
+    }
+
+    pub(crate) async fn record_tool_result_to_path(
+        path: &Path,
+        run_id: &str,
+        result: &AgentToolResult,
+    ) -> Result<(), String> {
+        let mut journal = Self::open(path)?;
+        journal.finish_tool_result(run_id, result)
     }
 
     pub(crate) fn start_subagent_lane(
@@ -239,7 +617,7 @@ impl CodingSessionHarness {
             } else {
                 format!("{base_lane}-{attempt_idx}")
             };
-            let identity = SubagentLaneIdentity {
+            let mut identity = SubagentLaneIdentity {
                 lane_name: lane_name.clone(),
                 run_id: run_id.clone(),
                 source_leaf_id: source_leaf_id.map(str::to_owned),
@@ -275,6 +653,7 @@ impl CodingSessionHarness {
                             error: retry_err.to_string(),
                         });
                     }
+                    identity.source_leaf_id = None;
                 } else {
                     return Err(SubagentStartError {
                         identity: None,
@@ -325,6 +704,55 @@ impl CodingSessionHarness {
                 attempt: 1,
                 result_entry_id: format!("entry-{}-assistant-1", identity.run_id),
                 compaction_reason: None,
+            })
+            .map_err(|error| SubagentStartError {
+                identity: Some(identity.clone()),
+                error: error.to_string(),
+            })?;
+        self.store
+            .drive_to_completion()
+            .map_err(|error| SubagentStartError {
+                identity: Some(identity.clone()),
+                error: error.to_string(),
+            })?;
+        let state = Reducer::reduce(self.store.store()).map_err(|error| SubagentStartError {
+            identity: Some(identity.clone()),
+            error: error.to_string(),
+        })?;
+        let parent_run_id = state
+            .lane("main")
+            .and_then(|lane| lane.open_operation.clone());
+        let parent_attempt = state.lane("main").map(|lane| lane.attempts);
+        let seq = harness_next_seq(self.store.store());
+        self.store
+            .append_record_gated(HarnessRecord::SubagentLifecycle {
+                id: format!("subagent-started-{}-{seq}", identity.run_id),
+                seq,
+                lane: "main".into(),
+                timestamp: timestamp(),
+                run_id: parent_run_id,
+                attempt: parent_attempt,
+                child_run_id: TraceString::new(identity.run_id.clone()).map_err(|error| {
+                    SubagentStartError {
+                        identity: Some(identity.clone()),
+                        error,
+                    }
+                })?,
+                parent_tool_call_id: None,
+                task_index: None,
+                agent_id: TraceString::new(lane_hint).map_err(|error| SubagentStartError {
+                    identity: Some(identity.clone()),
+                    error,
+                })?,
+                subagent_lane: TraceString::new(identity.lane_name.clone()).map_err(|error| {
+                    SubagentStartError {
+                        identity: Some(identity.clone()),
+                        error,
+                    }
+                })?,
+                phase: SubagentLifecyclePhase::Started,
+                result_entry_id: None,
+                error: None,
             })
             .map_err(|error| SubagentStartError {
                 identity: Some(identity.clone()),
@@ -623,6 +1051,87 @@ impl CodingSessionHarness {
         Ok(main_run_id)
     }
 
+    pub(crate) fn observe_abort_signal(
+        &mut self,
+        run_id: &str,
+        acknowledged: bool,
+    ) -> Result<(), String> {
+        self.refresh()?;
+        let state = Reducer::reduce(&self.store).map_err(|error| error.to_string())?;
+        let attempt = state.lane("main").map(|lane| lane.attempts);
+        let unfinished_requests = self
+            .store
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                HarnessRecord::ProviderRequestStarted {
+                    run_id: provider_run_id,
+                    attempt,
+                    request_id: Some(request_id),
+                    ..
+                } if provider_run_id == run_id
+                    && !self.store.records().iter().any(|candidate| {
+                        matches!(
+                            candidate,
+                            HarnessRecord::ProviderRequestFinished {
+                                run_id: finished_run_id,
+                                request_id: Some(finished_request_id),
+                                ..
+                            } if finished_run_id == run_id && finished_request_id == request_id
+                        )
+                    }) =>
+                {
+                    Some((*attempt, request_id.clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for (provider_attempt, request_id) in unfinished_requests {
+            let seq = harness_next_seq(self.store.store());
+            self.store
+                .append_record_gated(HarnessRecord::ProviderRequestFinished {
+                    id: format!("provider-finish-{run_id}-{}", request_id.as_str()),
+                    seq,
+                    lane: "main".into(),
+                    timestamp: timestamp(),
+                    run_id: run_id.into(),
+                    attempt: provider_attempt,
+                    request_id: Some(request_id),
+                    outcome: ProviderOutcome::Aborted,
+                    error: Some(ProviderErrorSummary {
+                        category: ErrorCategory::Cancelled,
+                        code: TraceString::new("runtime_abort").ok(),
+                        retryable: false,
+                    }),
+                    duration_ms: None,
+                    usage: None,
+                })
+                .map_err(|error| error.to_string())?;
+            self.store
+                .drive_to_completion()
+                .map_err(|error| error.to_string())?;
+        }
+        let seq = harness_next_seq(self.store.store());
+        self.store
+            .append_record_gated(HarnessRecord::AbortObserved {
+                id: format!("abort-observed-{run_id}-{seq}"),
+                seq,
+                lane: "main".into(),
+                timestamp: timestamp(),
+                run_id: run_id.into(),
+                attempt,
+                observation: AbortObservation::SignalSent,
+                initiator: AbortInitiator::User,
+                target: AbortTarget::ActiveRun,
+                acknowledged,
+                detail: None,
+            })
+            .map_err(|error| error.to_string())?;
+        self.store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())
+    }
+
     /// Reconcile an aborted operation: insert abort entry, record, and
     /// finish with `Aborted` outcome.  Returns `true` if recovery produced
     /// a terminal state.
@@ -734,7 +1243,7 @@ impl CodingSessionHarness {
 
     /// Append a user/assistant/tool message as a harness entry on the main
     /// lane.
-    pub(crate) fn append_message(&mut self, message: AgentMessage) -> Result<(), String> {
+    pub(crate) fn append_message(&mut self, message: AgentMessage) -> Result<String, String> {
         self.append_message_inner(message, true)
     }
 
@@ -744,7 +1253,7 @@ impl CodingSessionHarness {
     /// occurrence.  It must not apply the legacy last-entry content check,
     /// because two consecutive provider messages can legitimately have the
     /// same serialized value.
-    fn append_synced_message(&mut self, message: AgentMessage) -> Result<(), String> {
+    fn append_synced_message(&mut self, message: AgentMessage) -> Result<String, String> {
         self.append_message_inner(message, false)
     }
 
@@ -752,16 +1261,14 @@ impl CodingSessionHarness {
         &mut self,
         message: AgentMessage,
         deduplicate_last_entry: bool,
-    ) -> Result<(), String> {
+    ) -> Result<String, String> {
         self.refresh()?;
-        if deduplicate_last_entry
-            && self
-                .store
-                .entries()
-                .last()
-                .is_some_and(|entry| entry.message == message)
-        {
-            return Ok(());
+        if deduplicate_last_entry {
+            if let Some(entry) = self.store.entries().last() {
+                if entry.message == message {
+                    return Ok(entry.id.clone());
+                }
+            }
         }
         let state = Reducer::reduce(&self.store).ok();
         let latest_main_entry = || {
@@ -827,7 +1334,7 @@ impl CodingSessionHarness {
         };
         self.store
             .append_entry_gated(HarnessEntry {
-                id,
+                id: id.clone(),
                 parent_id,
                 lane: "main".into(),
                 seq,
@@ -838,7 +1345,8 @@ impl CodingSessionHarness {
             .map_err(|error| error.to_string())?;
         self.store
             .drive_to_completion()
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        Ok(id)
     }
 
     /// Append a message to a named lane (used for subagent results).
@@ -1216,6 +1724,30 @@ impl CodingSessionHarness {
             .map_err(|error| error.to_string())
     }
 
+    /// Finish a freshly executed tool result: record the tool result Entry, ToolFinished, and drive effects.
+    pub(crate) fn finish_tool_result(
+        &mut self,
+        run_id: &str,
+        result: &AgentToolResult,
+    ) -> Result<(), String> {
+        self.refresh()?;
+        self.store
+            .finish_tool(
+                run_id,
+                HarnessToolResult {
+                    call_id: result.tool_call_id.clone(),
+                    name: result.name.clone(),
+                    content: result.content.clone(),
+                    is_error: result.is_error,
+                    terminate: result.terminates(),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        self.store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())
+    }
+
     /// Finish a replayed tool result.
     pub(crate) fn finish_replayed_tool(
         &mut self,
@@ -1277,7 +1809,7 @@ impl CodingSessionHarness {
             .store
             .entries()
             .iter()
-            .filter(|entry| entry.parent_id.as_deref() == Some(assistant_id.as_str()))
+            .filter(|entry| entry.seq > assistant.seq)
             .filter_map(|entry| match &entry.message {
                 AgentMessage::Tool {
                     tool_call_id, name, ..
@@ -1500,11 +2032,32 @@ impl CodingSessionHarness {
             .iter()
             .find(|lane| lane.open_operation.as_deref() == Some(run_id))
             .ok_or_else(|| format!("harness operation {run_id} is not open"))?;
+        let parent_id = if spec.index == 0 {
+            assistant_entry_id.to_string()
+        } else {
+            state
+                .lanes
+                .iter()
+                .flat_map(|lane| lane.tools.iter())
+                .find(|tool| {
+                    tool.run_id == run_id
+                        && tool.assistant_entry_id == assistant_entry_id
+                        && tool.tool_index + 1 == spec.index
+                })
+                .filter(|tool| {
+                    self.store
+                        .entries()
+                        .iter()
+                        .any(|entry| entry.id == tool.result_entry_id)
+                })
+                .map(|tool| tool.result_entry_id.clone())
+                .unwrap_or_else(|| assistant_entry_id.to_string())
+        };
         let seq = self.next_seq();
         self.store
             .append_entry_gated(HarnessEntry {
                 id: spec.result_entry_id.clone(),
-                parent_id: Some(assistant_entry_id.into()),
+                parent_id: Some(parent_id),
                 lane: lane.name.clone(),
                 seq,
                 timestamp: timestamp(),
@@ -1743,6 +2296,7 @@ impl CodingSessionHarness {
     /// in the harness store.  Called after each turn to ensure the
     /// canonical session path captures all assistant/tool entries.
     pub(crate) fn sync_messages(&mut self, messages: &[AgentMessage]) -> Result<(), String> {
+        self.refresh()?;
         // The provider gives us the complete conversation, not stable entry
         // IDs.  Track occurrences rather than using a set: two turns can
         // legitimately produce byte-for-byte identical assistant messages,
@@ -1750,9 +2304,8 @@ impl CodingSessionHarness {
         let mut existing: HashMap<String, usize> = HashMap::new();
         for entry in self
             .store
-            .entries()
-            .iter()
-            .filter(|entry| entry.lane == "main")
+            .model_history("main")
+            .map_err(|error| error.to_string())?
         {
             *existing.entry(format!("{:?}", entry.message)).or_default() += 1;
         }
@@ -1761,11 +2314,9 @@ impl CodingSessionHarness {
             if matches!(msg, AgentMessage::System { .. }) {
                 continue;
             }
-            // Only persist non-user messages; user prompts are handled by
-            // begin_run/accept_prompt.
-            if msg.is_user() {
-                continue;
-            }
+            // Initial prompts are already present through begin_run, while
+            // queued/steered/generated user messages may exist only in the
+            // provider transcript. Occurrence matching handles both cases.
             let key = format!("{:?}", msg);
             if let Some(count) = existing.get_mut(&key) {
                 if *count > 0 {
@@ -1773,10 +2324,68 @@ impl CodingSessionHarness {
                     continue;
                 }
             }
+            if let AgentMessage::Tool { tool_call_id, .. } = msg {
+                self.refresh()?;
+                let unfinished_tool =
+                    Reducer::reduce(self.store.store()).ok().and_then(|state| {
+                        let lane = state.lane("main")?;
+                        let run_id = lane.open_operation.as_deref()?;
+                        lane.tools.iter().find_map(|tool| {
+                            (tool.run_id == run_id
+                                && tool.tool_call_id == *tool_call_id
+                                && !tool.completed)
+                                .then(|| (run_id.to_owned(), tool.result_entry_id.clone()))
+                        })
+                    });
+                if let Some((run_id, result_entry_id)) = unfinished_tool {
+                    // ToolStarted may be durable while its result entry is
+                    // not, if the process was interrupted between those
+                    // writes. Recreate the entry before closing the intent.
+                    if !self
+                        .store
+                        .entries()
+                        .iter()
+                        .any(|entry| entry.id == result_entry_id)
+                    {
+                        self.append_synced_message(msg.clone())?;
+                    }
+                    self.finish_tool_message(&run_id, msg)?;
+                    continue;
+                }
+            }
             self.append_synced_message(msg.clone())?;
         }
         Ok(())
     }
+    pub(crate) fn assert_model_visible(&mut self, messages: &[AgentMessage]) -> Result<(), String> {
+        self.refresh()?;
+        let logged = self
+            .store
+            .model_history("main")
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|entry| entry.message)
+            .collect::<Vec<_>>();
+        let expected = messages
+            .iter()
+            .filter(|message| !matches!(message, AgentMessage::System { .. }))
+            .cloned()
+            .collect::<Vec<_>>();
+        if logged == expected {
+            return Ok(());
+        }
+        let mismatch = logged
+            .iter()
+            .zip(expected.iter())
+            .position(|(logged, expected)| logged != expected)
+            .unwrap_or_else(|| logged.len().min(expected.len()));
+        Err(format!(
+            "model-visible history diverges at index {mismatch}: durable_count={}, provider_count={}",
+            logged.len(),
+            expected.len()
+        ))
+    }
+
     /// Run hooks of the given kind for the main lane.
     pub(crate) async fn run_hooks(&self, kind: HookKind, context: &HookContext) {
         for failure in self.store.hooks().run(kind, context).await {
@@ -1814,6 +2423,193 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
         (dir, path)
+    }
+
+    #[tokio::test]
+    async fn tool_intent_precedes_physical_execution_observation() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        harness
+            .begin_run("run-1", AgentMessage::user("prompt", vec![]))
+            .unwrap();
+        harness.prepare_assistant_attempt("run-1").unwrap();
+        CodingSessionHarness::record_provider_trace_to_path(
+            &path,
+            "run-1",
+            ProviderTraceEvent::AssistantReady {
+                attempt: 1,
+                request_id: "request-1".into(),
+                reasoning: None,
+                message: AgentMessage::Assistant {
+                    content: None,
+                    tool_calls: Some(vec![threadlane_provider::openai::ToolCall {
+                        id: "call-1".into(),
+                        r#type: "function".into(),
+                        function: threadlane_provider::openai::ToolCallFunction {
+                            name: "read_file".into(),
+                            arguments: r#"{"path":"README.md"}"#.into(),
+                        },
+                        thought_signature: None,
+                    }]),
+                    stop_reason: None,
+                    deferred_handle: None,
+                },
+            },
+        )
+        .unwrap();
+
+        CodingSessionHarness::record_tool_execution_to_path(
+            &path,
+            "run-1",
+            ToolExecutionTraceEvent::Started {
+                tool_call_id: "call-1".into(),
+                tool_name: "read_file".into(),
+                executor_kind: "builtin".into(),
+                effective_arguments: r#"{"path":"README.md"}"#.into(),
+                started_at_ms: 10,
+            },
+        )
+        .await
+        .unwrap();
+
+        let store = JsonlStore::open(&path).unwrap();
+        let intent_seq = store.records().iter().find_map(|record| match record {
+            HarnessRecord::ToolStarted { seq, .. } => Some(*seq),
+            _ => None,
+        });
+        let observed_seq = store.records().iter().find_map(|record| match record {
+            HarnessRecord::ToolExecutionObserved { seq, .. } => Some(*seq),
+            _ => None,
+        });
+        assert!(matches!(
+            (intent_seq, observed_seq),
+            (Some(intent), Some(observed)) if intent < observed
+        ));
+    }
+
+    #[test]
+    fn provider_attempt_trace_has_one_ordered_terminal_record() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        harness
+            .begin_run("run-1", AgentMessage::user("prompt", vec![]))
+            .unwrap();
+
+        CodingSessionHarness::record_provider_trace_to_path(
+            &path,
+            "run-1",
+            ProviderTraceEvent::Started {
+                attempt: 1,
+                request_id: "request-1".into(),
+                model: "test-model".into(),
+                provider: "openai".into(),
+            },
+        )
+        .unwrap();
+        CodingSessionHarness::record_provider_trace_to_path(
+            &path,
+            "run-1",
+            ProviderTraceEvent::Finished {
+                attempt: 1,
+                request_id: "request-1".into(),
+                outcome: threadlane_agent::harness::ProviderOutcome::Completed,
+                error: None,
+                duration_ms: 12,
+                usage: Some(TokenUsage {
+                    input_tokens: 3,
+                    output_tokens: 2,
+                    total_tokens: 5,
+                    ..Default::default()
+                }),
+            },
+        )
+        .unwrap();
+
+        let store = JsonlStore::open(&path).unwrap();
+        let start_seq = store.records().iter().find_map(|record| match record {
+            HarnessRecord::ProviderRequestStarted {
+                seq, request_id, ..
+            } if request_id.as_ref().map(TraceString::as_str) == Some("request-1") => Some(*seq),
+            _ => None,
+        });
+        let finishes = store
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                HarnessRecord::ProviderRequestFinished {
+                    seq,
+                    request_id,
+                    usage,
+                    ..
+                } if request_id.as_ref().map(TraceString::as_str) == Some("request-1") => {
+                    assert_eq!(usage.as_ref().map(|usage| usage.total_tokens), Some(5));
+                    Some(*seq)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(finishes.len(), 1);
+        assert!(start_seq.is_some_and(|seq| seq < finishes[0]));
+    }
+
+    #[test]
+    fn cancellation_closes_an_unfinished_provider_attempt_before_abort_observation() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        harness
+            .begin_run("run-1", AgentMessage::user("prompt", vec![]))
+            .unwrap();
+        CodingSessionHarness::record_provider_trace_to_path(
+            &path,
+            "run-1",
+            ProviderTraceEvent::Started {
+                attempt: 1,
+                request_id: "request-1".into(),
+                model: "test-model".into(),
+                provider: "openai".into(),
+            },
+        )
+        .unwrap();
+        let run_id = harness.request_abort().unwrap().unwrap();
+        harness.observe_abort_signal(&run_id, true).unwrap();
+
+        let store = JsonlStore::open(&path).unwrap();
+        let provider_finish_seq = store.records().iter().find_map(|record| match record {
+            HarnessRecord::ProviderRequestFinished {
+                seq,
+                outcome: ProviderOutcome::Aborted,
+                ..
+            } => Some(*seq),
+            _ => None,
+        });
+        let abort_observed_seq = store.records().iter().find_map(|record| match record {
+            HarnessRecord::AbortObserved { seq, .. } => Some(*seq),
+            _ => None,
+        });
+        assert!(matches!(
+            (provider_finish_seq, abort_observed_seq),
+            (Some(provider), Some(abort)) if provider < abort
+        ));
+    }
+
+    #[test]
+    fn invalid_subagent_source_is_not_retained_for_passive_commit() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+
+        let identity = harness
+            .start_subagent_lane("worker", "inspect", Some("node_69"))
+            .unwrap();
+
+        assert!(identity.source_leaf_id.is_none());
+        assert!(harness.store.records().iter().any(|record| matches!(
+            record,
+            HarnessRecord::OperationStarted {
+                lane,
+                source_leaf_id: None,
+                ..
+            } if lane == &identity.lane_name
+        )));
     }
 
     // ── No-tool prompt: one OperationStarted + one StepAttempt + one
@@ -2101,6 +2897,216 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn sync_messages_repairs_a_tool_intent_without_its_result_entry() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        let run_id = harness.unique_run_id("test").unwrap();
+        harness
+            .begin_run(&run_id, AgentMessage::user("inspect", vec![]))
+            .unwrap();
+
+        harness
+            .append_message(AgentMessage::Assistant {
+                content: None,
+                tool_calls: Some(vec![threadlane_provider::openai::ToolCall {
+                    id: "call-1".into(),
+                    r#type: "function".into(),
+                    function: threadlane_provider::openai::ToolCallFunction {
+                        name: "read_file".into(),
+                        arguments: "{\"path\":\"README.md\"}".into(),
+                    },
+                    thought_signature: None,
+                }]),
+                stop_reason: None,
+                deferred_handle: None,
+            })
+            .unwrap();
+        harness
+            .append_tool_intent(
+                &run_id,
+                "call-1",
+                "read_file",
+                serde_json::json!({"path": "README.md"}),
+            )
+            .await
+            .unwrap();
+
+        let result = AgentMessage::Tool {
+            tool_call_id: "call-1".into(),
+            name: "read_file".into(),
+            content: "contents".into(),
+            is_error: false,
+            terminate: false,
+        };
+        harness.sync_messages(&[result.clone()]).unwrap();
+
+        let state = Reducer::reduce(&harness.store).unwrap();
+        assert!(state
+            .lane("main")
+            .unwrap()
+            .tools
+            .iter()
+            .find(|tool| tool.tool_call_id == "call-1")
+            .unwrap()
+            .completed);
+    }
+
+    #[test]
+    fn sync_messages_persists_provider_visible_queued_user_messages() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        let run_id = harness.unique_run_id("test").unwrap();
+        let initial = AgentMessage::user("initial", vec![]);
+        let queued = AgentMessage::user("queued follow-up", vec![]);
+
+        harness.begin_run(&run_id, initial.clone()).unwrap();
+        harness
+            .sync_messages(&[initial.clone(), queued.clone()])
+            .unwrap();
+        harness
+            .assert_model_visible(&[initial, queued.clone()])
+            .unwrap();
+
+        assert!(harness
+            .store
+            .model_history("main")
+            .unwrap()
+            .iter()
+            .any(|entry| entry.message == queued));
+    }
+
+    #[test]
+    fn model_visibility_rejects_extra_durable_messages() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        let run_id = harness.unique_run_id("test").unwrap();
+        let prompt = AgentMessage::user("inspect", vec![]);
+        let extra = AgentMessage::Assistant {
+            content: Some("stale response".into()),
+            tool_calls: None,
+            stop_reason: Some("end_turn".into()),
+            deferred_handle: None,
+        };
+
+        harness.begin_run(&run_id, prompt.clone()).unwrap();
+        harness.sync_messages(&[prompt.clone(), extra]).unwrap();
+
+        let error = harness.assert_model_visible(&[prompt]).unwrap_err();
+        assert!(error.contains("durable_count=2, provider_count=1"));
+    }
+
+    #[test]
+    fn sync_messages_persists_reasoning_before_model_visibility_check() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        let run_id = harness.unique_run_id("test").unwrap();
+        let prompt = AgentMessage::user("inspect", vec![]);
+        let thinking = AgentMessage::Custom {
+            custom_type: "thinking".into(),
+            payload: serde_json::json!({"text": "reasoning"}),
+        };
+
+        harness.begin_run(&run_id, prompt.clone()).unwrap();
+        harness
+            .sync_messages(&[prompt.clone(), thinking.clone()])
+            .unwrap();
+        harness
+            .assert_model_visible(&[prompt, thinking.clone()])
+            .unwrap();
+
+        assert!(harness
+            .store
+            .entries()
+            .iter()
+            .any(|entry| entry.message == thinking));
+    }
+
+    #[test]
+    fn stale_metadata_and_chained_tool_results_remain_model_visible_and_get_lifecycle_records() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        let run_id = harness.unique_run_id("test").unwrap();
+        let prompt = AgentMessage::user("inspect", vec![]);
+        harness.begin_run(&run_id, prompt.clone()).unwrap();
+        harness.prepare_assistant_attempt(&run_id).unwrap();
+
+        let mut stale_tree = SessionTree::load_from_file(&path).unwrap();
+        stale_tree.set_name("stale metadata".into()).unwrap();
+
+        let assistant = AgentMessage::Assistant {
+            content: None,
+            tool_calls: Some(vec![
+                threadlane_provider::openai::ToolCall {
+                    id: "call-1".into(),
+                    r#type: "function".into(),
+                    function: threadlane_provider::openai::ToolCallFunction {
+                        name: "read_file".into(),
+                        arguments: "{}".into(),
+                    },
+                    thought_signature: None,
+                },
+                threadlane_provider::openai::ToolCall {
+                    id: "call-2".into(),
+                    r#type: "function".into(),
+                    function: threadlane_provider::openai::ToolCallFunction {
+                        name: "grep".into(),
+                        arguments: "{}".into(),
+                    },
+                    thought_signature: None,
+                },
+            ]),
+            stop_reason: None,
+            deferred_handle: None,
+        };
+        let first_tool = AgentMessage::Tool {
+            tool_call_id: "call-1".into(),
+            name: "read_file".into(),
+            content: "first".into(),
+            is_error: false,
+            terminate: false,
+        };
+        let second_tool = AgentMessage::Tool {
+            tool_call_id: "call-2".into(),
+            name: "grep".into(),
+            content: "second".into(),
+            is_error: false,
+            terminate: false,
+        };
+        let final_assistant = AgentMessage::Assistant {
+            content: Some("done".into()),
+            tool_calls: None,
+            stop_reason: Some("end_turn".into()),
+            deferred_handle: None,
+        };
+        let messages = vec![prompt, assistant, first_tool, second_tool, final_assistant];
+
+        harness.sync_messages(&messages).unwrap();
+        harness.assert_model_visible(&messages).unwrap();
+        harness
+            .record_completed_tools_with_termination(&run_id, &HashMap::new())
+            .unwrap();
+
+        assert_eq!(
+            harness
+                .store
+                .records()
+                .iter()
+                .filter(|record| matches!(record, HarnessRecord::ToolStarted { .. }))
+                .count(),
+            2
+        );
+        assert_eq!(
+            harness
+                .store
+                .records()
+                .iter()
+                .filter(|record| matches!(record, HarnessRecord::ToolFinished { .. }))
+                .count(),
+            2
+        );
+    }
+
     #[test]
     fn sync_messages_persists_identical_empty_assistant_results_for_each_run() {
         let (_dir, path) = temp_session();
@@ -2149,5 +3155,58 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn assistant_ready_persists_provider_response_attached_record() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        let run_id = harness.unique_run_id("test").unwrap();
+        harness
+            .begin_run(&run_id, AgentMessage::user("test prompt", vec![]))
+            .unwrap();
+
+        CodingSessionHarness::record_provider_trace_to_path(
+            &path,
+            &run_id,
+            ProviderTraceEvent::AssistantReady {
+                attempt: 1,
+                request_id: "req-123".into(),
+                reasoning: Some("deep thinking".into()),
+                message: AgentMessage::Assistant {
+                    content: Some("final answer".into()),
+                    tool_calls: None,
+                    stop_reason: None,
+                    deferred_handle: None,
+                },
+            },
+        )
+        .unwrap();
+
+        let updated_harness = CodingSessionHarness::open(&path).unwrap();
+        let response_record = updated_harness
+            .store
+            .records()
+            .iter()
+            .find(|record| matches!(record, HarnessRecord::ProviderResponseAttached { .. }))
+            .expect("must record ProviderResponseAttached");
+
+        if let HarnessRecord::ProviderResponseAttached {
+            run_id: rec_run_id,
+            attempt,
+            request_id,
+            entry_id,
+            reasoning_entry_id,
+            ..
+        } = response_record
+        {
+            assert_eq!(rec_run_id, &run_id);
+            assert_eq!(*attempt, 1);
+            assert_eq!(request_id.as_ref().map(|r| r.as_str()), Some("req-123"));
+            assert!(!entry_id.is_empty());
+            assert!(reasoning_entry_id.is_some());
+        } else {
+            panic!("expected ProviderResponseAttached");
+        }
     }
 }

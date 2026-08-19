@@ -382,7 +382,11 @@ pub struct AdvisorNote {
 }
 
 impl AdvisorNote {
-    fn new(severity: AdvisorSeverity, summary: impl Into<String>, details: impl Into<String>) -> Self {
+    fn new(
+        severity: AdvisorSeverity,
+        summary: impl Into<String>,
+        details: impl Into<String>,
+    ) -> Self {
         Self {
             severity,
             summary: summary.into(),
@@ -426,6 +430,12 @@ pub struct ModelRoles {
     pub advisor: Option<String>,
     #[serde(default)]
     pub advisor_enabled: bool,
+    /// Ordered alternate models attempted after a pre-output quota/rate-limit failure.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback_chain: Vec<String>,
+    /// Persisted cooldown markers for temporarily exhausted provider/model routes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cooldown_models: Vec<String>,
 }
 
 impl ModelRoles {
@@ -434,11 +444,42 @@ impl ModelRoles {
     }
 
     pub fn resolve_plan<'a>(&'a self, fallback: &'a str) -> &'a str {
-        self.plan.as_deref().or(self.task.as_deref()).unwrap_or(fallback)
+        self.plan
+            .as_deref()
+            .or(self.task.as_deref())
+            .unwrap_or(fallback)
     }
 
     pub fn resolve_advisor<'a>(&'a self, fallback: &'a str) -> &'a str {
         self.advisor.as_deref().unwrap_or(fallback)
+    }
+
+    pub fn fallback_after<'a>(&'a self, current: &str) -> Option<&'a str> {
+        self.fallback_chain
+            .iter()
+            .map(String::as_str)
+            .find(|candidate| {
+                *candidate != current
+                    && !self
+                        .cooldown_models
+                        .iter()
+                        .any(|cooldown| cooldown == candidate)
+            })
+    }
+}
+
+#[cfg(test)]
+mod model_role_tests {
+    use super::ModelRoles;
+
+    #[test]
+    fn fallback_skips_current_and_cooldown_routes() {
+        let roles = ModelRoles {
+            fallback_chain: vec!["primary".into(), "cooling".into(), "backup".into()],
+            cooldown_models: vec!["cooling".into()],
+            ..Default::default()
+        };
+        assert_eq!(roles.fallback_after("primary"), Some("backup"));
     }
 }
 
@@ -452,6 +493,10 @@ pub struct TurnState {
 }
 
 impl TurnState {
+    pub fn reasoning_effort(&self) -> ReasoningEffort {
+        self.reasoning_effort
+    }
+
     pub(crate) fn new(model: impl Into<String>, system_prompt: impl Into<String>) -> Self {
         Self {
             system_prompt: system_prompt.into(),
@@ -462,7 +507,6 @@ impl TurnState {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -475,6 +519,7 @@ mod tests {
             plan: None,
             advisor: Some("advisor-model".into()),
             advisor_enabled: true,
+            ..Default::default()
         };
 
         assert_eq!(roles.resolve_task("base-model"), "task-model");

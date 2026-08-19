@@ -443,10 +443,7 @@ fn handle_command(
         requests.push(set_ui_status(""));
         requests.push(notify_ui("Goal cleared."));
         (
-            Response::ok(
-                "Goal cleared.",
-                serde_json::to_value(&state).unwrap(),
-            ),
+            Response::ok("Goal cleared.", serde_json::to_value(&state).unwrap()),
             requests,
         )
     } else {
@@ -473,7 +470,10 @@ fn handle_command(
 
         let new_goal = GoalState {
             version: 1,
-            id: format!("goal_{}", state.current_goal.as_ref().map_or(1, |g| g.turns_count + 1)),
+            id: format!(
+                "goal_{}",
+                state.current_goal.as_ref().map_or(1, |g| g.turns_count + 1)
+            ),
             objective,
             status: GoalStatus::Active,
             token_budget,
@@ -486,7 +486,10 @@ fn handle_command(
         let prompt = continuation_prompt(&new_goal);
         let status_line = format_goal_status_line(&new_goal);
         requests.push(set_ui_status(&status_line));
-        requests.push(notify_ui(&format!("Active goal set: {}", truncate_text(&new_goal.objective, 60))));
+        requests.push(notify_ui(&format!(
+            "Active goal set: {}",
+            truncate_text(&new_goal.objective, 60)
+        )));
         requests.push(request_turn(&prompt));
 
         let msg = format!("Goal activated:\n{status_line}");
@@ -559,12 +562,19 @@ fn handle_tool(
             goal.status = GoalStatus::Complete;
             let status_line = format_goal_status_line(goal);
             requests.push(set_ui_status(&status_line));
-            requests.push(notify_ui(&format!("Goal marked complete: {}", truncate_text(&goal.objective, 50))));
+            requests.push(notify_ui(&format!(
+                "Goal marked complete: {}",
+                truncate_text(&goal.objective, 50)
+            )));
 
             let message = format!(
                 "Goal successfully marked complete.\nObjective: {}\nEvidence: {}\n{}",
                 goal.objective,
-                if evidence.is_empty() { "(no evidence provided)" } else { evidence },
+                if evidence.is_empty() {
+                    "(no evidence provided)"
+                } else {
+                    evidence
+                },
                 status_line
             );
 
@@ -590,13 +600,14 @@ fn handle_tool(
                 );
             }
 
-            let token_budget = args
-                .get("token_budget")
-                .and_then(|v| v.as_u64());
+            let token_budget = args.get("token_budget").and_then(|v| v.as_u64());
 
             let new_goal = GoalState {
                 version: 1,
-                id: format!("goal_{}", state.current_goal.as_ref().map_or(1, |g| g.turns_count + 1)),
+                id: format!(
+                    "goal_{}",
+                    state.current_goal.as_ref().map_or(1, |g| g.turns_count + 1)
+                ),
                 objective: objective.to_string(),
                 status: GoalStatus::Active,
                 token_budget,
@@ -609,7 +620,10 @@ fn handle_tool(
             let prompt = continuation_prompt(&new_goal);
             let status_line = format_goal_status_line(&new_goal);
             requests.push(set_ui_status(&status_line));
-            requests.push(notify_ui(&format!("Goal set: {}", truncate_text(&new_goal.objective, 60))));
+            requests.push(notify_ui(&format!(
+                "Goal set: {}",
+                truncate_text(&new_goal.objective, 60)
+            )));
             requests.push(request_turn(&prompt));
 
             let message = format!("Goal created and activated:\n{status_line}");
@@ -662,27 +676,27 @@ fn handle_hook_invocation(
     }
 
     // Check if the assistant completed the goal in this turn
-    let called_complete = args
-        .get("tool_calls")
-        .and_then(|v| v.as_array())
-        .map_or(false, |calls| {
-            calls.iter().any(|call| {
-                call.get("name").and_then(|n| n.as_str()) == Some("update_goal")
-                    && (call
-                        .get("arguments")
-                        .and_then(|a| a.get("status"))
-                        .and_then(|s| s.as_str())
-                        == Some("complete")
-                        || call
+    let called_complete =
+        args.get("tool_calls")
+            .and_then(|v| v.as_array())
+            .map_or(false, |calls| {
+                calls.iter().any(|call| {
+                    call.get("name").and_then(|n| n.as_str()) == Some("update_goal")
+                        && (call
                             .get("arguments")
-                            .and_then(|a| a.as_str())
-                            .is_some_and(|s| s.contains("\"complete\"")))
+                            .and_then(|a| a.get("status"))
+                            .and_then(|s| s.as_str())
+                            == Some("complete")
+                            || call
+                                .get("arguments")
+                                .and_then(|a| a.as_str())
+                                .is_some_and(|s| s.contains("\"complete\"")))
+                })
             })
-        })
-        || args
-            .get("content")
-            .and_then(|v| v.as_str())
-            .is_some_and(|c| c.contains("<!-- GOAL_COMPLETE -->"));
+            || args
+                .get("content")
+                .and_then(|v| v.as_str())
+                .is_some_and(|c| c.contains("<!-- GOAL_COMPLETE -->"));
 
     if called_complete {
         goal.status = GoalStatus::Complete;

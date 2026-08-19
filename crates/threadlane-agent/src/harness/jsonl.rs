@@ -302,7 +302,7 @@ impl SessionStore for JsonlStore {
             record = record.with_seq(next_seq);
         }
         validate_candidate_record(self, &record)?;
-        append_json_line(&self.path.with_extension("harness.jsonl"), &record)?;
+        append_json_line(&self.path, &record)?;
         self.reload_unlocked()
     }
 }
@@ -459,23 +459,38 @@ impl JsonlStore {
     }
 }
 
-fn append_json_line<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), ReduceError> {
-    // ponytail: process-wide append lock; the session writer lease handles cross-process writers.
+pub(crate) fn with_session_writer_gate<T>(
+    path: &Path,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    let claim = writer_claim(path)?;
+    let _guard = claim
+        .gate
+        .lock()
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    operation()
+}
+
+pub(crate) fn append_session_json_line<T: serde::Serialize>(
+    path: &Path,
+    value: &T,
+) -> io::Result<()> {
+    // Process-wide append lock; the session writer lease handles cross-process writers.
     static APPEND_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     let _guard = APPEND_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .map_err(|error| ReduceError::Storage(error.to_string()))?;
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(path)
-        .map_err(|error| ReduceError::Storage(error.to_string()))?;
-    serde_json::to_writer(&mut file, value)
-        .map_err(|error| ReduceError::Storage(error.to_string()))?;
-    file.write_all(b"\n")
-        .and_then(|_| file.sync_all())
-        .map_err(|error| ReduceError::Storage(error.to_string()))
+        .open(path)?;
+    serde_json::to_writer(&mut file, value).map_err(io::Error::other)?;
+    file.write_all(b"\n").and_then(|_| file.sync_all())
+}
+
+fn append_json_line<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), ReduceError> {
+    append_session_json_line(path, value).map_err(|error| ReduceError::Storage(error.to_string()))
 }
 
 fn read_entries(path: &Path) -> io::Result<(Vec<Entry>, Vec<Record>)> {

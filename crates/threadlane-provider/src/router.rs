@@ -18,6 +18,15 @@ pub fn is_opencode_model(model: &str) -> bool {
     model.starts_with(OPENCODE_MODEL_PREFIX)
 }
 
+pub fn is_quota_or_rate_limit(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("429")
+        || error.contains("rate limit")
+        || error.contains("rate_limit")
+        || error.contains("quota")
+        || error.contains("too many requests")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PayloadFormat {
     ChatCompletions,
@@ -104,6 +113,7 @@ impl ProviderClient {
         }
     }
 
+    #[cfg(test)]
     fn determine_format(&self, model: &str) -> PayloadFormat {
         if is_antigravity_model(model) || is_opencode_model(model) {
             PayloadFormat::ChatCompletions
@@ -111,6 +121,18 @@ impl ProviderClient {
             PayloadFormat::Codex
         } else {
             PayloadFormat::ChatCompletions
+        }
+    }
+
+    pub fn provider_kind(&self, model: &str) -> &'static str {
+        if is_antigravity_model(model) {
+            "antigravity"
+        } else if is_opencode_model(model) {
+            "opencode-go"
+        } else if self.openai.is_codex() {
+            "codex"
+        } else {
+            "openai"
         }
     }
 
@@ -122,7 +144,6 @@ impl ProviderClient {
     ) {
         let source = payload_source.into();
         let model = source.model().to_string();
-
         let provider: Arc<dyn crate::traits::ModelProvider> = if is_antigravity_model(&model) {
             Arc::new(self.antigravity.clone())
         } else if is_opencode_model(&model) {
@@ -130,10 +151,64 @@ impl ProviderClient {
         } else {
             Arc::new(self.openai.clone())
         };
-
         provider
             .stream_chat_completion(source, prompt_cache_key, event_tx)
             .await;
+    }
+
+    /// Returns true for provider errors where retrying the identical request on
+    /// a configured fallback is safe (before any output was emitted).
+    pub fn is_quota_or_rate_limit(error: &str) -> bool {
+        is_quota_or_rate_limit(error)
+    }
+
+    /// Routes a completed provider stream through a one-shot fallback before
+    /// forwarding events to the caller. Fallback is permitted only if the
+    /// primary failed before emitting visible output, preventing duplication.
+    pub async fn stream_with_fallback<P, F, PrimaryFut, FallbackFut>(
+        &self,
+        primary: P,
+        fallback: F,
+        event_tx: mpsc::Sender<StreamEvent>,
+    ) where
+        P: FnOnce(mpsc::Sender<StreamEvent>) -> PrimaryFut,
+        F: FnOnce(mpsc::Sender<StreamEvent>) -> FallbackFut,
+        PrimaryFut: std::future::Future<Output = ()>,
+        FallbackFut: std::future::Future<Output = ()>,
+    {
+        let (primary_tx, mut primary_rx) = mpsc::channel(32);
+        primary(primary_tx).await;
+        let mut emitted_visible_output = false;
+        let mut retry = false;
+        while let Some(event) = primary_rx.recv().await {
+            match &event {
+                StreamEvent::ContentToken(_)
+                | StreamEvent::ReasoningToken(_)
+                | StreamEvent::ToolCallStart { .. } => {
+                    emitted_visible_output = true;
+                }
+                StreamEvent::Error(error)
+                    if !emitted_visible_output && is_quota_or_rate_limit(error) =>
+                {
+                    retry = true;
+                    break;
+                }
+                _ => {}
+            }
+            if event_tx.send(event).await.is_err() {
+                return;
+            }
+        }
+        if !retry {
+            return;
+        }
+        let (fallback_tx, mut fallback_rx) = mpsc::channel(32);
+        fallback(fallback_tx).await;
+        while let Some(event) = fallback_rx.recv().await {
+            if event_tx.send(event).await.is_err() {
+                return;
+            }
+        }
     }
 
     pub async fn fetch_deferred(
@@ -309,6 +384,49 @@ impl ProviderClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_retryable_quota_and_rate_limit_errors() {
+        assert!(is_quota_or_rate_limit("HTTP 429 Too Many Requests"));
+        assert!(is_quota_or_rate_limit("quota exhausted"));
+        assert!(is_quota_or_rate_limit("rate_limit_exceeded"));
+        assert!(!is_quota_or_rate_limit("HTTP 401 unauthorized"));
+    }
+
+    #[tokio::test]
+    async fn retries_quota_failure_on_fallback_without_forwarding_error() {
+        let client = ProviderClient::new("test", None);
+        let (tx, mut rx) = mpsc::channel(8);
+        client
+            .stream_with_fallback(
+                |tx| async move {
+                    tx.send(StreamEvent::Error("HTTP 429 quota exceeded".into()))
+                        .await
+                        .unwrap();
+                },
+                |tx| async move {
+                    tx.send(StreamEvent::ContentToken("recovered".into()))
+                        .await
+                        .unwrap();
+                    tx.send(StreamEvent::Finished {
+                        tool_calls: Vec::new(),
+                        usage: crate::openai::ProviderUsage::default(),
+                    })
+                    .await
+                    .unwrap();
+                },
+                tx,
+            )
+            .await;
+        assert!(
+            matches!(rx.recv().await, Some(StreamEvent::ContentToken(text)) if text == "recovered")
+        );
+        assert!(matches!(
+            rx.recv().await,
+            Some(StreamEvent::Finished { .. })
+        ));
+        assert!(rx.recv().await.is_none());
+    }
 
     #[test]
     fn routes_only_prefixed_models_to_antigravity() {

@@ -89,7 +89,11 @@ pub(crate) fn discover_skills(project_root: Option<&Path>) -> Vec<SkillMetadata>
     manager.list_skills()
 }
 
-pub(crate) fn set_skill_enabled(project_root: &Path, skill_id: &str, enabled: bool) -> Result<(), String> {
+pub(crate) fn set_skill_enabled(
+    project_root: &Path,
+    skill_id: &str,
+    enabled: bool,
+) -> Result<(), String> {
     SkillSettings::load(project_root).set_enabled(project_root, skill_id, enabled)
 }
 

@@ -1,6 +1,6 @@
 use threadlane_agent::harness::{
-    Entry, MemoryStore, OperationIntent, OperationOutcome, Record, Reducer, SessionStore,
-    SqliteStore,
+    AgentHarness, Entry, MemoryStore, OperationIntent, OperationOutcome, Record, Reducer,
+    SessionStore, SqliteStore,
 };
 use threadlane_agent::AgentMessage;
 
@@ -76,6 +76,30 @@ fn exercise<S: SessionStore>(store: &mut S) {
             value: "gpt-test".into(),
         })
         .unwrap();
+}
+
+#[test]
+fn model_visible_messages_are_reconstructable_from_log() {
+    let mut harness = AgentHarness::new(MemoryStore::new("session"));
+    let model_visible_messages = vec![AgentMessage::user("hello", vec![])];
+    harness
+        .accept_prompt("run-1", model_visible_messages[0].clone())
+        .unwrap();
+    harness.drive_to_completion().unwrap();
+
+    let logged_messages = harness
+        .store()
+        .model_history("main")
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.message)
+        .collect::<Vec<_>>();
+
+    assert_eq!(logged_messages, model_visible_messages);
+    assert_eq!(
+        threadlane_agent::provider::convert_to_llm(&logged_messages),
+        threadlane_agent::provider::convert_to_llm(&model_visible_messages),
+    );
 }
 
 #[test]

@@ -11,8 +11,9 @@ pub(crate) use runtime::{
 };
 pub use runtime::{
     cancel_open_subagent_operations, AgentRunTask, CodingAgent, CodingAgentCancellation,
-    CodingAgentOptions, CodingAgentWorkHandle, SubagentCancellationGuard, SubagentInnerTool,
-    SubagentInnerToolData, SubagentResult, SubagentSessionData,
+    CodingAgentOptions, CodingAgentWorkHandle, HarnessCompositionSnapshot,
+    SubagentCancellationGuard, SubagentInnerTool, SubagentInnerToolData, SubagentResult,
+    SubagentSessionData,
 };
 #[cfg(test)]
 pub(crate) use runtime::{
@@ -33,11 +34,11 @@ mod tests {
     use crate::system_prompt::SystemPromptConfig;
     use serde_json::Value;
     use std::collections::{HashMap, HashSet};
+    use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration as StdDuration, Instant};
-    use std::fs;
     use threadlane_agent::harness::{
         AgentHarness, HookContext, HookEffect, HookHandler, HookKind, JsonlStore, OperationIntent,
         OperationOutcome, QueueKind, Record, Reducer, SessionStore,
@@ -83,6 +84,98 @@ mod tests {
             .records()
             .windows(2)
             .all(|pair| pair[0].seq() < pair[1].seq()));
+    }
+
+    #[tokio::test]
+    async fn failed_run_persists_an_error_message_for_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut options = coding_agent_options(dir.path().to_path_buf());
+        options.session_file = Some(path.clone());
+        let mut agent = CodingAgent::new(options);
+        let run_id = agent
+            .begin_harness_run(AgentMessage::user("prompt", vec![]))
+            .await
+            .unwrap()
+            .unwrap();
+
+        agent
+            .finish_harness_run(
+                Some(&run_id),
+                OperationOutcome::Failed,
+                Some("provider failed".into()),
+            )
+            .await
+            .unwrap();
+
+        let store = JsonlStore::open(&path).unwrap();
+        assert!(store.entries().iter().any(|entry| {
+            matches!(
+                &entry.message,
+                AgentMessage::Custom { custom_type, payload }
+                    if custom_type == "agent_error"
+                        && payload.get("error").and_then(Value::as_str)
+                            == Some("provider failed")
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn accepted_harness_prompt_uses_its_canonical_entry_as_active_leaf() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut options = coding_agent_options(dir.path().to_path_buf());
+        options.session_file = Some(path.clone());
+        let mut agent = CodingAgent::new(options);
+
+        agent
+            .begin_harness_run(AgentMessage::user("prompt", vec![]))
+            .await
+            .unwrap();
+
+        let active_leaf = agent.session_tree.active_node_id().unwrap();
+        let store = JsonlStore::open(&path).unwrap();
+        assert!(store.entries().iter().any(|entry| entry.id == active_leaf));
+        assert!(!active_leaf.starts_with("node_"));
+        let context = store
+            .records()
+            .iter()
+            .find(|record| matches!(record, HarnessRecord::RunContextCaptured { .. }))
+            .expect("accepted run must persist its resolved context");
+        assert!(matches!(
+            context,
+            HarnessRecord::RunContextCaptured {
+                system_prompt: threadlane_agent::harness::PromptSnapshot::Full { content, .. },
+                model,
+                provider,
+                enabled_tool_names,
+                ..
+            } if !content.is_empty()
+                && !model.as_str().is_empty()
+                && !provider.as_str().is_empty()
+                && !enabled_tool_names.is_empty()
+        ));
+    }
+
+    #[test]
+    fn adopted_background_run_captures_context_before_provider_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut options = coding_agent_options(dir.path().to_path_buf());
+        options.session_file = Some(path.clone());
+        let mut agent = CodingAgent::new(options);
+        let mut harness = HarnessJournal::open(&path).unwrap();
+        harness
+            .begin_run("background-run", AgentMessage::user("prompt", vec![]))
+            .unwrap();
+
+        agent.adopt_harness_run("background-run").unwrap();
+
+        let store = JsonlStore::open(&path).unwrap();
+        assert!(store.records().iter().any(|record| matches!(
+            record,
+            HarnessRecord::RunContextCaptured { run_id, .. } if run_id == "background-run"
+        )));
     }
 
     #[test]
@@ -858,7 +951,15 @@ mod tests {
             runs.len()
         );
         let store = JsonlStore::open(&session_file).unwrap();
-        assert_eq!(store.records().len(), 16);
+        assert_eq!(store.records().len(), 24);
+        assert_eq!(
+            store
+                .records()
+                .iter()
+                .filter(|record| matches!(record, HarnessRecord::SubagentLifecycle { .. }))
+                .count(),
+            runs.len()
+        );
     }
 
     #[test]
@@ -2026,12 +2127,13 @@ mod tests {
             capability,
             tool_policy: None,
             extensions: Arc::new(WasiExtensionManager::new()),
-            work_dir,
+            work_dir: work_dir.clone(),
             event_tx,
             allowed_hosts: Arc::new(HashSet::new()),
             permissions: None,
             agent_work,
             agent_runner: None,
+            session_file: Some(work_dir.join("session.jsonl")),
             persist_tool_policy: false,
             managed_processes: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
@@ -2628,7 +2730,9 @@ mod tests {
         let extension_dir = dir.path().join(".threadlane/extensions/queue_command_ext");
         std::fs::create_dir_all(&extension_dir).unwrap();
         std::fs::write(extension_dir.join("extension.wasm"), wasm).unwrap();
-        let mut coding_agent = CodingAgent::new(coding_agent_options(dir.path().to_path_buf()));
+        let mut options = coding_agent_options(dir.path().to_path_buf());
+        options.session_file = Some(dir.path().join("session.jsonl"));
+        let mut coding_agent = CodingAgent::new(options);
         assert!(coding_agent.wasi_extensions.has_command("queue"));
         let observed = Arc::new(Mutex::new(Vec::new()));
         coding_agent.agent_work.set_test_observer(observed.clone());

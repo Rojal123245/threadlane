@@ -1,9 +1,20 @@
 pub mod hashline;
+pub mod search;
+mod virtual_read;
+
+fn read_virtual_skill(root: &Path, name: &str) -> String {
+    virtual_read::skill(root, name)
+}
+
+fn read_virtual_agent(root: &Path, name: &str) -> String {
+    virtual_read::agent(root, name)
+}
 
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 
 fn tool_definitions() -> Vec<Value> {
     vec![
@@ -55,6 +66,27 @@ fn tool_definitions() -> Vec<Value> {
                     }
                 },
                 "required": ["path", "edits"]
+            }
+        }),
+        json!({
+            "name": "grep_search",
+            "description": "Search workspace files in-process without spawning a child process.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string" },
+                    "glob": { "type": "string" }
+                },
+                "required": ["pattern"]
+            }
+        }),
+        json!({
+            "name": "accept_edit",
+            "description": "Apply a previously staged edit proposal by ID.",
+            "parameters": {
+                "type": "object",
+                "properties": { "proposal_id": { "type": "string" } },
+                "required": ["proposal_id"]
             }
         }),
         json!({
@@ -288,6 +320,18 @@ fn validate_cwd_in_workspace(
     Ok(canonical_target)
 }
 
+#[derive(Debug, Clone)]
+struct EditProposal {
+    path: PathBuf,
+    content: String,
+}
+
+fn proposals() -> &'static Mutex<std::collections::HashMap<String, EditProposal>> {
+    static PROPOSALS: OnceLock<Mutex<std::collections::HashMap<String, EditProposal>>> =
+        OnceLock::new();
+    PROPOSALS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
 pub fn execute_tool(name: &str, args_json: &str) -> String {
     execute_tool_in_workspace(name, args_json, Path::new("."))
 }
@@ -299,8 +343,48 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
     };
 
     match name {
+        "accept_edit" => {
+            let proposal_id = match args.get("proposal_id").and_then(Value::as_str) {
+                Some(id) => id,
+                None => return "Error: 'proposal_id' parameter is required".into(),
+            };
+            let Some(proposal) = proposals()
+                .lock()
+                .ok()
+                .and_then(|mut map| map.remove(proposal_id))
+            else {
+                return format!("Error: unknown edit proposal '{proposal_id}'");
+            };
+            match fs::write(&proposal.path, proposal.content) {
+                Ok(()) => format!("Accepted edit proposal '{proposal_id}'."),
+                Err(error) => format!("Error applying proposal '{proposal_id}': {error}"),
+            }
+        }
+        "grep_search" => {
+            let pattern = match args.get("pattern").and_then(Value::as_str) {
+                Some(pattern) => pattern,
+                None => return "Error: 'pattern' parameter is required".into(),
+            };
+            let glob = args.get("glob").and_then(Value::as_str);
+            match search::grep_search(workspace_root, pattern, glob) {
+                Ok(result) => result,
+                Err(error) => format!("Error searching workspace: {error}"),
+            }
+        }
         "read_file" => {
             let raw_path = match args.get("path").and_then(|v| v.as_str()) {
+                Some(path) if path.starts_with("skill://") => {
+                    return read_virtual_skill(workspace_root, &path[8..]);
+                }
+                Some(path) if path.starts_with("agent://") => {
+                    return read_virtual_agent(workspace_root, &path[8..]);
+                }
+                Some(path) if path.starts_with("pr://") => {
+                    return virtual_read::github(workspace_root, "pr", &path[5..]);
+                }
+                Some(path) if path.starts_with("issue://") => {
+                    return virtual_read::github(workspace_root, "issue", &path[8..]);
+                }
                 Some(p) => p,
                 None => return "Error: 'path' parameter is required".into(),
             };
@@ -403,16 +487,39 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
 
             match fs::read_to_string(&validated_path) {
                 Ok(content) => match hashline::apply_hashline_edits(&content, &edits) {
-                    Ok(new_content) => match fs::write(&validated_path, new_content) {
-                        Ok(_) => {
-                            let diag = run_post_edit_diagnostics(workspace_root, raw_path);
-                            format!(
-                                "Successfully applied {} hashline edit(s) to '{raw_path}'{diag}",
-                                edits.len()
-                            )
+                    Ok(new_content) => {
+                        let interactive = args
+                            .get("interactive")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        if interactive {
+                            let proposal_id = format!(
+                                "edit-{}",
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_nanos()
+                            );
+                            if let Ok(mut map) = proposals().lock() {
+                                map.insert(
+                                    proposal_id.clone(),
+                                    EditProposal {
+                                        path: validated_path,
+                                        content: new_content,
+                                    },
+                                );
+                            }
+                            format!("Proposed edit '{}'. Review the staged result, then call accept_edit with proposal_id.", proposal_id)
+                        } else {
+                            match fs::write(&validated_path, new_content) {
+                                Ok(_) => {
+                                    let diag = run_post_edit_diagnostics(workspace_root, raw_path);
+                                    format!("Successfully applied {} hashline edit(s) to '{raw_path}'{diag}", edits.len())
+                                }
+                                Err(e) => format!("Error writing file '{raw_path}': {e}"),
+                            }
                         }
-                        Err(e) => format!("Error writing file '{raw_path}': {e}"),
-                    },
+                    }
                     Err(e) => format!("Error applying hashline edits to '{raw_path}': {e}"),
                 },
                 Err(e) => format!("Error reading file '{raw_path}': {e}"),
@@ -916,6 +1023,29 @@ mod tests {
         let dir = tempdir().unwrap();
         let res = run_post_edit_diagnostics(dir.path(), "readme.txt");
         assert_eq!(res, "");
+    }
+
+    #[test]
+    fn rust_write_surfaces_compile_diagnostics_in_the_same_tool_result() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"diagnostic-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        let result = execute_tool_in_workspace(
+            "write_file",
+            &serde_json::json!({
+                "path": "src/lib.rs",
+                "content": "pub fn broken() { let _: = 1; }"
+            })
+            .to_string(),
+            dir.path(),
+        );
+        assert!(result.starts_with("Successfully wrote"));
+        assert!(result.contains("[LSP Diagnostics Post-Check]"));
+        assert!(result.contains("Found 1 error(s)"), "{result}");
+        assert!(result.contains("Line 1"), "{result}");
     }
 
     #[test]

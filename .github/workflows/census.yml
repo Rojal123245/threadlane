@@ -1,0 +1,22 @@
+name: Panic Construct Census
+
+on:
+  pull_request:
+    paths:
+      - "crates/threadlane-agent/**"
+      - "crates/threadlane-coding-agent/**"
+      - "crates/threadlane-wasi/**"
+      - "scripts/unwrap_census.sh"
+      - ".github/workflows/census.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  census:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run panic construct census
+        run: scripts/unwrap_census.sh

@@ -179,6 +179,81 @@ fn prompt_acceptance_commits_input_and_provisions_the_first_attempt() {
 }
 
 #[test]
+fn killed_child_lane_resumes_without_duplicate_durable_records() {
+    let mut store = MemoryStore::new("session-1");
+    let root = store.append_message(None, AgentMessage::user("parent", vec![]));
+    store
+        .try_append_entry(threadlane_agent::harness::Entry {
+            id: "child-leaf".into(),
+            parent_id: Some(root),
+            lane: "child".into(),
+            seq: 2,
+            timestamp: 2,
+            message: AgentMessage::user("child", vec![]),
+            terminate: false,
+        })
+        .unwrap();
+
+    let mut first = AgentHarness::new(store);
+    first
+        .accept_prompt_on_lane("child", "child-run", AgentMessage::user("continue", vec![]))
+        .unwrap();
+    assert!(first.drive_one().unwrap());
+    let prefix = first.store().entries().to_vec();
+    let records_prefix = first.store().records().to_vec();
+    drop(first);
+
+    let mut resumed_store = MemoryStore::new("session-1");
+    for entry in prefix {
+        resumed_store.try_append_entry(entry).unwrap();
+    }
+    for record in records_prefix {
+        resumed_store.try_append_record(record).unwrap();
+    }
+    let mut resumed = AgentHarness::new(resumed_store);
+    resumed
+        .resume_no_tool_run_on_lane(
+            "child",
+            "child-run",
+            "continue",
+            AgentMessage::Assistant {
+                content: Some("done".into()),
+                tool_calls: None,
+                stop_reason: Some("stop".into()),
+                deferred_handle: None,
+            },
+        )
+        .unwrap();
+    resumed.drive_to_completion().unwrap();
+
+    let records = resumed.store().records();
+    let mut ids = records.iter().map(|record| record.id()).collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), records.len());
+    assert_eq!(
+        records
+            .iter()
+            .filter(
+                |record| matches!(record, Record::OperationStarted { id, .. } if id == "child-run")
+            )
+            .count(),
+        1
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(record, Record::StepAttempt { run_id, .. } if run_id == "child-run"))
+            .count(),
+        1
+    );
+    assert!(resumed.store().entries().iter().any(|entry| {
+        entry.lane == "child"
+            && matches!(&entry.message, AgentMessage::Assistant { content: Some(text), .. } if text == "done")
+    }));
+}
+
+#[test]
 fn no_tool_acceptance_writes_prompt_and_result_on_a_child_lane() {
     let mut store = MemoryStore::new("session-1");
     let root = store.append_message(None, AgentMessage::user("parent", vec![]));

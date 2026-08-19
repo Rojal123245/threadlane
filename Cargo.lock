@@ -7160,6 +7160,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.19",
  "threadlane-provider",
@@ -7195,6 +7196,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.19",
  "threadlane-agent",
@@ -7209,6 +7211,9 @@ dependencies = [
 [[package]]
 name = "threadlane-git"
 version = "0.1.0"
+dependencies = [
+ "tempfile",
+]
 
 [[package]]
 name = "threadlane-gpui"
@@ -7228,13 +7233,16 @@ dependencies = [
  "robius-open",
  "serde",
  "serde_json",
+ "tempfile",
  "threadlane-agent",
  "threadlane-auth",
  "threadlane-coding-agent",
  "threadlane-git",
  "threadlane-provider",
+ "threadlane-skills",
  "threadlane-tools",
  "threadlane-updater",
+ "threadlane-wasi",
  "tokio",
  "vt100",
 ]

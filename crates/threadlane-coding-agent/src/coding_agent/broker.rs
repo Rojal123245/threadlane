@@ -15,8 +15,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::time::{timeout, Duration};
 
 use super::{
-    AgentRunTask, AgentRunner, AgentWork, AgentWorkScheduler, MAX_SUBAGENT_TASKS,
-    MAX_SUBAGENT_TASK_CHARS,
+    runtime::enqueue_harness_follow_up, AgentRunTask, AgentRunner, AgentWork, AgentWorkScheduler,
+    MAX_SUBAGENT_TASKS, MAX_SUBAGENT_TASK_CHARS,
 };
 
 pub(crate) const CAPABILITY_TIMEOUT: Duration = Duration::from_secs(2);
@@ -58,6 +58,7 @@ pub(crate) struct HostCapabilityHandler {
     pub(crate) permissions: Option<Arc<PermissionManager>>,
     pub(crate) agent_work: AgentWorkScheduler,
     pub(crate) agent_runner: Option<AgentRunner>,
+    pub(crate) session_file: Option<PathBuf>,
     pub(crate) persist_tool_policy: bool,
     pub(crate) managed_processes: ManagedProcessRegistry,
 }
@@ -231,17 +232,20 @@ impl HostCapabilityHandler {
     }
 
     fn handle_agent(&self, request: &BrokerRequest) -> Result<Value, BrokerError> {
-        let work = match request.operation.as_str() {
-            "request_turn" => {
-                AgentWork::RequestTurn(string_argument(&request.arguments, "prompt")?.to_string())
-            }
-            "queue_message" => AgentWork::QueueMessage {
-                content: string_argument(&request.arguments, "content")?.to_string(),
-                images: Vec::new(),
-            },
+        let content = match request.operation.as_str() {
+            "request_turn" => string_argument(&request.arguments, "prompt")?.to_string(),
+            "queue_message" => string_argument(&request.arguments, "content")?.to_string(),
             _ => return unknown_operation(self.capability, &request.operation),
         };
-        self.agent_work.schedule(work);
+        let session_file = self
+            .session_file
+            .as_deref()
+            .ok_or_else(|| internal_error("Agent queue durability is unavailable"))?;
+        enqueue_harness_follow_up(session_file, content.clone(), Vec::new()).map_err(host_error)?;
+        self.agent_work.schedule(AgentWork::QueueMessage {
+            content,
+            images: Vec::new(),
+        });
         Ok(serde_json::json!({"queued": true}))
     }
 
@@ -759,12 +763,19 @@ impl HostCapabilityHandler {
             .host_str()
             .ok_or_else(|| invalid_argument("URL is missing a host"))?
             .to_ascii_lowercase();
-        let approved = self.allowed_hosts.contains(&host)
-            || self
-                .permissions
-                .as_ref()
-                .is_some_and(|permissions| permissions.network_host_is_approved(&host));
+        let policy_approved = self.allowed_hosts.contains(&host);
+        let persisted_approved = self
+            .permissions
+            .as_ref()
+            .is_some_and(|permissions| permissions.network_host_is_approved(&host));
+        let approved = policy_approved || persisted_approved;
         let decision = if approved {
+            if let Some(permissions) = &self.permissions {
+                permissions
+                    .trace_preapproved_network_host(url, persisted_approved)
+                    .await
+                    .map_err(host_error)?;
+            }
             PermissionDecision::AllowOnce
         } else if let Some(permissions) = &self.permissions {
             permissions.request_network_host(&host, url).await
@@ -972,10 +983,7 @@ fn unknown_operation(capability: &str, operation: &str) -> Result<Value, BrokerE
         message: format!("Capability `{capability}` does not implement operation `{operation}`"),
     })
 }
-fn string_argument<'a>(
-    arguments: &'a Value,
-    name: &str,
-) -> Result<&'a str, BrokerError> {
+fn string_argument<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, BrokerError> {
     arguments
         .get(name)
         .and_then(Value::as_str)

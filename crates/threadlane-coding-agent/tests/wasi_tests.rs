@@ -1008,14 +1008,21 @@ fn goal_extension_command_and_tool_workflow() {
     assert_eq!(cmd_res.host_broker_requests[0].request.capability, "ui");
     assert_eq!(cmd_res.host_broker_requests[1].request.capability, "ui");
     assert_eq!(cmd_res.host_broker_requests[2].request.capability, "agent");
-    assert_eq!(cmd_res.host_broker_requests[2].request.operation, "request_turn");
+    assert_eq!(
+        cmd_res.host_broker_requests[2].request.operation,
+        "request_turn"
+    );
 
     // 2. Call get_goal tool
     let get_res = manager
         .execute_tool_with_broker_requests("get_goal", "{}")
         .unwrap()
         .unwrap();
-    assert!(get_res.response.message.unwrap().contains("implement feature X"));
+    assert!(get_res
+        .response
+        .message
+        .unwrap()
+        .contains("implement feature X"));
 
     // 3. Trigger assistant_message hook -> schedules continuation turn
     let hook_args = serde_json::json!({
@@ -1027,8 +1034,14 @@ fn goal_extension_command_and_tool_workflow() {
         .pop()
         .unwrap()
         .unwrap();
-    assert_eq!(hook_res.response.message.unwrap(), "continuation turn scheduled");
-    assert!(hook_res.host_broker_requests.iter().any(|r| r.request.operation == "request_turn"));
+    assert_eq!(
+        hook_res.response.message.unwrap(),
+        "continuation turn scheduled"
+    );
+    assert!(hook_res
+        .host_broker_requests
+        .iter()
+        .any(|r| r.request.operation == "request_turn"));
 
     // 4. Assistant calls update_goal with status complete
     let update_args = serde_json::json!({
@@ -1039,7 +1052,11 @@ fn goal_extension_command_and_tool_workflow() {
         .execute_tool_with_broker_requests("update_goal", &update_args.to_string())
         .unwrap()
         .unwrap();
-    assert!(update_res.response.message.unwrap().contains("Goal successfully marked complete"));
+    assert!(update_res
+        .response
+        .message
+        .unwrap()
+        .contains("Goal successfully marked complete"));
 
     // 5. Subsequent assistant_message hook recognizes goal is complete and does not request more turns
     let final_hook_res = manager
@@ -1047,6 +1064,12 @@ fn goal_extension_command_and_tool_workflow() {
         .pop()
         .unwrap()
         .unwrap();
-    assert_eq!(final_hook_res.response.message.unwrap(), "goal status is complete");
-    assert!(!final_hook_res.host_broker_requests.iter().any(|r| r.request.operation == "request_turn"));
+    assert_eq!(
+        final_hook_res.response.message.unwrap(),
+        "goal status is complete"
+    );
+    assert!(!final_hook_res
+        .host_broker_requests
+        .iter()
+        .any(|r| r.request.operation == "request_turn"));
 }

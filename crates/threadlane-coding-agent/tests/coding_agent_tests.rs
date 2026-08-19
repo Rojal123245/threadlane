@@ -54,7 +54,6 @@ async fn compact_command_stays_in_current_session() {
         .any(|message| threadlane_agent::compaction_summary_text(message).is_some()));
 }
 
-
 #[tokio::test]
 async fn roles_command_updates_task_plan_and_advisor_roles() {
     let tmp = tempdir().unwrap();
@@ -84,22 +83,21 @@ async fn roles_command_updates_task_plan_and_advisor_roles() {
         &mut tree,
     )
     .await;
-    execute_slash_command(
-        CommandAction::Advisor("on".into()),
-        &mut agent,
-        &mut tree,
-    )
-    .await;
+    execute_slash_command(CommandAction::Advisor("on".into()), &mut agent, &mut tree).await;
     assert_eq!(agent.model_roles().resolve_plan("base-model"), "plan-model");
     assert!(agent.model_roles().advisor_enabled);
 
     let configured = agent.model_roles().clone();
-    assert_eq!(configured, ModelRoles {
-        task: Some("task-model".into()),
-        plan: Some("plan-model".into()),
-        advisor: None,
-        advisor_enabled: true,
-    });
+    assert_eq!(
+        configured,
+        ModelRoles {
+            task: Some("task-model".into()),
+            plan: Some("plan-model".into()),
+            advisor: None,
+            advisor_enabled: true,
+            ..Default::default()
+        }
+    );
 }
 
 #[test]

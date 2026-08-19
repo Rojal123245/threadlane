@@ -39,7 +39,7 @@ Threadlane combines a GPU-accelerated desktop interface with a capable coding-ag
 
 | Capability | What it provides |
 | --- | --- |
-| Native GPUI Desktop UI | Streaming chat, Markdown, tool activity, reasoning states, image attachments, keyboard-first controls, and native terminal integration. |
+| Native GPUI Desktop UI | Streaming chat, Markdown, tool activity, reasoning states, image attachments, keyboard-first controls, native terminal integration, and a canonical-session Trajectory view. |
 | Multi-project workspace | Attached-project registry, project switching, isolated drafts, persistent sessions, archive/delete actions, and automatic titles. |
 | Coding tools | Workspace-scoped file reading and writing, directory inspection, pattern search, and bounded command execution. |
 | Skills and commands | Global and project-local skill discovery with searchable slash-command completion. |
@@ -95,17 +95,6 @@ cd threadlane
 # Start the native desktop app.
 cargo run -p threadlane-gpui
 
-# Start the interactive Ratatui TUI in your terminal
-cargo run -p threadlane-cli
-
-# Install the standalone `threadlane` CLI binary locally:
-cargo install --path crates/threadlane-cli
-
-# Launch the TUI using the binary name:
-threadlane
-
-# Or execute a one-shot headless query directly in your shell:
-threadlane -p "Summarize git diff"
 ```
 
 On first launch, use the in-app authorization flow or provide credentials through the supported provider configuration. Threadlane persists device-flow credentials under `~/.threadlane/auth.json`.
@@ -155,6 +144,14 @@ For an attached Git project, the composer shows the current branch with checkout
 4. Review streamed reasoning summaries and tool activity in the conversation.
 5. Use `/` to discover built-in commands, installed skills, and extension commands.
 6. Stop an active generation at any time; the submitted draft and attachments are restored when applicable.
+7. Use **Trajectory** in the session header to inspect canonical turn, tool, subagent, recovery, and rule events observed during the active session.
+8. Use **Export log** to save an exact copy of the active session's canonical JSONL record; this is the durable recovery/debug artifact, not a generated transcript.
+
+### Session visibility
+
+The chat view includes a session-scoped plan tracker above the composer. It is restored from persisted `session_plan` records and never mixes project-wide background tasks into the current conversation plan. The composer also reports observed turns, tool calls, token totals, and subagent-lane count. These are derived from agent events available to the desktop; unavailable timing/cache metrics are intentionally not fabricated.
+
+The dedicated **Chat / Trajectory** tabs switch between the transcript and a read-only canonical execution navigator. Trajectory hydrates durable operation, step, retry, tool, usage, user, assistant, and selected context records from the session JSONL, then appends live agent events. Compact rows are grouped by run/turn and expose sequence, lane, and tool-call correlation metadata. Category and lane menus plus text search filter the active projection; the lane menu also shows each observed lane's latest event. The Input/Model/Tools overview represents event order and density, not elapsed duration. Exporting a session log copies the canonical JSONL chosen by the user and does not create a second operation log.
 
 ## Slash Commands
 
@@ -191,8 +188,7 @@ Treat these directories as user data. Back them up before manually migrating or 
 
 | Crate | Responsibility |
 | --- | --- |
-| [`threadlane-gpui`](crates/threadlane-gpui) | GPUI desktop application, chat UI, composer, projects, sessions, updater, and application event loop. |
-| [`threadlane-cli`](crates/threadlane-cli) | Headless CLI & Ratatui TUI binary (`threadlane`). |
+| [`threadlane-gpui`](crates/threadlane-gpui) | Native GPUI desktop application, chat UI, composer, projects, sessions, updater, and application event loop. |
 | [`threadlane-auth`](crates/threadlane-auth) | Trait-based authentication (`AuthProvider`), device flow, and token storage. |
 | [`threadlane-coding-agent`](crates/threadlane-coding-agent) | Coding-agent orchestration, project context, skills, prompts, subagents, and WASI extension hosting. |
 | [`threadlane-agent`](crates/threadlane-agent) | Agent execution loop, message/session trees, context compaction, hooks, and tool-call dispatch. |

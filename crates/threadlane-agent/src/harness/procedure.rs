@@ -2085,10 +2085,23 @@ impl ToolBatchProcedure {
         }
         let entry_seq = next_seq_with_effects(store, effects);
         let call_id = result.call_id.clone();
+        let parent_id = if tool.tool_index == 0 {
+            tool.assistant_entry_id.clone()
+        } else {
+            lane.tools
+                .iter()
+                .find(|candidate| {
+                    candidate.run_id == run_id
+                        && candidate.assistant_entry_id == tool.assistant_entry_id
+                        && candidate.tool_index + 1 == tool.tool_index
+                })
+                .map(|candidate| candidate.result_entry_id.clone())
+                .ok_or_else(|| ProcedureError::Invalid("previous tool result is missing".into()))?
+        };
         effects.park(EffectAction::AppendEntry {
             entry: Entry {
                 id: tool.result_entry_id.clone(),
-                parent_id: Some(tool.assistant_entry_id.clone()),
+                parent_id: Some(parent_id),
                 lane: lane.name.clone(),
                 seq: entry_seq,
                 timestamp: entry_seq,

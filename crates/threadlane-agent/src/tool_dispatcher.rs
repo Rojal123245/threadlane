@@ -11,6 +11,7 @@ use crate::tool_executor::ToolExecutor;
 use crate::types::{AgentToolCall, AgentToolDefinition, AgentToolResult, ToolExecutionMode};
 use log::{debug, warn};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
@@ -37,6 +38,7 @@ struct ToolExecutorRoute {
 struct ToolRunContext {
     hooks: HookRegistry,
     intent_recorder: Option<ToolIntentRecorder>,
+    execution_trace_recorder: Option<crate::provider::ToolExecutionTraceRecorder>,
     event_tx: broadcast::Sender<AgentEvent>,
     tool_routes: Vec<ToolExecutorRoute>,
     allowed_tool_names: Option<HashSet<String>>,
@@ -62,6 +64,7 @@ pub struct ToolDispatcher {
     hook_registry: HookRegistry,
     pub tool_intent_recorder: Option<ToolIntentRecorder>,
     pub tool_completion_recorder: Option<ToolCompletionRecorder>,
+    pub tool_execution_trace_recorder: Option<crate::provider::ToolExecutionTraceRecorder>,
     pub(crate) allowed_tool_names: Option<HashSet<String>>,
     pub(crate) work_dir: Option<PathBuf>,
     pub(crate) session_id: String,
@@ -79,6 +82,7 @@ impl ToolDispatcher {
             hook_registry: hooks,
             tool_intent_recorder: None,
             tool_completion_recorder: None,
+            tool_execution_trace_recorder: None,
             allowed_tool_names: None,
             work_dir: None,
             session_id: String::new(),
@@ -191,7 +195,10 @@ impl ToolDispatcher {
 
     /// Replays already-intended safe tools. The before hook is intentionally
     /// skipped: the durable ToolStarted record is the clearance boundary.
-    pub(crate) async fn execute_tools_for_replay(&self, tool_calls: &[ToolCall]) -> Vec<AgentToolResult> {
+    pub(crate) async fn execute_tools_for_replay(
+        &self,
+        tool_calls: &[ToolCall],
+    ) -> Vec<AgentToolResult> {
         self.execute_tools_with_options(tool_calls, None, true)
             .await
     }
@@ -226,6 +233,7 @@ impl ToolDispatcher {
                 let context = ToolRunContext {
                     hooks: self.hook_registry.clone(),
                     intent_recorder: intent_recorder.clone(),
+                    execution_trace_recorder: self.tool_execution_trace_recorder.clone(),
                     event_tx: self.event_tx.clone(),
                     tool_routes: tool_routes.clone(),
                     allowed_tool_names: allowed_tool_names.clone(),
@@ -270,7 +278,7 @@ impl ToolDispatcher {
                     let Some(result) = slots[index].as_mut() else {
                         continue;
                     };
-                    if let Err(error) = recorder(&result.tool_call_id, result.terminate).await {
+                    if let Err(error) = recorder(result).await {
                         result.content = error;
                         result.is_error = true;
                     }
@@ -304,6 +312,7 @@ impl ToolDispatcher {
             ToolRunContext {
                 hooks: self.hook_registry.clone(),
                 intent_recorder,
+                execution_trace_recorder: self.tool_execution_trace_recorder.clone(),
                 event_tx: self.event_tx.clone(),
                 tool_routes,
                 allowed_tool_names,
@@ -318,7 +327,7 @@ impl ToolDispatcher {
         match result {
             Ok(mut result) => {
                 if let Some(recorder) = &self.tool_completion_recorder {
-                    if let Err(error) = recorder(&result.tool_call_id, result.terminate).await {
+                    if let Err(error) = recorder(&result).await {
                         result.content = error;
                         result.is_error = true;
                     }
@@ -465,6 +474,38 @@ impl ToolDispatcher {
             context,
         } = call;
         let start_time = std::time::Instant::now();
+        let started_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let executor_kind = if context
+            .tool_routes
+            .iter()
+            .any(|route| route.tool_names.contains(&tc.function.name))
+        {
+            "registered"
+        } else {
+            "builtin"
+        };
+        if let Some(recorder) = &context.execution_trace_recorder {
+            if let Err(error) = recorder(crate::provider::ToolExecutionTraceEvent::Started {
+                tool_call_id: tc.id.clone(),
+                tool_name: tc.function.name.clone(),
+                executor_kind: executor_kind.into(),
+                effective_arguments: arguments.clone(),
+                started_at_ms,
+            })
+            .await
+            {
+                return AgentToolResult {
+                    tool_call_id: tc.id,
+                    name: tc.function.name,
+                    content: format!("Failed to persist tool execution start: {error}"),
+                    is_error: true,
+                    terminate: false,
+                };
+            }
+        }
         debug!(
             "Tool execution started: '{}' (call_id: {})",
             tc.function.name, tc.id
@@ -537,11 +578,36 @@ impl ToolDispatcher {
         if let Some(content) = hook_run.effect.override_content {
             final_result.content = content;
         }
+        if let Some(content) = hook_run.effect.append_content {
+            if !content.trim().is_empty() {
+                final_result.content.push_str("\n\n");
+                final_result.content.push_str(&content);
+            }
+        }
         if let Some(is_error) = hook_run.effect.override_is_error {
             final_result.is_error = is_error;
         }
         if let Some(terminate) = hook_run.effect.terminate {
             final_result.terminate = terminate;
+        }
+
+        if let Some(recorder) = &context.execution_trace_recorder {
+            if let Err(error) = recorder(crate::provider::ToolExecutionTraceEvent::Finished {
+                tool_call_id: final_result.tool_call_id.clone(),
+                tool_name: final_result.name.clone(),
+                executor_kind: executor_kind.into(),
+                started_at_ms,
+                duration_ms: start_time.elapsed().as_millis() as u64,
+                is_error: final_result.is_error,
+                terminate: final_result.terminate,
+                output_sha256: format!("{:x}", Sha256::digest(final_result.content.as_bytes())),
+                output_bytes: final_result.content.len() as u64,
+            })
+            .await
+            {
+                final_result.content = format!("Failed to persist tool execution finish: {error}");
+                final_result.is_error = true;
+            }
         }
 
         final_result
@@ -771,6 +837,61 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].content, "world");
         assert!(!results[0].is_error);
+    }
+
+    #[tokio::test]
+    async fn dispatcher_records_physical_execution_envelope_once() {
+        let (event_tx, _) = broadcast::channel(8);
+        let mut dispatcher = ToolDispatcher::new(event_tx, HookRegistry::default());
+        dispatcher
+            .register_tool_executor(Arc::new(StubExecutor {
+                id: "stub".into(),
+                tools: vec![stub_tool("hello")],
+                result: Some("world".into()),
+            }))
+            .unwrap();
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder_observed = observed.clone();
+        dispatcher.tool_execution_trace_recorder = Some(Arc::new(move |event| {
+            let observed = recorder_observed.clone();
+            Box::pin(async move {
+                observed.lock().unwrap().push(event);
+                Ok(())
+            })
+        }));
+
+        let results = dispatcher
+            .execute_tools_without_intent_recording(&[ToolCall {
+                id: "call_1".into(),
+                r#type: "function".into(),
+                function: threadlane_provider::openai::ToolCallFunction {
+                    name: "hello".into(),
+                    arguments: "{}".into(),
+                },
+                thought_signature: None,
+            }])
+            .await;
+
+        assert!(!results[0].is_error);
+        let observed = observed.lock().unwrap();
+        assert_eq!(observed.len(), 2);
+        assert!(matches!(
+            &observed[0],
+            crate::provider::ToolExecutionTraceEvent::Started {
+                tool_call_id,
+                executor_kind,
+                ..
+            } if tool_call_id == "call_1" && executor_kind == "registered"
+        ));
+        assert!(matches!(
+            &observed[1],
+            crate::provider::ToolExecutionTraceEvent::Finished {
+                tool_call_id,
+                output_bytes: 5,
+                output_sha256,
+                ..
+            } if tool_call_id == "call_1" && output_sha256.len() == 64
+        ));
     }
 
     #[tokio::test]

@@ -1,6 +1,6 @@
+use crate::capabilities::CapabilityCatalog;
 use std::path::Path;
 use threadlane_agent::{SessionTree, UnifiedAgent};
-use crate::capabilities::CapabilityCatalog;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlashCommandInfo {
@@ -12,9 +12,18 @@ pub struct SlashCommandInfo {
 pub fn builtin_commands() -> Vec<SlashCommandInfo> {
     [
         ("model", "Switch model, or show the current one"),
-        ("advisor", "Toggle or configure the advisor reviewer model (/advisor on|off|status|model <id>)"),
-        ("plan", "Create or refine an implementation plan using the plan model (/plan <objective>)"),
-        ("roles", "View or configure model roles (task, plan, advisor)"),
+        (
+            "advisor",
+            "Toggle or configure the advisor reviewer model (/advisor on|off|status|model <id>)",
+        ),
+        (
+            "plan",
+            "Create or refine an implementation plan using the plan model (/plan <objective>)",
+        ),
+        (
+            "roles",
+            "View or configure model roles (task, plan, advisor)",
+        ),
         ("compact", "Compact the conversation context"),
         ("session", "Show session info"),
         ("name", "Name this session"),
@@ -46,7 +55,9 @@ pub fn available_slash_commands(project_root: Option<&Path>) -> Vec<SlashCommand
         if !record.is_effective() || !record.is_enabled() {
             continue;
         }
-        if let Ok(ext) = threadlane_wasi::WasiExtension::load_from_file_requiring_manifest(record.module_path()) {
+        if let Ok(ext) =
+            threadlane_wasi::WasiExtension::load_from_file_requiring_manifest(record.module_path())
+        {
             for cmd in ext.manifest.commands {
                 if !commands.iter().any(|c| c.name == cmd.name) {
                     commands.push(SlashCommandInfo {
@@ -108,7 +119,6 @@ pub fn parse_slash_command(input: &str) -> Option<CommandAction> {
     }
 }
 
-
 pub async fn execute_slash_command(
     action: CommandAction,
     agent: &mut UnifiedAgent,
@@ -131,13 +141,16 @@ pub async fn execute_slash_command(
                 agent.set_model_roles(roles);
                 format!("Switched model to: {}", new_model)
             }
-
         }
         CommandAction::Advisor(arg) => {
             let mut roles = agent.model_roles().clone();
             let trimmed = arg.trim();
             if trimmed.is_empty() || trimmed == "status" {
-                let status = if roles.advisor_enabled { "ENABLED" } else { "DISABLED" };
+                let status = if roles.advisor_enabled {
+                    "ENABLED"
+                } else {
+                    "DISABLED"
+                };
                 let model = roles.advisor.as_deref().unwrap_or("inherit main");
                 format!("Advisor status: {status}\nAdvisor model: {model}\nUsage: /advisor on | off | model <model-id>")
             } else if trimmed == "on" || trimmed == "enable" {
@@ -188,7 +201,9 @@ pub async fn execute_slash_command(
                         agent.set_model_roles(roles);
                         format!("Advisor model role set to: {val}")
                     }
-                    other => format!("Unknown model role: {other}. Available roles: task, plan, advisor"),
+                    other => {
+                        format!("Unknown model role: {other}. Available roles: task, plan, advisor")
+                    }
                 }
             } else {
                 format!("Usage: /roles plan=<model> | task=<model> | advisor=<model>")

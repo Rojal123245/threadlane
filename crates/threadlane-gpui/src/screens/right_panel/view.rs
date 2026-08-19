@@ -6,8 +6,8 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::scroll::ScrollableElement;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
+use gpui_component::scroll::ScrollableElement;
 use gpui_component::separator::Separator;
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::{ActiveTheme, IconName, Selectable, Sizable};
@@ -82,7 +82,11 @@ pub struct RightPanelView {
 }
 
 impl RightPanelView {
-    pub(crate) fn new(model: Entity<AppState>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        model: Entity<AppState>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let document_state = cx.new(|cx| TextViewState::markdown("", cx));
         let (event_tx, event_rx) = mpsc::channel();
 
@@ -433,7 +437,9 @@ impl RightPanelView {
             .children(self.files.iter().cloned().map(|entry| {
                 let relative_path = entry.relative_path.clone();
                 let context_path = relative_path.clone();
-                let absolute_path = project.as_ref().map(|root| root.join(&relative_path).display().to_string());
+                let absolute_path = project
+                    .as_ref()
+                    .map(|root| root.join(&relative_path).display().to_string());
                 let folder_path = relative_path.clone();
                 let file_path = relative_path.clone();
                 let expanded = self.expanded_paths.contains(&relative_path);
@@ -484,16 +490,21 @@ impl RightPanelView {
                         let absolute_path = absolute_path.clone();
                         move |menu, _window, _cx| {
                             let text = path.clone();
-                            let menu = menu.item(PopupMenuItem::new("Copy Relative Path").on_click(
-                                move |_event, _window, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-                                },
-                            ));
+                            let menu =
+                                menu.item(PopupMenuItem::new("Copy Relative Path").on_click(
+                                    move |_event, _window, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            text.clone(),
+                                        ));
+                                    },
+                                ));
                             if let Some(absolute_path) = absolute_path.clone() {
                                 let text = absolute_path;
                                 menu.item(PopupMenuItem::new("Copy Absolute Path").on_click(
                                     move |_event, _window, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            text.clone(),
+                                        ));
                                     },
                                 ))
                             } else {
@@ -579,76 +590,87 @@ impl RightPanelView {
                     .overflow_y_scrollbar()
                     .py_2()
                     .children(self.review_files.iter().cloned().map(|file| {
-                let path = file.path.clone();
-                        let absolute_path = self.project.as_ref().map(|root| root.join(&path).display().to_string());
-                let status = file.status_char().to_string();
-                let context_path = path.clone();
-                div()
-                    .id(SharedString::from(format!("review-file-{path}")))
-                    .h(px(36.0))
-                    .mx_2()
-                    .px_2()
-                    .rounded_md()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .cursor_pointer()
-                    .hover(|row| row.bg(theme.muted))
-                    .child(IconName::File)
-                    .child(
+                        let path = file.path.clone();
+                        let absolute_path = self
+                            .project
+                            .as_ref()
+                            .map(|root| root.join(&path).display().to_string());
+                        let status = file.status_char().to_string();
+                        let context_path = path.clone();
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_xs()
-                            .child(file.path),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.success)
-                            .child(format!("+{}", file.additions)),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.danger)
-                            .child(format!("-{}", file.deletions)),
-                    )
-                    .child(
-                        div()
-                            .w(px(18.0))
-                            .text_center()
-                            .text_xs()
-                            .text_color(theme.warning)
-                            .child(status),
-                    )
-                    .on_click(cx.listener(move |this, _event, _window, _cx| {
-                        this.open_diff(path.clone());
-                    }))
-                    .context_menu({
-                        let path = context_path.clone();
-                        let absolute_path = absolute_path.clone();
-                        move |menu, _window, _cx| {
-                            let text = path.clone();
-                            let menu = menu.item(PopupMenuItem::new("Copy Relative Path").on_click(
-                                move |_event, _window, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-                                },
-                            ));
-                            if let Some(absolute_path) = absolute_path.clone() {
-                                let text = absolute_path;
-                                menu.item(PopupMenuItem::new("Copy Absolute Path").on_click(
-                                    move |_event, _window, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-                                    },
-                                ))
-                            } else {
-                                menu
-                            }
-                        }
-                    })
-                }))
+                            .id(SharedString::from(format!("review-file-{path}")))
+                            .h(px(36.0))
+                            .mx_2()
+                            .px_2()
+                            .rounded_md()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .cursor_pointer()
+                            .hover(|row| row.bg(theme.muted))
+                            .child(IconName::File)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_xs()
+                                    .child(file.path),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.success)
+                                    .child(format!("+{}", file.additions)),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.danger)
+                                    .child(format!("-{}", file.deletions)),
+                            )
+                            .child(
+                                div()
+                                    .w(px(18.0))
+                                    .text_center()
+                                    .text_xs()
+                                    .text_color(theme.warning)
+                                    .child(status),
+                            )
+                            .on_click(cx.listener(move |this, _event, _window, _cx| {
+                                this.open_diff(path.clone());
+                            }))
+                            .context_menu({
+                                let path = context_path.clone();
+                                let absolute_path = absolute_path.clone();
+                                move |menu, _window, _cx| {
+                                    let text = path.clone();
+                                    let menu = menu.item(
+                                        PopupMenuItem::new("Copy Relative Path").on_click(
+                                            move |_event, _window, cx| {
+                                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                                    text.clone(),
+                                                ));
+                                            },
+                                        ),
+                                    );
+                                    if let Some(absolute_path) = absolute_path.clone() {
+                                        let text = absolute_path;
+                                        menu.item(
+                                            PopupMenuItem::new("Copy Absolute Path").on_click(
+                                                move |_event, _window, cx| {
+                                                    cx.write_to_clipboard(
+                                                        ClipboardItem::new_string(text.clone()),
+                                                    );
+                                                },
+                                            ),
+                                        )
+                                    } else {
+                                        menu
+                                    }
+                                }
+                            })
+                    })),
             )
             .into_any_element()
     }
