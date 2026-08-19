@@ -1,6 +1,60 @@
 use super::types::{Entry, Record, ReduceError};
-use crate::types::TokenUsage;
+use crate::types::{AgentMessage, TokenUsage};
 use std::collections::BTreeSet;
+
+/// A deterministic, model-facing projection of the canonical event log.
+///
+/// Operational records remain durable in the same store, but never appear in
+/// this projection. Consumers that construct provider requests should use this
+/// type rather than walking the session log or a rendered transcript.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelContextProjection {
+    pub lane: String,
+    pub leaf_id: Option<String>,
+    /// Selected active branch entries, including a compaction checkpoint and
+    /// only the tail after that checkpoint.
+    pub entries: Vec<Entry>,
+    /// The latest durable compaction checkpoint in `entries`, if selected.
+    pub checkpoint: Option<CompactionCheckpoint>,
+}
+
+/// Metadata derived from a durable compaction summary entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactionCheckpoint {
+    pub entry_id: String,
+    pub seq: u64,
+    pub compacted_messages: Option<usize>,
+    pub source_leaf_id: Option<String>,
+}
+
+impl ModelContextProjection {
+    pub fn messages(&self) -> Vec<AgentMessage> {
+        self.entries
+            .iter()
+            .map(|entry| entry.message.clone())
+            .collect()
+    }
+}
+
+/// The ordered, user-facing transcript projection for a lane.
+///
+/// Unlike [`ModelContextProjection`], this projection intentionally retains
+/// every durable entry in chronological sequence order. It is suitable for UI
+/// reconciliation and audits, not for provider payloads.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TranscriptProjection {
+    pub lane: String,
+    pub entries: Vec<Entry>,
+}
+
+impl TranscriptProjection {
+    pub fn messages(&self) -> Vec<AgentMessage> {
+        self.entries
+            .iter()
+            .map(|entry| entry.message.clone())
+            .collect()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionIdGenerator {
@@ -88,9 +142,12 @@ pub trait SessionStore {
     fn preferred_leaf(&self, _lane: &str) -> Option<String> {
         None
     }
-    /// Return the durable model context for one lane's currently selected branch.
-    /// Operation records and entries from other lanes are excluded.
-    fn model_history(&self, lane: &str) -> Result<Vec<Entry>, ReduceError>
+    /// Build the model-facing context projection for one lane's selected branch.
+    ///
+    /// The append-only log remains the source of truth. This projection selects
+    /// only model-visible entries from the active branch; lifecycle, telemetry,
+    /// permission, and recovery records stay available for other projections.
+    fn model_context(&self, lane: &str) -> Result<ModelContextProjection, ReduceError>
     where
         Self: Sized,
     {
@@ -99,12 +156,55 @@ pub trait SessionStore {
             .lane(lane)
             .and_then(|lane| lane.leaf_id.clone())
             .or_else(|| self.preferred_leaf(lane));
-        Ok(self
+        let entries: Vec<Entry> = self
             .branch(leaf_id.as_deref(), usize::MAX)
             .into_iter()
             .filter(|entry| entry.lane == lane)
-            .collect())
+            .collect();
+        let checkpoint = entries.iter().rev().find_map(|entry| match &entry.message {
+            AgentMessage::Custom {
+                custom_type,
+                payload,
+            } if custom_type == "compaction_summary" => Some(CompactionCheckpoint {
+                entry_id: entry.id.clone(),
+                seq: entry.seq,
+                compacted_messages: payload
+                    .get("compacted_messages")
+                    .and_then(|value| value.as_u64())
+                    .and_then(|value| usize::try_from(value).ok()),
+                source_leaf_id: payload
+                    .get("source_leaf_id")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned),
+            }),
+            _ => None,
+        });
+        Ok(ModelContextProjection {
+            lane: lane.to_owned(),
+            leaf_id,
+            entries,
+            checkpoint,
+        })
     }
+
+    /// Build the chronological transcript projection for one lane.
+    ///
+    /// This retains inactive and compacted branch entries so the UI can show a
+    /// complete durable history without accidentally using it as model context.
+    fn transcript(&self, lane: &str) -> TranscriptProjection {
+        let mut entries = self
+            .entries()
+            .iter()
+            .filter(|entry| entry.lane == lane)
+            .cloned()
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.seq);
+        TranscriptProjection {
+            lane: lane.to_owned(),
+            entries,
+        }
+    }
+
     fn branch(&self, leaf_id: Option<&str>, limit: usize) -> Vec<Entry> {
         if limit == 0 {
             return Vec::new();

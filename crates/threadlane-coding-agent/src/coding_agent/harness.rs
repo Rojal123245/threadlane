@@ -2304,8 +2304,9 @@ impl CodingSessionHarness {
         let mut existing: HashMap<String, usize> = HashMap::new();
         for entry in self
             .store
-            .model_history("main")
+            .model_context("main")
             .map_err(|error| error.to_string())?
+            .entries
         {
             *existing.entry(format!("{:?}", entry.message)).or_default() += 1;
         }
@@ -2361,11 +2362,9 @@ impl CodingSessionHarness {
         self.refresh()?;
         let logged = self
             .store
-            .model_history("main")
+            .model_context("main")
             .map_err(|error| error.to_string())?
-            .into_iter()
-            .map(|entry| entry.message)
-            .collect::<Vec<_>>();
+            .messages();
         let expected = messages
             .iter()
             .filter(|message| !matches!(message, AgentMessage::System { .. }))
@@ -2801,8 +2800,8 @@ mod tests {
             })
             .unwrap();
 
-        let tree = SessionTree::load_from_file(&path).unwrap();
-        let branch = tree.get_active_branch_messages();
+        let store = threadlane_agent::harness::JsonlStore::open_read_only(&path).unwrap();
+        let branch = store.model_context("main").unwrap().messages();
         assert!(matches!(
             branch.get(1),
             Some(AgentMessage::Assistant {
@@ -2970,8 +2969,9 @@ mod tests {
 
         assert!(harness
             .store
-            .model_history("main")
+            .model_context("main")
             .unwrap()
+            .entries
             .iter()
             .any(|entry| entry.message == queued));
     }

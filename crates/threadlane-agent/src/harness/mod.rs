@@ -34,7 +34,10 @@ pub use queue::{LaneQueue, SteerItem, SteerPriority};
 pub use reducer::Reducer;
 pub use session::{LaneHandle, SessionAgent};
 pub use sqlite::SqliteStore;
-pub use store::{SessionIdGenerator, SessionStore};
+pub use store::{
+    CompactionCheckpoint, ModelContextProjection, SessionIdGenerator, SessionStore,
+    TranscriptProjection,
+};
 pub use telemetry::{ExecutionContext, NoopTelemetry, TelemetrySink};
 pub use types::{
     sanitize_tool_args, AbortInitiator, AbortObservation, AbortTarget, BoundedPromptText,

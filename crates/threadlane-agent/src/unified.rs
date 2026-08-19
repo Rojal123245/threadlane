@@ -9,7 +9,7 @@ use crate::error::AgentError;
 use crate::events::AgentEvent;
 use crate::harness::{
     AgentHarness, HarnessEventHub, HookRegistry, JsonlStore, ProcedureError, ProvisionedEntry,
-    QueueKind, Reducer,
+    QueueKind, Reducer, SessionStore,
 };
 use crate::provider::ProviderRouter;
 use crate::tool_dispatcher::ToolDispatcher;
@@ -48,6 +48,7 @@ pub struct UnifiedAgent {
     prompt_cache_key: Option<String>,
     allowed_tool_names: Option<HashSet<String>>,
     provider_trace_recorder: Option<crate::provider::ProviderTraceRecorder>,
+    message_recorder: Option<crate::provider::AssistantMessageRecorder>,
 }
 
 impl UnifiedAgent {
@@ -102,6 +103,7 @@ impl UnifiedAgent {
             prompt_cache_key: None,
             allowed_tool_names: None,
             provider_trace_recorder: None,
+            message_recorder: None,
         })
     }
 
@@ -125,10 +127,21 @@ impl UnifiedAgent {
     }
 
     pub async fn prompt_message(&mut self, message: AgentMessage) {
-        // Push the user message.
-        {
-            let mut turn = self.turn.lock().await;
-            turn.messages.push(message);
+        // PromptProcedure records run intent, the user entry, and the first
+        // step attempt before provider work. The provider context is then
+        // projected from those canonical records.
+        let run_id = format!("foreground-{}", self.harness.store().next_sequence());
+        if let Err(error) = self.harness.accept_prompt(&run_id, message) {
+            let _ = self.event_tx.send(AgentEvent::AgentError {
+                error: format!("failed to accept prompt before provider work: {error}"),
+            });
+            return;
+        }
+        if let Err(error) = self.harness.drive_to_completion() {
+            let _ = self.event_tx.send(AgentEvent::AgentError {
+                error: format!("failed to commit prompt before provider work: {error}"),
+            });
+            return;
         }
 
         let _ = self.event_tx.send(AgentEvent::AgentStart);
@@ -159,6 +172,13 @@ impl UnifiedAgent {
         self.provider_trace_recorder = recorder;
     }
 
+    pub fn set_message_recorder(
+        &mut self,
+        recorder: Option<crate::provider::AssistantMessageRecorder>,
+    ) {
+        self.message_recorder = recorder;
+    }
+
     pub fn set_model_roles(&mut self, roles: crate::types::ModelRoles) {
         self.config.model_roles = roles;
     }
@@ -183,6 +203,33 @@ impl UnifiedAgent {
     /// Returns a snapshot of the current turn state.
     pub async fn get_state(&self) -> TurnState {
         self.turn.lock().await.clone()
+    }
+
+    /// Replace the in-memory provider working copy from the canonical active
+    /// event-log projection. The system prompt stays runtime-owned because it
+    /// is captured separately in `RunContextCaptured`.
+    pub async fn sync_turn_from_model_context(&self) -> Result<(), AgentError> {
+        let context = self
+            .harness
+            .store()
+            .model_context("main")
+            .map_err(|error| AgentError::Session(error.to_string()))?;
+        let mut turn = self.turn.lock().await;
+        let system_prompt = turn.system_prompt.clone();
+        turn.messages = std::iter::once(AgentMessage::System {
+            content: system_prompt,
+        })
+        .chain(context.messages())
+        .collect();
+        Ok(())
+    }
+
+    /// Read the durable transcript projection for UI reconciliation and audit
+    /// views. It must not be used to build a provider request.
+    pub fn transcript_projection(
+        &self,
+    ) -> crate::harness::TranscriptProjection {
+        self.harness.store().transcript("main")
     }
 
     pub async fn compact_history(
@@ -229,7 +276,15 @@ impl UnifiedAgent {
 
     /// Builds provider payloads for testing (delegates to the router).
     pub async fn build_api_payloads(&self) -> (serde_json::Value, serde_json::Value) {
-        let turn = self.turn.lock().await;
+        let mut turn = self.turn.lock().await.clone();
+        if let Ok(context) = self.harness.store().model_context("main") {
+            let system_prompt = turn.system_prompt.clone();
+            turn.messages = std::iter::once(AgentMessage::System {
+                content: system_prompt,
+            })
+            .chain(context.messages())
+            .collect();
+        }
         let tools: Vec<_> = self.configured_tool_definitions();
         let chat = self.provider_router.build_payload(
             PayloadFormat::ChatCompletions,
@@ -286,6 +341,14 @@ impl UnifiedAgent {
     // ── Turn loop ─────────────────────────────────────────────────────
 
     async fn run_turns(&mut self) {
+        // The durable event log is authoritative at every provider boundary.
+        // In-memory state only holds the active turn's transient stream data.
+        if let Err(error) = self.sync_turn_from_model_context().await {
+            let _ = self.event_tx.send(AgentEvent::AgentError {
+                error: format!("failed to construct canonical model context: {error}"),
+            });
+            return;
+        }
         let tool_dispatcher = self.synced_dispatcher();
         let mut driver = crate::turn_driver::TurnDriver {
             turn: self.turn.clone(),
@@ -297,6 +360,7 @@ impl UnifiedAgent {
             event_tx: self.event_tx.clone(),
             harness_event_hub: self.harness.events().clone(),
             provider_trace_recorder: self.provider_trace_recorder.clone(),
+            message_recorder: self.message_recorder.clone(),
             stream_rules: self.stream_rules.clone(),
             steering_queue: &mut self.steering_queue,
             follow_up_queue: &mut self.follow_up_queue,

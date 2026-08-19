@@ -219,10 +219,13 @@ pub async fn execute_slash_command(
         CommandAction::Compact => {
             if !agent.compact_history(None).await {
                 "Nothing to compact yet.".to_string()
-            } else {
+            } else if agent.harness().store().entries().is_empty() {
+                // Legacy in-memory sessions have no canonical journal yet.
                 let state = agent.get_state().await;
                 session_tree.replace_active_branch(state.messages);
                 "Context compacted in the current session.".to_string()
+            } else {
+                "Context compaction requires the durable session harness.".to_string()
             }
         }
         CommandAction::ShowSession => {
@@ -241,10 +244,14 @@ pub async fn execute_slash_command(
         }
         CommandAction::SwitchTreeBranch(node_id) => {
             if session_tree.switch_active_node(&node_id) {
-                let branch_msgs = session_tree.get_active_branch_messages();
-                let mut st = agent.turn.lock().await;
-                st.messages = branch_msgs;
-                format!("Switched session tree to node: {}", node_id)
+                if agent.harness().store().entries().is_empty() {
+                    let branch_msgs = session_tree.get_active_branch_messages();
+                    let mut st = agent.turn.lock().await;
+                    st.messages = branch_msgs;
+                    format!("Switched session tree to node: {}", node_id)
+                } else {
+                    "Branch switching requires the durable session harness.".to_string()
+                }
             } else {
                 format!("Node ID not found in session tree: {}", node_id)
             }

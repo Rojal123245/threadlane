@@ -89,11 +89,9 @@ fn model_visible_messages_are_reconstructable_from_log() {
 
     let logged_messages = harness
         .store()
-        .model_history("main")
+        .model_context("main")
         .unwrap()
-        .into_iter()
-        .map(|entry| entry.message)
-        .collect::<Vec<_>>();
+        .messages();
 
     assert_eq!(logged_messages, model_visible_messages);
     assert_eq!(

@@ -156,8 +156,10 @@ fn compact_from_index(messages: &[AgentMessage], mut start: usize) -> Vec<AgentM
     compacted.push(AgentMessage::Custom {
         custom_type: "compaction_summary".to_string(),
         payload: serde_json::json!({
+            "schema_version": 1,
             "summary": build_checkpoint(&dropped, &AgentConfig::default()),
             "compacted_messages": dropped.len(),
+            "checkpoint_kind": "token_budget",
         }),
     });
     compacted.extend(

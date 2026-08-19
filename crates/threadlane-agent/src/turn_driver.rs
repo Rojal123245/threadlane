@@ -24,6 +24,19 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 
 const STREAM_CHECKPOINT_BYTES: usize = 16 * 1024;
 
+async fn persist_messages_with(
+    recorder: Option<&crate::provider::AssistantMessageRecorder>,
+    messages: &[AgentMessage],
+) -> Result<(), String> {
+    let Some(recorder) = recorder else {
+        return Ok(());
+    };
+    for message in messages {
+        recorder(message.clone()).await?;
+    }
+    Ok(())
+}
+
 fn classify_provider_error(error: &str) -> ErrorCategory {
     let error = error.to_ascii_lowercase();
     if error.contains("401")
@@ -114,6 +127,9 @@ pub(crate) struct TurnDriver<'a> {
     pub(crate) event_tx: broadcast::Sender<AgentEvent>,
     pub(crate) harness_event_hub: crate::harness::HarnessEventHub,
     pub(crate) provider_trace_recorder: Option<ProviderTraceRecorder>,
+    /// Persists model-visible messages before they may affect another provider
+    /// request. Durable runtimes install the canonical session-journal writer.
+    pub(crate) message_recorder: Option<crate::provider::AssistantMessageRecorder>,
     pub(crate) stream_rules: Vec<(StreamRule, Regex)>,
     pub(crate) steering_queue: &'a mut Vec<AgentMessage>,
     pub(crate) follow_up_queue: &'a mut Vec<AgentMessage>,
@@ -132,6 +148,10 @@ impl<'a> TurnDriver<'a> {
         }
     }
 
+    async fn persist_messages(&self, messages: &[AgentMessage]) -> Result<(), String> {
+        persist_messages_with(self.message_recorder.as_ref(), messages).await
+    }
+
     pub(crate) async fn run_turns(&mut self) {
         let mut turn_number = 0;
         let mut overflow_recovery_attempted = false;
@@ -144,12 +164,21 @@ impl<'a> TurnDriver<'a> {
             // Drain steering queue into turn state.
             if !self.steering_queue.is_empty() {
                 let items: Vec<_> = self.steering_queue.drain(..).collect();
+                if let Err(error) = self.persist_messages(&items).await {
+                    self.emit_event(AgentEvent::AgentError {
+                        error: format!("failed to persist steering before provider work: {error}"),
+                    });
+                    return;
+                }
                 let mut turn = self.turn.lock().await;
                 turn.messages.extend(items);
             }
 
-            // Auto-compaction.
-            {
+            // Auto-compaction is only safe here for runtimes without a durable
+            // journal. Durable coding sessions compact at their harness boundary
+            // before starting a run, where the checkpoint branch is committed
+            // before another provider request can observe it.
+            if self.message_recorder.is_none() {
                 let mut turn = self.turn.lock().await;
                 if should_auto_compact(&turn.messages, &self.config) {
                     turn.messages = compact_messages_to_token_budget(
@@ -423,7 +452,10 @@ impl<'a> TurnDriver<'a> {
                             });
                             return;
                         }
-                        if !overflow_recovery_attempted && is_context_overflow_error(&err) {
+                        if !overflow_recovery_attempted
+                            && self.message_recorder.is_none()
+                            && is_context_overflow_error(&err)
+                        {
                             let mut turn = self.turn.lock().await;
                             turn.messages = compact_messages_to_token_budget(
                                 &turn.messages,
@@ -583,12 +615,24 @@ impl<'a> TurnDriver<'a> {
 
                 if !self.steering_queue.is_empty() {
                     let items: Vec<_> = self.steering_queue.drain(..).collect();
+                    if let Err(error) = self.persist_messages(&items).await {
+                        self.emit_event(AgentEvent::AgentError {
+                            error: format!("failed to persist steering before retry: {error}"),
+                        });
+                        return;
+                    }
                     self.turn.lock().await.messages.extend(items);
                     continue;
                 }
 
                 if !self.follow_up_queue.is_empty() {
                     let items: Vec<_> = self.follow_up_queue.drain(..).collect();
+                    if let Err(error) = self.persist_messages(&items).await {
+                        self.emit_event(AgentEvent::AgentError {
+                            error: format!("failed to persist follow-up before provider work: {error}"),
+                        });
+                        return;
+                    }
                     self.turn.lock().await.messages.extend(items);
                     continue;
                 }
@@ -621,20 +665,26 @@ impl<'a> TurnDriver<'a> {
 
             let tool_results = dispatcher.execute_tools(&captured_tool_calls).await;
 
-            // Append tool results to turn state.
-            {
-                let mut turn = self.turn.lock().await;
-                for r in &tool_results {
-                    let msg = AgentMessage::Tool {
-                        tool_call_id: r.tool_call_id.clone(),
-                        name: r.name.clone(),
-                        content: r.content.clone(),
-                        is_error: r.is_error,
-                        terminate: r.terminate,
-                    };
-                    turn.messages.push(msg);
-                }
+            // Persist tool results before they can affect the continuation
+            // request. Tool lifecycle recorders may enrich the same durable
+            // operation, while this recorder guarantees model visibility.
+            let tool_messages = tool_results
+                .iter()
+                .map(|result| AgentMessage::Tool {
+                    tool_call_id: result.tool_call_id.clone(),
+                    name: result.name.clone(),
+                    content: result.content.clone(),
+                    is_error: result.is_error,
+                    terminate: result.terminate,
+                })
+                .collect::<Vec<_>>();
+            if let Err(error) = self.persist_messages(&tool_messages).await {
+                self.emit_event(AgentEvent::AgentError {
+                    error: format!("failed to persist tool results before continuation: {error}"),
+                });
+                return;
             }
+            self.turn.lock().await.messages.extend(tool_messages);
 
             self.emit_event(AgentEvent::TurnEnd {
                 turn_number,

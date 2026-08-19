@@ -7,6 +7,7 @@ use threadlane_agent::{
     AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, SessionPlan, SessionTree,
     TokenUsage,
 };
+use threadlane_agent::harness::SessionStore;
 
 use crate::adapters::agent_events::{adapt_agent_event, ChatAgentUpdate};
 use crate::persistence::load_project_registry;
@@ -321,14 +322,11 @@ fn load_session_projection(
     let Ok(tree) = SessionTree::load_from_file(session_file) else {
         return (SessionPlan::default(), Vec::new(), 0, false);
     };
-    let agent_messages = {
-        let branch = tree.get_active_branch_messages();
-        if branch.is_empty() {
-            tree.get_persisted_messages()
-        } else {
-            branch
-        }
-    };
+    // UI history is the durable chronological transcript projection, distinct
+    // from the active model-context branch used for provider requests.
+    let agent_messages = threadlane_agent::harness::JsonlStore::open_read_only(session_file)
+        .map(|store| store.transcript("main").messages())
+        .unwrap_or_else(|_| tree.get_persisted_messages());
     let projected = project_agent_messages(agent_messages);
     let end = projected.len();
     let start = end.saturating_sub(CHAT_HISTORY_PAGE_SIZE);
@@ -347,14 +345,9 @@ fn load_session_message_page(
     let Ok(tree) = SessionTree::load_from_file(session_file) else {
         return (Vec::new(), 0, false);
     };
-    let agent_messages = {
-        let branch = tree.get_active_branch_messages();
-        if branch.is_empty() {
-            tree.get_persisted_messages()
-        } else {
-            branch
-        }
-    };
+    let agent_messages = threadlane_agent::harness::JsonlStore::open_read_only(session_file)
+        .map(|store| store.transcript("main").messages())
+        .unwrap_or_else(|_| tree.get_persisted_messages());
     let projected = project_agent_messages(agent_messages);
     let end = end.min(projected.len());
     let start = end.saturating_sub(CHAT_HISTORY_PAGE_SIZE);

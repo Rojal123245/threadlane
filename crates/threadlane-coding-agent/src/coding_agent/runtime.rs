@@ -89,42 +89,6 @@ fn durable_prompt_snapshot(content: &str) -> PromptSnapshot {
     }
 }
 
-fn active_branch_with_detached_tool_results(tree: &SessionTree) -> Vec<AgentMessage> {
-    let branch = tree.get_active_branch_messages();
-    let attached_tool_ids = branch
-        .iter()
-        .filter_map(|message| match message {
-            AgentMessage::Tool { tool_call_id, .. } => Some(tool_call_id.clone()),
-            _ => None,
-        })
-        .collect::<HashSet<_>>();
-    let mut messages = Vec::with_capacity(branch.len());
-    for message in branch {
-        let expected = match &message {
-            AgentMessage::Assistant {
-                tool_calls: Some(calls),
-                ..
-            } => calls.iter().map(|call| call.id.clone()).collect::<Vec<_>>(),
-            _ => Vec::new(),
-        };
-        messages.push(message);
-        for tool_call_id in expected {
-            if attached_tool_ids.contains(&tool_call_id) {
-                continue;
-            }
-            if let Some(tool) = tree.nodes.values().find_map(|node| match &node.message {
-                AgentMessage::Tool {
-                    tool_call_id: id, ..
-                } if id == &tool_call_id => Some(node.message.clone()),
-                _ => None,
-            }) {
-                messages.push(tool);
-            }
-        }
-    }
-    messages
-}
-
 pub(crate) fn is_retryable_generation_error(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     [
@@ -799,6 +763,14 @@ impl CodingAgent {
                     HarnessJournal::record_provider_trace_to_path(&path, &run_id, event)
                 })
             })));
+        let message_path = path.clone();
+        self.agent.set_message_recorder(Some(Arc::new(move |message| {
+            let path = message_path.clone();
+            Box::pin(async move {
+                let mut journal = HarnessJournal::open(&path)?;
+                journal.append_message(message).map(|_| ())
+            })
+        })));
         let tool_path = path.clone();
         let tool_run_id = run_id.clone();
         self.agent.tool_dispatcher.tool_execution_trace_recorder = Some(Arc::new(move |event| {
@@ -1109,6 +1081,7 @@ impl CodingAgent {
             }
         }
         self.agent.set_provider_trace_recorder(None);
+        self.agent.set_message_recorder(None);
         self.agent.tool_dispatcher.tool_execution_trace_recorder = None;
         self.permission_handle.set_trace_recorder(None);
         result
@@ -1136,8 +1109,19 @@ impl CodingAgent {
             return Some(self.session_tree.add_message(message));
         }
         let leaf = self.session_tree.active_node_id().map(str::to_owned);
-        if self.session_tree.get_active_branch_messages().last() != Some(&message) {
-            warn!("Persisted prompt is not the active session leaf; subagents will use the canonical active leaf");
+        let projected_last = self
+            .harness
+            .as_mut()
+            .and_then(|journal| {
+                let _ = journal.refresh();
+                journal
+                    .store
+                    .model_context("main")
+                    .ok()
+                    .and_then(|projection| projection.messages().pop())
+            });
+        if projected_last.as_ref() != Some(&message) {
+            warn!("Persisted prompt is not the canonical model-context leaf; subagents will use the canonical active leaf");
         }
         leaf
     }
@@ -1281,9 +1265,10 @@ impl CodingAgent {
                 self.session_tree = SessionTree::load_from_file(&path)
                     .map_err(|error| format!("failed to reload navigated session: {error}"))?;
                 self.session_tree.switch_active_node(&target_entry_id);
-                let branch_msgs = self.session_tree.get_active_branch_messages();
-                let mut agent_state = self.agent.turn.lock().await;
-                agent_state.messages = branch_msgs;
+                self.agent
+                    .sync_turn_from_model_context()
+                    .await
+                    .map_err(|error| format!("failed to project navigated context: {error}"))?;
                 return Ok(format!("Switched session tree to node: {node_id}"));
             }
         }
@@ -1341,6 +1326,15 @@ impl CodingAgent {
     }
 
     pub(crate) async fn sync_session_history(&mut self) {
+        if self.harness.is_some() {
+            if let Err(error) = self.agent.sync_turn_from_model_context().await {
+                warn!("Failed to project canonical model context: {error}");
+            }
+            return;
+        }
+        // Legacy in-memory sessions have no harness journal yet. Keep this
+        // compatibility path isolated; durable sessions always project from
+        // the canonical append-only event log above.
         let branch = self.session_tree.get_active_branch_messages();
         let mut state = self.agent.turn.lock().await;
         let system_prompt = state.system_prompt.clone();
@@ -1858,14 +1852,9 @@ impl CodingAgent {
                 .as_mut()
                 .and_then(|harness| {
                     let _ = harness.refresh();
-                    harness.store.model_history("main").ok()
+                    harness.store.model_context("main").ok()
                 })
-                .map(|entries| {
-                    entries
-                        .into_iter()
-                        .map(|entry| entry.message)
-                        .collect::<Vec<_>>()
-                })
+                .map(|projection| projection.messages())
                 .unwrap_or_default();
             if requires_harness_compaction_reset(&durable_messages, &state_messages) {
                 let summary = state_messages
@@ -2489,24 +2478,32 @@ impl CodingAgent {
     async fn repair_interrupted_history(&mut self) -> bool {
         if let Some(path) = self.session_tree.file_path.clone() {
             if self.harness.is_some() {
+                // Recovery starts from the same selected model-context branch
+                // used for provider requests, never from the UI session tree.
                 let Ok(tree) = SessionTree::load_from_file(&path) else {
                     return false;
                 };
-                let branch = active_branch_with_detached_tool_results(&tree);
+                let Some(journal) = self.harness.as_mut() else {
+                    return false;
+                };
+                if journal.refresh().is_err() {
+                    return false;
+                }
+                let Ok(projection) = journal.store.model_context("main") else {
+                    return false;
+                };
                 let mut state = self.agent.turn.lock().await;
-                let mut messages = Vec::with_capacity(branch.len() + 1);
+                let mut messages = Vec::with_capacity(projection.entries.len() + 1);
                 messages.push(AgentMessage::System {
                     content: state.system_prompt.clone(),
                 });
-                messages.extend(
-                    branch
-                        .into_iter()
-                        .filter(|message| !matches!(message, AgentMessage::System { .. })),
-                );
+                messages.extend(projection.messages());
                 let repaired = repair_interrupted_tool_turn(&mut messages);
                 let changed = state.messages != messages;
                 self.session_tree = tree;
                 if repaired {
+                    // The harness owns durable persistence. This in-memory tree
+                    // update only keeps legacy UI reconciliation coherent.
                     self.session_tree.replace_active_branch_in_memory(
                         messages
                             .iter()

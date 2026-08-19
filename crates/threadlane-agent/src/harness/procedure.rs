@@ -1042,7 +1042,12 @@ impl CompactionProcedure {
                     timestamp: first_seq + 1,
                     message: AgentMessage::Custom {
                         custom_type: "compaction_summary".into(),
-                        payload: serde_json::json!({"summary": summary}),
+                        payload: serde_json::json!({
+                            "schema_version": 1,
+                            "summary": summary,
+                            "checkpoint_kind": "manual",
+                            "source_leaf_id": source_leaf_id,
+                        }),
                     },
                     terminate: false,
                 },
