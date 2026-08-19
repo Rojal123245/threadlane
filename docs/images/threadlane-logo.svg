@@ -1,19 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
-  <rect width="512" height="512" rx="108" fill="#000"/>
-  <g transform="translate(0 -5.333333) scale(21.333333)" stroke="#fff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M2 5h20"/>
-    <path d="M2 7.2h20"/>
-    <path d="M2 9.4h20"/>
-    <path d="M9.8 5L9.6 19.5"/>
-    <path d="M12 7.2V19.5"/>
-    <path d="M14.2 9.4L14.4 19.5"/>
-    <path d="M8 11.5L7.9 19.5" stroke-width="0.6"/>
-    <path d="M16 11.5L16.1 19.5" stroke-width="0.6"/>
-    <path d="M10.8 12.5v1.4" stroke-width="0.6"/>
-    <path d="M10.8 15.5v1.4" stroke-width="0.6"/>
-    <path d="M10.8 18.2v0.8" stroke-width="0.6"/>
-    <path d="M13.2 12.5v1.4" stroke-width="0.6"/>
-    <path d="M13.2 15.5v1.4" stroke-width="0.6"/>
-    <path d="M13.2 18.2v0.8" stroke-width="0.6"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Threadlane icon</title>
+  <desc id="desc">Three bold threads join into a single vertical lane.</desc>
+  <rect width="512" height="512" rx="112" fill="#0B0F14"/>
+  <g fill="none" stroke="#F7F8FA" stroke-linecap="round" stroke-linejoin="round" stroke-width="44">
+    <path d="M118 154H394"/>
+    <path d="M118 236H330"/>
+    <path d="M118 318H266"/>
+    <path d="M266 154V394"/>
   </g>
+  <circle cx="266" cy="394" r="22" fill="#F7F8FA"/>
 </svg>
