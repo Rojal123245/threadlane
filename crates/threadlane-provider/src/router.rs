@@ -102,7 +102,7 @@ impl From<(Value, Value)> for PayloadSource {
 #[derive(Clone)]
 pub struct ProviderClient {
     openai: OpenAIClient,
-    openai_fallback: Option<OpenAIClient>,
+    openai_fallbacks: Vec<OpenAIClient>,
     antigravity: AntigravityClient,
     opencode: OpenCodeGoClient,
 }
@@ -110,19 +110,16 @@ pub struct ProviderClient {
 impl ProviderClient {
     pub fn new(api_key: impl Into<String>, account_id: Option<String>) -> Self {
         let api_key = api_key.into();
-        let fallback = if let Some(backup) = threadlane_auth::openai_auth::get_backup_codex_accounts().first() {
-            if backup.access_token != api_key {
-                Some(OpenAIClient::new(backup.access_token.clone(), backup.account_id.clone()))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let backups = threadlane_auth::openai_auth::get_backup_codex_accounts();
+        let openai_fallbacks: Vec<OpenAIClient> = backups
+            .into_iter()
+            .filter(|backup| backup.access_token != api_key)
+            .map(|backup| OpenAIClient::new(backup.access_token, backup.account_id))
+            .collect();
 
         Self {
             openai: OpenAIClient::new(api_key, account_id),
-            openai_fallback: fallback,
+            openai_fallbacks,
             antigravity: AntigravityClient::new(),
             opencode: OpenCodeGoClient::new(),
         }
@@ -136,10 +133,33 @@ impl ProviderClient {
     ) -> Self {
         Self {
             openai: OpenAIClient::new(api_key.into(), account_id),
-            openai_fallback: Some(OpenAIClient::new(fallback_api_key.into(), fallback_account_id)),
+            openai_fallbacks: vec![OpenAIClient::new(
+                fallback_api_key.into(),
+                fallback_account_id,
+            )],
             antigravity: AntigravityClient::new(),
             opencode: OpenCodeGoClient::new(),
         }
+    }
+
+    pub fn with_fallback_accounts(
+        api_key: impl Into<String>,
+        account_id: Option<String>,
+        fallbacks: Vec<(String, Option<String>)>,
+    ) -> Self {
+        Self {
+            openai: OpenAIClient::new(api_key.into(), account_id),
+            openai_fallbacks: fallbacks
+                .into_iter()
+                .map(|(key, acc)| OpenAIClient::new(key, acc))
+                .collect(),
+            antigravity: AntigravityClient::new(),
+            opencode: OpenCodeGoClient::new(),
+        }
+    }
+
+    pub fn openai_fallback(&self) -> Option<&OpenAIClient> {
+        self.openai_fallbacks.first()
     }
 
     #[cfg(test)]
@@ -188,30 +208,30 @@ impl ProviderClient {
             return;
         }
 
-        if let Some(fallback_client) = &self.openai_fallback {
-            let primary = self.openai.clone();
-            let fallback = fallback_client.clone();
-            let source_primary = source.clone();
-            let source_fallback = source;
-            let key_primary = prompt_cache_key.clone();
-            let key_fallback = prompt_cache_key;
+        if !self.openai_fallbacks.is_empty() {
+            let mut clients = Vec::with_capacity(1 + self.openai_fallbacks.len());
+            clients.push(self.openai.clone());
+            clients.extend(self.openai_fallbacks.clone());
 
-            self.stream_with_fallback(
-                |tx| async move {
-                    let provider: Arc<dyn crate::traits::ModelProvider> = Arc::new(primary);
-                    provider
-                        .stream_chat_completion(source_primary, key_primary, tx)
-                        .await;
-                },
-                |tx| async move {
-                    let provider: Arc<dyn crate::traits::ModelProvider> = Arc::new(fallback);
-                    provider
-                        .stream_chat_completion(source_fallback, key_fallback, tx)
-                        .await;
-                },
-                event_tx,
-            )
-            .await;
+            let tasks: Vec<Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send>> = clients
+                .into_iter()
+                .map(|client| {
+                    let source = source.clone();
+                    let prompt_cache_key = prompt_cache_key.clone();
+                    let task: Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send> =
+                        Box::new(move |tx| {
+                            Box::pin(async move {
+                                let provider: Arc<dyn crate::traits::ModelProvider> = Arc::new(client);
+                                provider
+                                    .stream_chat_completion(source, prompt_cache_key, tx)
+                                    .await;
+                            })
+                        });
+                    task
+                })
+                .collect();
+
+            Self::execute_stream_fallback_chain(tasks, event_tx).await;
         } else {
             let provider: Arc<dyn crate::traits::ModelProvider> = Arc::new(self.openai.clone());
             provider
@@ -226,52 +246,71 @@ impl ProviderClient {
         is_quota_or_rate_limit(error)
     }
 
-    /// Routes a completed provider stream through a one-shot fallback before
+    /// Routes a completed provider stream through a sequence of fallbacks before
     /// forwarding events to the caller. Fallback is permitted only if the
-    /// primary failed before emitting visible output, preventing duplication.
+    /// preceding provider failed before emitting visible output, preventing duplication.
     pub async fn stream_with_fallback<P, F, PrimaryFut, FallbackFut>(
         &self,
         primary: P,
         fallback: F,
         event_tx: mpsc::Sender<StreamEvent>,
     ) where
-        P: FnOnce(mpsc::Sender<StreamEvent>) -> PrimaryFut,
-        F: FnOnce(mpsc::Sender<StreamEvent>) -> FallbackFut,
-        PrimaryFut: std::future::Future<Output = ()>,
-        FallbackFut: std::future::Future<Output = ()>,
+        P: FnOnce(mpsc::Sender<StreamEvent>) -> PrimaryFut + Send + 'static,
+        F: FnOnce(mpsc::Sender<StreamEvent>) -> FallbackFut + Send + 'static,
+        PrimaryFut: std::future::Future<Output = ()> + Send + 'static,
+        FallbackFut: std::future::Future<Output = ()> + Send + 'static,
     {
-        let (primary_tx, mut primary_rx) = mpsc::channel(32);
-        primary(primary_tx).await;
-        let mut emitted_visible_output = false;
-        let mut retry = false;
-        while let Some(event) = primary_rx.recv().await {
-            match &event {
-                StreamEvent::ContentToken(_)
-                | StreamEvent::ReasoningToken(_)
-                | StreamEvent::ToolCallStart { .. } => {
-                    emitted_visible_output = true;
+        let tasks: Vec<Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send>> = vec![
+            Box::new(move |tx| Box::pin(primary(tx))),
+            Box::new(move |tx| Box::pin(fallback(tx))),
+        ];
+        Self::execute_stream_fallback_chain(tasks, event_tx).await;
+    }
+
+    pub async fn execute_stream_fallback_chain(
+        tasks: Vec<Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send>>,
+        event_tx: mpsc::Sender<StreamEvent>,
+    ) {
+        let total = tasks.len();
+        for (idx, task) in tasks.into_iter().enumerate() {
+            let (tx, mut rx) = mpsc::channel(32);
+            let producer_fut = task(tx);
+            let producer_handle = tokio::spawn(producer_fut);
+
+            let is_last = idx + 1 == total;
+            let mut emitted_visible_output = false;
+            let mut retry = false;
+
+            while let Some(event) = rx.recv().await {
+                match &event {
+                    StreamEvent::ContentToken(_)
+                    | StreamEvent::ReasoningToken(_)
+                    | StreamEvent::ToolCallStart { .. } => {
+                        emitted_visible_output = true;
+                    }
+                    StreamEvent::Error(error)
+                        if !emitted_visible_output
+                            && !is_last
+                            && is_quota_or_rate_limit(error) =>
+                    {
+                        retry = true;
+                        break;
+                    }
+                    _ => {}
                 }
-                StreamEvent::Error(error)
-                    if !emitted_visible_output && is_quota_or_rate_limit(error) =>
-                {
-                    retry = true;
-                    break;
+                if event_tx.send(event).await.is_err() {
+                    producer_handle.abort();
+                    return;
                 }
-                _ => {}
             }
-            if event_tx.send(event).await.is_err() {
-                return;
+
+            if retry {
+                producer_handle.abort();
+                continue;
             }
-        }
-        if !retry {
+
+            let _ = producer_handle.await;
             return;
-        }
-        let (fallback_tx, mut fallback_rx) = mpsc::channel(32);
-        fallback(fallback_tx).await;
-        while let Some(event) = fallback_rx.recv().await {
-            if event_tx.send(event).await.is_err() {
-                return;
-            }
         }
     }
 
@@ -555,6 +594,116 @@ mod tests {
             Some("acc2".into()),
         );
         assert_eq!(client.provider_kind("gpt-4o"), "codex");
-        assert!(client.openai_fallback.is_some());
+        assert!(client.openai_fallback().is_some());
+    }
+
+    #[tokio::test]
+    async fn does_not_deadlock_when_primary_emits_more_than_channel_capacity_events() {
+        let client = ProviderClient::new("test", None);
+        let (tx, mut rx) = mpsc::channel(200);
+
+        // Send 100 events, which exceeds the mpsc channel capacity of 32
+        client
+            .stream_with_fallback(
+                |tx| async move {
+                    for i in 0..100 {
+                        tx.send(StreamEvent::ContentToken(format!("token_{i}")))
+                            .await
+                            .unwrap();
+                    }
+                    tx.send(StreamEvent::Finished {
+                        tool_calls: Vec::new(),
+                        usage: crate::openai::ProviderUsage::default(),
+                    })
+                    .await
+                    .unwrap();
+                },
+                |_tx| async move {},
+                tx,
+            )
+            .await;
+
+        let mut received = 0;
+        while let Some(event) = rx.recv().await {
+            match event {
+                StreamEvent::ContentToken(_) => received += 1,
+                StreamEvent::Finished { .. } => break,
+                _ => {}
+            }
+        }
+        assert_eq!(received, 100);
+    }
+
+    #[tokio::test]
+    async fn tries_all_backups_in_fallback_chain() {
+        let _client = ProviderClient::with_fallback_accounts(
+            "key1",
+            Some("acc1".into()),
+            vec![
+                ("key2".into(), Some("acc2".into())),
+                ("key3".into(), Some("acc3".into())),
+            ],
+        );
+        let (tx, mut rx) = mpsc::channel(8);
+
+        let tasks: Vec<Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send>> = vec![
+            Box::new(|tx| {
+                Box::pin(async move {
+                    tx.send(StreamEvent::Error("HTTP 429 quota exceeded".into()))
+                        .await
+                        .unwrap();
+                })
+            }),
+            Box::new(|tx| {
+                Box::pin(async move {
+                    tx.send(StreamEvent::Error("HTTP 429 quota exceeded".into()))
+                        .await
+                        .unwrap();
+                })
+            }),
+            Box::new(|tx| {
+                Box::pin(async move {
+                    tx.send(StreamEvent::ContentToken("backup3_ok".into()))
+                        .await
+                        .unwrap();
+                })
+            }),
+        ];
+
+        ProviderClient::execute_stream_fallback_chain(tasks, tx).await;
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(StreamEvent::ContentToken(text)) if text == "backup3_ok"
+        ));
+    }
+
+    #[tokio::test]
+    async fn returns_final_error_when_all_backups_fail() {
+        let (tx, mut rx) = mpsc::channel(8);
+
+        let tasks: Vec<Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send>> = vec![
+            Box::new(|tx| {
+                Box::pin(async move {
+                    tx.send(StreamEvent::Error("HTTP 429 quota1".into()))
+                        .await
+                        .unwrap();
+                })
+            }),
+            Box::new(|tx| {
+                Box::pin(async move {
+                    tx.send(StreamEvent::Error("HTTP 429 quota2".into()))
+                        .await
+                        .unwrap();
+                })
+            }),
+        ];
+
+        ProviderClient::execute_stream_fallback_chain(tasks, tx).await;
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(StreamEvent::Error(err)) if err == "HTTP 429 quota2"
+        ));
     }
 }

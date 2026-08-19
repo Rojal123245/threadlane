@@ -885,8 +885,8 @@ impl AppState {
             self.selected_model =
                 crate::model_catalog::default_model_for_project(self.active_work_dir.as_deref())
                     .unwrap_or_default();
-            self.invalidate_idle_runtimes();
         }
+        self.invalidate_idle_runtimes();
     }
 
     pub(crate) fn set_selected_model(&mut self, model: String) {
