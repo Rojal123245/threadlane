@@ -248,7 +248,9 @@ impl EditorView {
             Ok(c) => c,
             Err(err) => {
                 log::error!("Failed to open file {}: {}", full_path.display(), err);
-                format!("// Failed to open file: {err}\n")
+                self.status_msg = Some(format!("Unable to open {}: {err}", relative_path));
+                cx.notify();
+                return;
             }
         };
 

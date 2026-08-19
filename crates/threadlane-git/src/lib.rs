@@ -596,7 +596,41 @@ pub fn unstage_file(work_dir: &Path, path: &str) -> Result<(), GitError> {
     Ok(())
 }
 
+fn validate_diff_path(work_dir: &Path, path: &str) -> Result<(), GitError> {
+    let invalid = || GitError {
+        work_dir: work_dir.to_path_buf(),
+        message: format!("path is outside the workspace: {path}"),
+    };
+    let relative = Path::new(path);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(invalid());
+    }
+
+    let root = work_dir.canonicalize().map_err(|error| GitError {
+        work_dir: work_dir.to_path_buf(),
+        message: format!("could not resolve workspace: {error}"),
+    })?;
+    let mut existing = work_dir.join(relative);
+    while !existing.exists() {
+        if !existing.pop() {
+            return Err(invalid());
+        }
+    }
+    if !existing.canonicalize().map_err(|error| GitError {
+        work_dir: work_dir.to_path_buf(),
+        message: format!("could not resolve path: {error}"),
+    })?.starts_with(&root) {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 pub fn diff_file(work_dir: &Path, path: &str) -> Result<String, GitError> {
+    validate_diff_path(work_dir, path)?;
     // 1. Try diff against HEAD (both staged and unstaged combined)
     if let Ok(head_diff) = command(work_dir, &["diff", "--no-ext-diff", "HEAD", "--", path]) {
         if !head_diff.trim().is_empty() {
@@ -606,12 +640,14 @@ pub fn diff_file(work_dir: &Path, path: &str) -> Result<String, GitError> {
 
     // 2. Try unstaged + staged separately (e.g. if HEAD is unborn or detached)
     let mut diff = String::new();
-    let staged = command(work_dir, &["diff", "--no-ext-diff", "--cached", "--", path]).unwrap_or_default();
+    let staged_result = command(work_dir, &["diff", "--no-ext-diff", "--cached", "--", path]);
+    let staged = staged_result.as_deref().unwrap_or_default();
     if !staged.trim().is_empty() {
         diff.push_str("# Staged changes\n");
         diff.push_str(&staged);
     }
-    let unstaged = command(work_dir, &["diff", "--no-ext-diff", "--", path]).unwrap_or_default();
+    let unstaged_result = command(work_dir, &["diff", "--no-ext-diff", "--", path]);
+    let unstaged = unstaged_result.as_deref().unwrap_or_default();
     if !unstaged.trim().is_empty() {
         if !diff.is_empty() {
             diff.push('\n');
@@ -621,6 +657,9 @@ pub fn diff_file(work_dir: &Path, path: &str) -> Result<String, GitError> {
     }
     if !diff.trim().is_empty() {
         return Ok(diff);
+    }
+    if let (Err(staged_error), Err(_unstaged_error)) = (&staged_result, &unstaged_result) {
+        return Err(staged_error.clone());
     }
 
     // 3. If untracked or new file, show whole file as additions via git diff --no-index
@@ -806,6 +845,25 @@ mod tests {
         let diff = diff_file(dir.path(), "tracked.txt").unwrap();
 
         assert_eq!(diff, "No textual diff available for this file.\n");
+    }
+
+    #[test]
+    fn diff_file_rejects_paths_outside_workspace() {
+        let dir = tempdir().unwrap();
+
+        let error = diff_file(dir.path(), "../outside.txt").unwrap_err();
+
+        assert!(error.message.contains("outside the workspace"));
+    }
+
+    #[test]
+    fn diff_file_preserves_git_errors() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("file.txt"), "content\n").unwrap();
+
+        let error = diff_file(dir.path(), "file.txt").unwrap_err();
+
+        assert!(!error.message.is_empty());
     }
 
     #[test]
