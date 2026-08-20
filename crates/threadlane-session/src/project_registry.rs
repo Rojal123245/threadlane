@@ -175,12 +175,23 @@ fn normalize_projects(projects: Vec<ProjectRecord>) -> Vec<ProjectRecord> {
         .into_iter()
         .filter_map(|mut project| {
             project.path = fs::canonicalize(&project.path).unwrap_or(project.path);
+            if is_ephemeral_temp_project(&project.path) {
+                return None;
+            }
             if project.id.is_empty() {
                 project.id = project_id(&project.path);
             }
             seen.insert(project.path.clone()).then_some(project)
         })
         .collect()
+}
+
+fn is_ephemeral_temp_project(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let suffix = name.strip_prefix(".tmp").unwrap_or_default();
+    !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_alphanumeric())
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {

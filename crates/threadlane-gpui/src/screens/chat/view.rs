@@ -69,9 +69,6 @@ pub struct ChatListView {
     expanded_activity_groups: HashSet<String>,
     markdown_states: HashMap<String, (String, Entity<TextViewState>)>,
     pasted_images: Vec<ImageAttachment>,
-    branches: Vec<String>,
-    current_checkout: Option<String>,
-    branch_error: Option<String>,
     last_session_key: Option<(std::path::PathBuf, String)>,
     initial_scroll_frames: u8,
     older_load_pending: bool,
@@ -253,9 +250,6 @@ impl ChatListView {
             expanded_activity_groups: HashSet::new(),
             markdown_states: HashMap::new(),
             pasted_images: Vec::new(),
-            branches: Vec::new(),
-            current_checkout: None,
-            branch_error: None,
             last_session_key: None,
             initial_scroll_frames: 0,
             older_load_pending: false,
@@ -269,54 +263,6 @@ impl ChatListView {
             selected_trajectory_index: None,
             _subscriptions: vec![sub1, sub2, sub3, sub_editor],
         }
-    }
-
-    fn refresh_branches(&self, cx: &mut Context<Self>) {
-        let Some(work_dir) = self.model.read(cx).active_work_dir.clone() else {
-            return;
-        };
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    threadlane_git::inspect(&work_dir)
-                        .map_err(|error| format!("{}: {}", error.work_dir.display(), error.message))
-                })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(status) => {
-                        this.current_checkout = status.branch;
-                        this.branches = status.branches;
-                        this.branch_error = None;
-                    }
-                    Err(error) => {
-                        this.branch_error = Some(error);
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    fn checkout_branch(&mut self, branch: String, cx: &mut Context<Self>) {
-        let Some(work_dir) = self.model.read(cx).active_work_dir.clone() else {
-            return;
-        };
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { threadlane_git::checkout(&work_dir, &branch) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                if result.is_ok() {
-                    this.refresh_branches(cx);
-                }
-                cx.notify();
-            });
-        })
-        .detach();
     }
 
     fn paste_composer_clipboard(
@@ -424,44 +370,50 @@ impl ChatListView {
             )
             .child(
                 div()
-                    .h(px(28.0))
+                    .h(px(30.0))
                     .flex_none()
                     .flex()
                     .items_center()
                     .gap_1()
                     .p(px(2.0))
-                    .rounded_md()
+                    .rounded_lg()
                     .border_1()
                     .border_color(theme.border)
-                    .bg(theme.muted.opacity(0.5))
-                    .child(
-                        Button::new("trajectory-tab-chat")
-                            .ghost()
-                            .xsmall()
-                            .selected(self.current_tab == CentralTab::Chat)
-                            .label("Chat")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.current_tab = CentralTab::Chat;
-                                cx.notify();
-                            })),
-                    )
+                    .bg(theme.muted.opacity(0.4))
                     .child(
                         Button::new("trajectory-tab-events")
+                            .icon(Icon::default().path("icons/tabs/trajectory.svg"))
+                            .label("Trajectory")
+                            .tooltip("Trajectory (Execution & Diagnostics)")
                             .ghost()
                             .xsmall()
                             .selected(self.current_tab == CentralTab::Trajectory)
-                            .label("Trajectory")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.current_tab = CentralTab::Trajectory;
                                 cx.notify();
                             })),
                     )
                     .child(
+                        Button::new("trajectory-tab-chat")
+                            .icon(Icon::default().path("icons/tabs/chat.svg"))
+                            .label("Chat")
+                            .tooltip("Chat (Conversation & Turn History)")
+                            .ghost()
+                            .xsmall()
+                            .selected(self.current_tab == CentralTab::Chat)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.current_tab = CentralTab::Chat;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
                         Button::new("trajectory-tab-editor")
+                            .icon(Icon::default().path("icons/tabs/editor.svg"))
+                            .label(editor_label)
+                            .tooltip("Editor (Code & Diff Review)")
                             .ghost()
                             .xsmall()
                             .selected(self.current_tab == CentralTab::Editor)
-                            .label(editor_label)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.current_tab = CentralTab::Editor;
                                 cx.notify();
@@ -1856,6 +1808,7 @@ impl ChatListView {
             .label(selected_project)
             .dropdown_caret(true)
             .ghost()
+            .small()
             .dropdown_menu(move |menu, _window, _cx| {
                 let mut menu = menu;
                 for (name, work_dir) in projects.clone() {
@@ -1913,7 +1866,7 @@ impl ChatListView {
                 div()
                     .flex()
                     .items_center()
-                    .gap_2()
+                    .gap_1()
                     .text_lg()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.foreground)
@@ -2027,25 +1980,15 @@ impl ChatListView {
         let (
             selected_model,
             reasoning_effort,
-            project_name,
             is_generating,
-            session_status,
             pending_message,
             active_session_id,
         ) = {
             let state = self.model.read(cx);
-            let project_name = state
-                .active_work_dir
-                .as_ref()
-                .and_then(|path| path.file_name())
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "No project".to_string());
             (
                 state.selected_model.clone(),
                 state.reasoning_effort,
-                project_name,
                 state.is_generating,
-                state.session_status.clone(),
                 state.active_pending_composer_message().map(str::to_owned),
                 state.active_session_id.clone(),
             )
@@ -2197,44 +2140,6 @@ impl ChatListView {
             .ghost()
             .disabled(!has_models);
 
-        if self.branches.is_empty() {
-            self.refresh_branches(cx);
-        }
-        let branch_model = self.model.clone();
-        let branch_view = cx.entity().clone();
-        let branches = self.branches.clone();
-        let current_checkout = self.current_checkout.clone();
-        let branch_error = self.branch_error.clone();
-        let refresh_view = cx.entity().clone();
-        let branch_picker = Button::new("composer-branch-picker")
-            .label(current_checkout.as_deref().unwrap_or("Current checkout"))
-            .dropdown_caret(true)
-            .ghost()
-            .on_click(move |_event, _window, cx| {
-                refresh_view.update(cx, |this, cx| this.refresh_branches(cx));
-            })
-            .icon(Icon::default().path("icons/git/branch.svg"))
-            .dropdown_menu(move |menu, _window, _cx| {
-                if branches.is_empty() {
-                    let message = branch_error
-                        .as_deref()
-                        .map(|error| format!("Git unavailable: {error}"))
-                        .unwrap_or_else(|| "Loading local branches…".to_owned());
-                    return menu.item(PopupMenuItem::new(message));
-                }
-
-                branches.iter().cloned().fold(menu, |menu, branch| {
-                    let branch_view = branch_view.clone();
-                    let branch_model = branch_model.clone();
-                    menu.item(PopupMenuItem::new(branch.clone()).on_click(
-                        move |_event, _window, cx| {
-                            branch_view
-                                .update(cx, |this, cx| this.checkout_branch(branch.clone(), cx));
-                            branch_model.update(cx, |_, cx| cx.notify());
-                        },
-                    ))
-                })
-            });
         let model_picker = if let Some(option) = selected_option.as_ref() {
             model_picker.icon(Icon::default().path(option.provider.icon_path()))
         } else {
@@ -2281,6 +2186,7 @@ impl ChatListView {
                     let model = effort_model.clone();
                     menu.item(
                         PopupMenuItem::new(effort.label())
+                            .icon(Icon::default().path("icons/effort.svg"))
                             .checked(effort == reasoning_effort)
                             .on_click(move |_event, _window, cx| {
                                 model.update(cx, |state, cx| {
@@ -2401,7 +2307,9 @@ impl ChatListView {
             0.0
         };
 
-        let meter_color = if percent >= 95.0 {
+        let meter_color = if percent == 0.0 {
+            theme.muted_foreground
+        } else if percent >= 95.0 {
             theme.danger
         } else if percent >= 80.0 {
             theme.warning
@@ -2749,32 +2657,6 @@ impl ChatListView {
                                         }
                                     })),
                             ),
-                    ),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(1000.0))
-                    .mx_auto()
-                    .h(px(40.0))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .px_4()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child(IconName::Folder)
-                    .child(project_name)
-                    .child("·")
-                    .child("Local")
-                    .child(div().flex_1())
-                    .child(branch_picker)
-                    .children(
-                        session_status
-                            .filter(|status| !status.starts_with("Working"))
-                            .map(|status| {
-                                div().flex().items_center().gap_2().child("·").child(status)
-                            }),
                     ),
             )
     }

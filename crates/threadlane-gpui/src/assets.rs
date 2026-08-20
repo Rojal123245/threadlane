@@ -19,6 +19,11 @@ impl AssetSource for Assets {
             }
             "icons/providers/acp.svg" => Some(include_bytes!("../assets/icons/providers/acp.svg")),
             "icons/effort.svg" => Some(include_bytes!("../assets/icons/effort.svg")),
+            "icons/tabs/trajectory.svg" => {
+                Some(include_bytes!("../assets/icons/tabs/trajectory.svg"))
+            }
+            "icons/tabs/chat.svg" => Some(include_bytes!("../assets/icons/tabs/chat.svg")),
+            "icons/tabs/editor.svg" => Some(include_bytes!("../assets/icons/tabs/editor.svg")),
             "icons/git/actions.svg" => Some(include_bytes!("../assets/icons/git/actions.svg")),
             "icons/git/commit.svg" => Some(include_bytes!("../assets/icons/git/commit.svg")),
             "icons/git/compare.svg" => Some(include_bytes!("../assets/icons/git/compare.svg")),
@@ -41,6 +46,9 @@ impl AssetSource for Assets {
                 "icons/providers/opencode.svg",
                 "icons/providers/acp.svg",
                 "icons/effort.svg",
+                "icons/tabs/trajectory.svg",
+                "icons/tabs/chat.svg",
+                "icons/tabs/editor.svg",
                 "icons/git/actions.svg",
                 "icons/git/commit.svg",
                 "icons/git/compare.svg",

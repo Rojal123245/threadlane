@@ -384,12 +384,33 @@ impl<S: SessionStore> AgentHarness<S> {
     }
 
     pub fn append_entry_gated(&mut self, entry: super::Entry) -> Result<(), ProcedureError> {
+        let next = self
+            .effects
+            .pending_sequences()
+            .max()
+            .map_or(self.store.next_sequence(), |seq| seq + 1)
+            .max(self.store.next_sequence());
+        let mut entry = entry;
+        if entry.seq < next {
+            entry.seq = next;
+        }
         self.effects
             .park(EffectAction::AppendEntry { entry })
             .map_err(ProcedureError::from)
     }
 
     pub fn append_record_gated(&mut self, record: super::Record) -> Result<(), ProcedureError> {
+        let next = self
+            .effects
+            .pending_sequences()
+            .max()
+            .map_or(self.store.next_sequence(), |seq| seq + 1)
+            .max(self.store.next_sequence());
+        let record = if record.seq() < next {
+            record.with_seq(next)
+        } else {
+            record
+        };
         self.effects
             .park(EffectAction::AppendRecord {
                 id: record.id().to_owned(),

@@ -6,7 +6,6 @@ use gpui::*;
 use gpui_component::alert::{Alert, AlertVariant};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::switch::Switch;
 use gpui_component::tag::{Tag, TagVariant};
@@ -20,14 +19,17 @@ use crate::state::AppState;
 use threadlane_session::{
     AcpAgentRecord, AcpScope, ExtensionRecord, ExtensionScope, SkillMetadata,
 };
+use threadlane_updater::UpdateStatus;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum SettingsPage {
     #[default]
+    General,
     Appearance,
+    Keybindings,
     Providers,
-    Extensions,
     Skills,
+    Extensions,
     AcpAgents,
 }
 
@@ -241,42 +243,18 @@ impl SettingsView {
         let model = self.model.clone();
 
         div()
-            .w(px(260.0))
+            .w(px(240.0))
             .h_full()
             .flex_none()
             .flex()
             .flex_col()
             .border_r_1()
-            .border_color(theme.sidebar_border)
-            .bg(theme.sidebar)
+            .border_color(theme.border)
+            .bg(theme.title_bar)
             .child(div().h(px(48.0)).flex_none())
-            .child(
-                div().px_3().child(
-                    Button::new("settings-back")
-                        .child(
-                            div()
-                                .w_full()
-                                .flex()
-                                .items_center()
-                                .justify_start()
-                                .gap_2()
-                                .child(IconName::ArrowLeft)
-                                .child("Back"),
-                        )
-                        .ghost()
-                        .w_full()
-                        .justify_start()
-                        .on_click(move |_event, _window, cx| {
-                            model.update(cx, |state, _cx| {
-                                controller::dispatch(state, AppAction::CloseSettings);
-                            });
-                        }),
-                ),
-            )
             .child(
                 div()
                     .px_3()
-                    .pt_4()
                     .pb_2()
                     .text_xs()
                     .font_weight(FontWeight::SEMIBOLD)
@@ -289,6 +267,27 @@ impl SettingsView {
                     .flex()
                     .flex_col()
                     .gap_1()
+                    .child(
+                        Button::new("settings-general")
+                            .child(
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_start()
+                                    .gap_2()
+                                    .child(IconName::Settings)
+                                    .child("General"),
+                            )
+                            .ghost()
+                            .selected(self.page == SettingsPage::General)
+                            .w_full()
+                            .justify_start()
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.page = SettingsPage::General;
+                                cx.notify();
+                            })),
+                    )
                     .child(
                         Button::new("settings-appearance")
                             .child(
@@ -311,6 +310,27 @@ impl SettingsView {
                             })),
                     )
                     .child(
+                        Button::new("settings-keybindings")
+                            .child(
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_start()
+                                    .gap_2()
+                                    .child(IconName::SquareTerminal)
+                                    .child("Keybindings"),
+                            )
+                            .ghost()
+                            .selected(self.page == SettingsPage::Keybindings)
+                            .w_full()
+                            .justify_start()
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.page = SettingsPage::Keybindings;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
                         Button::new("settings-providers")
                             .child(
                                 div()
@@ -328,29 +348,6 @@ impl SettingsView {
                             .justify_start()
                             .on_click(cx.listener(|this, _event, _window, cx| {
                                 this.page = SettingsPage::Providers;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("settings-extensions")
-                            .child(
-                                div()
-                                    .w_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_start()
-                                    .gap_2()
-                                    .child(IconName::HardDrive)
-                                    .child("Extensions"),
-                            )
-                            .ghost()
-                            .selected(self.page == SettingsPage::Extensions)
-                            .w_full()
-                            .justify_start()
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.page = SettingsPage::Extensions;
-                                this.capability_status = None;
-                                this.refresh_extensions(cx);
                                 cx.notify();
                             })),
                     )
@@ -378,6 +375,29 @@ impl SettingsView {
                             })),
                     )
                     .child(
+                        Button::new("settings-extensions")
+                            .child(
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_start()
+                                    .gap_2()
+                                    .child(IconName::HardDrive)
+                                    .child("WASI Extensions"),
+                            )
+                            .ghost()
+                            .selected(self.page == SettingsPage::Extensions)
+                            .w_full()
+                            .justify_start()
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.page = SettingsPage::Extensions;
+                                this.capability_status = None;
+                                this.refresh_extensions(cx);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
                         Button::new("settings-acp")
                             .child(
                                 div()
@@ -386,7 +406,7 @@ impl SettingsView {
                                     .items_center()
                                     .justify_start()
                                     .gap_2()
-                                    .child(Icon::default().path("icons/providers/acp.svg"))
+                                    .child(IconName::Network)
                                     .child("ACP Agents"),
                             )
                             .ghost()
@@ -401,82 +421,247 @@ impl SettingsView {
                             })),
                     ),
             )
+            .child(div().flex_1())
+            .child(
+                div().flex_none().px_3().py_2().child(
+                    Button::new("settings-back")
+                        .child(
+                            div()
+                                .w_full()
+                                .flex()
+                                .items_center()
+                                .justify_start()
+                                .gap_2()
+                                .child(IconName::ArrowLeft)
+                                .child("Back"),
+                        )
+                        .ghost()
+                        .w_full()
+                        .justify_start()
+                        .text_color(theme.muted_foreground)
+                        .on_click(move |_event, _window, cx| {
+                            model.update(cx, |state, _cx| {
+                                controller::dispatch(state, AppAction::CloseSettings);
+                            });
+                        }),
+                ),
+            )
     }
 
-    fn render_appearance(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_general(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().colors;
-        let active_theme = crate::theme::active_theme_name(cx);
-        let themes = crate::theme::available_themes(cx);
-        let menu_themes = themes.clone();
-        let selected_theme = active_theme.clone();
-        let needle_enabled = self.model.read(cx).needle_enabled;
+        let state = self.model.read(cx);
+        let active_project = state
+            .active_work_dir
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "No active project".to_string());
+        let project_count = state.projects.len();
+        let needle_enabled = state.needle_enabled;
         let toggle_view = cx.entity().downgrade();
-        let theme_picker = Button::new("settings-theme-picker")
-            .label(active_theme)
-            .dropdown_caret(true)
-            .outline()
-            .dropdown_menu(move |menu, _window, _cx| {
-                let mut menu = menu;
-                for (name, _mode) in menu_themes.clone() {
-                    let selected = name == selected_theme;
-                    let apply_name = name.clone();
-                    menu = menu.item(PopupMenuItem::new(name).checked(selected).on_click(
-                        move |_event, _window, cx| {
-                            crate::theme::apply_theme(&apply_name, cx);
-                        },
-                    ));
-                }
-                menu
-            });
+        let update_status_label = match &state.update_status {
+            UpdateStatus::Checking => "Checking for updates...",
+            UpdateStatus::Available(_) => "Update available",
+            UpdateStatus::Downloading { .. } => "Downloading update...",
+            UpdateStatus::ReadyToInstall { .. } => "Ready to restart",
+            UpdateStatus::Installing => "Installing update...",
+            UpdateStatus::Error(_) => "Update check failed",
+            _ => "Up to date",
+        };
 
         div()
             .mt_5()
-            .rounded_xl()
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.title_bar)
-            .p_4()
             .flex()
-            .items_center()
-            .gap_6()
+            .flex_col()
+            .gap_4()
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.title_bar)
+                    .p_4()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
                     .child(
                         div()
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.foreground)
-                            .child("Theme"),
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .size(px(36.0))
+                                            .rounded_lg()
+                                            .bg(theme.muted)
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .text_color(theme.foreground)
+                                            .child(IconName::Settings),
+                                    )
+                                    .child(
+                                        div()
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(theme.foreground)
+                                                    .child("Application Details"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(theme.muted_foreground)
+                                                    .child("Threadlane GPUI Desktop Native Engine"),
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                Tag::new()
+                                    .child(format!("v{}", env!("CARGO_PKG_VERSION")))
+                                    .with_variant(TagVariant::Primary)
+                                    .small(),
+                            ),
                     )
                     .child(
                         div()
-                            .mt_1()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("Choose between the focused Light and Black themes."),
+                            .grid()
+                            .grid_cols(2)
+                            .gap_3()
+                            .pt_2()
+                            .border_t_1()
+                            .border_color(theme.border)
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("Active Workspace")
+                                    .child(
+                                        div()
+                                            .mt_1()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme.foreground)
+                                            .child(active_project),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("Attached Projects")
+                                    .child(
+                                        div()
+                                            .mt_1()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme.foreground)
+                                            .child(format!("{project_count} projects")),
+                                    ),
+                            ),
                     ),
             )
-            .child(theme_picker)
             .child(
                 div()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.title_bar)
+                    .p_4()
                     .flex()
                     .items_center()
-                    .gap_2()
+                    .justify_between()
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("Local tool routing"),
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme.foreground)
+                                            .child("Application Updates"),
+                                    )
+                                    .child(
+                                        Tag::new()
+                                            .child(update_status_label)
+                                            .with_variant(TagVariant::Secondary)
+                                            .small(),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .mt_1()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("Signed native desktop application release channel."),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.title_bar)
+                    .p_4()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme.foreground)
+                                            .child("Local Needle Indexing"),
+                                    )
+                                    .child(
+                                        Tag::new()
+                                            .child(if needle_enabled { "Enabled" } else { "Disabled" })
+                                            .with_variant(if needle_enabled {
+                                                TagVariant::Success
+                                            } else {
+                                                TagVariant::Secondary
+                                            })
+                                            .small(),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .mt_1()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("Accelerate file search and symbol extraction using the native local index."),
+                            ),
                     )
                     .child(
-                        Switch::new("settings-needle")
+                        Switch::new("general-needle-switch")
                             .checked(needle_enabled)
                             .tooltip(if needle_enabled {
-                                "Disable Needle tool routing"
+                                "Disable Needle routing"
                             } else {
-                                "Enable Needle tool routing"
+                                "Enable Needle routing"
                             })
                             .on_click(move |checked, _window, cx| {
                                 let _ = toggle_view.update(cx, |this, cx| {
@@ -493,6 +678,249 @@ impl SettingsView {
             )
             .into_any_element()
     }
+
+    fn render_appearance(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().colors;
+        let active_theme = crate::theme::active_theme_name(cx);
+        let is_dark = active_theme == "Threadlane Dark";
+        let is_light = active_theme == "Threadlane Light";
+
+        div()
+            .mt_5()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                div()
+                    .grid()
+                    .grid_cols(2)
+                    .gap_4()
+                    .child(
+                        div()
+                            .id("theme-card-dark")
+                            .p_4()
+                            .rounded_xl()
+                            .border_2()
+                            .border_color(if is_dark { theme.primary } else { theme.border })
+                            .bg(theme.title_bar)
+                            .cursor_pointer()
+                            .on_click(|_event, _window, cx| {
+                                crate::theme::apply_theme("Threadlane Dark", cx);
+                            })
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .h(px(80.0))
+                                    .rounded_lg()
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .bg(hsla(0.0, 0.0, 0.07, 1.0))
+                                    .p_3()
+                                    .flex()
+                                    .flex_col()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .gap_1_5()
+                                            .child(div().size(px(8.0)).rounded_full().bg(hsla(0.0, 0.7, 0.6, 1.0)))
+                                            .child(div().size(px(8.0)).rounded_full().bg(hsla(0.12, 0.7, 0.6, 1.0)))
+                                            .child(div().size(px(8.0)).rounded_full().bg(hsla(0.35, 0.7, 0.6, 1.0))),
+                                    )
+                                    .child(
+                                        div()
+                                            .h(px(16.0))
+                                            .w_3_4()
+                                            .rounded_md()
+                                            .bg(hsla(0.0, 0.0, 0.16, 1.0)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(theme.foreground)
+                                                    .child("Threadlane Dark"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(theme.muted_foreground)
+                                                    .child("High-contrast deep black interface"),
+                                            ),
+                                    )
+                                    .children(is_dark.then(|| {
+                                        Tag::new()
+                                            .child("Active")
+                                            .with_variant(TagVariant::Success)
+                                            .small()
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("theme-card-light")
+                            .p_4()
+                            .rounded_xl()
+                            .border_2()
+                            .border_color(if is_light { theme.primary } else { theme.border })
+                            .bg(theme.title_bar)
+                            .cursor_pointer()
+                            .on_click(|_event, _window, cx| {
+                                crate::theme::apply_theme("Threadlane Light", cx);
+                            })
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .h(px(80.0))
+                                    .rounded_lg()
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .bg(hsla(0.0, 0.0, 0.98, 1.0))
+                                    .p_3()
+                                    .flex()
+                                    .flex_col()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .gap_1_5()
+                                            .child(div().size(px(8.0)).rounded_full().bg(hsla(0.0, 0.7, 0.6, 1.0)))
+                                            .child(div().size(px(8.0)).rounded_full().bg(hsla(0.12, 0.7, 0.6, 1.0)))
+                                            .child(div().size(px(8.0)).rounded_full().bg(hsla(0.35, 0.7, 0.6, 1.0))),
+                                    )
+                                    .child(
+                                        div()
+                                            .h(px(16.0))
+                                            .w_3_4()
+                                            .rounded_md()
+                                            .bg(hsla(0.0, 0.0, 0.88, 1.0)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(theme.foreground)
+                                                    .child("Threadlane Light"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(theme.muted_foreground)
+                                                    .child("Clean and crisp light aesthetic"),
+                                            ),
+                                    )
+                                    .children(is_light.then(|| {
+                                        Tag::new()
+                                            .child("Active")
+                                            .with_variant(TagVariant::Success)
+                                            .small()
+                                    })),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_keybindings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().colors;
+
+        let shortcuts = [
+            ("Global", vec![
+                ("⌘ ,", "Open Settings"),
+                ("⌘ B", "Toggle Left Sidebar"),
+                ("⌘ R", "Toggle Right Panel"),
+                ("⌘ J", "Toggle Terminal Panel"),
+                ("⌘ E", "Toggle Code/Diff Editor"),
+                ("⌘ N", "New Session"),
+                ("⌘ P", "Open Project File Finder"),
+                ("⌘ ⇧ O", "Attach Local Project"),
+            ]),
+            ("Composer & Chat", vec![
+                ("Enter", "Submit prompt to agent"),
+                ("⇧ Enter", "Insert newline in composer"),
+                ("Escape", "Cancel active agent turn"),
+                ("/ (in empty composer)", "Open Slash Commands palette"),
+                ("@ (in composer)", "Reference file or context in prompt"),
+            ]),
+            ("Editor & Diff", vec![
+                ("⌘ S", "Save active file"),
+                ("⌘ Z", "Undo edit"),
+                ("⌘ ⇧ Z", "Redo edit"),
+                ("⌘ F", "Find in active editor buffer"),
+            ]),
+        ];
+
+        let mut list = div().mt_5().flex().flex_col().gap_6();
+
+        for (section_title, items) in shortcuts {
+            let mut section_div = div()
+                .rounded_xl()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.title_bar)
+                .p_4()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .pb_2()
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.muted_foreground)
+                        .child(section_title.to_uppercase()),
+                );
+
+            for (keys, description) in items {
+                section_div = section_div.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .py_1()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(theme.foreground)
+                                .child(description),
+                        )
+                        .child(
+                            Tag::new()
+                                .child(keys)
+                                .with_variant(TagVariant::Secondary)
+                                .small(),
+                        ),
+                );
+            }
+
+            list = list.child(section_div);
+        }
+
+        list.into_any_element()
+    }
+
 
     fn render_provider_connection(
         &self,
@@ -573,53 +1001,77 @@ impl SettingsView {
                     ),
             )
             .child(
-                Button::new(if antigravity {
-                    "antigravity-auth-button"
-                } else {
-                    "chatgpt-auth-button"
-                })
-                .label(button_label)
-                .when(!connected, |button| button.primary())
-                .when(connected, |button| button.ghost())
-                .on_click(move |_event, _window, cx| {
-                    let _ = view.update(cx, |this, cx| {
-                        if connected {
-                            let result = if antigravity {
-                                threadlane_provider::antigravity_auth::clear_antigravity_credentials()
-                            } else {
-                                threadlane_auth::openai_auth::remove_credentials()
-                            };
-                            let disconnected = result.is_ok();
-                            this.auth_message = Some(match result {
-                                Ok(()) if antigravity => {
-                                    "Disconnected Google Antigravity.".to_string()
-                                }
-                                Ok(()) => "Disconnected ChatGPT.".to_string(),
-                                Err(error) => format!("Failed to disconnect: {error}"),
-                            });
-                            if disconnected {
-                                model.update(cx, |state, cx| {
-                                    state.reconcile_selected_model();
-                                    cx.notify();
-                                });
-                            }
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .children(connected.then(|| {
+                        let auth_tx = self.auth_tx.clone();
+                        Button::new(if antigravity {
+                            "test-antigravity-connection-btn"
                         } else {
-                            let result = if antigravity {
-                                provider_auth::start_antigravity_login(this.auth_tx.clone())
+                            "test-chatgpt-connection-btn"
+                        })
+                        .icon(IconName::Play)
+                        .label("Test")
+                        .outline()
+                        .on_click(move |_event, _window, _cx| {
+                            if antigravity {
+                                let _ = provider_auth::test_antigravity_connection(auth_tx.clone());
                             } else {
-                                provider_auth::start_chatgpt_login(this.auth_tx.clone())
-                            };
-                            this.auth_message = Some(match result {
-                                Ok(()) if antigravity => {
-                                    "Opening Google Antigravity sign-in...".to_string()
+                                let _ = provider_auth::test_openai_connection(None, auth_tx.clone());
+                            }
+                        })
+                    }))
+                    .child(
+                        Button::new(if antigravity {
+                            "antigravity-auth-button"
+                        } else {
+                            "chatgpt-auth-button"
+                        })
+                        .label(button_label)
+                        .when(!connected, |button| button.primary())
+                        .when(connected, |button| button.ghost())
+                        .on_click(move |_event, _window, cx| {
+                            let _ = view.update(cx, |this, cx| {
+                                if connected {
+                                    let result = if antigravity {
+                                        threadlane_provider::antigravity_auth::clear_antigravity_credentials()
+                                    } else {
+                                        threadlane_auth::openai_auth::remove_credentials()
+                                    };
+                                    let disconnected = result.is_ok();
+                                    this.auth_message = Some(match result {
+                                        Ok(()) if antigravity => {
+                                            "Disconnected Google Antigravity.".to_string()
+                                        }
+                                        Ok(()) => "Disconnected ChatGPT.".to_string(),
+                                        Err(error) => format!("Failed to disconnect: {error}"),
+                                    });
+                                    if disconnected {
+                                        model.update(cx, |state, cx| {
+                                            state.reconcile_selected_model();
+                                            cx.notify();
+                                        });
+                                    }
+                                } else {
+                                    let result = if antigravity {
+                                        provider_auth::start_antigravity_login(this.auth_tx.clone())
+                                    } else {
+                                        provider_auth::start_chatgpt_login(this.auth_tx.clone())
+                                    };
+                                    this.auth_message = Some(match result {
+                                        Ok(()) if antigravity => {
+                                            "Opening Google Antigravity sign-in...".to_string()
+                                        }
+                                        Ok(()) => "Starting ChatGPT sign-in...".to_string(),
+                                        Err(error) => error,
+                                    });
                                 }
-                                Ok(()) => "Starting ChatGPT sign-in...".to_string(),
-                                Err(error) => error,
+                                cx.notify();
                             });
-                        }
-                        cx.notify();
-                    });
-                }),
+                        }),
+                    ),
             )
     }
 
@@ -956,27 +1408,43 @@ impl SettingsView {
                             ),
                     )
                     .child(
-                        Button::new("add-chatgpt-account-btn")
-                            .icon(IconName::Plus)
-                            .label("Add Account")
-                            .outline()
-                            .on_click({
-                                let view = view.clone();
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child({
                                 let auth_tx = auth_tx.clone();
-                                move |_event, _window, cx| {
-                                    let _ = view.update(cx, |this, cx| {
-                                        let result =
-                                            provider_auth::start_chatgpt_login(auth_tx.clone());
-                                        this.auth_message = Some(match result {
-                                            Ok(()) => {
-                                                "Starting sign-in for additional account...".to_string()
-                                            }
-                                            Err(error) => error,
-                                        });
-                                        cx.notify();
-                                    });
-                                }
-                            }),
+                                Button::new("test-chatgpt-accounts-btn")
+                                    .icon(IconName::Play)
+                                    .label("Test")
+                                    .outline()
+                                    .on_click(move |_event, _window, _cx| {
+                                        let _ = provider_auth::test_openai_connection(None, auth_tx.clone());
+                                    })
+                            })
+                            .child(
+                                Button::new("add-chatgpt-account-btn")
+                                    .icon(IconName::Plus)
+                                    .label("Add Account")
+                                    .outline()
+                                    .on_click({
+                                        let view = view.clone();
+                                        let auth_tx = auth_tx.clone();
+                                        move |_event, _window, cx| {
+                                            let _ = view.update(cx, |this, cx| {
+                                                let result =
+                                                    provider_auth::start_chatgpt_login(auth_tx.clone());
+                                                this.auth_message = Some(match result {
+                                                    Ok(()) => {
+                                                        "Starting sign-in for additional account...".to_string()
+                                                    }
+                                                    Err(error) => error,
+                                                });
+                                                cx.notify();
+                                            });
+                                        }
+                                    }),
+                            ),
                     ),
             )
             .child(
@@ -1156,11 +1624,13 @@ impl SettingsView {
         input: &Entity<InputState>,
         button_id: &'static str,
         action: fn(String) -> AppAction,
+        is_openai: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme().colors;
         let model = self.model.clone();
         let input = input.clone();
+        let auth_tx = self.auth_tx.clone();
 
         div()
             .py_4()
@@ -1180,6 +1650,22 @@ impl SettingsView {
                     .items_center()
                     .gap_2()
                     .child(div().flex_1().child(Input::new(&input).mask_toggle()))
+                    .child({
+                        let input = input.clone();
+                        let auth_tx = auth_tx.clone();
+                        Button::new(format!("test-{button_id}"))
+                            .icon(IconName::Play)
+                            .label("Test")
+                            .outline()
+                            .on_click(move |_event, _window, cx| {
+                                let key = input.read(cx).value().to_string();
+                                if is_openai {
+                                    let _ = provider_auth::test_openai_connection(Some(key), auth_tx.clone());
+                                } else {
+                                    let _ = provider_auth::test_opencode_connection(&key, auth_tx.clone());
+                                }
+                            })
+                    })
                     .child(Button::new(button_id).label("Save").primary().on_click(
                         move |_event, _window, cx| {
                             let value = input.read(cx).value().to_string();
@@ -1231,6 +1717,7 @@ impl SettingsView {
                 &self.openai_input,
                 "save-openai-key",
                 AppAction::SaveOpenAiKey,
+                true,
                 cx,
             ))
             .child(self.render_key_row(
@@ -1238,6 +1725,7 @@ impl SettingsView {
                 &self.opencode_input,
                 "save-opencode-key",
                 AppAction::SaveOpenCodeKey,
+                false,
                 cx,
             ))
             .into_any_element()
@@ -1835,29 +2323,39 @@ impl Render for SettingsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
         let (title, description, content) = match self.page {
+            SettingsPage::General => (
+                "General",
+                "Application details, release channels, and runtime options.",
+                self.render_general(cx),
+            ),
             SettingsPage::Appearance => (
-                "Appearance",
-                "Customize how Threadlane looks.",
+                "Appearance & Themes",
+                "Customize the editor theme and visual aesthetic.",
                 self.render_appearance(cx),
             ),
+            SettingsPage::Keybindings => (
+                "Keybindings",
+                "Keyboard shortcuts reference and operational controls.",
+                self.render_keybindings(cx),
+            ),
             SettingsPage::Providers => (
-                "Providers",
-                "Configure models and provider credentials.",
+                "Models & Providers",
+                "Configure model providers, cloud authentication, and API credentials.",
                 self.render_providers(cx),
             ),
-            SettingsPage::Extensions => (
-                "Extensions",
-                "Install and manage compiled WASI extensions.",
-                self.render_extensions(cx),
-            ),
             SettingsPage::Skills => (
-                "Skills",
-                "Enable or disable skills for the active project.",
+                "Skills Catalog",
+                "Contextual instructions and automation skills enabled for your active workspace.",
                 self.render_skills(cx),
+            ),
+            SettingsPage::Extensions => (
+                "WASI Extensions",
+                "Install and manage compiled WebAssembly extensions (.wasm) for tools and language servers.",
+                self.render_extensions(cx),
             ),
             SettingsPage::AcpAgents => (
                 "ACP Agents",
-                "Configure external coding agents that communicate over stdio.",
+                "Configure external coding agents communicating over stdio (e.g. Claude Code, Copilot).",
                 self.render_acp_agents(cx),
             ),
         };

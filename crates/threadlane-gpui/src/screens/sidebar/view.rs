@@ -2,13 +2,14 @@ use gpui::prelude::FluentBuilder;
 use gpui::InteractiveElement;
 use gpui::*;
 
-use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
+use gpui_component::dialog::DialogButtonProps;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::theme::ActiveTheme;
-use gpui_component::{IconName, Sizable};
+use gpui_component::{IconName, Sizable, WindowExt};
 
 use crate::app::{actions::AppAction, controller};
 use crate::state::{AppState, SessionHealth, SessionInfo, TrajectoryEntry};
@@ -681,64 +682,81 @@ impl SidebarView {
                 ))
                 .separator()
                 .item(
-                    PopupMenuItem::new("Archive Session").on_click(move |_event, _window, cx| {
+                    PopupMenuItem::new("Archive Session").on_click(move |_event, window, cx| {
                         let model = settle_model.clone();
                         let work_dir = settle_work_dir.clone();
                         let session_id = settle_session_id.clone();
-                        cx.spawn(async move |cx| {
-                            let result = rfd::AsyncMessageDialog::new()
-                                .set_title("Archive session?")
-                                .set_description(format!(
-                                    "This removes session {session_id} from the active list."
-                                ))
-                                .set_buttons(rfd::MessageButtons::YesNo)
-                                .show()
-                                .await;
-                            if matches!(result, rfd::MessageDialogResult::Yes) {
-                                let _ = model.update(cx, |state, cx| {
-                                    controller::dispatch(
-                                        state,
-                                        AppAction::SettleSession {
-                                            work_dir,
-                                            session_id,
-                                        },
-                                    );
-                                    cx.notify();
-                                });
+                        window.open_alert_dialog(cx, {
+                            let model = model.clone();
+                            let work_dir = work_dir.clone();
+                            let session_id = session_id.clone();
+                            move |alert, _window, _cx| {
+                                let model = model.clone();
+                                let work_dir = work_dir.clone();
+                                let session_id = session_id.clone();
+                                alert
+                                    .title("Archive session?")
+                                    .description(format!(
+                                        "This removes session {session_id} from the active list."
+                                    ))
+                                    .show_cancel(true)
+                                    .on_ok(move |_event, _window, cx| {
+                                        model.update(cx, |state, cx| {
+                                            controller::dispatch(
+                                                state,
+                                                AppAction::SettleSession {
+                                                    work_dir: work_dir.clone(),
+                                                    session_id: session_id.clone(),
+                                                },
+                                            );
+                                            cx.notify();
+                                        });
+                                        true
+                                    })
                             }
-                        })
-                        .detach();
+                        });
                     }),
                 )
                 .separator()
                 .item(
-                    PopupMenuItem::new("Remove Session").on_click(move |_event, _window, cx| {
+                    PopupMenuItem::new("Remove Session").on_click(move |_event, window, cx| {
                         let model = remove_model.clone();
                         let work_dir = remove_work_dir.clone();
                         let session_id = remove_session_id.clone();
-                        cx.spawn(async move |cx| {
-                            let result = rfd::AsyncMessageDialog::new()
-                                .set_title("Remove session?")
-                                .set_description(format!(
-                                    "This permanently removes session {session_id}."
-                                ))
-                                .set_buttons(rfd::MessageButtons::YesNo)
-                                .show()
-                                .await;
-                            if matches!(result, rfd::MessageDialogResult::Yes) {
-                                let _ = model.update(cx, |state, cx| {
-                                    controller::dispatch(
-                                        state,
-                                        AppAction::RemoveSession {
-                                            work_dir,
-                                            session_id,
-                                        },
-                                    );
-                                    cx.notify();
-                                });
+                        window.open_alert_dialog(cx, {
+                            let model = model.clone();
+                            let work_dir = work_dir.clone();
+                            let session_id = session_id.clone();
+                            move |alert, _window, _cx| {
+                                let model = model.clone();
+                                let work_dir = work_dir.clone();
+                                let session_id = session_id.clone();
+                                alert
+                                    .title("Remove session?")
+                                    .description(format!(
+                                        "This permanently removes session {session_id}."
+                                    ))
+                                    .button_props(
+                                        DialogButtonProps::default()
+                                            .ok_text("Remove")
+                                            .ok_variant(ButtonVariant::Danger)
+                                            .show_cancel(true),
+                                    )
+                                    .on_ok(move |_event, _window, cx| {
+                                        model.update(cx, |state, cx| {
+                                            controller::dispatch(
+                                                state,
+                                                AppAction::RemoveSession {
+                                                    work_dir: work_dir.clone(),
+                                                    session_id: session_id.clone(),
+                                                },
+                                            );
+                                            cx.notify();
+                                        });
+                                        true
+                                    })
                             }
-                        })
-                        .detach();
+                        });
                     }),
                 )
             })
@@ -750,9 +768,19 @@ impl SidebarView {
 
         div().flex_none().px_3().py_2().child(
             Button::new("sidebar-settings")
-                .icon(IconName::Settings)
-                .tooltip("Settings")
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .justify_start()
+                        .gap_2()
+                        .child(IconName::Settings)
+                        .child("Settings"),
+                )
                 .ghost()
+                .w_full()
+                .justify_start()
                 .text_color(theme.muted_foreground)
                 .on_click(move |_event, _window, cx| {
                     model.update(cx, |state, cx| {

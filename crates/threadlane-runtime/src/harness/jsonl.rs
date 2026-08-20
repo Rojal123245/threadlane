@@ -334,7 +334,7 @@ impl SessionStore for JsonlStore {
         }
         // Concurrent stores allocate optimistically; assign stale inputs while holding the gate.
         let next_seq = self.next_seq();
-        if record.seq() < next_seq {
+        if record.seq() <= next_seq {
             record = record.with_seq(next_seq);
         }
         validate_candidate_record(self, &record)?;

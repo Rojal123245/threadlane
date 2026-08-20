@@ -1508,6 +1508,14 @@ impl CodingSessionHarness {
             AgentMessage::Tool { tool_call_id, .. } => format!("v2-tool-result-{tool_call_id}"),
             _ => format!("v2-entry-{seq}"),
         };
+        // Tool completions are recorded both by the execution lifecycle and
+        // by the model-visible transcript.  They may be separated by other
+        // journal records, so checking only the last entry is insufficient.
+        if self.store.entries().iter().any(|entry| {
+            entry.id == id && entry.message == message
+        }) {
+            return Ok(id);
+        }
         self.store
             .append_entry_gated(HarnessEntry {
                 id: id.clone(),

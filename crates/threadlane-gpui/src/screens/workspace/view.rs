@@ -1,22 +1,13 @@
 use std::sync::mpsc;
 use std::time::Duration;
 
-use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandGroup, CommandItem, CommandState};
-use gpui_component::dialog::{
-    Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
-};
-use gpui_component::input::{Input, InputState};
-use gpui_component::notification::Notification;
 use gpui_component::resizable::{h_resizable, resizable_panel, v_resizable, ResizableState};
-use gpui_component::spinner::Spinner;
 use gpui_component::status_bar::StatusBar;
-use gpui_component::switch::Switch;
-use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::{
-    v_flex, ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable, WindowExt,
+    v_flex, ActiveTheme, Icon, IconName, Root, Selectable, Sizable,
 };
 
 actions!(threadlane_workspace, [ToggleCommandPalette]);
@@ -42,32 +33,8 @@ pub fn init(cx: &mut App) {
     ]);
 }
 
-enum GitAction {
-    Commit,
-    CommitAndPush,
-    Push,
-}
-
 enum GitEvent {
     Loaded(Result<GitStatus, String>),
-    Finished(Result<GitStatus, String>),
-    MessageGenerated(Result<String, String>),
-}
-
-fn normalize_generated_commit_message(raw: &str) -> String {
-    let line = raw
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with("```"))
-        .unwrap_or_default()
-        .trim_matches('`')
-        .trim();
-    let line = line
-        .strip_prefix("Commit message:")
-        .or_else(|| line.strip_prefix("Commit:"))
-        .unwrap_or(line)
-        .trim();
-    line.chars().take(72).collect()
 }
 
 pub struct WorkspaceView {
@@ -83,14 +50,7 @@ pub struct WorkspaceView {
     environment_open: bool,
     command_palette_open: bool,
     command_state: Entity<CommandState>,
-    git_dialog_open: bool,
-    git_include_unstaged: bool,
-    git_busy: bool,
-    git_message_pending: bool,
-    generated_commit_message: Option<String>,
     git_status: Option<GitStatus>,
-    git_feedback: Option<String>,
-    git_message_input: Entity<InputState>,
     sidebar_resizable_state: Entity<ResizableState>,
     right_panel_resizable_state: Entity<ResizableState>,
     bottom_panel_resizable_state: Entity<ResizableState>,
@@ -144,8 +104,6 @@ impl WorkspaceView {
         let sidebar_resizable_state = cx.new(|_cx| ResizableState::default());
         let right_panel_resizable_state = cx.new(|_cx| ResizableState::default());
         let bottom_panel_resizable_state = cx.new(|_cx| ResizableState::default());
-        let git_message_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Commit message"));
         let command_state = cx.new(|cx| CommandState::new(window, cx));
         let (git_event_tx, git_event_rx) = mpsc::channel();
         let (updater_tx, updater_rx) = mpsc::channel();
@@ -216,14 +174,7 @@ impl WorkspaceView {
                 environment_open: false,
                 command_palette_open: false,
                 command_state,
-                git_dialog_open: false,
-                git_include_unstaged: true,
-                git_busy: false,
-                git_message_pending: false,
-                generated_commit_message: None,
                 git_status: None,
-                git_feedback: None,
-                git_message_input,
                 sidebar_resizable_state,
                 right_panel_resizable_state,
                 bottom_panel_resizable_state,
@@ -256,8 +207,10 @@ impl WorkspaceView {
     }
 
     fn open_git_dialog(&mut self, cx: &mut Context<Self>) {
-        self.git_dialog_open = true;
-        self.git_feedback = None;
+        self.right_panel_visible = true;
+        self.right_panel.update(cx, |panel, cx| {
+            panel.open_review(cx);
+        });
         self.refresh_git_status(cx);
         cx.notify();
     }
@@ -338,10 +291,8 @@ impl WorkspaceView {
     fn refresh_git_status(&mut self, cx: &App) {
         let Some(work_dir) = self.model.read(cx).active_work_dir.clone() else {
             self.git_status = None;
-            self.git_feedback = Some("Attach a project to use Git actions.".into());
             return;
         };
-        self.git_busy = true;
         let tx = self.git_event_tx.clone();
         std::thread::spawn(move || {
             let result = threadlane_git::inspect(&work_dir).map_err(|error| error.to_string());
@@ -349,156 +300,13 @@ impl WorkspaceView {
         });
     }
 
-    fn generate_commit_message(&mut self, cx: &mut Context<Self>) {
-        if self.git_busy || self.git_message_pending {
-            return;
-        }
-        if !self.git_message_input.read(cx).value().trim().is_empty() {
-            self.git_feedback =
-                Some("Clear the current message before generating a new one.".into());
-            cx.notify();
-            return;
-        }
-        let Some(work_dir) = self.model.read(cx).active_work_dir.clone() else {
-            self.git_feedback = Some("Attach a project to generate a commit message.".into());
-            cx.notify();
-            return;
-        };
-        let model = self.model.read(cx).selected_model.clone();
-        if model.trim().is_empty() {
-            self.git_feedback = Some("Select a model before generating a commit message.".into());
-            cx.notify();
-            return;
-        }
-        let (api_key, account_id) = crate::state::provider_credentials(&model);
-        let tx = self.git_event_tx.clone();
-        let Ok(executor) = crate::services::chat::executor() else {
-            self.git_feedback = Some("Unable to start the model runtime.".into());
-            cx.notify();
-            return;
-        };
-
-        self.git_message_pending = true;
-        self.git_feedback = Some("Generating a commit message…".into());
-        executor.spawn(async move {
-            let result = async {
-                let diff = threadlane_git::commit_message_diff(&work_dir)
-                    .map_err(|error| error.to_string())?;
-                let diff = if diff.chars().count() > 24_000 {
-                    format!(
-                        "{}\n\n[Diff truncated for message generation]",
-                        diff.chars().take(24_000).collect::<String>()
-                    )
-                } else {
-                    diff
-                };
-                let raw = threadlane_provider::ProviderClient::new(api_key, account_id)
-                    .generate_commit_message(&model, &diff)
-                    .await?;
-                let message = normalize_generated_commit_message(&raw);
-                if message.is_empty() {
-                    Err("The model returned an empty commit message.".to_string())
-                } else {
-                    Ok(message)
-                }
-            }
-            .await;
-            let _ = tx.send(GitEvent::MessageGenerated(result));
-        });
-        cx.notify();
-    }
-
-    fn run_git_action(
-        &mut self,
-        action: GitAction,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(work_dir) = self.model.read(cx).active_work_dir.clone() else {
-            self.git_feedback = Some("Attach a project to use Git actions.".into());
-            window.push_notification(
-                Notification::warning("Attach a project to use Git actions"),
-                cx,
-            );
-            cx.notify();
-            return;
-        };
-        let message = self.git_message_input.read(cx).value().trim().to_string();
-        // A commit is needed whenever there is staged work, or unstaged work that the
-        // "Include unstaged" toggle will stage. This applies to Push too, so "Push only"
-        // stages + commits dirty work before pushing when the toggle asks for it.
-        let needs_commit = self.git_status.as_ref().is_some_and(|status| {
-            status.staged_changes || (self.git_include_unstaged && status.unstaged_changes)
-        });
-        if needs_commit && message.is_empty() {
-            self.git_feedback = Some("Enter a commit message first.".into());
-            window.push_notification(Notification::warning("Enter a commit message first"), cx);
-            cx.notify();
-            return;
-        }
-
-        self.git_busy = true;
-        let feedback = match action {
-            GitAction::Commit => "Committing…",
-            GitAction::CommitAndPush => "Committing and pushing…",
-            GitAction::Push => "Pushing…",
-        };
-        self.git_feedback = Some(feedback.into());
-        window.push_notification(Notification::info(feedback), cx);
-        let include_unstaged = self.git_include_unstaged;
-        let tx = self.git_event_tx.clone();
-        std::thread::spawn(move || {
-            let result = (|| {
-                let mut status = threadlane_git::inspect(&work_dir).map_err(|e| e.to_string())?;
-                if include_unstaged {
-                    let mut staged_any = false;
-                    for file in status.files.iter().filter(|file| file.unstaged) {
-                        threadlane_git::stage_file(&work_dir, &file.path)
-                            .map_err(|e| e.to_string())?;
-                        staged_any = true;
-                    }
-                    status.unstaged_changes = false;
-                    status.staged_changes |= staged_any;
-                }
-                // Commit whenever there is staged work left to record. This makes "Push only"
-                // honor the include-unstaged toggle: dirty files are staged above and committed
-                // here before the push below.
-                if status.staged_changes {
-                    threadlane_git::commit_staged(&work_dir, &message)
-                        .map_err(|e| e.to_string())?;
-                }
-                if matches!(action, GitAction::CommitAndPush | GitAction::Push) {
-                    threadlane_git::push(&work_dir).map_err(|e| e.to_string())?;
-                }
-                threadlane_git::inspect(&work_dir).map_err(|e| e.to_string())
-            })();
-            let _ = tx.send(GitEvent::Finished(result));
-        });
-        cx.notify();
-    }
-
-    fn apply_git_event(&mut self, event: GitEvent, cx: &mut Context<Self>) {
-        self.git_busy = false;
+    fn apply_git_event(&mut self, event: GitEvent, _cx: &mut Context<Self>) {
         match event {
             GitEvent::Loaded(Ok(status)) => {
                 self.git_status = Some(status);
             }
-            GitEvent::Loaded(Err(error)) => self.git_feedback = Some(error),
-            GitEvent::Finished(Ok(status)) => {
-                self.git_status = Some(status);
-                self.git_feedback = Some("Git action completed.".into());
-                self.right_panel
-                    .update(cx, |panel, cx| panel.open_review(cx));
-            }
-            GitEvent::Finished(Err(error)) => self.git_feedback = Some(error),
-            GitEvent::MessageGenerated(Ok(message)) => {
-                self.git_message_pending = false;
-                self.generated_commit_message = Some(message);
-                self.git_feedback = None;
-            }
-            GitEvent::MessageGenerated(Err(error)) => {
-                self.git_message_pending = false;
-                self.git_feedback = Some(error);
+            GitEvent::Loaded(Err(_)) => {
+                self.git_status = None;
             }
         }
     }
@@ -783,277 +591,6 @@ impl WorkspaceView {
             }))
     }
 
-    fn render_git_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().colors;
-        let status = self.git_status.as_ref();
-        let branch = status
-            .and_then(|status| status.branch.as_deref())
-            .unwrap_or("No branch");
-        let additions = status
-            .map(|status| status.files.iter().map(|file| file.additions).sum::<u32>())
-            .unwrap_or(0);
-        let deletions = status
-            .map(|status| status.files.iter().map(|file| file.deletions).sum::<u32>())
-            .unwrap_or(0);
-        let has_dirty = |status: &GitStatus| {
-            status.staged_changes || (self.git_include_unstaged && status.unstaged_changes)
-        };
-        let can_commit =
-            !self.git_busy && !self.git_message_pending && status.is_some_and(has_dirty);
-        let can_push = !self.git_busy
-            && !self.git_message_pending
-            && status.is_some_and(|status| status.ahead > 0 || has_dirty(status));
-        let toggle_view = cx.entity().downgrade();
-
-        Dialog::new(cx)
-            .w(px(440.0))
-            .overlay(true)
-            .overlay_closable(false)
-            .close_button(false)
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        DialogHeader::new()
-                            .relative()
-                            .px_5()
-                            .pt_5()
-                            .pb_4()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .size(px(38.0))
-                                    .rounded_lg()
-                                    .bg(theme.muted)
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_color(theme.foreground)
-                                    .child(Icon::default().path("icons/git/actions.svg")),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .child(
-                                        DialogTitle::new()
-                                            .text_lg()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child("Commit changes"),
-                                    )
-                                    .child(
-                                        DialogDescription::new()
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground)
-                                            .child(format!("On branch {branch}")),
-                                    ),
-                            )
-                            .child(
-                                Button::new("git-dialog-close")
-                                    .absolute()
-                                    .top(px(16.0))
-                                    .right(px(16.0))
-                                    .icon(IconName::Close)
-                                    .tooltip("Close")
-                                    .ghost()
-                                    .xsmall()
-                                    .disabled(self.git_busy)
-                                    .on_click(cx.listener(|this, _event, _window, cx| {
-                                        if !this.git_busy {
-                                            this.git_dialog_open = false;
-                                            cx.notify();
-                                        }
-                                    })),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .mx_5()
-                            .mb_4()
-                            .rounded_lg()
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.muted)
-                            .px_3()
-                            .h(px(46.0))
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(Icon::default().path("icons/git/compare.svg"))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_sm()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(branch.to_string()),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .text_xs()
-                                    .child(
-                                        Tag::new()
-                                            .child(format!("+{additions}"))
-                                            .with_variant(TagVariant::Success)
-                                            .small(),
-                                    )
-                                    .child(
-                                        Tag::new()
-                                            .child(format!("−{deletions}"))
-                                            .with_variant(TagVariant::Danger)
-                                            .small(),
-                                    )
-                                    .child(div().text_color(theme.muted_foreground).child(
-                                        format!("{} files", status.map_or(0, |s| s.files.len())),
-                                    )),
-                            ),
-                    )
-                    .child(
-                        DialogContent::new()
-                            .px_5()
-                            .pb_5()
-                            .flex()
-                            .flex_col()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .child("Commit message"),
-                                    )
-                                    .child(
-                                        Button::new("git-generate-message")
-                                            .when(self.git_message_pending, |button| {
-                                                button
-                                                    .child(Spinner::new().xsmall())
-                                                    .label("Generating…")
-                                            })
-                                            .when(!self.git_message_pending, |button| {
-                                                button.label("Generate")
-                                            })
-                                            .ghost()
-                                            .xsmall()
-                                            .disabled(self.git_busy || self.git_message_pending)
-                                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                                this.generate_commit_message(cx);
-                                            })),
-                                    ),
-                            )
-                            .child(Input::new(&self.git_message_input))
-                            .child(
-                                div()
-                                    .rounded_lg()
-                                    .border_1()
-                                    .border_color(theme.border)
-                                    .px_3()
-                                    .py_3()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .gap_1()
-                                            .child(
-                                                div()
-                                                    .text_sm()
-                                                    .font_weight(FontWeight::MEDIUM)
-                                                    .child("Include unstaged changes"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(theme.muted_foreground)
-                                                    .child("Stage modified and untracked files"),
-                                            ),
-                                    )
-                                    .child(
-                                        Switch::new("git-include-unstaged")
-                                            .checked(self.git_include_unstaged)
-                                            .disabled(self.git_busy)
-                                            .on_click(move |checked, _window, cx| {
-                                                let checked = *checked;
-                                                let _ = toggle_view.update(cx, |this, cx| {
-                                                    this.git_include_unstaged = checked;
-                                                    cx.notify();
-                                                });
-                                            }),
-                                    ),
-                            )
-                            .children(self.git_feedback.as_ref().map(|feedback| {
-                                div()
-                                    .rounded_md()
-                                    .bg(theme.muted)
-                                    .px_3()
-                                    .py_2()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(feedback.clone())
-                            })),
-                    )
-                    .child(
-                        DialogFooter::new()
-                            .border_t_1()
-                            .border_color(theme.border)
-                            .bg(theme.title_bar)
-                            .px_5()
-                            .py_4()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                Button::new("git-push")
-                                    .label("Push only")
-                                    .ghost()
-                                    .disabled(!can_push)
-                                    .on_click(cx.listener(|this, _event, window, cx| {
-                                        this.run_git_action(GitAction::Push, window, cx);
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        Button::new("git-commit")
-                                            .label("Commit")
-                                            .outline()
-                                            .disabled(!can_commit)
-                                            .on_click(cx.listener(|this, _event, window, cx| {
-                                                this.run_git_action(GitAction::Commit, window, cx);
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("git-commit-push")
-                                            .icon(Icon::default().path("icons/git/commit.svg"))
-                                            .label("Commit & push")
-                                            .disabled(!can_commit)
-                                            .on_click(cx.listener(|this, _event, window, cx| {
-                                                this.run_git_action(
-                                                    GitAction::CommitAndPush,
-                                                    window,
-                                                    cx,
-                                                );
-                                            })),
-                                    ),
-                            ),
-                    ),
-            )
-    }
 
     fn render_update_notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let status = {
@@ -1443,9 +980,7 @@ impl WorkspaceView {
                             .xsmall()
                             .tooltip("Git Review & Commit")
                             .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.git_dialog_open = true;
-                                this.refresh_git_status(cx);
-                                cx.notify();
+                                this.open_git_dialog(cx);
                             })),
                     )
                     .children((dirty_count > 0).then(|| {
@@ -1512,10 +1047,6 @@ impl WorkspaceView {
 
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some(message) = self.generated_commit_message.take() {
-            self.git_message_input
-                .update(cx, |input, cx| input.set_value(message, window, cx));
-        }
         let workspace_page = self.model.read(cx).workspace_page;
         if let Some(project) = self.model.read(cx).active_work_dir.clone() {
             self.terminal
@@ -1596,11 +1127,16 @@ impl Render for WorkspaceView {
             }
         };
 
-        let chat_view_with_status_bar = div()
+        let page_content = match workspace_page {
+            WorkspacePage::Chat => chat_page_content.into_any_element(),
+            WorkspacePage::Settings => self.settings.clone().into_any_element(),
+        };
+
+        let view_with_status_bar = div()
             .size_full()
             .flex()
             .flex_col()
-            .child(div().flex_1().min_h_0().child(chat_page_content))
+            .child(div().flex_1().min_h_0().child(page_content))
             .child(self.render_status_bar(cx));
 
         div()
@@ -1610,10 +1146,7 @@ impl Render for WorkspaceView {
             .h_full()
             .on_action(cx.listener(Self::toggle_command_palette))
             .bg(theme.background)
-            .child(match workspace_page {
-                WorkspacePage::Chat => chat_view_with_status_bar.into_any_element(),
-                WorkspacePage::Settings => self.settings.clone().into_any_element(),
-            })
+            .child(view_with_status_bar)
             .children((workspace_page == WorkspacePage::Chat).then(|| {
                 Button::new("command-palette-btn")
                     .icon(IconName::SquareTerminal)
@@ -1623,7 +1156,7 @@ impl Render for WorkspaceView {
                     .xsmall()
                     .absolute()
                     .top(px(9.0))
-                    .right(px(120.0))
+                    .right(px(84.0))
                     .on_click(cx.listener(|this, _event, window, cx| {
                         this.command_palette_open = !this.command_palette_open;
                         if this.command_palette_open {
@@ -1632,29 +1165,6 @@ impl Render for WorkspaceView {
                                 state.focus(window, cx);
                             });
                         }
-                        cx.notify();
-                    }))
-            }))
-            .children((workspace_page == WorkspacePage::Chat).then(|| {
-                Button::new("bottom-panel-toggle")
-                    .icon(if self.bottom_panel_visible {
-                        IconName::PanelBottomOpen
-                    } else {
-                        IconName::PanelBottom
-                    })
-                    .tooltip(if self.bottom_panel_visible {
-                        "Hide terminal"
-                    } else {
-                        "Show terminal"
-                    })
-                    .ghost()
-                    .selected(self.bottom_panel_visible)
-                    .xsmall()
-                    .absolute()
-                    .top(px(9.0))
-                    .right(px(84.0))
-                    .on_click(cx.listener(|this, _event, _window, cx| {
-                        this.bottom_panel_visible = !this.bottom_panel_visible;
                         cx.notify();
                     }))
             }))
@@ -1736,11 +1246,13 @@ impl Render for WorkspaceView {
                 (workspace_page == WorkspacePage::Chat && self.environment_open)
                     .then(|| self.render_environment_popover(cx)),
             )
-            .children(self.git_dialog_open.then(|| self.render_git_dialog(cx)))
             .children(
                 self.command_palette_open
                     .then(|| self.render_command_palette(cx)),
             )
             .children(self.render_update_notice(cx))
+            .children(Root::render_dialog_layer(window, cx))
+            .children(Root::render_notification_layer(window, cx))
+            .children(Root::render_sheet_layer(window, cx))
     }
 }
