@@ -17,7 +17,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use threadlane_mcp::{McpManager, McpToolExecutor};
+use threadlane_mcp::McpManager;
 use threadlane_protocol::ProviderPort;
 use threadlane_runtime::harness::{HookContext, HookEffect, HookHandler, HookKind};
 use threadlane_runtime::Capability;
@@ -134,7 +134,7 @@ impl Capability for McpCapability {
         "mcp"
     }
     fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
-        vec![Arc::new(McpToolExecutor::new(self.mcp_manager.clone()))]
+        vec![self.mcp_manager.clone()]
     }
 }
 

@@ -48,5 +48,5 @@ pub use provider::{
 };
 pub use rules::*;
 pub use tool_dispatcher::ToolDispatcher;
-pub use tool_executor::ToolExecutor;
+pub use tool_executor::{BuiltinToolExecutor, ToolExecutor};
 pub use types::*;

@@ -1,5 +1,59 @@
 use crate::types::{AgentToolCall, AgentToolDefinition};
 use async_trait::async_trait;
+use std::sync::Arc;
+use threadlane_tools::{
+    execute_tool, execute_tool_in_workspace, get_available_tools, get_codex_tools,
+};
+
+/// Executor for the built-in Threadlane tools.
+///
+/// Registering this alongside extension executors makes the dispatcher own one
+/// ordered execution pipeline for every model-visible tool.
+#[derive(Default)]
+pub struct BuiltinToolExecutor;
+
+impl BuiltinToolExecutor {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for BuiltinToolExecutor {
+    fn executor_id(&self) -> &str {
+        "threadlane.builtin_tools"
+    }
+
+    fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
+        let mut seen = std::collections::HashSet::new();
+        get_available_tools()
+            .into_iter()
+            .chain(get_codex_tools())
+            .filter_map(|schema| AgentToolDefinition::from_provider_schema(&schema).ok())
+            .filter(|definition| seen.insert(definition.name.clone()))
+            .collect()
+    }
+
+    async fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {
+        Some(Ok(execute_tool(name, args)))
+    }
+
+    async fn execute_tool_in_workspace(
+        &self,
+        name: &str,
+        args: &str,
+        work_dir: Option<&std::path::Path>,
+    ) -> Option<Result<String, String>> {
+        Some(Ok(match work_dir {
+            Some(work_dir) => execute_tool_in_workspace(name, args, work_dir),
+            None => execute_tool(name, args),
+        }))
+    }
+}
+
+pub fn builtin_tool_executor() -> Arc<dyn ToolExecutor> {
+    Arc::new(BuiltinToolExecutor::new())
+}
 
 #[async_trait]
 pub trait ToolExecutor: Send + Sync {
@@ -22,6 +76,17 @@ pub trait ToolExecutor: Send + Sync {
     }
 
     async fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>>;
+
+    /// Executes in the active workspace when the executor needs that context.
+    /// The default preserves existing executors that do not use a workspace.
+    async fn execute_tool_in_workspace(
+        &self,
+        name: &str,
+        args: &str,
+        _work_dir: Option<&std::path::Path>,
+    ) -> Option<Result<String, String>> {
+        self.execute_tool(name, args).await
+    }
 
     async fn execute_tool_with_call(
         &self,

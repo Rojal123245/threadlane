@@ -7148,6 +7148,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "threadlane-protocol",
+ "threadlane-provider",
  "threadlane-tools",
  "tokio",
  "tracing",

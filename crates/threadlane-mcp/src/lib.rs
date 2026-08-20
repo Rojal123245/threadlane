@@ -418,14 +418,14 @@ impl McpManager {
         mcp_tools
     }
 
-    fn get_tools_sync(&self) -> Vec<AgentToolDefinition> {
+    pub fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
         self.cached_tool_defs
             .read()
             .map(|defs| defs.clone())
             .unwrap_or_default()
     }
 
-    async fn execute_tool(&self, full_name: &str, args: &str) -> Option<Result<String, String>> {
+    pub async fn execute_tool(&self, full_name: &str, args: &str) -> Option<Result<String, String>> {
         let target = {
             let servers = self.servers.lock().await;
             servers.iter().find_map(|server| {
@@ -512,6 +512,23 @@ impl McpManager {
     }
 }
 
+#[async_trait]
+impl ToolExecutor for McpManager {
+    fn executor_id(&self) -> &str {
+        "threadlane.mcp_tools"
+    }
+
+    fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
+        McpManager::tool_definitions(self)
+    }
+
+    async fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {
+        McpManager::execute_tool(self, name, args).await
+    }
+}
+
+/// Compatibility adapter for callers that have not yet registered an
+/// `McpManager` directly with `ToolDispatcher`.
 pub struct McpToolExecutor {
     manager: Arc<McpManager>,
 }
@@ -525,11 +542,11 @@ impl McpToolExecutor {
 #[async_trait]
 impl ToolExecutor for McpToolExecutor {
     fn executor_id(&self) -> &str {
-        "threadlane.mcp_tools"
+        "threadlane.mcp_tools.adapter"
     }
 
     fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
-        self.manager.get_tools_sync()
+        self.manager.tool_definitions()
     }
 
     async fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {

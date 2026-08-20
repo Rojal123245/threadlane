@@ -7,7 +7,7 @@ use crate::error::AgentError;
 use crate::events::AgentEvent;
 use crate::harness::{HookContext, HookRegistry};
 use crate::loop_engine::AbortOnDrop;
-use crate::tool_executor::ToolExecutor;
+use crate::tool_executor::{builtin_tool_executor, ToolExecutor};
 use crate::types::{AgentToolCall, AgentToolDefinition, AgentToolResult, ToolExecutionMode};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -16,9 +16,6 @@ use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Arc;
 use threadlane_protocol::RuntimeToolCall as ToolCall;
-use threadlane_tools::{
-    execute_tool, execute_tool_in_workspace, get_available_tools, get_codex_tools,
-};
 use tokio::sync::broadcast;
 use tracing::{debug, warn};
 
@@ -70,7 +67,6 @@ pub struct ToolDispatcher {
     pub(crate) session_id: String,
 
     tool_executors: Vec<Arc<dyn ToolExecutor>>,
-    extension_manager: Option<Arc<dyn ToolExecutor>>,
     event_tx: broadcast::Sender<AgentEvent>,
 }
 
@@ -86,8 +82,7 @@ impl ToolDispatcher {
             allowed_tool_names: None,
             work_dir: None,
             session_id: String::new(),
-            tool_executors: Vec::new(),
-            extension_manager: None,
+            tool_executors: vec![builtin_tool_executor()],
             event_tx,
         }
     }
@@ -97,8 +92,7 @@ impl ToolDispatcher {
     /// Returns the core and registered executor schemas in provider order,
     /// after conflict deduplication and the active allowlist are applied.
     pub(crate) fn configured_tool_definitions(&self) -> Vec<AgentToolDefinition> {
-        let mut definitions =
-            collect_tool_definitions(&[], &self.tool_executors, self.compatibility_executor());
+        let mut definitions = collect_tool_definitions(&self.tool_executors);
         if let Some(allowed) = &self.allowed_tool_names {
             definitions.retain(|d| allowed.contains(&d.name));
         }
@@ -125,10 +119,7 @@ impl ToolDispatcher {
             )));
         }
 
-        let mut known_names: HashSet<String> = core_tool_definitions()
-            .into_iter()
-            .map(|d| d.name)
-            .collect();
+        let mut known_names = HashSet::new();
         for registered in self.ordered_tool_executors() {
             known_names.extend(registered.tool_definitions().into_iter().map(|d| d.name));
         }
@@ -154,26 +145,8 @@ impl ToolDispatcher {
         self.ordered_tool_executors().len()
     }
 
-    fn compatibility_executor(&self) -> Option<Arc<dyn ToolExecutor>> {
-        self.extension_manager.clone().filter(|compat| {
-            !self
-                .tool_executors
-                .iter()
-                .any(|reg| reg.executor_id() == compat.executor_id())
-        })
-    }
-
     fn ordered_tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
-        self.tool_executors
-            .iter()
-            .cloned()
-            .chain(self.compatibility_executor())
-            .collect()
-    }
-
-    /// Sets the compatibility executor slot (used by existing callers).
-    pub fn set_extension_manager(&mut self, executor: Option<Arc<dyn ToolExecutor>>) {
-        self.extension_manager = executor;
+        self.tool_executors.clone()
     }
 
     // ── Tool execution ────────────────────────────────────────────────
@@ -479,20 +452,17 @@ impl ToolDispatcher {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
-        let executor_kind = if context
+        let executor_kind = context
             .tool_routes
             .iter()
-            .any(|route| route.tool_names.contains(&tc.function.name))
-        {
-            "registered"
-        } else {
-            "builtin"
-        };
+            .find(|route| route.tool_names.contains(&tc.function.name))
+            .map(|route| route.executor.executor_id().to_string())
+            .unwrap_or_else(|| "unregistered".to_string());
         if let Some(recorder) = &context.execution_trace_recorder {
             if let Err(error) = recorder(crate::provider::ToolExecutionTraceEvent::Started {
                 tool_call_id: tc.id.clone(),
                 tool_name: tc.function.name.clone(),
-                executor_kind: executor_kind.into(),
+                executor_kind: executor_kind.clone(),
                 effective_arguments: arguments.clone(),
                 started_at_ms,
             })
@@ -524,7 +494,11 @@ impl ToolDispatcher {
             }
             if let Some(result) = route
                 .executor
-                .execute_tool_with_call(&agent_tool_call, &arguments)
+                .execute_tool_in_workspace(
+                    &agent_tool_call.name,
+                    &arguments,
+                    context.work_dir.as_deref(),
+                )
                 .await
             {
                 execution_result = Some(result);
@@ -532,10 +506,10 @@ impl ToolDispatcher {
             }
         }
         let execution_result = execution_result.unwrap_or_else(|| {
-            Ok(match context.work_dir.as_deref() {
-                Some(dir) => execute_tool_in_workspace(&tc.function.name, &arguments, dir),
-                None => execute_tool(&tc.function.name, &arguments),
-            })
+            Err(format!(
+                "No registered executor handles tool '{}'",
+                tc.function.name
+            ))
         });
         let (content, is_error) = match execution_result {
             Ok(content) => (content, false),
@@ -615,103 +589,31 @@ impl ToolDispatcher {
     }
 
     async fn tool_execution_routes(&self) -> Vec<ToolExecutorRoute> {
-        let state_tools: Vec<Value> = Vec::new(); // dispatched owns its own tools
-        let mut claimed_names: HashSet<String> = core_tool_definitions()
-            .into_iter()
-            .map(|d| d.name)
-            .collect();
-        let mut routes = Vec::new();
-
-        for executor in &self.tool_executors {
-            let tool_names: HashSet<String> = executor
-                .tool_definitions()
-                .into_iter()
-                .filter_map(|d| {
-                    if d.name.trim().is_empty() {
-                        None
-                    } else {
-                        Some(d.name)
-                    }
-                })
-                .filter(|name| claimed_names.insert(name.clone()))
-                .collect();
-            routes.push(ToolExecutorRoute {
-                executor: executor.clone(),
-                tool_names,
-            });
-        }
-
-        if let Some(compat) = self.compatibility_executor() {
-            let tool_names: HashSet<String> = compat
-                .tool_definitions()
-                .into_iter()
-                .filter_map(|d| {
-                    if d.name.trim().is_empty() {
-                        None
-                    } else {
-                        Some(d.name)
-                    }
-                })
-                .filter(|name| claimed_names.insert(name.clone()))
-                .collect();
-            routes.push(ToolExecutorRoute {
-                executor: compat,
-                tool_names,
-            });
-        }
-
-        // Fallback built-in tools for any names not handled by registered executors.
-        let state_tool_names: HashSet<String> = state_tools
+        let mut claimed_names = HashSet::new();
+        self.tool_executors
             .iter()
-            .filter_map(|schema| {
-                AgentToolDefinition::from_provider_schema(schema)
-                    .ok()
-                    .map(|d| d.name)
+            .map(|executor| ToolExecutorRoute {
+                executor: executor.clone(),
+                tool_names: executor
+                    .tool_definitions()
+                    .into_iter()
+                    .filter_map(|definition| {
+                        (!definition.name.trim().is_empty()).then_some(definition.name)
+                    })
+                    .filter(|name| claimed_names.insert(name.clone()))
+                    .collect(),
             })
-            .filter(|name| claimed_names.insert(name.clone()))
-            .collect();
-
-        // State tools are handled by the fallback built-in path (execute_tool /
-        // execute_tool_in_workspace), which is reached when no registered route matches.
-        let _ = state_tool_names;
-
-        routes
+            .collect()
     }
 }
 
-// ── Free functions (shared with loop_engine) ──────────────────────────
+// ── Free functions ───────────────────────────────────────────────────
 
-fn core_tool_definitions() -> Vec<AgentToolDefinition> {
-    let mut seen = HashSet::new();
-    get_available_tools()
-        .into_iter()
-        .chain(get_codex_tools())
-        .filter_map(|schema| AgentToolDefinition::from_provider_schema(&schema).ok())
-        .filter(|d| seen.insert(d.name.clone()))
-        .collect()
-}
-
-fn collect_tool_definitions(
-    _state_tools: &[Value],
-    registered_executors: &[Arc<dyn ToolExecutor>],
-    compatibility_executor: Option<Arc<dyn ToolExecutor>>,
-) -> Vec<AgentToolDefinition> {
+fn collect_tool_definitions(registered_executors: &[Arc<dyn ToolExecutor>]) -> Vec<AgentToolDefinition> {
     let mut seen = HashSet::new();
     let mut definitions = Vec::new();
 
-    for definition in core_tool_definitions()
-        .into_iter()
-        .chain(
-            registered_executors
-                .iter()
-                .flat_map(|e| e.tool_definitions()),
-        )
-        .chain(
-            compatibility_executor
-                .into_iter()
-                .flat_map(|e| e.tool_definitions()),
-        )
-    {
+    for definition in registered_executors.iter().flat_map(|executor| executor.tool_definitions()) {
         if seen.insert(definition.name.clone()) {
             definitions.push(definition);
         }
@@ -882,7 +784,7 @@ mod tests {
                 tool_call_id,
                 executor_kind,
                 ..
-            } if tool_call_id == "call_1" && executor_kind == "registered"
+            } if tool_call_id == "call_1" && executor_kind == "stub"
         ));
         assert!(matches!(
             &observed[1],
@@ -893,6 +795,18 @@ mod tests {
                 ..
             } if tool_call_id == "call_1" && output_sha256.len() == 64
         ));
+    }
+
+    #[tokio::test]
+    async fn builtins_are_registered_in_the_unified_executor_registry() {
+        let (event_tx, _) = broadcast::channel(8);
+        let dispatcher = ToolDispatcher::new(event_tx, HookRegistry::default());
+
+        assert_eq!(dispatcher.tool_executor_count(), 1);
+        assert!(dispatcher
+            .configured_tool_definitions()
+            .iter()
+            .any(|definition| definition.name == "read_file"));
     }
 
     #[tokio::test]
@@ -947,7 +861,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_tool_uses_builtin_fallback() {
+    async fn unknown_tool_is_rejected_without_a_registered_route() {
         let (event_tx, _) = broadcast::channel(8);
         let dispatcher = ToolDispatcher::new(event_tx, HookRegistry::default());
         let results = dispatcher
@@ -963,12 +877,7 @@ mod tests {
             .await;
 
         assert_eq!(results.len(), 1);
-        // Unknown tools delegate to the built-in fallback, which returns
-        // a content string starting with "Error:" rather than an Err variant.
-        assert!(
-            results[0].content.contains("Unknown tool")
-                || results[0].content.contains("Error")
-                || results[0].is_error
-        );
+        assert!(results[0].is_error);
+        assert!(results[0].content.contains("No registered executor handles tool"));
     }
 }
