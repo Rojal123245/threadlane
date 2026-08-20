@@ -8,7 +8,9 @@ use crate::compaction::{
 };
 use crate::config::AgentConfig;
 use crate::events::AgentEvent;
-use crate::harness::{ErrorCategory, ProviderErrorSummary, ProviderOutcome, TraceString};
+use crate::harness::{
+    ErrorCategory, ProviderErrorSummary, ProviderOutcome, SessionStore, TraceString,
+};
 use crate::provider::{ProviderRouter, ProviderTraceEvent, ProviderTraceRecorder};
 use crate::rules::{StreamRule, StreamRuleMonitor};
 use crate::tool_dispatcher::ToolDispatcher;
@@ -121,6 +123,7 @@ impl ProviderStepAccumulator {
 
 pub(crate) struct TurnDriver<'a> {
     pub(crate) turn: Arc<Mutex<TurnState>>,
+    pub(crate) harness: &'a crate::harness::AgentHarness<crate::harness::JsonlStore>,
     pub(crate) provider_client: ProviderClient,
     pub(crate) provider_router: ProviderRouter,
     pub(crate) prompt_cache_key: Option<String>,
@@ -132,7 +135,6 @@ pub(crate) struct TurnDriver<'a> {
     /// Persists model-visible messages before they may affect another provider
     /// request. Durable runtimes install the canonical session-journal writer.
     pub(crate) message_recorder: Option<crate::provider::AssistantMessageRecorder>,
-    pub(crate) model_context_refresh: Option<crate::provider::ModelContextRefresh>,
     pub(crate) stream_rules: Vec<(StreamRule, Regex)>,
     pub(crate) steering_queue: &'a mut Vec<AgentMessage>,
     pub(crate) follow_up_queue: &'a mut Vec<AgentMessage>,
@@ -164,16 +166,16 @@ impl<'a> TurnDriver<'a> {
         'turns: loop {
             turn_number += 1;
 
-            // A durable recorder is the canonical projection boundary. Refresh
-            // the transient request copy before every provider attempt so
-            // continuations cannot rely on stale in-memory history.
-            if let Some(refresh) = self.model_context_refresh.as_ref() {
-                if let Err(error) = refresh(self.turn.clone()).await {
-                    self.emit_event(AgentEvent::AgentError {
-                        error: format!("failed to refresh canonical model context: {error}"),
-                    });
-                    return;
-                }
+            // Refresh the transient request copy before every provider attempt
+            // directly from the canonical harness store projection.
+            if let Ok(context) = self.harness.store().model_context("main") {
+                let system_prompt = self.turn.lock().await.system_prompt.clone();
+                let messages: Vec<AgentMessage> = std::iter::once(AgentMessage::System {
+                    content: system_prompt,
+                })
+                .chain(context.messages())
+                .collect();
+                self.turn.lock().await.messages = messages;
             }
 
             // Drain steering queue into turn state.

@@ -18,10 +18,6 @@ pub mod utils;
 mod runtime;
 pub use runtime::{AgentRuntime, ModelContextProjector, ModelContextSource};
 
-// ── AppRuntime (new composition root) ───────────────────────────────
-mod app_runtime;
-pub use app_runtime::AppRuntime;
-
 // ── Re-exports matching the old threadlane-agent public API ────────
 pub use utils::{dirs_home, now_timestamp_ms, now_timestamp_secs, AbortOnDrop};
 

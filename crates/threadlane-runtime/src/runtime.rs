@@ -92,12 +92,6 @@ pub struct AgentRuntime {
     provider_trace_recorder: Option<crate::provider::ProviderTraceRecorder>,
     /// Assistant message recorder (for persistence).
     message_recorder: Option<crate::provider::AssistantMessageRecorder>,
-    /// Optional external model context projector. When set, this is used
-    /// instead of the internal harness projection for refreshing turn state.
-    model_context_source: Option<Arc<dyn ModelContextSource>>,
-    model_context_projector: Option<ModelContextProjector>,
-    /// Optional external model context refresh hook.
-    model_context_refresh: Option<crate::provider::ModelContextRefresh>,
     /// Harness event hub for wiring durability events.
     pub harness_event_hub: HarnessEventHub,
 }
@@ -150,9 +144,6 @@ impl AgentRuntime {
             allowed_tool_names: None,
             provider_trace_recorder: None,
             message_recorder: None,
-            model_context_source: None,
-            model_context_projector: None,
-            model_context_refresh: None,
         }
     }
 
@@ -193,55 +184,9 @@ impl AgentRuntime {
 
     // ── Model context ─────────────────────────────────────────────────
 
-    /// Sets an external model context projector. When set, this is used
-    /// instead of the internal harness projection for refreshing turn state
-    /// before each turn. Useful when the caller manages the session store
-    /// externally (e.g. CodingSessionHarness).
-    /// Sets the unified model-context source for durable integrations.
-    pub fn set_model_context_source(&mut self, source: Option<Arc<dyn ModelContextSource>>) {
-        self.model_context_source = source;
-    }
-
-    /// Compatibility setter for older integrations.
-    pub fn set_model_context_projector(&mut self, projector: Option<ModelContextProjector>) {
-        self.model_context_projector = projector;
-    }
-
-    /// Sets an external model context refresh hook.
-    pub fn set_model_context_refresh(
-        &mut self,
-        refresh: Option<crate::provider::ModelContextRefresh>,
-    ) {
-        self.model_context_refresh = refresh;
-    }
-
-    /// Refreshes the in-memory turn messages from the authoritative source.
-    /// Prefers the model_context_refresh hook, then the projector closure,
-    /// then falls back to the internal harness projection.
-    async fn refresh_projected_messages(&self) {
-        if let Some(source) = &self.model_context_source {
-            if let Ok(messages) = source.project() {
-                self.turn.lock().await.messages = messages;
-            }
-            return;
-        }
-        // Compatibility path for older callers. New integrations should use
-        // one ModelContextSource rather than this precedence chain.
-        if let Some(refresh) = &self.model_context_refresh {
-            let _ = refresh(self.turn.clone()).await;
-            return;
-        }
-        if let Some(projector) = &self.model_context_projector {
-            self.turn.lock().await.messages = projector();
-            return;
-        }
-        if let Ok(context) = self.harness.store().model_context("main") {
-            let system_prompt = self.turn.lock().await.system_prompt.clone();
-            let messages: Vec<AgentMessage> = std::iter::once(AgentMessage::System {
-                content: system_prompt,
-            })
-            .chain(context.messages())
-            .collect();
+    /// Refreshes the in-memory turn messages directly from the authoritative harness projection.
+    pub async fn refresh_projected_messages(&self) {
+        if let Ok(messages) = self.projected_messages().await {
             self.turn.lock().await.messages = messages;
         }
     }
@@ -677,6 +622,7 @@ impl AgentRuntime {
         let tool_dispatcher = self.synced_dispatcher();
         let mut driver = crate::turn_driver::TurnDriver {
             turn: self.turn.clone(),
+            harness: &self.harness,
             provider_client: self.provider_client.clone(),
             provider_router: self.provider_router.clone(),
             prompt_cache_key: self.prompt_cache_key.clone(),
@@ -686,7 +632,6 @@ impl AgentRuntime {
             harness_event_hub: self.harness_event_hub.clone(),
             provider_trace_recorder: self.provider_trace_recorder.clone(),
             message_recorder: self.message_recorder.clone(),
-            model_context_refresh: self.model_context_refresh.clone(),
             stream_rules: self.stream_rules.clone(),
             steering_queue: &mut self.steering_queue,
             follow_up_queue: &mut self.follow_up_queue,
