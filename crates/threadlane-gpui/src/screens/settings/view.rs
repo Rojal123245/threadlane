@@ -17,7 +17,7 @@ use crate::app::{actions::AppAction, controller};
 use crate::services::provider_auth::{self, ProviderAuthEvent};
 use crate::services::settings::{self, SettingsEvent};
 use crate::state::AppState;
-use threadlane_coding_agent::{
+use threadlane_session::{
     AcpAgentRecord, AcpScope, ExtensionRecord, ExtensionScope, SkillMetadata,
 };
 

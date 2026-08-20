@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use threadlane_agent::{AgentToolDefinition, ToolExecutor};
+use threadlane_runtime::{AgentToolDefinition, ToolExecutor};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex as TokioMutex;

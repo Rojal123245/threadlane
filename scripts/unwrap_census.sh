@@ -5,8 +5,8 @@ set -euo pipefail
 # baseline metric: CI fails only when a touched-crate count increases.
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 crates=(
-  "$root/crates/threadlane-agent"
-  "$root/crates/threadlane-coding-agent"
+  "$root/crates/threadlane-runtime"
+  "$root/crates/threadlane-session"
   "$root/crates/threadlane-wasi"
 )
 

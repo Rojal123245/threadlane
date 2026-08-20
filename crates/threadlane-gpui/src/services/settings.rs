@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::OnceLock;
 
-use threadlane_coding_agent::{
+use threadlane_session::{
     default_global_threadlane_dir, AcpAgentConfig, AcpAgentRecord, AcpAgentStatus, AcpManager,
     AcpScope, AcpSettings, ExtensionManager, ExtensionRecord, ExtensionScope, SkillManager,
     SkillMetadata, SkillSettings,

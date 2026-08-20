@@ -62,7 +62,7 @@ impl ExtensionRecord {
 }
 
 pub fn default_global_threadlane_dir() -> Option<PathBuf> {
-    threadlane_agent::utils::dirs_home().map(|home| home.join(".threadlane"))
+    threadlane_runtime::utils::dirs_home().map(|home| home.join(".threadlane"))
 }
 
 pub struct ExtensionManager {

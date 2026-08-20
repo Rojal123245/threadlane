@@ -19,8 +19,8 @@ use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable};
 use crate::app::{actions::AppAction, controller};
 use crate::screens::editor::EditorView;
 use crate::state::{AppState, ChatMessageInfo, MessageRole, ToolActivityInfo};
-use threadlane_agent::{ImageAttachment, PlanItemStatus, ReasoningEffort, SessionPlan};
-use threadlane_coding_agent::commands::available_slash_commands;
+use threadlane_session::{ImageAttachment, PlanItemStatus, ReasoningEffort, SessionPlan};
+use threadlane_session::commands::available_slash_commands;
 
 actions!(threadlane_composer, [PasteClipboard]);
 
@@ -957,7 +957,10 @@ impl ChatListView {
                     .child(div().size(px(6.0)).flex_none().rounded_full().bg(
                         if entry.category == "Tool" {
                             theme.warning
-                        } else if entry.category == "Error" {
+                        } else if entry.category == "Error"
+                            || entry.detail.contains("Failed")
+                            || entry.detail.contains("Error")
+                        {
                             theme.danger
                         } else {
                             theme.primary
@@ -1047,6 +1050,22 @@ impl ChatListView {
                                 .child(entry.summary.clone()),
                         )
                         .child(
+                            Button::new("copy-trajectory-row")
+                                .ghost()
+                                .xsmall()
+                                .label("📋")
+                                .on_click({
+                                    let text = format!(
+                                        "seq:{:?} turn:{:?} category:{} summary:{} detail:{} lane:{:?} run:{:?} call:{:?}",
+                                        entry.seq, entry.turn, entry.category, entry.summary,
+                                        entry.detail, entry.lane, entry.run_id, entry.correlation_id,
+                                    );
+                                    move |_, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                                    }
+                                }),
+                        )
+                        .child(
                             Button::new("close-trajectory-inspector")
                                 .ghost()
                                 .xsmall()
@@ -1081,7 +1100,15 @@ impl ChatListView {
                                             .text_color(theme.muted_foreground)
                                             .child(label),
                                     )
-                                    .child(div().min_w_0().flex_1().child(value))
+                                    .child(
+                                        div().min_w_0().flex_1().child(
+                                            TextView::markdown(
+                                                format!("trajectory-meta-{}", entry.seq.unwrap_or(0)),
+                                                value.clone(),
+                                            )
+                                            .selectable(true),
+                                        ),
+                                    )
                             },
                         )))
                         .child(
@@ -1091,11 +1118,18 @@ impl ChatListView {
                                 .text_color(theme.muted_foreground)
                                 .child("DETAIL"),
                         )
-                        .child(div().text_sm().child(if entry.detail.is_empty() {
-                            "No additional detail".into()
-                        } else {
-                            entry.detail
-                        })),
+                        .child(div().text_sm().child(
+                            if entry.detail.is_empty() {
+                                div().child("No additional detail").into_any_element()
+                            } else {
+                                TextView::markdown(
+                                    format!("trajectory-detail-{}", entry.seq.unwrap_or(0)),
+                                    entry.detail.clone(),
+                                )
+                                .selectable(true)
+                                .into_any_element()
+                            },
+                        )),
                 )
         });
         let overview_lane = |label: &'static str, category: &'static str, color: Hsla| {
@@ -1662,19 +1696,19 @@ impl ChatListView {
             ),
             MessageRole::Advisor(severity) => {
                 let (badge_text, bg_color, border_color, text_color) = match severity {
-                    threadlane_agent::AdvisorSeverity::Aside => (
+                    threadlane_session::AdvisorSeverity::Aside => (
                         "ADVISOR ASIDE",
                         theme.secondary,
                         theme.border,
                         theme.secondary_foreground,
                     ),
-                    threadlane_agent::AdvisorSeverity::Concern => (
+                    threadlane_session::AdvisorSeverity::Concern => (
                         "ADVISOR CONCERN",
                         theme.warning,
                         theme.warning,
                         theme.warning_foreground,
                     ),
-                    threadlane_agent::AdvisorSeverity::Blocker => (
+                    threadlane_session::AdvisorSeverity::Blocker => (
                         "ADVISOR BLOCKER",
                         theme.danger,
                         theme.danger,
@@ -1869,7 +1903,7 @@ impl ChatListView {
 
         let action_button = |id: &'static str,
                              label: &'static str,
-                             decision: threadlane_coding_agent::PermissionDecision,
+                             decision: threadlane_session::PermissionDecision,
                              primary: bool,
                              danger: bool| {
             let model = self.model.clone();
@@ -1934,21 +1968,21 @@ impl ChatListView {
                         .child(action_button(
                             "permission-deny",
                             "Deny",
-                            threadlane_coding_agent::PermissionDecision::Deny,
+                            threadlane_session::PermissionDecision::Deny,
                             false,
                             true,
                         ))
                         .child(action_button(
                             "permission-allow-once",
                             "Allow once",
-                            threadlane_coding_agent::PermissionDecision::AllowOnce,
+                            threadlane_session::PermissionDecision::AllowOnce,
                             false,
                             false,
                         ))
                         .child(action_button(
                             "permission-allow-always",
                             "Always",
-                            threadlane_coding_agent::PermissionDecision::AllowAlways,
+                            threadlane_session::PermissionDecision::AllowAlways,
                             true,
                             false,
                         )),

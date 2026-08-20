@@ -1,7 +1,7 @@
 use gpui::*;
 use gpui_component::Root;
 use std::path::PathBuf;
-use threadlane_coding_agent::{coding_agent::HarnessCompositionSnapshot, CodingAgentOptions};
+use threadlane_session::{CodingAgentOptions, HarnessCompositionSnapshot};
 use threadlane_gpui::assets::Assets;
 use threadlane_gpui::screens::workspace::WorkspaceView;
 use threadlane_gpui::theme;

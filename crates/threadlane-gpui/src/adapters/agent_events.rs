@@ -1,4 +1,4 @@
-use threadlane_agent::{
+use threadlane_session::{
     AdvisorNote, AgentEvent, ModelRoles, PermissionRequest, SessionPlan, TokenUsage,
 };
 
@@ -94,9 +94,9 @@ mod tests {
     fn plan_update_preserves_the_canonical_session_plan() {
         let plan = SessionPlan {
             explanation: Some("Ship incrementally".into()),
-            items: vec![threadlane_agent::PlanItem {
+            items: vec![threadlane_session::PlanItem {
                 step: "Inspect the UI".into(),
-                status: threadlane_agent::PlanItemStatus::InProgress,
+                status: threadlane_session::PlanItemStatus::InProgress,
             }],
         };
 

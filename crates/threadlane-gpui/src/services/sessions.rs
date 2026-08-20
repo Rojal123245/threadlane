@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use threadlane_coding_agent::{
+use threadlane_session::{
     CodingAgent, CodingAgentCancellation, CodingAgentOptions, CodingAgentWorkHandle,
     PermissionDecision, PermissionHandle,
 };
@@ -89,7 +89,7 @@ impl SessionRuntime {
         Ok(())
     }
 
-    pub(crate) async fn set_model_roles(&self, roles: threadlane_agent::ModelRoles) {
+    pub(crate) async fn set_model_roles(&self, roles: threadlane_session::ModelRoles) {
         let mut agent = self.agent.lock().await;
         agent.set_model_roles(roles);
     }

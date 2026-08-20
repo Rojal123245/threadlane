@@ -99,7 +99,7 @@ Legend: ✅ have · 🟡 partial · ❌ missing · — not applicable to a nativ
 4. **Polish the flywheel, don't add tools.** Prefer making the common path faster and
    cheaper (hash edits, in-process search, preview-then-apply) over adding another
    one-off tool — the `omp` "benchmaxxed" lesson. Keep rare tools behind a namespace.
-5. **Measure before changing.** Reuse `threadlane-mcp`/`threadlane-agent` perf baselines
+5. **Measure before changing.** Reuse `threadlane-mcp`/`threadlane-runtime` perf baselines
    and add behavioral (not timing) tests for fixes — our existing `AGENTS.md` rule and
    `omp`'s first-exec-cost warning.
 
@@ -133,7 +133,7 @@ have; P1/P2 add flywheel capabilities; P3 is parity/ambition.
       **Gate:** kill-mid-write test leaves a replayable log with no orphaned sequences.
       *(completed in `harness_recovery.rs`)*
 - [x] **Panic/unwrap census.** Added `scripts/unwrap_census.sh` and a focused GitHub
-      Actions workflow that reports counts for `threadlane-agent`, `threadlane-coding-agent`,
+      Actions workflow that reports counts for `threadlane-runtime`, `threadlane-session`,
       and `threadlane-wasi` on relevant pull requests.
       **Gate:** count trends down, not up, on each PR touching those crates.
       *(baseline: 134 / 702 / 17 source occurrences)*

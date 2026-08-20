@@ -106,8 +106,8 @@ fn models_for_credentials(
 }
 
 fn append_acp_models(models: &mut Vec<ModelOption>, project_root: Option<&std::path::Path>) {
-    let manager = threadlane_coding_agent::AcpManager::new(
-        threadlane_coding_agent::default_global_threadlane_dir(),
+    let manager = threadlane_session::AcpManager::new(
+        threadlane_session::default_global_threadlane_dir(),
         project_root.map(std::path::Path::to_path_buf),
     );
     for config in manager
@@ -116,7 +116,7 @@ fn append_acp_models(models: &mut Vec<ModelOption>, project_root: Option<&std::p
         .filter(|config| config.enabled)
     {
         models.push(ModelOption {
-            id: threadlane_coding_agent::acp_model_id(&config.id),
+            id: threadlane_session::acp_model_id(&config.id),
             label: config.name,
             provider: ModelProvider::Acp,
         });
