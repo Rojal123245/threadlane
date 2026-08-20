@@ -1004,6 +1004,229 @@ impl RightPanelView {
                     })),
             );
 
+        let pr_card = self.git_status.as_ref().and_then(|s| s.pr.as_ref()).map(|pr| {
+            let pr_url = pr.url.clone();
+            let pr_num = pr.number;
+            let pr_title = pr.title.clone();
+            let pr_title_display = if pr.title.is_empty() {
+                format!("PR #{pr_num}")
+            } else {
+                format!("#{pr_num} {}", pr.title)
+            };
+
+            let failing_checks = pr.failing_checks;
+            let pending_checks = pr.pending_checks;
+            let total_checks = pr.total_checks;
+            let comments_count = pr.comments_count;
+
+            let failing_check_names: Vec<String> = pr
+                .checks
+                .iter()
+                .filter(|c| {
+                    let concl = c.conclusion.as_deref().unwrap_or("").to_uppercase();
+                    matches!(
+                        concl.as_str(),
+                        "FAILURE" | "TIMED_OUT" | "ACTION_REQUIRED" | "CANCELLED" | "ERROR"
+                    )
+                })
+                .map(|c| c.name.clone())
+                .collect();
+            let failed_summary = failing_check_names.join(", ");
+
+            div()
+                .flex()
+                .flex_col()
+                .gap_1p5()
+                .p_2p5()
+                .mx_2()
+                .my_1p5()
+                .rounded_lg()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.muted.opacity(0.2))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .min_w_0()
+                                .flex_1()
+                                .child(
+                                    div()
+                                        .size(px(16.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_color(theme.muted_foreground)
+                                        .child(Icon::default().path("icons/git/actions.svg")),
+                                )
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_xs()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(theme.foreground)
+                                        .child(pr_title_display),
+                                ),
+                        )
+                        .when(!pr_url.is_empty(), |row| {
+                            let target_url = pr_url.clone();
+                            row.child(
+                                Button::new("pr-link-btn")
+                                    .icon(IconName::ExternalLink)
+                                    .ghost()
+                                    .xsmall()
+                                    .tooltip("Open pull request in browser")
+                                    .on_click(move |_event, _window, cx| {
+                                        cx.open_url(&target_url);
+                                    }),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .pt_0p5()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1p5()
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .size(px(14.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_color(if failing_checks > 0 {
+                                            theme.danger
+                                        } else if pending_checks > 0 {
+                                            theme.warning
+                                        } else {
+                                            theme.success
+                                        })
+                                        .child(if failing_checks > 0 {
+                                            IconName::Close
+                                        } else if pending_checks > 0 {
+                                            IconName::Asterisk
+                                        } else {
+                                            IconName::Check
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(if failing_checks > 0 {
+                                            theme.danger
+                                        } else {
+                                            theme.muted_foreground
+                                        })
+                                        .child(if failing_checks > 0 {
+                                            format!(
+                                                "{failing_checks} failing check{}",
+                                                if failing_checks == 1 { "" } else { "s" }
+                                            )
+                                        } else if pending_checks > 0 {
+                                            format!("{pending_checks} in progress")
+                                        } else {
+                                            format!("All {} checks passed", total_checks.max(1))
+                                        }),
+                                ),
+                        )
+                        .child(if failing_checks > 0 {
+                            let fix_pr_num = pr_num;
+                            let fix_pr_title = pr_title.clone();
+                            let fix_failed_summary = failed_summary.clone();
+                            Button::new("fix-ci-btn")
+                                .label("Fix CI")
+                                .danger()
+                                .xsmall()
+                                .tooltip("Ask AI to fix failing CI checks")
+                                .on_click(cx.listener(move |this, _event, _window, cx| {
+                                    let prompt = format!(
+                                        "Please inspect and fix the failing CI check on PR #{fix_pr_num} ({fix_pr_title}): {fix_failed_summary}"
+                                    );
+                                    this.model.update(cx, |state, _cx| {
+                                        state.request_composer_prompt(prompt);
+                                    });
+                                    cx.notify();
+                                }))
+                                .into_any_element()
+                        } else {
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(format!("{}/{}", pr.passing_checks, pr.total_checks))
+                                .into_any_element()
+                        }),
+                )
+                .when(comments_count > 0, |card| {
+                    let comments_pr_num = pr_num;
+                    let comments_pr_title = pr_title.clone();
+                    card.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .pt_0p5()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .size(px(14.0))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .text_color(theme.muted_foreground)
+                                            .child(IconName::File),
+                                    )
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(format!(
+                                                "{comments_count} review comment{}",
+                                                if comments_count == 1 { "" } else { "s" }
+                                            )),
+                                    ),
+                            )
+                            .child(
+                                Button::new("address-comments-btn")
+                                    .label("Address")
+                                    .ghost()
+                                    .xsmall()
+                                    .tooltip("Ask AI to address PR comments")
+                                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                                        let prompt = format!(
+                                            "Please review and address comments and feedback on PR #{comments_pr_num} ({comments_pr_title})."
+                                        );
+                                        this.model.update(cx, |state, _cx| {
+                                            state.request_composer_prompt(prompt);
+                                        });
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                })
+        });
+
         let selection_bar = (total_files > 0).then(|| {
             div()
                 .flex()
@@ -1378,6 +1601,7 @@ impl RightPanelView {
             .flex()
             .flex_col()
             .child(branch_header)
+            .children(pr_card)
             .children(selection_bar)
             .child(file_list_content)
             .child(commit_footer)

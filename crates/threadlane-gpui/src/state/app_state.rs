@@ -210,6 +210,7 @@ pub struct AppState {
     pub(crate) update_status: threadlane_updater::UpdateStatus,
     pub(crate) update_notice_dismissed: bool,
     pub(crate) requested_editor_target: Option<RequestedEditorTarget>,
+    pub(crate) requested_composer_prompt: Option<String>,
     stream_tx: Sender<ChatStreamEvent>,
     stream_rx: Receiver<ChatStreamEvent>,
     pending_stream_event: Mutex<Option<ChatStreamEvent>>,
@@ -699,6 +700,7 @@ impl AppState {
             update_status: threadlane_updater::UpdateStatus::Idle,
             update_notice_dismissed: false,
             requested_editor_target: None,
+            requested_composer_prompt: None,
             stream_tx,
             stream_rx,
             pending_stream_event: Mutex::new(None),
@@ -982,6 +984,10 @@ impl AppState {
             path: relative_path,
             content,
         });
+    }
+
+    pub(crate) fn request_composer_prompt(&mut self, prompt: String) {
+        self.requested_composer_prompt = Some(prompt);
     }
 
     pub(crate) fn select_session(

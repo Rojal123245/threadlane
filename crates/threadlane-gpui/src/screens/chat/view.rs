@@ -2688,6 +2688,15 @@ impl Render for ChatListView {
                 state.set_value("", window, cx);
             });
         }
+        if let Some(prompt) = self
+            .model
+            .update(cx, |state, _cx| state.requested_composer_prompt.take())
+        {
+            self.current_tab = CentralTab::Chat;
+            self.input_state.update(cx, |input, cx| {
+                input.set_value(&prompt, window, cx);
+            });
+        }
         if self.initial_scroll_frames > 0 {
             self.scroll_handle.scroll_to_bottom();
             self.initial_scroll_frames = self.initial_scroll_frames.saturating_sub(1);

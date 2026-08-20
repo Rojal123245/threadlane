@@ -289,11 +289,9 @@ impl SessionStore for JsonlStore {
                 return Err(ReduceError::MissingParent(parent.clone()));
             }
         }
-        // Concurrent stores allocate optimistically; assign stale inputs while holding the gate.
-        let next_seq = self.next_seq();
-        if entry.seq < next_seq {
-            entry.seq = next_seq;
-        }
+        // Sequence allocation belongs to the writer, not callers. This is the
+        // only point where a sequence becomes durable.
+        entry.seq = self.next_seq();
         validate_candidate_entry(self, &entry)?;
         append_json_line(&self.path, &entry)?;
         self.session_file_len =
@@ -332,11 +330,9 @@ impl SessionStore for JsonlStore {
         {
             return Err(ReduceError::DuplicateId(record.id().into()));
         }
-        // Concurrent stores allocate optimistically; assign stale inputs while holding the gate.
-        let next_seq = self.next_seq();
-        if record.seq() <= next_seq {
-            record = record.with_seq(next_seq);
-        }
+        // Sequence allocation belongs to the writer, not callers. This is the
+        // only point where a sequence becomes durable.
+        record = record.with_seq(self.next_seq());
         validate_candidate_record(self, &record)?;
         append_json_line(&self.path, &record)?;
         self.session_file_len =
@@ -564,7 +560,7 @@ fn read_entries(
                     if let Some(name) = name {
                         records.push(Record::FactSet {
                             id: format!("fact-name-{}", index + 1),
-                            seq: (index + 1) as u64,
+                            seq: 0,
                             lane: "main".into(),
                             timestamp: 0,
                             run_id: None,
@@ -575,7 +571,7 @@ fn read_entries(
                     if let Some(model) = model {
                         records.push(Record::FactSet {
                             id: format!("fact-model-{}", index + 1),
-                            seq: (index + 1) as u64,
+                            seq: 0,
                             lane: "main".into(),
                             timestamp: 0,
                             run_id: None,
@@ -586,7 +582,7 @@ fn read_entries(
                     if title_attempted {
                         records.push(Record::FactSet {
                             id: format!("fact-title-attempted-{}", index + 1),
-                            seq: (index + 1) as u64,
+                            seq: 0,
                             lane: "main".into(),
                             timestamp: 0,
                             run_id: None,
@@ -600,7 +596,7 @@ fn read_entries(
                     if let Ok(plan_json) = serde_json::to_string(&plan) {
                         records.push(Record::FactSet {
                             id: format!("fact-plan-{}", index + 1),
-                            seq: (index + 1) as u64,
+                            seq: 0,
                             lane: "main".into(),
                             timestamp: 0,
                             run_id: None,
@@ -612,7 +608,7 @@ fn read_entries(
                 KnownSessionRecord::GlobalFact { key, value } => {
                     records.push(Record::FactSet {
                         id: format!("fact-{key}-{}", index + 1),
-                        seq: (index + 1) as u64,
+                        seq: 0,
                         lane: "main".into(),
                         timestamp: 0,
                         run_id: None,
@@ -642,6 +638,21 @@ fn read_entries(
                 surface_op: super::types::SurfaceOperation::Append,
                 terminate: false,
             });
+        }
+    }
+    // Legacy metadata has no harness sequence. Allocate virtual values after
+    // the durable stream so it cannot collide with a V2 record sequence.
+    let mut next_seq = entries
+        .iter()
+        .map(|entry| entry.seq)
+        .chain(records.iter().map(Record::seq))
+        .max()
+        .unwrap_or(0)
+        + 1;
+    for record in &mut records {
+        if record.seq() == 0 {
+            *record = record.clone().with_seq(next_seq);
+            next_seq += 1;
         }
     }
     Ok((session_id, preferred_leaf, entries, records))
@@ -727,4 +738,25 @@ fn invalid_line(path: &Path, line: usize, error: impl std::fmt::Display) -> io::
         io::ErrorKind::InvalidData,
         format!("{} line {line}: {error}", path.display()),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_entries;
+
+    #[test]
+    fn legacy_metadata_records_get_distinct_virtual_sequences() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(
+            &path,
+            "{\"type\":\"session_metadata\",\"name\":\"One\",\"model\":\"model\",\"title_attempted\":true}\n",
+        )
+        .unwrap();
+
+        let (_, _, _, records) = read_entries(&path).unwrap();
+        let sequences = records.iter().map(|record| record.seq()).collect::<Vec<_>>();
+        assert_eq!(sequences.len(), 3);
+        assert!(sequences.windows(2).all(|pair| pair[0] < pair[1]));
+    }
 }
