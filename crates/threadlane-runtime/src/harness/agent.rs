@@ -31,6 +31,20 @@ impl<S: SessionStore> AgentHarness<S> {
         }
     }
 
+    pub fn with_events_and_hooks(
+        store: S,
+        events: HarnessEventHub,
+        hooks: HookRegistry,
+    ) -> Self {
+        Self {
+            store,
+            effects: GatedEffects::new(),
+            events,
+            hooks,
+            telemetry: Arc::new(NoopTelemetry),
+        }
+    }
+
     pub fn with_executor(
         store: S,
         events: HarnessEventHub,

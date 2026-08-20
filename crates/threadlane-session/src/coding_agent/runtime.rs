@@ -28,7 +28,7 @@ use threadlane_runtime::harness::{
     OperationOutcome, QueueKind, Reducer, SessionStore, Snapshot,
 };
 use threadlane_runtime::{
-    AgentEvent, AgentMessage, AgentRuntime, ImageAttachment, ModelContextSource,
+    AgentEvent, AgentMessage, AgentRuntime, ImageAttachment,
     ReasoningEffort, TokenUsage,
 };
 use threadlane_skills::{SkillManager, SkillRegistry};
@@ -311,34 +311,36 @@ impl CodingAgent {
             InterruptedSubagentRecoveryState::Complete
         };
         let plan_store = SessionPlanStore::new(initial_plan, session_file.clone());
-        let mut agent = AgentRuntime::new(
-            &options.api_key,
-            options.account_id.clone(),
-            &effective_model,
-            options.session_file.as_deref(),
-            agent_config.clone(),
-        )
-        .unwrap_or_else(|error| {
-            panic!("Failed to create agent runtime: {error}");
-        });
+        let mut agent = if let Some(h) = harness.as_ref() {
+            let runtime_harness = threadlane_runtime::harness::AgentHarness::with_events_and_hooks(
+                h.store.store().clone(),
+                h.events.clone(),
+                h.hooks.clone(),
+            );
+            AgentRuntime::from_harness(
+                &options.api_key,
+                options.account_id.clone(),
+                &effective_model,
+                runtime_harness,
+                agent_config.clone(),
+            )
+        } else {
+            AgentRuntime::new(
+                &options.api_key,
+                options.account_id.clone(),
+                &effective_model,
+                options.session_file.as_deref(),
+                agent_config.clone(),
+            )
+            .unwrap_or_else(|error| {
+                panic!("Failed to create agent runtime: {error}");
+            })
+        };
         agent.session_id = session_id.clone();
-        if let Some(h) = harness.as_ref() {
-            agent.hook_registry = h.store.hooks().clone();
-            agent.harness_event_hub = h.events.clone();
-            let store = h.store.store().clone();
-            let system_prompt = agent_config.default_system_prompt().to_owned();
-            agent.set_model_context_source(Some(Arc::new(move || {
-                let projection = store.model_context("main").map_err(|e| e.to_string())?;
-                Ok(std::iter::once(AgentMessage::System {
-                    content: system_prompt.clone(),
-                })
-                .chain(projection.messages())
-                .collect())
-            }) as Arc<dyn ModelContextSource>));
-        }
         let harness_run_id: Arc<std::sync::Mutex<Option<String>>> =
             Arc::new(std::sync::Mutex::new(None));
-        let cancellation = CodingAgentCancellation::new(session_file.clone(), agent.event_tx.clone());
+        let cancellation =
+            CodingAgentCancellation::new(session_file.clone(), agent.event_tx.clone());
 
         agent.set_prompt_cache_key(Some(session_id.clone()));
 

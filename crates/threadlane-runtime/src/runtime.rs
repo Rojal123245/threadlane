@@ -105,42 +105,20 @@ pub struct AgentRuntime {
 impl AgentRuntime {
     // ── Construction ──────────────────────────────────────────────────
 
-    /// Create a new runtime backed by the given session journal.
+    /// Create a new runtime directly backed by an existing [`AgentHarness`].
     ///
-    /// If `session_file` is provided, opens (or creates) a JSONL journal.
-    /// Otherwise, an in-memory store is used.
-    pub fn new(
+    /// The runtime shares the harness's store, hooks, and event hub directly.
+    pub fn from_harness(
         api_key: impl Into<String>,
         account_id: Option<String>,
         model: impl Into<String>,
-        session_file: Option<&Path>,
+        harness: AgentHarness<JsonlStore>,
         config: AgentConfig,
-    ) -> Result<Self, AgentError> {
+    ) -> Self {
         let api_key: String = api_key.into();
         let model = model.into();
-
-        let store = if let Some(path) = session_file {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).ok();
-            }
-            if !path.exists() {
-                std::fs::File::create(path)
-                    .map_err(|e| AgentError::Session(format!("create session file: {e}")))?;
-            }
-            JsonlStore::open(path)
-                .map_err(|e| AgentError::Session(format!("open session journal: {e}")))?
-        } else {
-            // Ephemeral store backed by a temp file.
-            let tmp =
-                std::env::temp_dir().join(format!("threadlane-ephemeral-{}", std::process::id()));
-            let _ = std::fs::create_dir_all(tmp.parent().unwrap());
-            JsonlStore::open(&tmp)
-                .map_err(|e| AgentError::Session(format!("open ephemeral journal: {e}")))?
-        };
-
         let (event_tx, _) = broadcast::channel(config.event_channel_capacity);
-        let harness_event_hub = HarnessEventHub::new(config.event_channel_capacity);
-        let harness = AgentHarness::new(store);
+        let harness_event_hub = harness.events().clone();
         let hooks = harness.hooks().clone();
         let tool_dispatcher = ToolDispatcher::new(event_tx.clone(), hooks.clone());
         let provider_client = ProviderClient::new(api_key.clone(), account_id.clone());
@@ -151,7 +129,7 @@ impl AgentRuntime {
             reasoning_effort: Default::default(),
         }));
 
-        Ok(Self {
+        Self {
             harness,
             tool_dispatcher,
             provider_client,
@@ -175,7 +153,42 @@ impl AgentRuntime {
             model_context_source: None,
             model_context_projector: None,
             model_context_refresh: None,
-        })
+        }
+    }
+
+    /// Create a new runtime backed by the given session journal path.
+    ///
+    /// If `session_file` is provided, opens (or creates) a JSONL journal.
+    /// Otherwise, an in-memory store is used.
+    pub fn new(
+        api_key: impl Into<String>,
+        account_id: Option<String>,
+        model: impl Into<String>,
+        session_file: Option<&Path>,
+        config: AgentConfig,
+    ) -> Result<Self, AgentError> {
+        let store = if let Some(path) = session_file {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            if !path.exists() {
+                std::fs::File::create(path)
+                    .map_err(|e| AgentError::Session(format!("create session file: {e}")))?;
+            }
+            JsonlStore::open(path)
+                .map_err(|e| AgentError::Session(format!("open session journal: {e}")))?
+        } else {
+            // Ephemeral store backed by a temp file.
+            let tmp =
+                std::env::temp_dir().join(format!("threadlane-ephemeral-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(tmp.parent().unwrap());
+            JsonlStore::open(&tmp)
+                .map_err(|e| AgentError::Session(format!("open ephemeral journal: {e}")))?
+        };
+
+        let harness_event_hub = HarnessEventHub::new(config.event_channel_capacity);
+        let harness = AgentHarness::with_events(store, harness_event_hub);
+        Ok(Self::from_harness(api_key, account_id, model, harness, config))
     }
 
     // ── Model context ─────────────────────────────────────────────────
