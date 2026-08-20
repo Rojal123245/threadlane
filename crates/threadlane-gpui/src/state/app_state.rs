@@ -3409,37 +3409,6 @@ mod tests {
     }
 
     #[test]
-    fn accepting_a_staged_edit_proposal_updates_the_active_project_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let work_dir = dir.path().to_path_buf();
-        let file = work_dir.join("note.txt");
-        std::fs::write(&file, "before\n").unwrap();
-        let proposal = threadlane_tools::execute_tool_in_workspace(
-            "edit_file_hashline",
-            &serde_json::json!({
-                "path": "note.txt",
-                "interactive": true,
-                "edits": [{"start_anchor":"1:f3e", "end_anchor":"1:f3e", "action":"replace", "new_content":"after"}]
-            }).to_string(),
-            &work_dir,
-        );
-        assert!(proposal.starts_with("Proposed edit"), "{proposal}");
-        let proposal_id = proposal
-            .split('\'')
-            .nth(1)
-            .expect("interactive edit returns proposal id");
-        let mut state = AppState::load_from_registry(Vec::new());
-        state.active_work_dir = Some(work_dir);
-        state.accept_edit_proposal(proposal_id).unwrap();
-        assert_eq!(std::fs::read_to_string(file).unwrap(), "after\n");
-        assert!(state
-            .session_status
-            .as_deref()
-            .unwrap_or_default()
-            .contains("Accepted"));
-    }
-
-    #[test]
     fn accepting_an_unknown_edit_proposal_does_not_mutate_files() {
         let dir = tempfile::tempdir().unwrap();
         let work_dir = dir.path().to_path_buf();

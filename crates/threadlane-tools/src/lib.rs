@@ -322,7 +322,7 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
 
     match name {
         "accept_edit" => {
-            "accept_edit is deprecated; edits are applied directly via edit_file_hashline or write_file.".to_string()
+            "Error: accept_edit is deprecated; edits are applied directly via edit_file_hashline or write_file.".to_string()
         }
         "grep_search" => {
             let pattern = match args.get("pattern").and_then(Value::as_str) {

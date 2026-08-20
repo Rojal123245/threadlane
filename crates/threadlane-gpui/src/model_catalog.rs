@@ -38,8 +38,6 @@ const OPENAI_MODELS: &[(&str, &str)] = &[
 
 const ANTIGRAVITY_MODELS: &[(&str, &str)] = &[
     ("antigravity/gemini-3.7-flash", "Gemini 3.7 Flash"),
-    ("antigravity/gemini-3.6-flash", "Gemini 3.6 Flash"),
-    ("antigravity/gemini-3.5-flash", "Gemini 3.5 Flash"),
     ("antigravity/gemini-3.1-pro", "Gemini 3.1 Pro"),
     ("antigravity/claude-sonnet-4-6", "Claude Sonnet 4.6"),
     ("antigravity/claude-opus-4-6", "Claude Opus 4.6"),
@@ -233,7 +231,7 @@ mod tests {
     #[test]
     fn catalog_matches_native_provider_inventory() {
         assert_eq!(OPENAI_MODELS.len(), 9);
-        assert_eq!(ANTIGRAVITY_MODELS.len(), 7);
+        assert_eq!(ANTIGRAVITY_MODELS.len(), 5);
         assert_eq!(OPENCODE_MODELS.len(), 8);
     }
 
