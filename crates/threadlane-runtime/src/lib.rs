@@ -5,6 +5,7 @@ pub(crate) mod engine;
 pub mod error;
 pub mod events;
 pub mod harness;
+pub mod local_tool_router;
 pub(crate) mod loop_engine;
 pub mod provider;
 pub mod rules;
@@ -33,6 +34,7 @@ pub use error::AgentError;
 pub use events::{
     AgentEvent, HarnessMetrics, PermissionRequest, PermissionScope, SubagentRecoveryStatus,
 };
+pub use local_tool_router::LocalToolRouter;
 pub use harness::{
     has_open_subagent_lanes, interrupted_subagent_lanes, AcceptedRun, DurableEvent, DurablePayload,
     InterruptedSubagentLane, LaneQueue, OperationOutcome, QueueKind, Record, RecoveryResult,

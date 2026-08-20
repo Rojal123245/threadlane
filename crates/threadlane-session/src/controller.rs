@@ -169,6 +169,14 @@ impl SessionController {
         agent.set_model_roles(roles);
     }
 
+    pub fn try_set_needle_enabled(&self, enabled: bool) -> bool {
+        let Ok(mut agent) = self.agent.try_lock() else {
+            return false;
+        };
+        agent.set_needle_enabled(enabled);
+        true
+    }
+
     pub async fn reload_extensions(&self) -> Result<usize, String> {
         let _guard = self.prompt_lock.lock().await;
         let mut agent = self.agent.lock().await;

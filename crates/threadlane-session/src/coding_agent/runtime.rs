@@ -166,6 +166,10 @@ impl CodingAgent {
         self.agent.set_model_roles(roles);
     }
 
+    pub fn set_needle_enabled(&mut self, enabled: bool) {
+        self.agent.set_needle_enabled(enabled);
+    }
+
     pub fn model_roles(&self) -> &threadlane_runtime::ModelRoles {
         self.agent.model_roles()
     }

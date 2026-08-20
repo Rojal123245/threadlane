@@ -257,7 +257,8 @@ impl EditorView {
         let lang = detect_language(relative_path);
         let content_for_sub = content.clone();
         let editor = cx.new(|cx| {
-            EditorState::new(lang, window, cx)
+            EditorState::new(window, cx)
+                .language(lang)
                 .line_number(true)
                 .folding(true)
                 .show_whitespaces(false)

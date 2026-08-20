@@ -261,7 +261,8 @@ impl RightPanelView {
         } else {
             let lang = detect_language(&title);
             let editor = cx.new(|cx| {
-                EditorState::new(lang, window, cx)
+                EditorState::new(window, cx)
+                    .language(lang)
                     .line_number(true)
                     .folding(true)
                     .show_whitespaces(false)

@@ -364,6 +364,10 @@ impl AgentRuntime {
         self.config.model_roles = roles;
     }
 
+    pub fn set_needle_enabled(&mut self, enabled: bool) {
+        self.config.needle_enabled = enabled;
+    }
+
     pub fn model_roles(&self) -> &crate::types::ModelRoles {
         &self.config.model_roles
     }

@@ -43,6 +43,10 @@ pub struct AgentConfig {
     pub model_roles: ModelRoles,
 
     // ── Tool Execution ──────────────────────────────────────────────────
+    /// Enable local Needle tool routing when compiled with the `needle` feature.
+    #[serde(default)]
+    pub needle_enabled: bool,
+
     /// Timeout for individual tool executions. `None` means no timeout.
     tool_execution_timeout: Option<Duration>,
 
@@ -65,6 +69,7 @@ impl Default for AgentConfig {
             stream_rule_max_window_bytes: 4096,
             default_system_prompt: "You are threadlane AI coding agent.".into(),
             model_roles: ModelRoles::default(),
+            needle_enabled: false,
             tool_execution_timeout: None,
             max_tool_output_bytes: None,
             event_channel_capacity: 500,

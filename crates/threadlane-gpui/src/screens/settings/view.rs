@@ -409,6 +409,8 @@ impl SettingsView {
         let themes = crate::theme::available_themes(cx);
         let menu_themes = themes.clone();
         let selected_theme = active_theme.clone();
+        let needle_enabled = self.model.read(cx).needle_enabled;
+        let toggle_view = cx.entity().downgrade();
         let theme_picker = Button::new("settings-theme-picker")
             .label(active_theme)
             .dropdown_caret(true)
@@ -457,6 +459,38 @@ impl SettingsView {
                     ),
             )
             .child(theme_picker)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("Local tool routing"),
+                    )
+                    .child(
+                        Switch::new("settings-needle")
+                            .checked(needle_enabled)
+                            .tooltip(if needle_enabled {
+                                "Disable Needle tool routing"
+                            } else {
+                                "Enable Needle tool routing"
+                            })
+                            .on_click(move |checked, _window, cx| {
+                                let _ = toggle_view.update(cx, |this, cx| {
+                                    let result = this.model.update(cx, |state, _cx| {
+                                        state.set_needle_enabled(*checked)
+                                    });
+                                    if let Err(error) = result {
+                                        this.capability_status = Some(error);
+                                    }
+                                    cx.notify();
+                                });
+                            }),
+                    ),
+            )
             .into_any_element()
     }
 

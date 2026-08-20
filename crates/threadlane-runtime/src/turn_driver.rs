@@ -240,7 +240,22 @@ impl<'a> TurnDriver<'a> {
             let (stream_tx, mut stream_rx) = mpsc::channel(100);
             let client = self.provider_client.clone();
             let pc_key = self.prompt_cache_key.clone();
-            let tool_definitions = self.tool_dispatcher.configured_tool_definitions();
+            let configured_tool_definitions = self.tool_dispatcher.configured_tool_definitions();
+            let query = {
+                let turn = self.turn.lock().await;
+                turn.messages.iter().rev().find_map(|message| match message {
+                    AgentMessage::User { content } | AgentMessage::UserWithImages { content, .. } => {
+                        Some(content.clone())
+                    }
+                    _ => None,
+                })
+            };
+            let tool_definitions = crate::local_tool_router::shortlist_from_environment(
+                &query.unwrap_or_default(),
+                &configured_tool_definitions,
+                self.config.needle_enabled,
+            )
+            .await;
             let payload_cache_key = pc_key.clone();
 
             let request = {

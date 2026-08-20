@@ -205,6 +205,7 @@ pub struct AppState {
     pub(crate) workspace_page: WorkspacePage,
     pub(crate) openai_key: String,
     pub(crate) opencode_key: String,
+    pub(crate) needle_enabled: bool,
     pub(crate) auth_status_msg: Option<String>,
     pub(crate) update_status: threadlane_updater::UpdateStatus,
     pub(crate) update_notice_dismissed: bool,
@@ -537,6 +538,7 @@ fn coding_agent_options(
     let (api_key, account_id) = provider_credentials(&model);
     let mut agent_config = threadlane_session::AgentConfig::default();
     agent_config.model_roles = model_roles;
+    agent_config.needle_enabled = crate::services::settings::load_needle_enabled();
 
     threadlane_session::CodingAgentOptions {
         api_key,
@@ -689,6 +691,7 @@ impl AppState {
             workspace_page: WorkspacePage::Chat,
             openai_key,
             opencode_key,
+            needle_enabled: crate::services::settings::load_needle_enabled(),
             auth_status_msg: None,
             update_status: threadlane_updater::UpdateStatus::Idle,
             update_notice_dismissed: false,
@@ -724,6 +727,15 @@ impl AppState {
             }
         }
         state
+    }
+
+    pub(crate) fn set_needle_enabled(&mut self, enabled: bool) -> Result<(), String> {
+        crate::services::settings::save_needle_enabled(enabled)?;
+        self.needle_enabled = enabled;
+        for runtime in self.session_runtimes.values() {
+            let _ = runtime.try_set_needle_enabled(enabled);
+        }
+        Ok(())
     }
 
     pub(crate) fn current_session_token_usage(&self) -> TokenUsage {
