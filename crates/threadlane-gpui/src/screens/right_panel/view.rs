@@ -8,11 +8,12 @@ use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Editor, EditorState, InputEvent, TabSize};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
+use gpui_component::notification::Notification;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::separator::Separator;
 use gpui_component::tag::Tag;
 use gpui_component::text::{TextView, TextViewState};
-use gpui_component::{ActiveTheme, Disableable, IconName, Selectable, Sizable};
+use gpui_component::{ActiveTheme, Disableable, IconName, Selectable, Sizable, WindowExt};
 use threadlane_git::GitFile;
 
 use crate::state::AppState;
@@ -623,19 +624,27 @@ impl RightPanelView {
                                 ));
                             let menu =
                                 menu.item(PopupMenuItem::new("Copy Relative Path").on_click(
-                                    move |_event, _window, cx| {
+                                    move |_event, window, cx| {
                                         cx.write_to_clipboard(ClipboardItem::new_string(
                                             text.clone(),
                                         ));
+                                        window.push_notification(
+                                            Notification::info("Copied relative path"),
+                                            cx,
+                                        );
                                     },
                                 ));
                             if let Some(absolute_path) = absolute_path.clone() {
                                 let text = absolute_path;
                                 menu.item(PopupMenuItem::new("Copy Absolute Path").on_click(
-                                    move |_event, _window, cx| {
+                                    move |_event, window, cx| {
                                         cx.write_to_clipboard(ClipboardItem::new_string(
                                             text.clone(),
                                         ));
+                                        window.push_notification(
+                                            Notification::info("Copied absolute path"),
+                                            cx,
+                                        );
                                     },
                                 ))
                             } else {
@@ -830,10 +839,14 @@ impl RightPanelView {
                                     );
                                     let menu = menu.item(
                                         PopupMenuItem::new("Copy Relative Path").on_click(
-                                            move |_event, _window, cx| {
+                                            move |_event, window, cx| {
                                                 cx.write_to_clipboard(ClipboardItem::new_string(
                                                     text.clone(),
                                                 ));
+                                                window.push_notification(
+                                                    Notification::info("Copied relative path"),
+                                                    cx,
+                                                );
                                             },
                                         ),
                                     );
@@ -841,9 +854,13 @@ impl RightPanelView {
                                         let text = absolute_path;
                                         menu.item(
                                             PopupMenuItem::new("Copy Absolute Path").on_click(
-                                                move |_event, _window, cx| {
+                                                move |_event, window, cx| {
                                                     cx.write_to_clipboard(
                                                         ClipboardItem::new_string(text.clone()),
+                                                    );
+                                                    window.push_notification(
+                                                        Notification::info("Copied absolute path"),
+                                                        cx,
                                                     );
                                                 },
                                             ),

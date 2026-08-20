@@ -563,7 +563,10 @@ impl AppState {
         Self::load_from_registry(load_project_registry())
     }
 
-    fn load_from_registry(mut registry_projects: Vec<AttachedProject>) -> Self {
+    fn load_from_registry(registry_projects: Vec<AttachedProject>) -> Self {
+        #[cfg(not(test))]
+        let mut registry_projects = registry_projects;
+        #[cfg(not(test))]
         if registry_projects.is_empty() {
             if let Ok(curr) = std::env::current_dir().and_then(std::fs::canonicalize) {
                 let project = AttachedProject::from_path(curr);

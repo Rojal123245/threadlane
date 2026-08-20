@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::persistence::global_threadlane_dir;
 
-const DEFAULT_THEME_NAME: &str = "Threadlane Black";
+const DEFAULT_THEME_NAME: &str = "Threadlane Dark";
 const BUNDLED_THEMES: &str = include_str!("../themes/threadlane.json");
 
 #[derive(Default, Deserialize, Serialize)]
@@ -42,6 +42,7 @@ pub(crate) fn available_themes(cx: &App) -> Vec<(SharedString, ThemeMode)> {
     ThemeRegistry::global(cx)
         .sorted_themes()
         .into_iter()
+        .filter(|theme| theme.name.starts_with("Threadlane"))
         .map(|theme| (theme.name.clone(), theme.mode))
         .collect()
 }
@@ -92,7 +93,12 @@ fn apply_saved_or_default_theme(cx: &mut App) {
 }
 
 fn find_theme(theme_name: &str, cx: &App) -> Option<Rc<ThemeConfig>> {
-    ThemeRegistry::global(cx).themes().get(theme_name).cloned()
+    let lookup_name = match theme_name {
+        "Threadlane Black" | "Default Dark" => "Threadlane Dark",
+        "Default Light" => "Threadlane Light",
+        other => other,
+    };
+    ThemeRegistry::global(cx).themes().get(lookup_name).cloned()
 }
 
 fn apply_theme_config(theme: Rc<ThemeConfig>, cx: &mut App) {
@@ -134,7 +140,7 @@ mod tests {
         assert!(themes
             .themes
             .iter()
-            .any(|theme| theme.name == "Threadlane Black"));
+            .any(|theme| theme.name == "Threadlane Dark"));
         assert!(themes
             .themes
             .iter()

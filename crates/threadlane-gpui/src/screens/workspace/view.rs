@@ -9,11 +9,15 @@ use gpui_component::dialog::{
     Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 };
 use gpui_component::input::{Input, InputState};
+use gpui_component::notification::Notification;
 use gpui_component::resizable::{h_resizable, resizable_panel, v_resizable, ResizableState};
 use gpui_component::spinner::Spinner;
+use gpui_component::status_bar::StatusBar;
 use gpui_component::switch::Switch;
 use gpui_component::tag::{Tag, TagVariant};
-use gpui_component::{v_flex, ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable};
+use gpui_component::{
+    v_flex, ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable, WindowExt,
+};
 
 actions!(threadlane_workspace, [ToggleCommandPalette]);
 use threadlane_git::GitStatus;
@@ -404,9 +408,18 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    fn run_git_action(&mut self, action: GitAction, cx: &mut Context<Self>) {
+    fn run_git_action(
+        &mut self,
+        action: GitAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(work_dir) = self.model.read(cx).active_work_dir.clone() else {
             self.git_feedback = Some("Attach a project to use Git actions.".into());
+            window.push_notification(
+                Notification::warning("Attach a project to use Git actions"),
+                cx,
+            );
             cx.notify();
             return;
         };
@@ -419,19 +432,19 @@ impl WorkspaceView {
         });
         if needs_commit && message.is_empty() {
             self.git_feedback = Some("Enter a commit message first.".into());
+            window.push_notification(Notification::warning("Enter a commit message first"), cx);
             cx.notify();
             return;
         }
 
         self.git_busy = true;
-        self.git_feedback = Some(
-            match action {
-                GitAction::Commit => "Committing…",
-                GitAction::CommitAndPush => "Committing and pushing…",
-                GitAction::Push => "Pushing…",
-            }
-            .into(),
-        );
+        let feedback = match action {
+            GitAction::Commit => "Committing…",
+            GitAction::CommitAndPush => "Committing and pushing…",
+            GitAction::Push => "Pushing…",
+        };
+        self.git_feedback = Some(feedback.into());
+        window.push_notification(Notification::info(feedback), cx);
         let include_unstaged = self.git_include_unstaged;
         let tx = self.git_event_tx.clone();
         std::thread::spawn(move || {
@@ -1006,8 +1019,8 @@ impl WorkspaceView {
                                     .label("Push only")
                                     .ghost()
                                     .disabled(!can_push)
-                                    .on_click(cx.listener(|this, _event, _window, cx| {
-                                        this.run_git_action(GitAction::Push, cx);
+                                    .on_click(cx.listener(|this, _event, window, cx| {
+                                        this.run_git_action(GitAction::Push, window, cx);
                                     })),
                             )
                             .child(
@@ -1020,8 +1033,8 @@ impl WorkspaceView {
                                             .label("Commit")
                                             .outline()
                                             .disabled(!can_commit)
-                                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                                this.run_git_action(GitAction::Commit, cx);
+                                            .on_click(cx.listener(|this, _event, window, cx| {
+                                                this.run_git_action(GitAction::Commit, window, cx);
                                             })),
                                     )
                                     .child(
@@ -1029,8 +1042,12 @@ impl WorkspaceView {
                                             .icon(Icon::default().path("icons/git/commit.svg"))
                                             .label("Commit & push")
                                             .disabled(!can_commit)
-                                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                                this.run_git_action(GitAction::CommitAndPush, cx);
+                                            .on_click(cx.listener(|this, _event, window, cx| {
+                                                this.run_git_action(
+                                                    GitAction::CommitAndPush,
+                                                    window,
+                                                    cx,
+                                                );
                                             })),
                                     ),
                             ),
@@ -1369,6 +1386,128 @@ impl WorkspaceView {
             )
             .into_any_element()
     }
+
+    fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let state = self.model.read(cx);
+        let theme = cx.theme().colors;
+
+        let branch = self
+            .git_status
+            .as_ref()
+            .and_then(|s| s.branch.as_deref())
+            .unwrap_or("main");
+        let (additions, deletions) = self.git_status.as_ref().map_or((0, 0), |s| {
+            s.files
+                .iter()
+                .fold((0, 0), |(a, d), f| (a + f.additions, d + f.deletions))
+        });
+        let dirty_count = self.git_status.as_ref().map_or(0, |s| s.files.len());
+
+        let model_name = if state.selected_model.is_empty() {
+            "default"
+        } else {
+            &state.selected_model
+        };
+
+        let active_project = state
+            .active_work_dir
+            .as_ref()
+            .and_then(|wd| {
+                state
+                    .projects
+                    .iter()
+                    .find(|p| &p.work_dir == wd)
+                    .map(|p| p.name.clone())
+            })
+            .or_else(|| {
+                state
+                    .active_work_dir
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| "No Project".into());
+
+        StatusBar::new()
+            .left(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Button::new("status-git-branch")
+                            .icon(IconName::Github)
+                            .label(format!("{active_project} · {branch}"))
+                            .ghost()
+                            .xsmall()
+                            .tooltip("Git Review & Commit")
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.git_dialog_open = true;
+                                this.refresh_git_status(cx);
+                                cx.notify();
+                            })),
+                    )
+                    .children((dirty_count > 0).then(|| {
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .text_xs()
+                            .children((additions > 0).then(|| {
+                                div()
+                                    .text_color(theme.success)
+                                    .child(format!("+{additions}"))
+                            }))
+                            .children((deletions > 0).then(|| {
+                                div()
+                                    .text_color(theme.danger)
+                                    .child(format!("−{deletions}"))
+                            }))
+                    })),
+            )
+            .right(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .px_2()
+                            .py_0p5()
+                            .rounded_md()
+                            .bg(theme.muted)
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(Icon::new(IconName::Cpu).xsmall())
+                            .child(model_name.to_string()),
+                    )
+                    .child(
+                        Button::new("status-terminal-toggle")
+                            .icon(if self.bottom_panel_visible {
+                                IconName::PanelBottomOpen
+                            } else {
+                                IconName::PanelBottom
+                            })
+                            .label("Terminal")
+                            .ghost()
+                            .selected(self.bottom_panel_visible)
+                            .xsmall()
+                            .tooltip(if self.bottom_panel_visible {
+                                "Hide terminal"
+                            } else {
+                                "Show terminal"
+                            })
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.bottom_panel_visible = !this.bottom_panel_visible;
+                                cx.notify();
+                            })),
+                    ),
+            )
+    }
 }
 
 impl Render for WorkspaceView {
@@ -1457,6 +1596,13 @@ impl Render for WorkspaceView {
             }
         };
 
+        let chat_view_with_status_bar = div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(div().flex_1().min_h_0().child(chat_page_content))
+            .child(self.render_status_bar(cx));
+
         div()
             .relative()
             .flex()
@@ -1465,7 +1611,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::toggle_command_palette))
             .bg(theme.background)
             .child(match workspace_page {
-                WorkspacePage::Chat => chat_page_content,
+                WorkspacePage::Chat => chat_view_with_status_bar.into_any_element(),
                 WorkspacePage::Settings => self.settings.clone().into_any_element(),
             })
             .children((workspace_page == WorkspacePage::Chat).then(|| {

@@ -6,15 +6,17 @@ use base64::Engine as _;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::collapsible::Collapsible;
 use gpui_component::hover_card::HoverCard;
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
+use gpui_component::notification::Notification;
 use gpui_component::progress::ProgressCircle;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::theme::ActiveTheme;
-use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable};
+use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable, WindowExt};
 
 use crate::app::{actions::AppAction, controller};
 use crate::screens::editor::EditorView;
@@ -718,11 +720,13 @@ impl ChatListView {
                             })
                     }))
                     .children(has_detail.then(|| {
-                        div()
-                            .flex_none()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(if activity.is_expanded { "⌄" } else { "›" })
+                        Icon::new(if activity.is_expanded {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .xsmall()
+                        .text_color(theme.muted_foreground)
                     })),
             )
             .children(activity.is_expanded.then(|| {
@@ -1062,8 +1066,12 @@ impl ChatListView {
                                         entry.seq, entry.turn, entry.category, entry.summary,
                                         entry.detail, entry.lane, entry.run_id, entry.correlation_id,
                                     );
-                                    move |_, _, cx| {
+                                    move |_, window, cx| {
                                         cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                                        window.push_notification(
+                                            Notification::info("Copied trajectory entry"),
+                                            cx,
+                                        );
                                     }
                                 }),
                         )
@@ -1495,11 +1503,13 @@ impl ChatListView {
                     }),
             )
             .child(
-                div()
-                    .flex_none()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(if is_expanded { "⌄" } else { "›" }),
+                Icon::new(if is_expanded {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .xsmall()
+                .text_color(theme.muted_foreground),
             )
             .on_click(move |_event, _window, cx| {
                 model.update(cx, |state, cx| {
@@ -1538,13 +1548,10 @@ impl ChatListView {
         });
 
         Some(
-            div()
-                .w_full()
-                .min_w_0()
-                .flex()
-                .flex_col()
+            Collapsible::new()
+                .open(is_expanded)
                 .child(header)
-                .children(detail)
+                .when_some(detail, |c, content| c.content(content))
                 .into_any_element(),
         )
     }
@@ -1591,10 +1598,14 @@ impl ChatListView {
                             move |menu, _window, _cx| {
                                 let text = content.clone();
                                 menu.item(PopupMenuItem::new("Copy Message").on_click(
-                                    move |_event, _window, cx| {
+                                    move |_event, window, cx| {
                                         cx.write_to_clipboard(ClipboardItem::new_string(
                                             text.clone(),
                                         ));
+                                        window.push_notification(
+                                            Notification::info("Copied to clipboard"),
+                                            cx,
+                                        );
                                     },
                                 ))
                             }
@@ -1669,10 +1680,14 @@ impl ChatListView {
                                 move |menu, _window, _cx| {
                                     let text = content.clone();
                                     menu.item(PopupMenuItem::new("Copy Message").on_click(
-                                        move |_event, _window, cx| {
+                                        move |_event, window, cx| {
                                             cx.write_to_clipboard(ClipboardItem::new_string(
                                                 text.clone(),
                                             ));
+                                            window.push_notification(
+                                                Notification::info("Copied to clipboard"),
+                                                cx,
+                                            );
                                         },
                                     ))
                                 }
@@ -1689,8 +1704,12 @@ impl ChatListView {
                         move |menu, _window, _cx| {
                             let text = content.clone();
                             menu.item(PopupMenuItem::new("Copy Message").on_click(
-                                move |_event, _window, cx| {
+                                move |_event, window, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                                    window.push_notification(
+                                        Notification::info("Copied to clipboard"),
+                                        cx,
+                                    );
                                 },
                             ))
                         }
@@ -1748,10 +1767,14 @@ impl ChatListView {
                                     move |menu, _window, _cx| {
                                         let text = content.clone();
                                         menu.item(PopupMenuItem::new("Copy Note").on_click(
-                                            move |_event, _window, cx| {
+                                            move |_event, window, cx| {
                                                 cx.write_to_clipboard(ClipboardItem::new_string(
                                                     text.clone(),
                                                 ));
+                                                window.push_notification(
+                                                    Notification::info("Copied to clipboard"),
+                                                    cx,
+                                                );
                                             },
                                         ))
                                     }
@@ -1789,9 +1812,13 @@ impl ChatListView {
                                         move |menu, _window, _cx| {
                                             let text = content.clone();
                                             menu.item(PopupMenuItem::new("Copy Message").on_click(
-                                                move |_event, _window, cx| {
+                                                move |_event, window, cx| {
                                                     cx.write_to_clipboard(
                                                         ClipboardItem::new_string(text.clone()),
+                                                    );
+                                                    window.push_notification(
+                                                        Notification::info("Copied to clipboard"),
+                                                        cx,
                                                     );
                                                 },
                                             ))
