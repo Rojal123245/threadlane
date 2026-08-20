@@ -18,7 +18,9 @@ use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable};
 
 use crate::app::{actions::AppAction, controller};
 use crate::screens::editor::EditorView;
-use crate::state::{AppState, ChatMessageInfo, MessageRole, ToolActivityInfo};
+use crate::state::{
+    compute_older_message_page, AppState, ChatMessageInfo, MessageRole, ToolActivityInfo,
+};
 use threadlane_session::commands::available_slash_commands;
 use threadlane_session::{ImageAttachment, PlanItemStatus, ReasoningEffort, SessionPlan};
 
@@ -2791,13 +2793,30 @@ impl Render for ChatListView {
             let model = self.model.clone();
             let scroll_handle = self.scroll_handle.clone();
             cx.spawn(async move |this, cx| {
-                let added = model.update(cx, |model, cx| {
-                    let added = model.load_older_messages();
-                    if added > 0 {
-                        cx.notify();
-                    }
-                    added
+                let request = model.update(cx, |state, _cx| {
+                    state.history_page_request()
                 });
+                let added = if let Some((session_file, end)) = request {
+                    let page_file = session_file.clone();
+                    let page = cx
+                        .background_executor()
+                        .spawn(async move { compute_older_message_page(&page_file, end) })
+                        .await;
+                    model.update(cx, |state, cx| {
+                        let added = state.apply_older_message_page(
+                            &session_file,
+                            page.0,
+                            page.1,
+                            page.2,
+                        );
+                        if added > 0 {
+                            cx.notify();
+                        }
+                        added
+                    })
+                } else {
+                    0
+                };
                 if added > 0 {
                     scroll_handle.scroll_to_item(old_top_item.saturating_add(added));
                 }

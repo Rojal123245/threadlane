@@ -25,7 +25,9 @@ use crate::screens::settings::SettingsView;
 use crate::screens::sidebar::SidebarView;
 use crate::screens::terminal::TerminalView;
 use crate::services::updater::{self, UpdaterEvent};
-use crate::state::{AppState, WorkspacePage};
+use crate::state::{
+    compute_full_session_projection, AppState, SessionHydrationRequest, WorkspacePage,
+};
 use threadlane_updater::UpdateStatus;
 
 pub fn init(cx: &mut App) {
@@ -95,6 +97,38 @@ pub struct WorkspaceView {
 }
 
 impl WorkspaceView {
+    pub(crate) fn spawn_session_hydration(
+        model: Entity<AppState>,
+        request: SessionHydrationRequest,
+        cx: &mut AsyncApp,
+    ) {
+        cx.spawn(async move |cx| {
+            let session_file = request.session_file.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { compute_full_session_projection(&session_file) })
+                .await;
+            let _ = model.update(cx, |state, cx| {
+                if state.active_session_id.as_deref() != Some(&request.session_id) {
+                    return;
+                }
+                match result {
+                    Ok(result) => {
+                        state.apply_session_hydration(
+                            &request.session_id,
+                            &request.session_file,
+                            result,
+                        );
+                        state.session_status = state.session_status_for_file(&request.session_file);
+                    }
+                    Err(error) => state.session_status = Some(format!("Could not load session: {error}")),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub fn build(window: &mut Window, cx: &mut App) -> Entity<Self> {
         let model = cx.new(|_cx| AppState::load());
         let sidebar = cx.new(|cx| SidebarView::new(model.clone(), window, cx));
@@ -133,6 +167,21 @@ impl WorkspaceView {
                     .await;
                 let git_events = git_event_rx.try_iter().collect::<Vec<_>>();
                 let updater_events = updater_rx.try_iter().collect::<Vec<_>>();
+                let hydration_requests = this
+                    .update(cx, |this, cx| {
+                        this.model.update(cx, |state, _cx| {
+                            std::mem::take(&mut state.pending_hydrations)
+                        })
+                    })
+                    .unwrap_or_default();
+                for request in hydration_requests {
+                    let model = this
+                        .update(cx, |this, _cx| this.model.clone())
+                        .ok();
+                    if let Some(model) = model {
+                        Self::spawn_session_hydration(model, request, cx);
+                    }
+                }
                 let _ = this.update(cx, |this, cx| {
                     this.model.update(cx, |state, cx| {
                         if state.apply_session_refreshes() {

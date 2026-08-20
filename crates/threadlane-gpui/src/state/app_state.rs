@@ -158,6 +158,24 @@ pub enum WorkspacePage {
     Settings,
 }
 
+/// A session whose durable UI projections need to be computed off the UI thread.
+pub(crate) struct SessionHydrationRequest {
+    pub(crate) session_id: String,
+    pub(crate) session_file: PathBuf,
+}
+
+/// The complete durable UI projection built from one JSONL store parse.
+pub(crate) struct SessionProjectionResult {
+    pub(crate) messages: Vec<ChatMessageInfo>,
+    pub(crate) history_start: usize,
+    pub(crate) history_has_older: bool,
+    pub(crate) plan: SessionPlan,
+    pub(crate) trajectory: Vec<TrajectoryEntry>,
+    pub(crate) diagnostics: threadlane_session::harness::SessionDiagnostics,
+    pub(crate) metrics: SessionMetricsInfo,
+    pub(crate) token_usage: TokenUsage,
+}
+
 pub struct AppState {
     pub(crate) projects: Vec<ProjectInfo>,
     pub(crate) active_work_dir: Option<PathBuf>,
@@ -179,6 +197,7 @@ pub struct AppState {
     session_metrics: HashMap<String, SessionMetricsInfo>,
     stashed_prompts: HashMap<String, String>,
     pub(crate) pending_permissions: HashMap<String, threadlane_session::PermissionRequest>,
+    pub(crate) pending_hydrations: Vec<SessionHydrationRequest>,
 
     pub(crate) selected_model: String,
     pub(crate) model_roles: threadlane_session::ModelRoles,
@@ -378,11 +397,48 @@ fn load_session_message_page(
     let Ok(store) = JsonlStore::open_read_only(session_file) else {
         return (Vec::new(), 0, false);
     };
+    project_message_page_from_store(&store, end)
+}
+
+fn project_message_page_from_store(
+    store: &JsonlStore,
+    end: usize,
+) -> (Vec<ChatMessageInfo>, usize, bool) {
     let agent_messages = store.transcript("main").messages();
     let projected = project_agent_messages(agent_messages);
     let end = end.min(projected.len());
     let start = end.saturating_sub(CHAT_HISTORY_PAGE_SIZE);
     (projected[start..end].to_vec(), start, start > 0)
+}
+
+/// Computes an older transcript page from disk. Call this on GPUI's background executor.
+pub(crate) fn compute_older_message_page(
+    session_file: &Path,
+    end: usize,
+) -> (Vec<ChatMessageInfo>, usize, bool) {
+    load_session_message_page(session_file, end)
+}
+
+/// Opens a session JSONL once and builds every UI projection required after hydration.
+pub(crate) fn compute_full_session_projection(
+    session_file: &Path,
+) -> Result<SessionProjectionResult, String> {
+    let store = JsonlStore::open_read_only(session_file).map_err(|error| error.to_string())?;
+    let diagnostics = threadlane_session::harness::project_session_diagnostics(&store, "main")
+        .map_err(|error| error.to_string())?;
+    let (messages, history_start, history_has_older) =
+        project_message_page_from_store(&store, usize::MAX);
+    let (trajectory, metrics, token_usage) = AppState::project_trajectory_from_store(&store);
+    Ok(SessionProjectionResult {
+        messages,
+        history_start,
+        history_has_older,
+        plan: store.plan(),
+        trajectory,
+        diagnostics,
+        metrics,
+        token_usage,
+    })
 }
 
 fn tool_activity_summary(name: &str, arguments: &str) -> String {
@@ -433,7 +489,7 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
         .collect()
 }
 
-fn runtime_status_text(status: SessionRuntimeStatus) -> Option<String> {
+pub(crate) fn runtime_status_text(status: SessionRuntimeStatus) -> Option<String> {
     match status {
         SessionRuntimeStatus::Ready => None,
         SessionRuntimeStatus::Working => Some("Working…".into()),
@@ -645,6 +701,7 @@ impl AppState {
             session_runtimes,
             deferred_stream_events: HashMap::new(),
             pending_permissions: HashMap::new(),
+            pending_hydrations: Vec::new(),
         };
         if let (Some(session_id), Some(session_file)) = (
             state.active_session_id.clone(),
@@ -889,23 +946,10 @@ impl AppState {
         self.history_has_older
     }
 
-    pub(crate) fn load_older_messages(&mut self) -> usize {
-        if !self.history_has_older {
-            return 0;
-        }
-        let Some(session_file) = self.history_session_file.as_deref() else {
-            return 0;
-        };
-        let (older, start, has_older) = load_session_message_page(session_file, self.history_start);
-        let added = older.len();
-        if added > 0 {
-            self.messages.splice(0..0, older);
-            self.history_start = start;
-            self.history_has_older = has_older;
-        } else {
-            self.history_has_older = false;
-        }
-        added
+    pub(crate) fn history_page_request(&self) -> Option<(PathBuf, usize)> {
+        self.history_has_older
+            .then(|| self.history_session_file.clone().map(|file| (file, self.history_start)))
+            .flatten()
     }
 
     pub(crate) fn request_open_file(&mut self, relative_path: String) {
@@ -925,7 +969,11 @@ impl AppState {
         });
     }
 
-    pub(crate) fn select_session(&mut self, work_dir: PathBuf, session_id: String) {
+    pub(crate) fn select_session(
+        &mut self,
+        work_dir: PathBuf,
+        session_id: String,
+    ) -> SessionHydrationRequest {
         self.workspace_page = WorkspacePage::Chat;
         self.active_work_dir = Some(work_dir.clone());
         self.active_session_id = Some(session_id.clone());
@@ -933,50 +981,33 @@ impl AppState {
         self.persist_project_selection(&work_dir, Some(&session_id));
 
         let session_file = self.session_file(&work_dir, &session_id);
-        let completed_while_away =
-            self.deferred_stream_events
-                .get(&session_id)
-                .is_some_and(|events| {
-                    events
-                        .iter()
-                        .any(|event| matches!(event, ChatStreamEvent::Finished { .. }))
-                });
-        let completed_events = completed_while_away
-            .then(|| self.deferred_stream_events.remove(&session_id))
-            .flatten()
+        let completed_events = self
+            .deferred_stream_events
+            .remove(&session_id)
             .unwrap_or_default();
         let runtime = self.ensure_session_runtime(work_dir, session_file.clone());
-        if !self.trajectory_by_session.contains_key(&session_id) {
-            if let Err(error) = self.hydrate_session_projection(&session_id, &session_file) {
-                self.trajectory_by_session.insert(
-                    session_id.clone(),
-                    vec![TrajectoryEntry {
-                        seq: None,
-                        run_id: None,
-                        turn: None,
-                        category: "Error".into(),
-                        summary: "Could not load durable trajectory".into(),
-                        detail: error,
-                        lane: Some("main".into()),
-                        correlation_id: None,
-                    }],
-                );
-            }
-        }
         for event in completed_events {
             if let ChatStreamEvent::Agent { event, .. } = event {
                 self.record_trajectory(&session_id, &event);
             }
         }
-        let (messages, start, has_older) = load_session_message_page(&session_file, usize::MAX);
-        self.messages = messages;
+        self.messages.clear();
         self.history_session_file = Some(session_file.clone());
-        self.history_start = start;
-        self.history_has_older = has_older;
-        self.active_plan = load_session_plan(&session_file);
+        self.history_start = 0;
+        self.history_has_older = false;
+        self.active_plan = SessionPlan::default();
         self.is_generating = runtime.is_generating();
         self.selected_model = runtime.selected_model.clone();
-        self.session_status = runtime_status_text(runtime.status());
+        self.session_status = Some("Loading session…".into());
+        let request = SessionHydrationRequest {
+            session_id,
+            session_file,
+        };
+        self.pending_hydrations.push(SessionHydrationRequest {
+            session_id: request.session_id.clone(),
+            session_file: request.session_file.clone(),
+        });
+        request
     }
 
     pub(crate) fn settle_session(
@@ -1125,7 +1156,7 @@ impl AppState {
             .next()
             .map(|session| (session.work_dir.clone(), session.id.clone()));
         if let Some((next_work_dir, next_session_id)) = next_session {
-            self.select_session(next_work_dir, next_session_id);
+            let _ = self.select_session(next_work_dir, next_session_id);
         }
     }
 
@@ -1222,29 +1253,32 @@ impl AppState {
         {
             project.sessions = discover_sessions_in_project(&work_dir);
         }
-        self.select_session(work_dir, session_id.clone());
+        let _ = self.select_session(work_dir, session_id.clone());
         self.is_new_task = false;
         Ok(session_id)
     }
 
     /// Hydrates trajectory, token usage, and metrics projections from durable harness records.
-    ///
-    /// Architecture Invariant:
-    /// - The trajectory timeline is an auditable session-wide / run-level projection over the
-    ///   complete chronological harness records (operations, tool executions, provider calls, and permissions).
-    /// - The chat message view reflects conversational turns on the active session branch.
-    /// - Streaming checkpoints and trace observations are non-replayable and observational.
     fn hydrate_session_projection(
         &mut self,
         session_id: &str,
         session_file: &Path,
     ) -> Result<(), String> {
-        let store = threadlane_session::harness::JsonlStore::open_read_only(session_file)
-            .map_err(|error| error.to_string())?;
-        let diagnostics = threadlane_session::harness::project_session_diagnostics(&store, "main")
-            .map_err(|error| error.to_string())?;
+        let result = compute_full_session_projection(session_file)?;
         self.diagnostics_by_session
-            .insert(session_id.to_owned(), diagnostics);
+            .insert(session_id.to_owned(), result.diagnostics);
+        self.trajectory_by_session
+            .insert(session_id.into(), result.trajectory);
+        self.session_metrics.insert(session_id.into(), result.metrics);
+        self.session_token_usage
+            .insert(session_id.into(), result.token_usage);
+        Ok(())
+    }
+
+    /// Projects trajectory entries, token usage, and metrics from an already-open store.
+    fn project_trajectory_from_store(
+        store: &JsonlStore,
+    ) -> (Vec<TrajectoryEntry>, SessionMetricsInfo, TokenUsage) {
         let mut trajectory: Vec<TrajectoryEntry> = Vec::new();
         let mut metrics = SessionMetricsInfo::default();
         let mut durable_usage = TokenUsage::default();
@@ -1812,12 +1846,59 @@ impl AppState {
             }
         }
         trajectory.sort_by_key(|entry| entry.seq.unwrap_or(u64::MAX));
+        (trajectory, metrics, durable_usage)
+    }
+
+    /// Applies a completed background projection if its session remains active.
+    pub(crate) fn session_status_for_file(&self, session_file: &Path) -> Option<String> {
+        self.session_runtimes
+            .get(session_file)
+            .and_then(|runtime| runtime_status_text(runtime.status()))
+    }
+
+    pub(crate) fn apply_session_hydration(
+        &mut self,
+        session_id: &str,
+        session_file: &Path,
+        result: SessionProjectionResult,
+    ) {
+        if self.active_session_id.as_deref() != Some(session_id) {
+            return;
+        }
+        self.messages = result.messages;
+        self.history_session_file = Some(session_file.to_path_buf());
+        self.history_start = result.history_start;
+        self.history_has_older = result.history_has_older;
+        self.active_plan = result.plan;
         self.trajectory_by_session
-            .insert(session_id.into(), trajectory);
-        self.session_metrics.insert(session_id.into(), metrics);
+            .insert(session_id.to_owned(), result.trajectory);
+        self.diagnostics_by_session
+            .insert(session_id.to_owned(), result.diagnostics);
+        self.session_metrics.insert(session_id.to_owned(), result.metrics);
         self.session_token_usage
-            .insert(session_id.into(), durable_usage);
-        Ok(())
+            .insert(session_id.to_owned(), result.token_usage);
+    }
+
+    /// Applies an older page that was computed off the UI thread.
+    pub(crate) fn apply_older_message_page(
+        &mut self,
+        session_file: &Path,
+        older: Vec<ChatMessageInfo>,
+        start: usize,
+        has_older: bool,
+    ) -> usize {
+        if self.history_session_file.as_deref() != Some(session_file) {
+            return 0;
+        }
+        let added = older.len();
+        if added > 0 {
+            self.messages.splice(0..0, older);
+            self.history_start = start;
+            self.history_has_older = has_older;
+        } else {
+            self.history_has_older = false;
+        }
+        added
     }
 
     fn record_trajectory(&mut self, session_id: &str, event: &AgentEvent) {
@@ -2265,20 +2346,12 @@ impl AppState {
                     }
                     if self.active_session_id.as_deref() == Some(&session_id) {
                         self.pending_permissions.remove(&session_id);
-                        self.replace_visible_history(&session_file);
-                        if let Err(error) =
-                            self.hydrate_session_projection(&session_id, &session_file)
-                        {
-                            tracing::warn!(
-                                "Failed to reconcile completed session trajectory: {error}"
-                            );
-                        }
-                        self.active_plan = load_session_plan(&session_file);
                         self.is_generating = false;
-                        self.session_status = self
-                            .session_runtimes
-                            .get(&session_file)
-                            .and_then(|runtime| runtime_status_text(runtime.status()));
+                        self.session_status = Some("Reconciling session…".into());
+                        self.pending_hydrations.push(SessionHydrationRequest {
+                            session_id: session_id.clone(),
+                            session_file: session_file.clone(),
+                        });
                     }
                     let runtime_is_stale =
                         self.session_runtimes

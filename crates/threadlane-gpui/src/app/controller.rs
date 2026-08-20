@@ -1,11 +1,14 @@
 use super::actions::AppAction;
-use crate::state::AppState;
+use crate::state::{AppState, SessionHydrationRequest};
 
 /// Application intent boundary used by screens.
 ///
 /// The controller is intentionally small for now. Keeping actions in one place
 /// gives us a stable seam for moving backend work out of `AppState` incrementally.
-pub(crate) fn dispatch(state: &mut AppState, action: AppAction) {
+pub(crate) fn dispatch(
+    state: &mut AppState,
+    action: AppAction,
+) -> Option<SessionHydrationRequest> {
     match action {
         AppAction::AttachProject(path) => {
             let _ = state.attach_project(path);
@@ -13,9 +16,7 @@ pub(crate) fn dispatch(state: &mut AppState, action: AppAction) {
         AppAction::SelectSession {
             work_dir,
             session_id,
-        } => {
-            state.select_session(work_dir, session_id);
-        }
+        } => return Some(state.select_session(work_dir, session_id)),
         AppAction::SettleSession {
             work_dir,
             session_id,
@@ -85,4 +86,5 @@ pub(crate) fn dispatch(state: &mut AppState, action: AppAction) {
         }
         AppAction::OpenFileInEditor(path) => state.request_open_file(path),
     }
+    None
 }
