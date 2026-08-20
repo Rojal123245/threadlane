@@ -617,11 +617,9 @@ impl AgentRuntime {
 
     /// Runs the main turn loop.
     async fn run_turns(&mut self) {
-        self.refresh_projected_messages().await;
         let tool_dispatcher = self.synced_dispatcher();
         let mut driver = crate::turn_driver::TurnDriver {
             turn: self.turn.clone(),
-            harness: &self.harness,
             provider_client: self.provider_client.clone(),
             prompt_cache_key: self.prompt_cache_key.clone(),
             tool_dispatcher,

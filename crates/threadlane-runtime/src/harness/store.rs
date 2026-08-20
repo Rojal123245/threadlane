@@ -399,6 +399,45 @@ mod tests {
     }
 
     #[test]
+    fn model_context_retains_prompt_assistant_and_tool_result_chain() {
+        let mut store = MemoryStore::new("session-1");
+        let prompt = store.append_message(None, AgentMessage::user("hello", vec![]));
+        let assistant = store.append_message(
+            Some(prompt.clone()),
+            AgentMessage::Assistant {
+                content: None,
+                tool_calls: Some(vec![threadlane_protocol::RuntimeToolCall {
+                    id: "call-1".into(),
+                    r#type: "function".into(),
+                    function: threadlane_protocol::RuntimeToolCallFunction {
+                        name: "load_skill".into(),
+                        arguments: r#"{\"name\":\"systematic-debugging\"}"#.into(),
+                    },
+                    thought_signature: None,
+                }]),
+                stop_reason: None,
+                deferred_handle: None,
+            },
+        );
+        store.append_message(
+            Some(assistant),
+            AgentMessage::Tool {
+                tool_call_id: "call-1".into(),
+                name: "load_skill".into(),
+                content: "skill instructions".into(),
+                is_error: false,
+                terminate: false,
+            },
+        );
+
+        let context = store.model_context("main").unwrap();
+        assert_eq!(context.entries.len(), 3);
+        assert_eq!(context.entries[0].id, prompt);
+        assert!(matches!(context.entries[1].message, AgentMessage::Assistant { .. }));
+        assert!(matches!(context.entries[2].message, AgentMessage::Tool { .. }));
+    }
+
+    #[test]
     fn session_id_generator_is_reload_safe_and_scoped() {
         let generator = SessionIdGenerator::new("session/one");
         let used = vec!["session_one-run-1".into()];

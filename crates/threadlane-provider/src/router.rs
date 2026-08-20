@@ -102,6 +102,71 @@ impl From<(Value, Value)> for PayloadSource {
     }
 }
 
+/// Build a complete provider-native object for a runtime request. The runtime
+/// deliberately supplies transport-neutral message and tool arrays; the
+/// router owns their envelope so Codex never receives a bare JSON array.
+fn runtime_request_payload_source(request: &RuntimeRequest) -> PayloadSource {
+    let model = request.model.clone();
+    let messages = request.messages.clone();
+    let tools = request.tools.clone();
+    let reasoning_effort = request.reasoning_effort.clone();
+    PayloadSource::lazy(model.clone(), move |format| {
+        let model = model.clone();
+        let messages = messages.clone();
+        let tools = tools.clone();
+        let reasoning_effort = reasoning_effort.clone();
+        Box::pin(async move {
+            match format {
+                PayloadFormat::ChatCompletions => {
+                    let agent_messages: Vec<threadlane_runtime::AgentMessage> =
+                        serde_json::from_value(messages).unwrap_or_default();
+                    let chat_messages = threadlane_runtime::convert_to_llm(&agent_messages);
+                    let mut payload = serde_json::json!({
+                        "model": model,
+                        "messages": chat_messages,
+                        "tools": tools,
+                        "stream": true,
+                        "stream_options": { "include_usage": true },
+                    });
+                    if let Some(effort) = reasoning_effort {
+                        payload["reasoning_effort"] = effort.into();
+                    }
+                    payload
+                }
+                PayloadFormat::Codex => {
+                    let agent_messages: Vec<threadlane_runtime::AgentMessage> =
+                        serde_json::from_value(messages).unwrap_or_default();
+                    let codex_tools = tools
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|tool| {
+                            threadlane_runtime::types::AgentToolDefinition::from_provider_schema(tool).ok()
+                        })
+                        .map(|tool| tool.to_codex_responses_tool())
+                        .collect::<Vec<_>>();
+                    let (instructions, input) = threadlane_runtime::convert_to_codex_llm(&agent_messages);
+                    let mut payload = serde_json::json!({
+                        "model": model,
+                        "instructions": instructions,
+                        "input": input,
+                        "tools": codex_tools,
+                        "store": false,
+                        "stream": true,
+                    });
+                    if let Some(effort) = reasoning_effort {
+                        payload["reasoning"] = serde_json::json!({
+                            "effort": effort,
+                            "summary": "auto",
+                        });
+                    }
+                    payload
+                }
+            }
+        })
+    })
+}
+
 #[derive(Clone)]
 pub struct ProviderClient {
     openai: OpenAIClient,
@@ -113,7 +178,7 @@ pub struct ProviderClient {
 #[async_trait::async_trait]
 impl ProviderPort for ProviderClient {
     async fn stream_request(&self, request: RuntimeRequest, events: mpsc::Sender<StreamEvent>) {
-        let payload = PayloadSource::ChatCompletions(request.messages);
+        let payload = runtime_request_payload_source(&request);
         self.stream_chat_completion(payload, request.prompt_cache_key, events).await;
     }
 
@@ -588,6 +653,122 @@ mod tests {
         assert!(is_opencode_model("opencode-go/deepseek-v4-flash"));
         assert!(!is_opencode_model("deepseek-v4-flash"));
         assert!(!is_opencode_model("antigravity/gemini-3.6-flash"));
+    }
+
+    #[tokio::test]
+    async fn runtime_request_builds_an_object_for_codex() {
+        let request = RuntimeRequest {
+            model: "gpt-5.6-luna".into(),
+            messages: serde_json::json!([{"role": "user", "content": "hello"}]),
+            tools: serde_json::json!([]),
+            prompt_cache_key: Some("cache-key".into()),
+            reasoning_effort: Some("medium".into()),
+        };
+        let payload = runtime_request_payload_source(&request)
+            .resolve(PayloadFormat::Codex)
+            .await;
+        assert!(payload.is_object());
+        assert_eq!(payload["model"], "gpt-5.6-luna");
+        assert_eq!(
+            payload["input"],
+            serde_json::json!([{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hello"}],
+            }])
+        );
+        assert_eq!(payload["tools"], serde_json::json!([]));
+        assert_eq!(payload["reasoning"]["effort"], "medium");
+        assert_eq!(payload["store"], false);
+    }
+
+    #[tokio::test]
+    async fn runtime_request_flattens_tools_for_codex() {
+        let request = RuntimeRequest {
+            model: "gpt-5.6-luna".into(),
+            messages: serde_json::json!([]),
+            tools: serde_json::json!([{
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "Read a workspace file",
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            }]),
+            prompt_cache_key: None,
+            reasoning_effort: None,
+        };
+        let payload = runtime_request_payload_source(&request)
+            .resolve(PayloadFormat::Codex)
+            .await;
+        assert_eq!(
+            payload["tools"],
+            serde_json::json!([{
+                "type": "function",
+                "name": "read_file",
+                "description": "Read a workspace file",
+                "parameters": {"type": "object", "properties": {}}
+            }])
+        );
+        assert!(payload["tools"][0].get("function").is_none());
+    }
+
+    #[tokio::test]
+    async fn runtime_request_converts_custom_messages_for_codex() {
+        let request = RuntimeRequest {
+            model: "gpt-5.6-luna".into(),
+            messages: serde_json::json!([
+                {"role": "system", "content": "system context"},
+                {"role": "user", "content": "hello"},
+                {
+                    "role": "custom",
+                    "custom_type": "thinking",
+                    "payload": "internal reasoning"
+                }
+            ]),
+            tools: serde_json::json!([]),
+            prompt_cache_key: None,
+            reasoning_effort: None,
+        };
+        let payload = runtime_request_payload_source(&request)
+            .resolve(PayloadFormat::Codex)
+            .await;
+        assert_eq!(payload["instructions"], "system context");
+        assert_eq!(payload["input"].as_array().unwrap().len(), 1);
+        assert!(payload["input"].as_array().unwrap().iter().all(|item| {
+            item.get("role")
+                .and_then(Value::as_str)
+                .is_none_or(|role| role != "custom")
+        }));
+    }
+
+    #[tokio::test]
+    async fn runtime_request_preserves_chat_completions_envelope() {
+        let request = RuntimeRequest {
+            model: "gpt-5.6-luna".into(),
+            messages: serde_json::json!([
+                {"role": "user", "content": "hello"},
+                {
+                    "role": "custom",
+                    "custom_type": "thinking",
+                    "payload": { "text": "internal reasoning" }
+                }
+            ]),
+            tools: serde_json::json!([]),
+            prompt_cache_key: None,
+            reasoning_effort: Some("medium".into()),
+        };
+        let payload = runtime_request_payload_source(&request)
+            .resolve(PayloadFormat::ChatCompletions)
+            .await;
+        assert!(payload.is_object());
+        assert_eq!(
+            payload["messages"],
+            serde_json::json!([{"role": "user", "content": "hello"}])
+        );
+        assert_eq!(payload["tools"], request.tools);
+        assert_eq!(payload["reasoning_effort"], "medium");
+        assert_eq!(payload["stream_options"]["include_usage"], true);
     }
 
     #[test]

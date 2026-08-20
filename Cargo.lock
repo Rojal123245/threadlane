@@ -7126,6 +7126,7 @@ dependencies = [
  "sha2 0.10.9",
  "threadlane-auth",
  "threadlane-protocol",
+ "threadlane-runtime",
  "threadlane-tools",
  "tokio",
  "tokio-tungstenite",

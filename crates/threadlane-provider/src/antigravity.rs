@@ -399,13 +399,7 @@ impl AntigravityClient {
                 "Antigravity API error ({status}, runtime model {runtime_model}): {}",
                 safe_error_text(&text)
             );
-            // 4xx errors (e.g. 429 RESOURCE_EXHAUSTED / Quota, 401 Unauthorized, 403 Forbidden)
-            // from the production endpoint are authoritative account responses and must not be
-            // masked by falling back to internal daily sandbox endpoints.
-            if status.is_client_error() {
-                break;
-            }
-            if !matches!(status.as_u16(), 500 | 502 | 503 | 504) {
+            if !matches!(status.as_u16(), 403 | 404 | 429 | 500 | 502 | 503 | 504) {
                 break;
             }
         }
@@ -575,7 +569,7 @@ fn antigravity_headers(token: &str) -> reqwest::header::HeaderMap {
     headers
 }
 
-fn resolve_runtime_model(model_id: &str, _effort: &str) -> String {
+fn resolve_runtime_model(model_id: &str, effort: &str) -> String {
     if let Ok(model) = std::env::var("ANTIGRAVITY_RUNTIME_MODEL") {
         if !model.trim().is_empty() {
             return model;
@@ -583,10 +577,25 @@ fn resolve_runtime_model(model_id: &str, _effort: &str) -> String {
     }
     let model = model_id.strip_prefix("antigravity/").unwrap_or(model_id);
     match model {
-        "gemini-3.7-flash" | "gemini-3.6-flash" | "gemini-3.5-flash" | "gemini-3-flash" => {
-            "gemini-3-flash-agent"
-        }
-        "gemini-3.1-pro" | "gemini-3-pro" | "gemini-pro" => "gemini-pro-agent",
+        "gemini-3.7-flash" => match effort {
+            "medium" => "gemini-3.7-flash-medium",
+            "high" | "xhigh" => "gemini-3.7-flash-high",
+            _ => "gemini-3.7-flash-low",
+        },
+        "gemini-3.6-flash" => match effort {
+            "medium" => "gemini-3.6-flash-medium",
+            "high" | "xhigh" => "gemini-3.6-flash-high",
+            _ => "gemini-3.6-flash-low",
+        },
+        "gemini-3.5-flash" => match effort {
+            "low" | "medium" => "gemini-3.5-flash-low",
+            "high" | "xhigh" => "gemini-3-flash-agent",
+            _ => "gemini-3.5-flash-extra-low",
+        },
+        "gemini-3.1-pro" => match effort {
+            "high" | "xhigh" => "gemini-pro-agent",
+            _ => "gemini-3.1-pro-low",
+        },
         "claude-opus-4-6" => "claude-opus-4-6-thinking",
         "claude-sonnet-4-6" => "claude-sonnet-4-6",
         "gpt-oss-120b" => "gpt-oss-120b-medium",
@@ -670,7 +679,7 @@ fn convert_openai_payload(payload: &Value) -> Result<(String, Value), String> {
                     .get("thoughtSignature")
                     .or_else(|| call.get("thought_signature"))
                     .and_then(Value::as_str);
-                if runtime_model.starts_with("gemini-") && thought_signature.is_none() {
+                if runtime_model.starts_with("gemini-3.6-") && thought_signature.is_none() {
                     if !id.is_empty() {
                         unreplayable_call_ids.insert(id.to_string());
                     }
@@ -1323,15 +1332,15 @@ mod tests {
     fn maps_public_models_and_reasoning_effort() {
         assert_eq!(
             resolve_runtime_model("antigravity/gemini-3.7-flash", "medium"),
-            "gemini-3-flash-agent"
+            "gemini-3.7-flash-medium"
         );
         assert_eq!(
             resolve_runtime_model("antigravity/gemini-3.7-flash", "high"),
-            "gemini-3-flash-agent"
+            "gemini-3.7-flash-high"
         );
         assert_eq!(
             resolve_runtime_model("antigravity/gemini-3.6-flash", "medium"),
-            "gemini-3-flash-agent"
+            "gemini-3.6-flash-medium"
         );
         assert_eq!(
             resolve_runtime_model("gemini-3.5-flash", "high"),
@@ -1373,7 +1382,7 @@ mod tests {
             }]
         });
         let (model, request) = convert_openai_payload(&payload).unwrap();
-        assert_eq!(model, "gemini-3-flash-agent");
+        assert_eq!(model, "gemini-3.6-flash-high");
         assert_eq!(
             request["systemInstruction"]["parts"][0]["text"],
             "Be precise"
@@ -1401,7 +1410,7 @@ mod tests {
 
         let envelope = request_envelope("project-1", &model, request);
         assert_eq!(envelope["project"], "project-1");
-        assert_eq!(envelope["model"], "gemini-3-flash-agent");
+        assert_eq!(envelope["model"], "gemini-3.6-flash-high");
         assert_eq!(envelope["requestType"], "agent");
         assert_eq!(envelope["userAgent"], "antigravity");
     }

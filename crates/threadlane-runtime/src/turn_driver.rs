@@ -9,7 +9,7 @@ use crate::compaction::{
 use crate::config::AgentConfig;
 use crate::events::AgentEvent;
 use crate::harness::{
-    ErrorCategory, ProviderErrorSummary, ProviderOutcome, SessionStore, TraceString,
+    ErrorCategory, ProviderErrorSummary, ProviderOutcome, TraceString,
 };
 use crate::provider::{ProviderTraceEvent, ProviderTraceRecorder};
 use crate::rules::{StreamRule, StreamRuleMonitor};
@@ -128,7 +128,6 @@ impl ProviderStepAccumulator {
 
 pub(crate) struct TurnDriver<'a> {
     pub(crate) turn: Arc<Mutex<TurnState>>,
-    pub(crate) harness: &'a crate::harness::AgentHarness<crate::harness::JsonlStore>,
     pub(crate) provider_client: Arc<dyn ProviderPort>,
     pub(crate) prompt_cache_key: Option<String>,
     pub(crate) tool_dispatcher: ToolDispatcher,
@@ -151,7 +150,7 @@ impl<'a> TurnDriver<'a> {
     }
 
     async fn record_provider_trace(&self, event: ProviderTraceEvent) -> Result<(), String> {
-        match self.provider_trace_recorder.as_ref() {
+        match &self.provider_trace_recorder {
             Some(recorder) => recorder(event).await,
             None => Ok(()),
         }
@@ -169,18 +168,6 @@ impl<'a> TurnDriver<'a> {
 
         'turns: loop {
             turn_number += 1;
-
-            // Refresh the transient request copy before every provider attempt
-            // directly from the canonical harness store projection.
-            if let Ok(context) = self.harness.store().model_context("main") {
-                let system_prompt = self.turn.lock().await.system_prompt.clone();
-                let messages: Vec<AgentMessage> = std::iter::once(AgentMessage::System {
-                    content: system_prompt,
-                })
-                .chain(context.messages())
-                .collect();
-                self.turn.lock().await.messages = messages;
-            }
 
             // Drain steering queue into turn state.
             if !self.steering_queue.is_empty() {
