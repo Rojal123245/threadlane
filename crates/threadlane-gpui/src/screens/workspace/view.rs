@@ -4,6 +4,7 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::command::{Command, CommandGroup, CommandItem, CommandState};
 use gpui_component::dialog::{
     Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 };
@@ -12,7 +13,7 @@ use gpui_component::resizable::{h_resizable, resizable_panel, v_resizable, Resiz
 use gpui_component::spinner::Spinner;
 use gpui_component::switch::Switch;
 use gpui_component::tag::{Tag, TagVariant};
-use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable};
+use gpui_component::{v_flex, ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable};
 
 actions!(threadlane_workspace, [ToggleCommandPalette]);
 use threadlane_git::GitStatus;
@@ -77,9 +78,7 @@ pub struct WorkspaceView {
     bottom_panel_visible: bool,
     environment_open: bool,
     command_palette_open: bool,
-    command_palette_selected: usize,
-    command_palette_scroll_handle: ScrollHandle,
-    command_palette_input: Entity<InputState>,
+    command_state: Entity<CommandState>,
     git_dialog_open: bool,
     git_include_unstaged: bool,
     git_busy: bool,
@@ -143,10 +142,7 @@ impl WorkspaceView {
         let bottom_panel_resizable_state = cx.new(|_cx| ResizableState::default());
         let git_message_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Commit message"));
-        let command_palette_scroll_handle = ScrollHandle::new();
-        let command_palette_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Type a command or search sessions…")
-        });
+        let command_state = cx.new(|cx| CommandState::new(window, cx));
         let (git_event_tx, git_event_rx) = mpsc::channel();
         let (updater_tx, updater_rx) = mpsc::channel();
 
@@ -215,9 +211,7 @@ impl WorkspaceView {
                 bottom_panel_visible: false,
                 environment_open: false,
                 command_palette_open: false,
-                command_palette_selected: 0,
-                command_palette_input,
-                command_palette_scroll_handle,
+                command_state,
                 git_dialog_open: false,
                 git_include_unstaged: true,
                 git_busy: false,
@@ -271,10 +265,11 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         self.command_palette_open = !self.command_palette_open;
-        self.command_palette_selected = 0;
         if self.command_palette_open {
-            self.command_palette_input
-                .update(cx, |input, cx| input.focus(window, cx));
+            self.command_state.update(cx, |state, cx| {
+                state.set_query("", window, cx);
+                state.focus(window, cx);
+            });
         }
         cx.notify();
     }
@@ -334,112 +329,6 @@ impl WorkspaceView {
             _ => {}
         }
         cx.notify();
-    }
-
-    fn command_palette_key_down(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let key = event.keystroke.key.as_str();
-        if !self.command_palette_open {
-            return;
-        }
-        if key.eq_ignore_ascii_case("escape") {
-            self.command_palette_open = false;
-            cx.stop_propagation();
-            cx.notify();
-            return;
-        }
-        let query = self
-            .command_palette_input
-            .read(cx)
-            .value()
-            .trim()
-            .to_lowercase();
-        let commands = [
-            ("New Task", "Start a fresh session", "new"),
-            (
-                "Add Project",
-                "Attach a project folder to your workspace",
-                "attach",
-            ),
-            (
-                "Goal Planning (/goal)",
-                "Autonomous goal loop extension",
-                "goal",
-            ),
-            (
-                "Model Selection (/model)",
-                "Switch model or provider",
-                "model",
-            ),
-            (
-                "Compact History (/compact)",
-                "Compact context conversation",
-                "compact",
-            ),
-            (
-                "Git Review & Commit",
-                "Review changed files and commit",
-                "git",
-            ),
-            (
-                "Toggle Sidebar",
-                "Show or hide your projects and tasks",
-                "sidebar",
-            ),
-            (
-                "Toggle Right Panel",
-                "Show review / files / terminal",
-                "panel",
-            ),
-            ("Settings", "Configure API keys and providers", "settings"),
-        ];
-        let matching: Vec<_> = commands
-            .iter()
-            .filter(|(name, desc, _)| {
-                query.is_empty()
-                    || name.to_lowercase().contains(&query)
-                    || desc.to_lowercase().contains(&query)
-            })
-            .collect();
-        match key.to_ascii_lowercase().as_str() {
-            "arrowdown" | "down" => {
-                if !matching.is_empty() {
-                    self.command_palette_selected =
-                        (self.command_palette_selected + 1) % matching.len();
-                    self.command_palette_scroll_handle
-                        .scroll_to_item(self.command_palette_selected);
-                }
-                cx.stop_propagation();
-                cx.notify();
-            }
-            "arrowup" | "up" => {
-                if !matching.is_empty() {
-                    self.command_palette_selected = self
-                        .command_palette_selected
-                        .checked_sub(1)
-                        .unwrap_or(matching.len() - 1);
-                    self.command_palette_scroll_handle
-                        .scroll_to_item(self.command_palette_selected);
-                }
-                cx.stop_propagation();
-                cx.notify();
-            }
-            "enter" => {
-                if let Some((_, _, action_key)) = matching.get(self.command_palette_selected) {
-                    let action_key = *action_key;
-                    self.command_palette_open = false;
-                    self.command_palette_selected = 0;
-                    self.execute_palette_action(action_key, window, cx);
-                    cx.notify();
-                }
-                cx.stop_propagation();
-            }
-            _ => {}
-        }
     }
 
     fn refresh_git_status(&mut self, cx: &App) {
@@ -1279,81 +1168,137 @@ impl WorkspaceView {
 
     fn render_command_palette(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
-        let query = self
-            .command_palette_input
-            .read(cx)
-            .value()
-            .trim()
-            .to_lowercase();
         let model = self.model.clone();
         let state = model.read(cx);
 
-        let mut session_results = Vec::new();
-        for project in &state.projects {
-            for session in &project.sessions {
-                if query.is_empty()
-                    || session.title.to_lowercase().contains(&query)
-                    || project.name.to_lowercase().contains(&query)
-                {
-                    session_results.push((
-                        project.work_dir.clone(),
-                        session.id.clone(),
-                        session.title.clone(),
-                        project.name.clone(),
-                    ));
-                }
-            }
-        }
-
-        let commands = [
-            ("New Task", "Start a fresh session", "new"),
+        let commands: [(&str, &str, &str, IconName, &[&str]); 9] = [
+            (
+                "New Task",
+                "Start a fresh session",
+                "new",
+                IconName::Plus,
+                &["task", "fresh", "session", "new"],
+            ),
             (
                 "Add Project",
                 "Attach a project folder to your workspace",
                 "attach",
+                IconName::FolderOpen,
+                &["folder", "workspace", "attach", "open", "project"],
             ),
             (
                 "Goal Planning (/goal)",
                 "Autonomous goal loop extension",
                 "goal",
+                IconName::Bot,
+                &["goal", "planning", "loop", "agent", "autonomous"],
             ),
             (
                 "Model Selection (/model)",
                 "Switch model or provider",
                 "model",
+                IconName::Cpu,
+                &["model", "llm", "switch", "provider", "select"],
             ),
             (
                 "Compact History (/compact)",
                 "Compact context conversation",
                 "compact",
+                IconName::Minimize,
+                &["compact", "history", "context", "clean"],
             ),
             (
                 "Git Review & Commit",
                 "Review changed files and commit",
                 "git",
+                IconName::Github,
+                &["git", "diff", "review", "commit", "stage"],
             ),
             (
                 "Toggle Sidebar",
                 "Show or hide your projects and tasks",
                 "sidebar",
+                IconName::PanelLeft,
+                &["sidebar", "toggle", "hide", "show", "projects"],
             ),
             (
                 "Toggle Right Panel",
                 "Show review / files / terminal",
                 "panel",
+                IconName::PanelRight,
+                &["panel", "right", "terminal", "review", "toggle"],
             ),
-            ("Settings", "Configure API keys and providers", "settings"),
+            (
+                "Settings",
+                "Configure API keys and providers",
+                "settings",
+                IconName::Settings,
+                &["settings", "keys", "provider", "preferences", "config"],
+            ),
         ];
 
-        let matching_commands: Vec<_> = commands
-            .into_iter()
-            .filter(|(name, desc, _)| {
-                query.is_empty()
-                    || name.to_lowercase().contains(&query)
-                    || desc.to_lowercase().contains(&query)
-            })
-            .collect();
-        let index_offset = matching_commands.len();
+        let mut commands_group = CommandGroup::new().label("Commands & Actions");
+        for (name, desc, _action_key, icon, keywords) in &commands {
+            let name_str = name.to_string();
+            let desc_str = desc.to_string();
+            let item = CommandItem::new()
+                .label(*name)
+                .icon(icon.clone())
+                .keywords(keywords.iter().copied())
+                .child(move |_window, cx| {
+                    let colors = cx.theme().colors;
+                    v_flex()
+                        .gap_0p5()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(name_str.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.muted_foreground)
+                                .child(desc_str.clone()),
+                        )
+                });
+            commands_group = commands_group.item(item);
+        }
+
+        let mut session_entries = Vec::new();
+        let mut sessions_group = CommandGroup::new().label("Sessions");
+        for project in &state.projects {
+            for session in &project.sessions {
+                session_entries.push((project.work_dir.clone(), session.id.clone()));
+                let title = session.title.clone();
+                let project_name = project.name.clone();
+                let item = CommandItem::new()
+                    .label(title.clone())
+                    .icon(IconName::SquareTerminal)
+                    .keywords([project.name.clone(), session.id.clone()])
+                    .child(move |_window, cx| {
+                        let colors = cx.theme().colors;
+                        v_flex()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(colors.muted_foreground)
+                                    .child(project_name.clone()),
+                            )
+                    });
+                sessions_group = sessions_group.item(item);
+            }
+        }
+
+        let view = cx.weak_entity();
+        let view_cancel = cx.weak_entity();
 
         div()
             .id("command-palette-backdrop")
@@ -1375,173 +1320,51 @@ impl WorkspaceView {
                 div()
                     .id("command-palette-modal")
                     .w(px(560.0))
-                    .max_h(px(480.0))
                     .rounded_xl()
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.title_bar)
                     .shadow_lg()
-                    .flex()
-                    .flex_col()
                     .overflow_hidden()
                     .on_mouse_down(MouseButton::Left, |_event, _window, _cx| {})
                     .child(
-                        div()
-                            .p_3()
-                            .border_b_1()
-                            .border_color(theme.border)
-                            .child(Input::new(&self.command_palette_input).appearance(false)),
-                    )
-                    .child(
-                        div()
-                            .px_3()
-                            .py_1()
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.muted_foreground)
-                            .child("Commands & Actions"),
-                    )
-                    .child(
-                        div()
-                            .id("command-palette-container")
-                            .relative()
-                            .w_full()
+                        Command::new(&self.command_state)
+                            .bordered(false)
+                            .placeholder("Type a command or search sessions…")
                             .max_h(px(420.0))
-                            .child(
-                                div()
-                                    .id("command-palette-results")
-                                    .size_full()
-                                    .max_h(px(420.0))
-                                    .track_scroll(&self.command_palette_scroll_handle)
-                                    .overflow_y_scroll()
-                                    .py_2()
-                                    .children(matching_commands.into_iter().enumerate().map(
-                                        |(index, (name, desc, action_key))| {
-                                            div()
-                                                .id(SharedString::from(format!(
-                                                    "palette-cmd-{action_key}"
-                                                )))
-                                                .mx_2()
-                                                .my_0p5()
-                                                .px_3()
-                                                .py_2()
-                                                .rounded_lg()
-                                                .hover(|style| style.bg(theme.list_hover))
-                                                .when(
-                                                    index == self.command_palette_selected,
-                                                    |style| style.bg(theme.list_active),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .flex()
-                                                        .flex_col()
-                                                        .gap_0p5()
-                                                        .child(
-                                                            div()
-                                                                .text_sm()
-                                                                .font_weight(FontWeight::MEDIUM)
-                                                                .child(name),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .text_xs()
-                                                                .text_color(theme.muted_foreground)
-                                                                .child(desc),
-                                                        ),
-                                                )
-                                                .on_click(cx.listener(
-                                                    move |this, _event, window, cx| {
-                                                        this.command_palette_open = false;
-                                                        this.command_palette_selected = 0;
-                                                        this.execute_palette_action(
-                                                            action_key, window, cx,
-                                                        );
+                            .group(commands_group)
+                            .group(sessions_group)
+                            .on_cancel(move |_window, cx| {
+                                let _ = view_cancel.update(cx, |this, cx| {
+                                    this.command_palette_open = false;
+                                    cx.notify();
+                                });
+                            })
+                            .on_confirm(move |index, window, cx| {
+                                let _ = view.update(cx, |this, cx| {
+                                    this.command_palette_open = false;
+                                    if index.section == 0 {
+                                        if let Some((_, _, action_key, _, _)) = commands.get(index.row) {
+                                            this.execute_palette_action(action_key, window, cx);
+                                        }
+                                    } else if index.section == 1 {
+                                        if let Some((work_dir, session_id)) = session_entries.get(index.row) {
+                                            let work_dir = work_dir.clone();
+                                            let session_id = session_id.clone();
+                                            this.model.update(cx, |state, _cx| {
+                                                controller::dispatch(
+                                                    state,
+                                                    AppAction::SelectSession {
+                                                        work_dir,
+                                                        session_id,
                                                     },
-                                                ))
-                                        },
-                                    ))
-                                    .when(!session_results.is_empty(), |list| {
-                                        list.child(
-                                            div()
-                                                .mt_2()
-                                                .px_3()
-                                                .py_1()
-                                                .text_xs()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(theme.muted_foreground)
-                                                .child("Sessions"),
-                                        )
-                                        .children(
-                                            session_results.into_iter().enumerate().take(8).map(
-                                                |(
-                                                    session_idx,
-                                                    (work_dir, session_id, title, project),
-                                                )| {
-                                                    let model = self.model.clone();
-                                                    div()
-                                                        .id(SharedString::from(format!(
-                                                            "palette-session-{session_id}"
-                                                        )))
-                                                        .mx_2()
-                                                        .my_0p5()
-                                                        .px_3()
-                                                        .py_2()
-                                                        .rounded_lg()
-                                                        .hover(|style| style.bg(theme.list_hover))
-                                                        .when(
-                                                            index_offset + session_idx
-                                                                == self.command_palette_selected,
-                                                            |style| style.bg(theme.list_active),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .flex()
-                                                                .flex_col()
-                                                                .gap_0p5()
-                                                                .child(
-                                                                    div()
-                                                                        .text_sm()
-                                                                        .font_weight(
-                                                                            FontWeight::MEDIUM,
-                                                                        )
-                                                                        .child(title),
-                                                                )
-                                                                .child(
-                                                                    div()
-                                                                        .text_xs()
-                                                                        .text_color(
-                                                                            theme.muted_foreground,
-                                                                        )
-                                                                        .child(project),
-                                                                ),
-                                                        )
-                                                        .on_click(cx.listener(
-                                                            move |this, _event, _window, cx| {
-                                                                this.command_palette_open = false;
-                                                                let work_dir = work_dir.clone();
-                                                                let session_id = session_id.clone();
-                                                                model.update(cx, |state, _cx| {
-                                                                    controller::dispatch(
-                                                                        state,
-                                                                        AppAction::SelectSession {
-                                                                            work_dir,
-                                                                            session_id,
-                                                                        },
-                                                                    );
-                                                                });
-                                                                cx.notify();
-                                                            },
-                                                        ))
-                                                },
-                                            ),
-                                        )
-                                    }),
-                            )
-                            .child(div().absolute().inset_0().child(
-                                gpui_component::scroll::Scrollbar::vertical(
-                                    &self.command_palette_scroll_handle,
-                                ),
-                            )),
+                                                );
+                                            });
+                                        }
+                                    }
+                                    cx.notify();
+                                });
+                            }),
                     ),
             )
             .into_any_element()
@@ -1559,12 +1382,14 @@ impl Render for WorkspaceView {
             self.terminal
                 .update(cx, |terminal, cx| terminal.set_project(project, cx));
         }
-        let theme = cx.theme().colors;
+
+        let _is_macos = cfg!(target_os = "macos");
         let sidebar_tooltip = if self.sidebar_collapsed {
-            "Show sidebar"
+            "Expand sidebar"
         } else {
             "Collapse sidebar"
         };
+        let theme = cx.theme().colors;
 
         let chat_page_content = {
             let upper_content = if self.right_panel_visible {
@@ -1637,7 +1462,6 @@ impl Render for WorkspaceView {
             .flex()
             .w_full()
             .h_full()
-            .on_key_down(cx.listener(Self::command_palette_key_down))
             .on_action(cx.listener(Self::toggle_command_palette))
             .bg(theme.background)
             .child(match workspace_page {
@@ -1656,10 +1480,11 @@ impl Render for WorkspaceView {
                     .right(px(120.0))
                     .on_click(cx.listener(|this, _event, window, cx| {
                         this.command_palette_open = !this.command_palette_open;
-                        this.command_palette_selected = 0;
                         if this.command_palette_open {
-                            this.command_palette_input
-                                .update(cx, |input, cx| input.focus(window, cx));
+                            this.command_state.update(cx, |state, cx| {
+                                state.set_query("", window, cx);
+                                state.focus(window, cx);
+                            });
                         }
                         cx.notify();
                     }))
