@@ -72,6 +72,8 @@ pub(crate) fn execute_prompt(
             return;
         };
 
+        let turn_span = tracing::info_span!("chat.turn", session_id = %task_session_id);
+        tracing::info!(parent: &turn_span, "starting chat turn");
         let mut cleanup = RunCleanup {
             runtime: task_runtime.clone(),
             registration_id,
@@ -103,6 +105,7 @@ pub(crate) fn execute_prompt(
                                 });
                             }
                             Some(Err(error)) => {
+                                tracing::error!(error = %error, "chat turn failed");
                                 run_error = Some(error);
                             }
                             _ => {}
@@ -140,6 +143,7 @@ pub(crate) fn execute_prompt(
             run_error
         };
 
+        tracing::info!(error = ?run_error, "chat turn finished");
         drop(agent);
         cleanup.error = run_error;
     });
@@ -173,7 +177,7 @@ pub(crate) fn spawn_session_title(
     let mut tree = match SessionTree::load_from_file(&session_file) {
         Ok(tree) => tree,
         Err(error) => {
-            log::warn!(
+            tracing::warn!(
                 "unable to load session {} for automatic title generation ({}): {}",
                 session_id,
                 session_file.display(),
@@ -189,7 +193,7 @@ pub(crate) fn spawn_session_title(
         Ok(true) => {}
         Ok(false) => return,
         Err(error) => {
-            log::warn!(
+            tracing::warn!(
                 "unable to persist automatic title attempt for session {}: {}",
                 session_id,
                 error
@@ -220,7 +224,7 @@ pub(crate) fn spawn_session_title(
         .await;
 
         if let Err(error) = result {
-            log::warn!(
+            tracing::warn!(
                 "automatic title generation failed for session {}: {}",
                 session_id,
                 error

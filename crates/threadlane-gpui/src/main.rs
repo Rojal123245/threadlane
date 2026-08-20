@@ -1,6 +1,7 @@
 use gpui::*;
 use gpui_component::Root;
 use std::path::PathBuf;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use threadlane_session::{CodingAgentOptions, HarnessCompositionSnapshot};
 use threadlane_gpui::assets::Assets;
 use threadlane_gpui::screens::workspace::WorkspaceView;
@@ -70,7 +71,18 @@ fn main() {
         }
         return;
     }
-    env_logger::init();
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_target(true)
+        .with_thread_ids(true)
+        .with_thread_names(true);
+    let registry = tracing_subscriber::registry().with(filter).with(fmt_layer);
+    if std::env::var_os("THREADLANE_TRACE_JSON").is_some() {
+        registry.with(tracing_subscriber::fmt::layer().json()).init();
+    } else {
+        registry.init();
+    }
 
     let app = gpui_platform::application().with_assets(Assets);
 

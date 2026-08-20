@@ -26,6 +26,8 @@ pub fn is_quota_or_rate_limit(error: &str) -> bool {
         || error.contains("rate_limit")
         || error.contains("quota")
         || error.contains("too many requests")
+        || error.contains("resource_exhausted")
+        || error.contains("resource has been exhausted")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,7 +195,10 @@ impl ProviderClient {
     ) {
         let source = payload_source.into();
         let model = source.model().to_string();
+        let span = tracing::info_span!("provider.stream", model = %model);
+        tracing::debug!(parent: &span, "routing stream request");
         if is_antigravity_model(&model) {
+            tracing::debug!(provider = "antigravity", "selected provider");
             let provider = Arc::new(self.antigravity.clone());
             provider
                 .stream_chat_completion(source, prompt_cache_key, event_tx)
@@ -201,6 +206,7 @@ impl ProviderClient {
             return;
         }
         if is_opencode_model(&model) {
+            tracing::debug!(provider = "opencode-go", "selected provider");
             let provider = Arc::new(self.opencode.clone());
             provider
                 .stream_chat_completion(source, prompt_cache_key, event_tx)
@@ -209,6 +215,11 @@ impl ProviderClient {
         }
 
         if !self.openai_fallbacks.is_empty() {
+            tracing::debug!(
+                provider = "openai",
+                fallback_count = self.openai_fallbacks.len(),
+                "selected provider with fallbacks"
+            );
             let mut clients = Vec::with_capacity(1 + self.openai_fallbacks.len());
             clients.push(self.openai.clone());
             clients.extend(self.openai_fallbacks.clone());
@@ -233,6 +244,7 @@ impl ProviderClient {
 
             Self::execute_stream_fallback_chain(tasks, event_tx).await;
         } else {
+            tracing::debug!(provider = "openai", "selected provider");
             let provider: Arc<dyn crate::traits::ModelProvider> = Arc::new(self.openai.clone());
             provider
                 .stream_chat_completion(source, prompt_cache_key, event_tx)
@@ -293,6 +305,11 @@ impl ProviderClient {
                             && !is_last
                             && is_quota_or_rate_limit(error) =>
                     {
+                        tracing::warn!(
+                            attempt = idx + 1,
+                            error = %error,
+                            "quota or rate-limit failure; retrying on fallback"
+                        );
                         retry = true;
                         break;
                     }

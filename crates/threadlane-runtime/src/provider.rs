@@ -135,26 +135,10 @@ impl ProviderAdapter for CodexResponsesAdapter {
             "stream": true,
             "tools": codex_tools
         });
-        // Codex WebSocket API rejects empty `input` arrays. When there are no
-        // conversation items yet (first turn), send the latest user message text
-        // as `prompt` so the API has at least one content-bearing field.
-        if codex_msgs.is_empty() {
-            let prompt_text = state
-                .messages
-                .iter()
-                .rev()
-                .find_map(|msg| match msg {
-                    AgentMessage::User { content } => Some(content.as_str()),
-                    AgentMessage::UserWithImages { content, .. } => Some(content.as_str()),
-                    _ => None,
-                })
-                .unwrap_or_default();
-            if !prompt_text.is_empty() {
-                codex_payload["prompt"] = serde_json::Value::String(prompt_text.to_string());
-            }
-        } else {
-            codex_payload["input"] = serde_json::Value::Array(codex_msgs);
-        }
+        // The Responses WebSocket protocol requires `input` on every
+        // response.create event, including the first turn. Keep it as an
+        // array even when the conversation currently has no input items.
+        codex_payload["input"] = serde_json::Value::Array(codex_msgs);
         if let Some(key) = prompt_cache_key {
             codex_payload["prompt_cache_key"] = key.into();
         }
@@ -653,8 +637,8 @@ mod tests {
 
         let codex = router.build_payload(PayloadFormat::Codex, &state, &[], None);
         assert!(codex.get("instructions").is_some());
-        // When messages are empty, input is omitted and no prompt fallback exists.
-        assert!(codex.get("input").is_none());
+        // The WebSocket response.create envelope always includes input.
+        assert_eq!(codex["input"], serde_json::json!([]));
         assert!(codex.get("prompt").is_none());
     }
 
@@ -703,8 +687,9 @@ mod tests {
 
         let codex = router.build_payload(PayloadFormat::Codex, &state, &[], None);
         assert!(codex.get("instructions").is_some());
-        // Only system messages produce empty input; no prompt fallback either.
-        assert!(codex.get("input").is_none());
+        // System messages produce an empty input array, which is still
+        // required by the WebSocket response.create envelope.
+        assert_eq!(codex["input"], serde_json::json!([]));
         assert!(codex.get("prompt").is_none());
     }
 }

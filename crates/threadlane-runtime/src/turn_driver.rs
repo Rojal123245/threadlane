@@ -315,9 +315,9 @@ impl<'a> TurnDriver<'a> {
                             checkpointed_bytes = current_text.len();
                         }
                         if let Some(matched) = monitor.push_chunk(&token) {
-                            log::warn!(
-                                "stream rule '{}' matched; aborting current response",
-                                matched.rule_id
+                            tracing::warn!(
+                                rule_id = %matched.rule_id,
+                                "stream rule matched; aborting current response"
                             );
                             self.emit_event(AgentEvent::MessageEnd {
                                 message: AgentMessage::Assistant {
@@ -396,6 +396,12 @@ impl<'a> TurnDriver<'a> {
                             cache_write_tokens: usage.cache_write_tokens,
                             total_tokens: usage.total_tokens,
                         };
+                        tracing::info!(
+                            turn = turn_number,
+                            tool_calls = captured_tool_calls.len(),
+                            total_tokens = usage.total_tokens,
+                            "provider turn finished"
+                        );
                         if let Err(error) = self
                             .record_provider_trace(ProviderTraceEvent::Finished {
                                 attempt: turn_number as u32,
@@ -418,6 +424,7 @@ impl<'a> TurnDriver<'a> {
                         break;
                     }
                     StreamEvent::Error(err) => {
+                        tracing::error!(turn = turn_number, error = %err, "provider turn failed");
                         if current_text.len() > checkpointed_bytes {
                             checkpoint_index = checkpoint_index.saturating_add(1);
                             if let Err(error) = self
@@ -447,7 +454,7 @@ impl<'a> TurnDriver<'a> {
                         // Store the full provider error text so the trajectory
                         // inspector can show it inline with the request row.
                         let error_code = TraceString::new(
-                            err.chars().take(512).collect::<String>()
+                            err.chars().take(2048).collect::<String>()
                         ).ok();
                         if let Err(error) = self
                             .record_provider_trace(ProviderTraceEvent::Finished {
@@ -556,7 +563,7 @@ impl<'a> TurnDriver<'a> {
                         "Provider stream ended without a final response (turn {turn_number}): {error}"
                     ),
                 };
-                log::warn!("{error}");
+                tracing::warn!(turn = turn_number, error = %error, "provider returned no usable response");
                 self.emit_event(AgentEvent::AgentError { error });
                 return;
             }

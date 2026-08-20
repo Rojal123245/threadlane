@@ -24,7 +24,7 @@ impl PtySession {
     fn write(&self, bytes: &[u8]) {
         if let Ok(mut writer) = self.writer.lock() {
             if let Err(error) = writer.write_all(bytes).and_then(|_| writer.flush()) {
-                log::warn!("failed to write to terminal PTY: {error}");
+                tracing::warn!("failed to write to terminal PTY: {error}");
             }
         }
     }
@@ -36,7 +36,7 @@ impl PtySession {
             pixel_width: 0,
             pixel_height: 0,
         }) {
-            log::warn!("failed to resize terminal PTY: {error}");
+            tracing::warn!("failed to resize terminal PTY: {error}");
         }
     }
 }

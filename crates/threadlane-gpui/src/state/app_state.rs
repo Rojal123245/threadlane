@@ -853,7 +853,7 @@ impl AppState {
 
     fn persist_project_selection(&self, work_dir: &Path, session_id: Option<&str>) {
         if let Err(error) = threadlane_session::select_project(work_dir, session_id) {
-            log::warn!("Failed to persist selected project: {error}");
+            tracing::warn!("Failed to persist selected project: {error}");
         }
     }
 
@@ -1382,25 +1382,48 @@ impl AppState {
                     model,
                     provider,
                     reasoning_effort,
+                    prompt_cache_enabled,
+                    work_dir,
                     system_prompt,
                     tool_schema_sha256,
                     enabled_tool_names,
                     ..
                 } => {
-                    let prompt_detail = match system_prompt {
-                        threadlane_session::harness::PromptSnapshot::Full { sha256, .. } => {
-                            format!("System prompt captured (sha256 {})", sha256.as_str())
+                    let prompt_text = match system_prompt {
+                        threadlane_session::harness::PromptSnapshot::Full { sha256, content } => {
+                            format!("### System Prompt (SHA256 `{}`)\n\n```markdown\n{}\n```", sha256.as_str(), content.as_str())
                         }
                         threadlane_session::harness::PromptSnapshot::Redacted {
                             sha256,
                             byte_len,
                             reason,
                         } => format!(
-                            "System prompt redacted: {byte_len} bytes, sha256 {}, reason {}",
+                            "### System Prompt (Redacted)\n\n- Size: {byte_len} bytes\n- SHA256: `{}`\n- Reason: {}",
                             sha256.as_str(),
                             reason.as_str()
                         ),
                     };
+                    let tools_list = if enabled_tool_names.is_empty() {
+                        "None".to_string()
+                    } else {
+                        enabled_tool_names
+                            .iter()
+                            .map(|t| format!("`{}`", t.as_str()))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    };
+                    let detail = format!(
+                        "**Model**: `{}`\n\n**Provider**: `{}`\n\n**Reasoning Effort**: `{:?}`\n\n**Prompt Cache**: `{}`\n\n**Work Dir**: `{}`\n\n**Enabled Tools ({})**:\n{}\n\n**Tool Schema SHA256**: `{}`\n\n{}",
+                        model.as_str(),
+                        provider.as_str(),
+                        reasoning_effort,
+                        prompt_cache_enabled,
+                        work_dir.as_str(),
+                        enabled_tool_names.len(),
+                        tools_list,
+                        tool_schema_sha256.as_str(),
+                        prompt_text
+                    );
                     Some(TrajectoryEntry {
                         seq: Some(*seq),
                         run_id: Some(run_id.clone()),
@@ -1411,11 +1434,7 @@ impl AppState {
                             model.as_str(),
                             provider.as_str()
                         ),
-                        detail: format!(
-                            "{prompt_detail}; {} tools; tool schema sha256 {}",
-                            enabled_tool_names.len(),
-                            tool_schema_sha256.as_str()
-                        ),
+                        detail,
                         lane: Some(lane.clone()),
                         correlation_id: None,
                     })
@@ -1435,7 +1454,13 @@ impl AppState {
                     turn: Some(*attempt),
                     category: "Provider".into(),
                     summary: format!("{} request started", provider.as_str()),
-                    detail: format!("model {}", model.as_str()),
+                    detail: format!(
+                        "**Provider**: `{}`\n\n**Model**: `{}`\n\n**Turn / Attempt**: `{}`\n\n**Request ID**: `{}`",
+                        provider.as_str(),
+                        model.as_str(),
+                        attempt,
+                        request_id.as_ref().map(|r| r.as_str()).unwrap_or("none")
+                    ),
                     lane: Some(lane.clone()),
                     correlation_id: request_id.as_ref().map(|id| id.as_str().to_owned()),
                 }),
@@ -1457,28 +1482,34 @@ impl AppState {
                             durable_usage.accumulate(usage);
                         }
                     }
+                    let mut detail_lines = Vec::new();
+                    detail_lines.push(format!("**Outcome**: `{:?}`", outcome));
+                    if let Some(duration) = duration_ms {
+                        detail_lines.push(format!("**Duration**: {duration} ms"));
+                    }
+                    if let Some(req_id) = request_id {
+                        detail_lines.push(format!("**Request ID**: `{}`", req_id.as_str()));
+                    }
+                    if let Some(usage) = usage {
+                        detail_lines.push(format!(
+                            "**Tokens**: input={}, output={}, total={}",
+                            usage.input_tokens, usage.output_tokens, usage.total_tokens
+                        ));
+                    }
+                    if let Some(err) = error.as_ref() {
+                        detail_lines.push(format!("**Category**: `{:?}`", err.category));
+                        detail_lines.push(format!("**Retryable**: `{}`", err.retryable));
+                        if let Some(code) = err.code.as_ref() {
+                            detail_lines.push(format!("**Error Details**:\n```\n{}\n```", code.as_str()));
+                        }
+                    }
                     Some(TrajectoryEntry {
                         seq: Some(*seq),
                         run_id: Some(run_id.clone()),
                         turn: Some(*attempt),
                         category: "Provider".into(),
                         summary: format!("Provider request {outcome:?}"),
-                        detail: {
-                            let mut parts = Vec::new();
-                            if let Some(duration) = duration_ms {
-                                parts.push(format!("{duration} ms"));
-                            }
-                            if let Some(err) = error.as_ref() {
-                                parts.push(format!("{:?}", err.category));
-                                if !err.retryable {
-                                    parts.push("non-retryable".into());
-                                }
-                                if let Some(code) = err.code.as_ref() {
-                                    parts.push(code.as_str().to_string());
-                                }
-                            }
-                            parts.join("; ")
-                        },
+                        detail: detail_lines.join("\n\n"),
                         lane: Some(lane.clone()),
                         correlation_id: request_id.as_ref().map(|id| id.as_str().to_owned()),
                     })
@@ -1733,16 +1764,24 @@ impl AppState {
                     custom_type,
                     payload,
                 } if matches!(custom_type.as_str(), "thinking" | "goal_round" | "agent_error") => {
-                    let (category, summary) = if custom_type == "agent_error" {
-                        ("Error".to_string(), payload
+                    let (category, summary, detail) = if custom_type == "agent_error" {
+                        let err_msg = payload
                             .get("error")
                             .and_then(|v| v.as_str())
-                            .unwrap_or("agent error")
-                            .to_string())
+                            .unwrap_or("agent error");
+                        (
+                            "Error".to_string(),
+                            "Agent Error".to_string(),
+                            format!("### Error Details\n\n```\n{}\n```", err_msg),
+                        )
                     } else {
-                        ("Context".to_string(), custom_type.to_string())
+                        (
+                            "Context".to_string(),
+                            custom_type.to_string(),
+                            serde_json::to_string_pretty(payload).unwrap_or_else(|_| payload.to_string()),
+                        )
                     };
-                    Some((category, summary, payload.to_string()))
+                    Some((category, summary, detail))
                 }
                 _ => None,
             };
@@ -1885,15 +1924,25 @@ impl AppState {
         projection
             .model_context
             .iter()
-            .map(|entry| TrajectoryEntry {
-                seq: Some(entry.seq),
-                run_id: None,
-                turn: None,
-                category: "Model Context".into(),
-                summary: format!("{} · {}", entry.id, entry.message.role_str()),
-                detail: format!("{:?}", entry.message),
-                lane: Some(entry.lane.clone()),
-                correlation_id: Some(entry.id.clone()),
+            .map(|entry| {
+                let json_text = serde_json::to_string_pretty(&entry.message)
+                    .unwrap_or_else(|_| format!("{:?}", entry.message));
+                TrajectoryEntry {
+                    seq: Some(entry.seq),
+                    run_id: None,
+                    turn: None,
+                    category: "Model Context".into(),
+                    summary: format!("{} · {}", entry.id, entry.message.role_str()),
+                    detail: format!(
+                        "**Entry ID**: `{}`\n**Role**: `{}`\n**Lane**: `{}`\n\n```json\n{}\n```",
+                        entry.id,
+                        entry.message.role_str(),
+                        entry.lane,
+                        json_text
+                    ),
+                    lane: Some(entry.lane.clone()),
+                    correlation_id: Some(entry.id.clone()),
+                }
             })
             .collect()
     }
@@ -2207,7 +2256,7 @@ impl AppState {
                         if let Err(error) =
                             self.hydrate_session_projection(&session_id, &session_file)
                         {
-                            log::warn!("Failed to reconcile completed session trajectory: {error}");
+                            tracing::warn!("Failed to reconcile completed session trajectory: {error}");
                         }
                         self.active_plan = load_session_plan(&session_file);
                         self.is_generating = false;

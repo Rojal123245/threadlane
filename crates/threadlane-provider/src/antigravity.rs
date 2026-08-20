@@ -244,6 +244,11 @@ impl AntigravityClient {
         let token = get_valid_antigravity_token().await?;
         let project = self.resolve_project(&token).await;
         let (runtime_model, request) = convert_openai_payload(&api_payload)?;
+        tracing::debug!(
+            "Antigravity dispatching request: runtime_model={}, project={}",
+            runtime_model,
+            project
+        );
         let envelope = request_envelope(&project, &runtime_model, request);
         let response = self
             .send_stream_request(&token, &runtime_model, &envelope)
@@ -271,6 +276,7 @@ impl AntigravityClient {
     async fn resolve_project_uncached(&self, token: &str) -> String {
         if let Ok(project) = std::env::var("ANTIGRAVITY_PROJECT_ID") {
             if !project.trim().is_empty() {
+                tracing::debug!("Using ANTIGRAVITY_PROJECT_ID env override: {}", project);
                 return project;
             }
         }
@@ -287,6 +293,7 @@ impl AntigravityClient {
                 .discover_at(&endpoint, "loadCodeAssist", &metadata, token)
                 .await
             {
+                tracing::debug!("Antigravity resolved project from {endpoint}/loadCodeAssist: {project}");
                 return project;
             }
         }
@@ -295,12 +302,13 @@ impl AntigravityClient {
                 .discover_at(&endpoint, "listCloudAICompanionProjects", &json!({}), token)
                 .await
             {
+                tracing::debug!("Antigravity resolved project from {endpoint}/listCloudAICompanionProjects: {project}");
                 return project;
             }
         }
 
         let credentials = load_antigravity_credentials();
-        credentials
+        let project = credentials
             .as_ref()
             .and_then(|creds| creds.project_id.clone())
             .filter(|project| !project.trim().is_empty())
@@ -311,7 +319,9 @@ impl AntigravityClient {
                         .and_then(|creds| creds.account_email.as_deref())
                         .unwrap_or("antigravity-default"),
                 )
-            })
+            });
+        tracing::debug!("Antigravity falling back to credential/default project: {project}");
+        project
     }
 
     async fn discover_at(
@@ -331,6 +341,10 @@ impl AntigravityClient {
             .await
             .ok()?;
         if !response.status().is_success() {
+            tracing::debug!(
+                "Antigravity project discovery failed at {endpoint}:{method} with status {}",
+                response.status()
+            );
             return None;
         }
         let value = response.json::<Value>().await.ok()?;
@@ -352,6 +366,9 @@ impl AntigravityClient {
                     reqwest::header::HeaderValue::from_static("interleaved-thinking-2025-05-14"),
                 );
             }
+            tracing::debug!(
+                "Sending Antigravity stream request to {endpoint}{STREAM_PATH} (runtime_model={runtime_model})"
+            );
             let response = self
                 .client
                 .post(format!("{endpoint}{STREAM_PATH}"))
@@ -362,20 +379,31 @@ impl AntigravityClient {
             let response = match response {
                 Ok(response) => response,
                 Err(error) => {
+                    tracing::warn!("Request to Antigravity endpoint {endpoint} failed: {error}");
                     last_error = format!("request to Antigravity failed: {error}");
                     continue;
                 }
             };
             if response.status().is_success() {
+                tracing::debug!("Antigravity endpoint {endpoint} returned HTTP 200");
                 return Ok(response);
             }
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
+            tracing::error!(
+                "Antigravity endpoint {endpoint} returned error {status} for runtime model {runtime_model}: {text}"
+            );
             last_error = format!(
                 "Antigravity API error ({status}, runtime model {runtime_model}): {}",
                 safe_error_text(&text)
             );
-            if !matches!(status.as_u16(), 403 | 404 | 429 | 500 | 502 | 503 | 504) {
+            // 4xx errors (e.g. 429 RESOURCE_EXHAUSTED / Quota, 401 Unauthorized, 403 Forbidden)
+            // from the production endpoint are authoritative account responses and must not be
+            // masked by falling back to internal daily sandbox endpoints.
+            if status.is_client_error() {
+                break;
+            }
+            if !matches!(status.as_u16(), 500 | 502 | 503 | 504) {
                 break;
             }
         }
@@ -1228,17 +1256,40 @@ fn token_count(value: Option<&Value>) -> u32 {
 }
 
 fn safe_error_text(text: &str) -> String {
-    let message = serde_json::from_str::<Value>(text)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("error")
-                .and_then(|error| error.get("message"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| text.to_string());
-    message.chars().take(800).collect()
+    if let Ok(value) = serde_json::from_str::<Value>(text) {
+        if let Some(error) = value.get("error") {
+            let mut parts = Vec::new();
+            if let Some(msg) = error.get("message").and_then(Value::as_str) {
+                parts.push(msg.to_string());
+            }
+            if let Some(status) = error.get("status").and_then(Value::as_str) {
+                if !parts.iter().any(|p| p.contains(status)) {
+                    parts.push(format!("status: {status}"));
+                }
+            }
+            if let Some(details) = error.get("details").and_then(Value::as_array) {
+                for detail in details {
+                    if let Some(violations) = detail.get("fieldViolations").and_then(Value::as_array) {
+                        for v in violations {
+                            let field = v.get("field").and_then(Value::as_str).unwrap_or("");
+                            let desc = v.get("description").and_then(Value::as_str).unwrap_or("");
+                            if !field.is_empty() || !desc.is_empty() {
+                                parts.push(format!("field '{field}': {desc}"));
+                            }
+                        }
+                    } else if let Some(msg) = detail.get("description").or_else(|| detail.get("message")).and_then(Value::as_str) {
+                        parts.push(msg.to_string());
+                    }
+                }
+            }
+            if !parts.is_empty() {
+                let joined = parts.join(" | ");
+                return joined.chars().take(2000).collect();
+            }
+            return error.to_string().chars().take(2000).collect();
+        }
+    }
+    text.chars().take(2000).collect()
 }
 
 fn unix_seconds() -> u64 {

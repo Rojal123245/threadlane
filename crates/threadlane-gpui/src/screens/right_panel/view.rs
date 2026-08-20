@@ -304,7 +304,7 @@ impl RightPanelView {
         let file_path = project.join(title);
 
         if let Err(err) = std::fs::write(&file_path, &content) {
-            log::error!("Failed to save file {}: {}", file_path.display(), err);
+            tracing::error!("Failed to save file {}: {}", file_path.display(), err);
         } else {
             self.saved_content = content;
             self.is_dirty = false;

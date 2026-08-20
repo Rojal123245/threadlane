@@ -247,7 +247,7 @@ impl EditorView {
         let content = match std::fs::read_to_string(&full_path) {
             Ok(c) => c,
             Err(err) => {
-                log::error!("Failed to open file {}: {}", full_path.display(), err);
+                tracing::error!("Failed to open file {}: {}", full_path.display(), err);
                 self.status_msg = Some(format!("Unable to open {}: {err}", relative_path));
                 cx.notify();
                 return;
@@ -507,7 +507,7 @@ impl EditorView {
                 cx.notify();
             }
             Err(err) => {
-                log::error!("Failed to save file {}: {}", file_path.display(), err);
+                tracing::error!("Failed to save file {}: {}", file_path.display(), err);
                 self.status_msg = Some(format!("Error saving {}: {}", tab.file_name, err));
                 cx.notify();
             }
