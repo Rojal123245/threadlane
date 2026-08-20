@@ -94,7 +94,6 @@ impl ProviderRunExecutor {
             messages: Vec::new(),
             model,
             reasoning_effort: Default::default(),
-            tools: Vec::new(),
         }));
 
         Self {

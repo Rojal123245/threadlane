@@ -1399,14 +1399,3 @@ pub struct InterruptedSubagentLane {
     pub safe_tools: Vec<Record>,
     pub unsafe_tools: Vec<Record>,
 }
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct RecoveryPlan {
-    pub session_id: String,
-    pub lane: String,
-    pub open_operation_ids: Vec<String>,
-    pub safe_tools_to_replay: Vec<Record>,
-    pub unreplayable_tools: usize,
-    pub abort_requested_operation_ids: Vec<String>,
-    pub source_sequence: u64,
-}

@@ -1,4 +1,4 @@
-use crate::types::{AgentMessage, PlanItem, SessionPlan};
+use crate::types::{AgentMessage, SessionPlan};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

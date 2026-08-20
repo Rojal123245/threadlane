@@ -30,7 +30,6 @@ pub use hooks::{
     HookContext, HookEffect, HookFailure, HookHandler, HookKind, HookRegistry, HookRun,
 };
 pub use jsonl::JsonlStore;
-pub(crate) use jsonl::{append_session_json_line, with_session_writer_gate};
 pub use memory::MemoryStore;
 pub use procedure::{
     AbortProcedure, AssistantAttemptProcedure, CompactionProcedure, DeferredProcedure,

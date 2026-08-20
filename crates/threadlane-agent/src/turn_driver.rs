@@ -65,6 +65,7 @@ fn classify_provider_error(error: &str) -> ErrorCategory {
 
 /// Captured result from one provider stream.
 #[derive(Debug, Clone)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct ProviderStepResult {
     pub(crate) text: String,
     pub(crate) reasoning: String,

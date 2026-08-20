@@ -462,30 +462,7 @@ pub fn checkout(work_dir: &Path, name: &str) -> Result<(), GitError> {
     Ok(())
 }
 
-fn create_worktree(work_dir: &Path, path: &Path, branch: &str) -> Result<(), GitError> {
-    let branch = validate_branch_name(work_dir, branch)?;
-    if !path.is_absolute() {
-        return Err(GitError {
-            work_dir: work_dir.to_path_buf(),
-            message: "worktree path must be absolute".to_owned(),
-        });
-    }
-    if path == work_dir {
-        return Err(GitError {
-            work_dir: work_dir.to_path_buf(),
-            message: "worktree path must differ from the current checkout".to_owned(),
-        });
-    }
-    if path.exists() {
-        return Err(GitError {
-            work_dir: work_dir.to_path_buf(),
-            message: "worktree path already exists".to_owned(),
-        });
-    }
-    let path = path.to_string_lossy().into_owned();
-    command(work_dir, &["worktree", "add", &path, &branch])?;
-    Ok(())
-}
+
 
 /// Describe changed paths in dependency-friendly groups for atomic commit planning.
 /// Source files are emitted before generated/lock files, and lock files are excluded.
@@ -757,29 +734,7 @@ fn default_branch(work_dir: &Path) -> Option<String> {
     Some("main".to_owned())
 }
 
-fn github_repository(remote: &str) -> Option<(String, String)> {
-    let normalized = remote.trim().trim_end_matches('/').trim_end_matches(".git");
-    let path = normalized
-        .strip_prefix("https://github.com/")
-        .or_else(|| normalized.strip_prefix("http://github.com/"))
-        .or_else(|| normalized.strip_prefix("git@github.com:"))
-        .or_else(|| normalized.strip_prefix("ssh://git@github.com/"))?;
-    let mut parts = path.split('/');
-    let owner = parts.next()?.trim();
-    let repository = parts.next()?.trim();
-    if owner.is_empty() || repository.is_empty() || parts.next().is_some() {
-        return None;
-    }
-    Some((owner.to_owned(), repository.to_owned()))
-}
 
-fn github_compare_url(remote: &str, head: &str, base: Option<&str>) -> Option<String> {
-    let (owner, repo) = github_repository(remote)?;
-    let base = base.unwrap_or("main");
-    Some(format!(
-        "https://github.com/{owner}/{repo}/compare/{base}...{head}?expand=1"
-    ))
-}
 
 fn validate_branch_name(work_dir: &Path, name: &str) -> Result<String, GitError> {
     let name = name.trim();
@@ -915,12 +870,7 @@ mod tests {
         assert!(status.branch.is_none());
     }
 
-    #[test]
-    fn worktree_creation_rejects_relative_and_current_paths() {
-        let repo = Path::new("/tmp/project");
-        assert!(create_worktree(repo, Path::new("relative"), "main").is_err());
-        assert!(create_worktree(repo, repo, "main").is_err());
-    }
+
 
     #[test]
     fn normalizes_renamed_paths() {
@@ -953,25 +903,7 @@ mod tests {
         assert_eq!(status.files[0].path, " leading.txt ");
     }
 
-    #[test]
-    fn parses_github_remotes() {
-        assert_eq!(
-            github_repository("git@github.com:owner/repo.git"),
-            Some(("owner".to_owned(), "repo".to_owned()))
-        );
-        assert_eq!(
-            github_repository("https://github.com/owner/repo"),
-            Some(("owner".to_owned(), "repo".to_owned()))
-        );
-        assert_eq!(
-            github_compare_url(
-                "git@github.com:owner/repo.git",
-                "enhancements",
-                Some("main")
-            ),
-            Some("https://github.com/owner/repo/compare/main...enhancements?expand=1".to_owned())
-        );
-    }
+
 
     #[test]
     fn atomic_commit_groups_exclude_locks_and_order_sources_first() {

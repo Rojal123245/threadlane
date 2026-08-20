@@ -162,16 +162,11 @@ use crate::policy::ToolPolicy;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AgentWork {
-    RequestTurn(String),
     DurableQueueWake {
         queue: QueueKind,
         entry_id: String,
     },
     SteerMessage {
-        content: String,
-        images: Vec<ImageAttachment>,
-    },
-    NextRunMessage {
         content: String,
         images: Vec<ImageAttachment>,
     },
@@ -416,13 +411,6 @@ impl CodingAgentCancellation {
     }
 }
 
-pub(crate) fn abort_open_subagent_operations(
-    session_file: &Path,
-) -> Result<SubagentCancellationGuard, String> {
-    cancel_open_subagent_operations(session_file)?;
-    Ok(SubagentCancellationGuard)
-}
-
 pub fn cancel_open_subagent_operations(session_file: &Path) -> Result<(), String> {
     if session_file.exists() {
         let mut journal = HarnessJournal::open(session_file)?;
@@ -494,10 +482,6 @@ impl AgentWorkScheduler {
         }
         for work in pending {
             match work {
-                AgentWork::RequestTurn(prompt) => {
-                    agent.follow_up(AgentMessage::user(prompt, Vec::new()));
-                    agent.run_follow_up().await;
-                }
                 AgentWork::DurableQueueWake { queue, entry_id } => {
                     let Some(path) = session_file else { continue };
                     if let Ok(mut harness) = CodingSessionHarness::open(path) {
@@ -516,10 +500,6 @@ impl AgentWorkScheduler {
                 AgentWork::SteerMessage { content, images } => {
                     agent.steer(AgentMessage::user(content, images));
                     agent.run_steer().await;
-                }
-                AgentWork::NextRunMessage { content, images } => {
-                    agent.follow_up(AgentMessage::user(content, images));
-                    agent.run_follow_up().await;
                 }
                 AgentWork::QueueMessage { content, images } => {
                     agent.follow_up(AgentMessage::user(content, images));
@@ -606,25 +586,6 @@ impl CodingAgentWorkHandle {
         } else {
             self.scheduler
                 .schedule(AgentWork::SteerMessage { content, images });
-        }
-        Ok(())
-    }
-
-    pub(crate) fn queue_next_run_with_images(
-        &self,
-        content: impl Into<String>,
-        images: Vec<ImageAttachment>,
-    ) -> Result<(), String> {
-        let content = content.into();
-        if let Some(path) = self.session_file.as_deref() {
-            let entry_id = enqueue_harness_queue(path, QueueKind::NextRun, content, images)?;
-            self.scheduler.schedule(AgentWork::DurableQueueWake {
-                queue: QueueKind::NextRun,
-                entry_id,
-            });
-        } else {
-            self.scheduler
-                .schedule(AgentWork::NextRunMessage { content, images });
         }
         Ok(())
     }
@@ -756,6 +717,7 @@ pub struct CodingAgent {
     subagent_branch_observer: Option<SubagentBoundaryObserver>,
 }
 
+#[allow(dead_code)]
 impl CodingAgent {
     pub fn permission_handle(&self) -> crate::permission::PermissionHandle {
         self.permission_handle.clone()
@@ -4440,7 +4402,10 @@ async fn run_subagent_task(
         let scheduler = AgentWorkScheduler::default();
         scheduler.set_test_observer(observer.clone());
         scheduler.schedule(if is_recovery {
-            AgentWork::RequestTurn(SUBAGENT_RECOVERY_PROMPT.into())
+            AgentWork::QueueMessage {
+                content: SUBAGENT_RECOVERY_PROMPT.into(),
+                images: Vec::new(),
+            }
         } else {
             AgentWork::QueueMessage {
                 content: "test subagent follow-up".into(),

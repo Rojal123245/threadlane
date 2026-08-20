@@ -185,6 +185,7 @@ impl ToolDispatcher {
     }
 
     /// Executes tools without recording intents (e.g., replay).
+    #[cfg(test)]
     async fn execute_tools_without_intent_recording(
         &self,
         tool_calls: &[ToolCall],

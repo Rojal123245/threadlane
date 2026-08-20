@@ -1,6 +1,10 @@
+// Scaffolding for explicit background-task management (/task).
+// HarnessSupervisor is publicly exported but most methods are currently
+// exercised only in tests; dead-code warnings are intentionally suppressed.
+#![allow(dead_code)]
 use crate::coding_agent::harness::CodingSessionHarness;
 use crate::coding_agent::{
-    abort_open_subagent_operations, CodingAgent, CodingAgentOptions, SubagentCancellationGuard,
+    CodingAgent, CodingAgentOptions, SubagentCancellationGuard,
 };
 use crate::project_registry::{
     load_project_registry_from, merge_and_save_project_registry_to, ProjectRecord,
@@ -1140,7 +1144,10 @@ impl HarnessSupervisor {
                     let _ = harness.request_abort();
                 }
             }
-            let guard = abort_open_subagent_operations(&session_file)?;
+            let guard = {
+                crate::coding_agent::runtime::cancel_open_subagent_operations(&session_file)?;
+                SubagentCancellationGuard
+            };
             if let Some(run_id) = run_id {
                 let _ = self.finish_recovered_operations(
                     &session_id,

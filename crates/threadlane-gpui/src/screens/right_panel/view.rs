@@ -94,11 +94,7 @@ enum PanelEvent {
         files: Vec<GitFile>,
         error: Option<String>,
     },
-    DocumentLoaded {
-        project: PathBuf,
-        title: String,
-        content: String,
-    },
+
 }
 
 pub struct RightPanelView {
@@ -238,21 +234,6 @@ impl RightPanelView {
         cx.notify();
     }
 
-    fn open_file(&self, relative_path: String) {
-        let Some(project) = self.project.clone() else {
-            return;
-        };
-        let tx = self.event_tx.clone();
-        std::thread::spawn(move || {
-            let content = std::fs::read_to_string(project.join(&relative_path))
-                .unwrap_or_else(|error| format!("Unable to open {relative_path}: {error}"));
-            let _ = tx.send(PanelEvent::DocumentLoaded {
-                project,
-                title: relative_path,
-                content,
-            });
-        });
-    }
 
     fn close_document(&mut self, cx: &mut Context<Self>) {
         self.document_title = None;
@@ -331,22 +312,6 @@ impl RightPanelView {
         }
     }
 
-    fn open_diff(&self, relative_path: String) {
-        let Some(project) = self.project.clone() else {
-            return;
-        };
-        let tx = self.event_tx.clone();
-        std::thread::spawn(move || {
-            let content = threadlane_git::diff_file(&project, &relative_path)
-                .unwrap_or_else(|error| error.to_string());
-            let _ = tx.send(PanelEvent::DocumentLoaded {
-                project,
-                title: format!("Review · {relative_path}"),
-                content,
-            });
-        });
-    }
-
     fn apply_event(&mut self, event: PanelEvent, _cx: &mut Context<Self>) {
         match event {
             PanelEvent::FilesLoaded { project, entries }
@@ -361,13 +326,6 @@ impl RightPanelView {
             } if self.project.as_ref() == Some(&project) => {
                 self.review_files = files;
                 self.review_error = error;
-            }
-            PanelEvent::DocumentLoaded {
-                project,
-                title,
-                content,
-            } if self.project.as_ref() == Some(&project) => {
-                self.pending_document = Some((title, content));
             }
             _ => {}
         }

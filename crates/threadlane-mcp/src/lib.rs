@@ -132,31 +132,6 @@ impl McpSettings {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum McpServerStatus {
-    Disconnected,
-    Connecting,
-    Connected { tool_count: usize },
-    Error(String),
-}
-
-impl McpServerStatus {
-    pub fn display_status(&self) -> String {
-        match self {
-            McpServerStatus::Disconnected => "Disconnected".to_string(),
-            McpServerStatus::Connecting => "Connecting...".to_string(),
-            McpServerStatus::Connected { tool_count } => {
-                format!(
-                    "Connected ({} tool{})",
-                    tool_count,
-                    if *tool_count == 1 { "" } else { "s" }
-                )
-            }
-            McpServerStatus::Error(err) => format!("Error: {err}"),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct McpToolInfo {
     tool_name: String,
@@ -167,7 +142,6 @@ pub struct McpToolInfo {
 #[derive(Debug, Clone)]
 pub struct McpServerRecord {
     config: McpServerConfig,
-    status: McpServerStatus,
     tools: Vec<McpToolInfo>,
 }
 
@@ -363,19 +337,17 @@ impl McpManager {
             if !config.enabled {
                 records.push(McpServerRecord {
                     config,
-                    status: McpServerStatus::Disconnected,
                     tools: Vec::new(),
                 });
                 continue;
             }
 
-            let (status, tools) = self.connect_server(&config).await;
+            let tools = self.connect_server(&config).await;
             for t in &tools {
                 tool_defs.push(t.definition.clone());
             }
             records.push(McpServerRecord {
                 config,
-                status,
                 tools,
             });
         }
@@ -392,15 +364,9 @@ impl McpManager {
     async fn connect_server(
         &self,
         config: &McpServerConfig,
-    ) -> (McpServerStatus, Vec<McpToolInfo>) {
+    ) -> Vec<McpToolInfo> {
         if matches!(config.transport, McpTransport::Sse { .. }) {
-            let McpTransport::Sse { url, .. } = &config.transport else {
-                unreachable!("transport was just matched as SSE")
-            };
-            return (
-                McpServerStatus::Error(format!("SSE transport ({url}) not active")),
-                Vec::new(),
-            );
+            return Vec::new();
         }
 
         // A previous session may be stale after a config change, so discovery
@@ -411,15 +377,15 @@ impl McpManager {
         }
         let mut session = match McpSession::connect(config).await {
             Ok(session) => session,
-            Err(error) => return (McpServerStatus::Error(error), Vec::new()),
+            Err(_error) => return Vec::new(),
         };
 
         let listed = session.request("tools/list", json!({})).await;
         let response = match listed {
             Ok(response) => response,
-            Err(error) => {
+            Err(_error) => {
                 session.kill().await;
-                return (McpServerStatus::Error(error), Vec::new());
+                return Vec::new();
             }
         };
 
@@ -455,8 +421,7 @@ impl McpManager {
             .lock()
             .await
             .insert(config.id.clone(), Arc::new(TokioMutex::new(session)));
-        let count = mcp_tools.len();
-        (McpServerStatus::Connected { tool_count: count }, mcp_tools)
+        mcp_tools
     }
 
     fn get_tools_sync(&self) -> Vec<AgentToolDefinition> {

@@ -402,10 +402,6 @@ impl AdvisorNote {
         Self::new(AdvisorSeverity::Concern, summary, details)
     }
 
-    fn blocker(summary: impl Into<String>, details: impl Into<String>) -> Self {
-        Self::new(AdvisorSeverity::Blocker, summary, details)
-    }
-
     /// Formats the advisor note as prompt steering text for the task model.
     pub(crate) fn to_steering_prompt(&self) -> String {
         let tag = match self.severity {
@@ -489,22 +485,11 @@ pub struct TurnState {
     pub messages: Vec<AgentMessage>,
     pub model: String,
     pub(crate) reasoning_effort: ReasoningEffort,
-    pub(crate) tools: Vec<Value>,
 }
 
 impl TurnState {
     pub fn reasoning_effort(&self) -> ReasoningEffort {
         self.reasoning_effort
-    }
-
-    pub(crate) fn new(model: impl Into<String>, system_prompt: impl Into<String>) -> Self {
-        Self {
-            system_prompt: system_prompt.into(),
-            messages: Vec::new(),
-            model: model.into(),
-            reasoning_effort: ReasoningEffort::default(),
-            tools: Vec::new(),
-        }
     }
 }
 

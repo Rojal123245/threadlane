@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use threadlane_agent::{
     harness::JsonlStore, AgentEvent, AgentToolDefinition, PlanItem, PlanItemStatus, SessionPlan,
-    SessionTree, ToolExecutor,
+    ToolExecutor,
 };
 use tokio::sync::broadcast;
 
@@ -189,6 +189,7 @@ impl SessionPlanStore {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn current(&self) -> SessionPlan {
         self.inner.lock().unwrap().plan.clone()
     }

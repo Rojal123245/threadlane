@@ -6,7 +6,7 @@ pub mod runtime;
 // Re-export public runtime items (explicit list to avoid conflicts with
 // harness_journal module).
 pub(crate) use runtime::{
-    abort_open_subagent_operations, AgentRunner, AgentWork, AgentWorkScheduler, MAX_SUBAGENT_TASKS,
+    AgentRunner, AgentWork, AgentWorkScheduler, MAX_SUBAGENT_TASKS,
     MAX_SUBAGENT_TASK_CHARS,
 };
 pub use runtime::{
@@ -1072,7 +1072,7 @@ mod tests {
             .start_subagent_lane("subagent-1:0", "inspect", None)
             .unwrap();
 
-        let _guard = abort_open_subagent_operations(&session_file).unwrap();
+        let _guard = cancel_open_subagent_operations(&session_file).unwrap();
         journal
             .finish_subagent_lane(
                 &identity.lane_name,
@@ -1411,9 +1411,11 @@ mod tests {
         );
         assert_eq!(
             *observed.lock().unwrap(),
-            vec![AgentWork::RequestTurn(
-                "Continue from the recovered checkpoint and finish the assigned task.".into()
-            )]
+            vec![AgentWork::QueueMessage {
+                content: "Continue from the recovered checkpoint and finish the assigned task."
+                    .into(),
+                images: Vec::new(),
+            }]
         );
         assert!(coding_agent.session_tree.nodes.values().any(|node| {
             matches!(
@@ -2998,43 +3000,6 @@ mod tests {
         )));
         let consumed = JsonlStore::open(&session_file).unwrap();
         assert!(Reducer::reduce(&consumed).unwrap().lane("main").unwrap().queued.is_empty());
-    }
-
-    #[tokio::test]
-    async fn queued_next_run_is_persisted_and_consumed_by_the_harness() {
-        let dir = tempfile::tempdir().unwrap();
-        let session_file = dir.path().join("session.jsonl");
-        let mut options = coding_agent_options(dir.path().to_path_buf());
-        options.session_file = Some(session_file.clone());
-        let mut coding_agent = CodingAgent::new(options);
-        let observed = Arc::new(Mutex::new(Vec::new()));
-        coding_agent.agent_work.set_test_observer(observed.clone());
-
-        coding_agent
-            .work_handle()
-            .queue_next_run_with_images("durable next run", Vec::new())
-            .unwrap();
-        let queued = JsonlStore::open(&session_file).unwrap();
-        assert!(queued.records().iter().any(|record| matches!(
-            record,
-            HarnessRecord::QueueEnqueued {
-                queue: QueueKind::NextRun,
-                ..
-            }
-        )));
-
-        coding_agent.run_scheduled_agent_work().await;
-        assert!(observed.lock().unwrap().iter().any(|work| matches!(
-            work,
-            AgentWork::DurableQueueWake { queue: QueueKind::NextRun, .. }
-        )));
-        let consumed = JsonlStore::open(&session_file).unwrap();
-        assert!(Reducer::reduce(&consumed)
-            .unwrap()
-            .lane("main")
-            .unwrap()
-            .queued
-            .is_empty());
     }
 
     #[tokio::test]

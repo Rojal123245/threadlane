@@ -499,18 +499,6 @@ impl JsonlStore {
     }
 }
 
-pub(crate) fn with_session_writer_gate<T>(
-    path: &Path,
-    operation: impl FnOnce() -> io::Result<T>,
-) -> io::Result<T> {
-    let claim = writer_claim(path)?;
-    let _guard = claim
-        .gate
-        .lock()
-        .map_err(|error| io::Error::other(error.to_string()))?;
-    operation()
-}
-
 pub(crate) fn append_session_json_line<T: serde::Serialize>(
     path: &Path,
     value: &T,
