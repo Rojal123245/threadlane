@@ -15,7 +15,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use threadlane_runtime::harness::{DurableEvent, HarnessEvent};
+use threadlane_runtime::harness::{
+    DurableEvent, HarnessEvent, LaneStatus as HarnessLaneStatus, OperationOutcome,
+    Record as HarnessRecord, SubagentLifecyclePhase,
+};
 use threadlane_runtime::{AgentEvent, AgentMessage, TokenUsage};
 use threadlane_wasi::packages::ExtensionScope;
 use tokio::sync::broadcast;
@@ -157,7 +160,7 @@ impl TaskAgentEvent {
 
 struct TaskRuntime {
     controller: Arc<SessionController>,
-    status: TaskStatus,
+    /// Ephemeral execution control only; journal projections own lifecycle state.
     run_handle: Option<tokio::task::AbortHandle>,
     cancellation_guard: Option<SubagentCancellationGuard>,
 }
@@ -692,7 +695,6 @@ impl HarnessSupervisor {
 
         let runtime = TaskRuntime {
             controller,
-            status: TaskStatus::Idle,
             run_handle: None,
             cancellation_guard: None,
         };
@@ -712,8 +714,6 @@ impl HarnessSupervisor {
         self.save_registry();
 
         let event_tx = self.event_tx.clone();
-        let tasks = self.tasks.clone();
-        let runtimes = self.runtimes.clone();
         let lanes = self.lanes.clone();
         let tid = task_id.clone();
         let pid = project_id.to_string();
@@ -721,7 +721,6 @@ impl HarnessSupervisor {
             .file_stem()
             .map(|stem| stem.to_string_lossy().into_owned())
             .unwrap_or_else(|| tid.clone());
-        let event_session_file = final_session_file.clone();
 
         // Clones for the harness listener spawn below.
         let harness_event_tx = event_tx.clone();
@@ -731,31 +730,8 @@ impl HarnessSupervisor {
             let mut sub_rx = rx;
             while let Ok(evt) = sub_rx.recv().await {
                 observe_subagent_lane(&lanes, &session_id, &evt);
-                let status = match &evt {
-                    AgentEvent::AgentStart => Some(TaskStatus::Running),
-                    AgentEvent::AgentEnd { .. } => Some(TaskStatus::Completed),
-                    AgentEvent::AgentError { .. } => Some(TaskStatus::Failed),
-                    _ => None,
-                };
-                {
-                    let mut task_records = tasks.lock().unwrap();
-                    if let Some(task) = task_records.get_mut(&tid) {
-                        apply_background_event(task, &evt);
-                    }
-                    apply_subagent_event(
-                        &mut task_records,
-                        &pid,
-                        &session_id,
-                        Some(event_session_file.as_path()),
-                        Some(&tid),
-                        &evt,
-                    );
-                }
-                if let Some(status) = status {
-                    if let Some(runtime) = runtimes.lock().unwrap().get_mut(&tid) {
-                        runtime.status = status;
-                    }
-                }
+                // Lifecycle authority is the durable harness journal. This
+                // listener only forwards transient UI notifications.
                 let _ = event_tx.send(TaskAgentEvent {
                     task_id: tid.clone(),
                     project_id: pid.clone(),
@@ -877,40 +853,17 @@ impl HarnessSupervisor {
             .ok_or_else(|| format!("Task ID '{task_id}' has no session file"))?;
 
         // ── Begin run through CodingSessionHarness ────────────────────
-        let (accepted_run, leaf_id) = {
+        let accepted_run = {
             let mut harness = CodingSessionHarness::open(session_file_for_log)?;
-            let leaf_id = harness.snapshot().ok().and_then(|snap| {
-                snap.state
-                    .lanes
-                    .iter()
-                    .find(|l| l.name == "main")
-                    .and_then(|l| l.leaf_id.clone())
-            });
             let run_id = harness.unique_run_id("run")?;
-            let accepted = harness.begin_run(&run_id, AgentMessage::user(&prompt, Vec::new()))?;
-            (accepted, leaf_id)
+            harness.begin_run(&run_id, AgentMessage::user(&prompt, Vec::new()))?
         };
-
-        // Update in-memory lane projection
-        {
-            let key = format!("{session_id}:main");
-            let mut lock = self.lanes.lock().unwrap();
-            let lane = lock
-                .entry(key)
-                .or_insert_with(|| Lane::new("main", &session_id));
-            lane.session_file = Some(session_file_for_log.to_path_buf());
-            lane.active_run_id = Some(accepted_run.run_id.clone());
-            lane.leaf_id = leaf_id;
-            lane.status = LaneStatus::Running;
-        }
 
         if let Some(task) = self.tasks.lock().unwrap().get_mut(task_id) {
             task.summary = prompt.clone();
         }
-        self.update_task_status(task_id, TaskStatus::Running);
 
         let tid = task_id.to_string();
-        let tasks_map = self.tasks.clone();
         let runtimes_map = self.runtimes.clone();
         let supervisor = self.clone();
         let session_file_for_run = session_file.clone();
@@ -967,10 +920,7 @@ impl HarnessSupervisor {
                                 agent.sync_session_history().await;
                             }
                         }
-                        Err(_error) => {
-                            supervisor.update_task_status(&tid, TaskStatus::Failed);
-                            return;
-                        }
+                        Err(_error) => return,
                     }
                 }
             }
@@ -1022,7 +972,15 @@ impl HarnessSupervisor {
                 )));
             }
             if let Err(error) = agent.adopt_harness_run(&accepted_run_for_run) {
-                supervisor.update_task_status(&tid, TaskStatus::Failed);
+                if let Some(session_file) = session_file_for_run.as_deref() {
+                    if let Ok(mut harness) = CodingSessionHarness::open(session_file) {
+                        let _ = harness.finish_run(
+                            &run_id_for_run,
+                            OperationOutcome::Failed,
+                            Some(error.clone()),
+                        );
+                    }
+                }
                 error!("failed to adopt supervisor harness run {run_id_for_run}: {error}");
                 return;
             }
@@ -1038,64 +996,14 @@ impl HarnessSupervisor {
                 Some(Err(error)) => (threadlane_runtime::OperationOutcome::Failed, Some(error)),
                 _ => (threadlane_runtime::OperationOutcome::Completed, None),
             };
-            let task_status = if error.is_some() {
-                TaskStatus::Failed
-            } else {
-                TaskStatus::Completed
-            };
-            let run_is_active = supervisor
-                .lanes
-                .lock()
-                .unwrap()
-                .get(&format!("{session_id_for_run}:main"))
-                .and_then(|lane| lane.active_run_id.as_deref())
-                == Some(run_id_for_run.as_str());
-
-            if run_is_active {
-                if let Some(session_file) = session_file_for_run.as_deref() {
-                    if let Ok(mut harness) = CodingSessionHarness::open(session_file) {
-                        let _ = harness.finish_run(
-                            &run_id_for_run,
-                            match outcome {
-                                threadlane_runtime::OperationOutcome::Completed => {
-                                    threadlane_runtime::harness::OperationOutcome::Completed
-                                }
-                                threadlane_runtime::OperationOutcome::Aborted => {
-                                    threadlane_runtime::harness::OperationOutcome::Aborted
-                                }
-                                threadlane_runtime::OperationOutcome::Failed => {
-                                    threadlane_runtime::harness::OperationOutcome::Failed
-                                }
-                                threadlane_runtime::OperationOutcome::Declined => {
-                                    threadlane_runtime::harness::OperationOutcome::Declined
-                                }
-                            },
-                            error,
-                        );
-                    }
-                }
-            }
-            if run_is_active {
-                let mut lanes = supervisor.lanes.lock().unwrap();
-                if let Some(lane) = lanes.get_mut(&format!("{session_id_for_run}:main")) {
-                    lane.status = LaneStatus::Idle;
-                    lane.active_run_id = None;
+            if let Some(session_file) = session_file_for_run.as_deref() {
+                if let Ok(mut harness) = CodingSessionHarness::open(session_file) {
+                    let _ = harness.finish_run(&run_id_for_run, outcome, error);
                 }
             }
 
-            let mut t_lock = tasks_map.lock().unwrap();
-            if let Some(tr) = t_lock.get_mut(&tid) {
-                if tr.status == TaskStatus::Running {
-                    tr.status = task_status;
-                    tr.current_activity = None;
-                    tr.finished_at_ms = Some(now_ms());
-                }
-            }
             let mut r_lock = runtimes_map.lock().unwrap();
             if let Some(rt) = r_lock.get_mut(&tid) {
-                if rt.status == TaskStatus::Running {
-                    rt.status = task_status;
-                }
                 rt.run_handle = None;
             }
         });
@@ -1111,15 +1019,18 @@ impl HarnessSupervisor {
     fn cancel_task(&self, task_id: &str) -> Result<(), String> {
         let active_run = {
             let task = self.tasks.lock().unwrap().get(task_id).cloned();
-            task.filter(|task| task.active()).and_then(|task| {
-                let run_id = self
-                    .lanes
-                    .lock()
-                    .unwrap()
-                    .get(&format!("{}:main", task.session_id))
-                    .and_then(|lane| lane.active_run_id.clone());
-                task.session_file
-                    .map(|session_file| (task.session_id, session_file, run_id))
+            task.and_then(|task| {
+                let session_file = task.session_file?;
+                let run_id = CodingSessionHarness::open(&session_file)
+                    .ok()
+                    .and_then(|mut harness| harness.snapshot().ok())
+                    .and_then(|snapshot| {
+                        snapshot
+                            .state
+                            .lane("main")
+                            .and_then(|lane| lane.open_operation.clone())
+                    });
+                Some((task.session_id, session_file, run_id))
             })
         };
         let cancellation_guard = if let Some((session_id, session_file, run_id)) = active_run {
@@ -1156,114 +1067,21 @@ impl HarnessSupervisor {
         if let Some(handle) = handle {
             handle.abort();
         }
-        let finished_at_ms = now_ms();
-        let mut tasks = self.tasks.lock().unwrap();
-        let Some(task) = tasks.get_mut(task_id) else {
+        if !self.tasks.lock().unwrap().contains_key(task_id) {
             return Err(format!("Task ID '{task_id}' not found"));
-        };
-        task.status = TaskStatus::Cancelled;
-        task.current_activity = None;
-        task.finished_at_ms = Some(finished_at_ms);
-        for child in tasks.values_mut() {
-            if child.parent_task_id.as_deref() == Some(task_id) && child.active() {
-                child.status = TaskStatus::Cancelled;
-                child.current_activity = None;
-                child.finished_at_ms = Some(finished_at_ms);
-            }
-        }
-        drop(tasks);
-        if let Some(runtime) = self.runtimes.lock().unwrap().get_mut(task_id) {
-            runtime.status = TaskStatus::Cancelled;
         }
         Ok(())
     }
 
     pub fn resume_task(&self, task_id: &str) -> Result<(), String> {
-        let summary = {
-            let task = self
-                .tasks
-                .lock()
-                .unwrap()
-                .get(task_id)
-                .cloned()
-                .ok_or_else(|| format!("Task ID '{task_id}' not found"))?;
-            if task.status == TaskStatus::Running || task.status == TaskStatus::Idle {
-                return Err("Task is already running".into());
-            }
-            task.summary.clone()
-        };
-        if summary.is_empty() {
+        let task = self.get_task(task_id).ok_or_else(|| format!("Task ID '{task_id}' not found"))?;
+        if task.active() {
+            return Err("Task is already running".into());
+        }
+        if task.summary.is_empty() {
             return Err("Task has no prompt to resume".into());
         }
-        self.update_task_status(task_id, TaskStatus::Running);
-        self.submit_input(task_id, summary)
-    }
-
-    fn update_task_status(&self, task_id: &str, status: TaskStatus) {
-        let mut t_lock = self.tasks.lock().unwrap();
-        if let Some(tr) = t_lock.get_mut(task_id) {
-            tr.status = status;
-            if matches!(
-                status,
-                TaskStatus::Completed
-                    | TaskStatus::Failed
-                    | TaskStatus::Cancelled
-                    | TaskStatus::Interrupted
-            ) {
-                tr.finished_at_ms = Some(now_ms());
-            }
-        }
-        let mut r_lock = self.runtimes.lock().unwrap();
-        if let Some(rt) = r_lock.get_mut(task_id) {
-            rt.status = status;
-        }
-    }
-
-    fn resolve_task_status(&self, task: &TaskRecord) -> TaskStatus {
-        if let Some(runtime) = self.runtimes.lock().unwrap().get(&task.id) {
-            if runtime.run_handle.is_some() {
-                return TaskStatus::Running;
-            }
-        }
-        if let Some(session_file) = &task.session_file {
-            if let Ok(mut harness) = CodingSessionHarness::open(session_file) {
-                if let Ok(snapshot) = harness.snapshot() {
-                    let lane_name = match task.kind {
-                        TaskKind::Background => "main",
-                        TaskKind::Subagent => task.id.as_str(),
-                    };
-                    if let Some(lane) = snapshot.state.lanes.iter().find(|l| l.name == lane_name) {
-                        if lane.open_operation.is_some() {
-                            return TaskStatus::Running;
-                        }
-                    }
-                    if let Some(last_record) = harness.store.store().records().last() {
-                        match last_record {
-                            threadlane_runtime::harness::Record::OperationFinished {
-                                outcome,
-                                ..
-                            } => match outcome {
-                                threadlane_runtime::harness::OperationOutcome::Completed => {
-                                    return TaskStatus::Completed;
-                                }
-                                threadlane_runtime::harness::OperationOutcome::Failed => {
-                                    return TaskStatus::Failed;
-                                }
-                                threadlane_runtime::harness::OperationOutcome::Aborted
-                                | threadlane_runtime::harness::OperationOutcome::Declined => {
-                                    return TaskStatus::Cancelled;
-                                }
-                            },
-                            threadlane_runtime::harness::Record::AbortRequested { .. } => {
-                                return TaskStatus::Cancelled;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-        task.status
+        self.submit_input(task_id, task.summary)
     }
 
     pub fn get_task_status(&self, task_id: &str) -> Option<TaskStatus> {
@@ -1271,9 +1089,166 @@ impl HarnessSupervisor {
         Some(task.status)
     }
 
+    fn project_subagent_tasks_from_journal(
+        &self,
+        project_id: &str,
+        session_id: &str,
+        session_file: &Path,
+        parent_task_id: Option<&str>,
+    ) -> Vec<TaskRecord> {
+        let Ok(mut harness) = CodingSessionHarness::open(session_file) else {
+            return Vec::new();
+        };
+        let Ok(snapshot) = harness.snapshot() else {
+            return Vec::new();
+        };
+        let mut tasks = HashMap::new();
+        let mut ordered_records: Vec<_> = snapshot.records.iter().collect();
+        ordered_records.sort_by_key(|record| record.seq());
+        for record in ordered_records {
+            let HarnessRecord::SubagentLifecycle {
+                child_run_id,
+                parent_tool_call_id,
+                task_index,
+                agent_id,
+                subagent_lane,
+                phase,
+                timestamp,
+                error,
+                ..
+            } = record
+            else {
+                continue;
+            };
+            let id = child_run_id.as_str().to_owned();
+            let lane_name = subagent_lane.as_str();
+            let task = tasks.entry(id.clone()).or_insert_with(|| TaskRecord {
+                id,
+                project_id: project_id.to_owned(),
+                session_id: session_id.to_owned(),
+                session_file: Some(session_file.to_path_buf()),
+                parent_task_id: parent_task_id
+                    .map(str::to_owned)
+                    .or_else(|| parent_tool_call_id.as_ref().map(|id| id.as_str().to_owned())),
+                kind: TaskKind::Subagent,
+                agent: agent_id.as_str().to_owned(),
+                summary: task_index
+                    .map(|index| format!("Subagent task {index}"))
+                    .unwrap_or_else(|| lane_name.to_owned()),
+                current_activity: None,
+                status: TaskStatus::Idle,
+                started_at_ms: *timestamp as u128,
+                finished_at_ms: None,
+            });
+            match phase {
+                SubagentLifecyclePhase::Spawned => task.status = TaskStatus::Waiting,
+                SubagentLifecyclePhase::Started => task.status = TaskStatus::Running,
+                SubagentLifecyclePhase::Completed => {
+                    task.status = TaskStatus::Completed;
+                    task.finished_at_ms = Some(*timestamp as u128);
+                    task.current_activity = None;
+                }
+                SubagentLifecyclePhase::Failed => {
+                    task.status = TaskStatus::Failed;
+                    task.finished_at_ms = Some(*timestamp as u128);
+                    task.current_activity = error.as_ref().map(|error| error.as_str().to_owned());
+                }
+                SubagentLifecyclePhase::Cancelled => {
+                    task.status = TaskStatus::Cancelled;
+                    task.finished_at_ms = Some(*timestamp as u128);
+                    task.current_activity = None;
+                }
+            }
+        }
+        tasks.into_values().collect()
+    }
+
+    /// Project a supervisor task from the canonical session journal.
+    ///
+    /// `TaskRecord` retains only task-routing metadata and runtime ownership;
+    /// activity, lifecycle, and terminal state come exclusively from the
+    /// reduced harness snapshot and its ordered records.
+    fn project_task_from_journal(&self, task: &mut TaskRecord) {
+        let Some(session_file) = task.session_file.as_deref() else {
+            return;
+        };
+        let Ok(mut harness) = CodingSessionHarness::open(session_file) else {
+            return;
+        };
+        let Ok(snapshot) = harness.snapshot() else {
+            return;
+        };
+        let lane_name = match task.kind {
+            TaskKind::Background => "main",
+            TaskKind::Subagent => task.id.as_str(),
+        };
+        let Some(lane) = snapshot.state.lane(lane_name) else {
+            return;
+        };
+
+        task.status = match lane.status {
+            HarnessLaneStatus::Idle | HarnessLaneStatus::SuspendedDeferred => TaskStatus::Waiting,
+            HarnessLaneStatus::SuspendedCrash => TaskStatus::Interrupted,
+            HarnessLaneStatus::Completed => TaskStatus::Completed,
+            HarnessLaneStatus::Failed => TaskStatus::Failed,
+        };
+        if lane.open_operation.is_some() {
+            task.status = if lane.abort_requested {
+                TaskStatus::Cancelled
+            } else {
+                TaskStatus::Running
+            };
+        }
+
+        let active_run_id = lane.open_operation.as_deref();
+        let mut latest_finished = None;
+        let mut latest_activity = None;
+        let mut ordered_records: Vec<_> = snapshot.records.iter().collect();
+        ordered_records.sort_by_key(|record| record.seq());
+        for record in ordered_records {
+            match record {
+                HarnessRecord::ToolStarted {
+                    lane: record_lane,
+                    run_id,
+                    tool_name,
+                    ..
+                } if record_lane == lane_name && active_run_id == Some(run_id.as_str()) => {
+                    latest_activity = Some(tool_name.clone());
+                }
+                HarnessRecord::ToolFinished {
+                    lane: record_lane,
+                    run_id,
+                    ..
+                } if record_lane == lane_name && active_run_id == Some(run_id.as_str()) => {
+                    latest_activity = None;
+                }
+                HarnessRecord::OperationFinished {
+                    lane: record_lane,
+                    outcome,
+                    timestamp,
+                    ..
+                } if record_lane == lane_name => {
+                    latest_finished = Some((*timestamp, outcome));
+                }
+                _ => {}
+            }
+        }
+        task.current_activity = latest_activity;
+        if let Some((finished_at_ms, outcome)) = latest_finished {
+            task.finished_at_ms = Some(finished_at_ms as u128);
+            if lane.open_operation.is_none() {
+                task.status = match outcome {
+                    OperationOutcome::Completed => TaskStatus::Completed,
+                    OperationOutcome::Failed => TaskStatus::Failed,
+                    OperationOutcome::Aborted | OperationOutcome::Declined => TaskStatus::Cancelled,
+                };
+            }
+        }
+    }
+
     pub fn get_task(&self, task_id: &str) -> Option<TaskRecord> {
         let mut task = self.tasks.lock().unwrap().get(task_id).cloned()?;
-        task.status = self.resolve_task_status(&task);
+        self.project_task_from_journal(&mut task);
         Some(task)
     }
 
@@ -1281,13 +1256,23 @@ impl HarnessSupervisor {
         let lock = self.tasks.lock().unwrap();
         let mut tasks = lock
             .values()
-            .filter(|t| t.project_id == project_id)
+            .filter(|t| t.project_id == project_id && t.kind == TaskKind::Background)
             .cloned()
             .collect::<Vec<_>>();
         drop(lock);
+        let mut projected_subagents = Vec::new();
         for task in &mut tasks {
-            task.status = self.resolve_task_status(task);
+            self.project_task_from_journal(task);
+            if let Some(session_file) = task.session_file.as_deref() {
+                projected_subagents.extend(self.project_subagent_tasks_from_journal(
+                    project_id,
+                    &task.session_id,
+                    session_file,
+                    Some(&task.id),
+                ));
+            }
         }
+        tasks.extend(projected_subagents);
         tasks.sort_by(|left, right| {
             right
                 .started_at_ms
@@ -1297,41 +1282,6 @@ impl HarnessSupervisor {
         tasks
     }
 
-    fn observe_session_event(
-        &self,
-        project_id: &str,
-        session_id: &str,
-        session_file: Option<&Path>,
-        event: &AgentEvent,
-    ) -> bool {
-        observe_subagent_lane(&self.lanes, session_id, event);
-        apply_subagent_event(
-            &mut self.tasks.lock().unwrap(),
-            project_id,
-            session_id,
-            session_file,
-            None,
-            event,
-        )
-    }
-
-    fn finish_session_tasks(&self, project_id: &str, session_id: &str) -> bool {
-        let mut changed = false;
-        let finished_at_ms = now_ms();
-        for task in self.tasks.lock().unwrap().values_mut() {
-            if task.project_id == project_id
-                && task.session_id == session_id
-                && task.kind == TaskKind::Subagent
-                && task.active()
-            {
-                task.status = TaskStatus::Cancelled;
-                task.current_activity = None;
-                task.finished_at_ms = Some(finished_at_ms);
-                changed = true;
-            }
-        }
-        changed
-    }
 }
 
 // ── Free helpers ──────────────────────────────────────────────────────────
@@ -1350,40 +1300,6 @@ fn child_task_id(tool_call_id: &str) -> Option<String> {
     let task_index = parts.next()?.parse::<usize>().ok()?;
     parts.next()?;
     Some(format!("subagent-{run_id}:{task_index}"))
-}
-
-fn apply_background_event(task: &mut TaskRecord, event: &AgentEvent) -> bool {
-    match event {
-        AgentEvent::AgentStart => {
-            task.status = TaskStatus::Running;
-            true
-        }
-        AgentEvent::AgentEnd { .. } => {
-            task.status = TaskStatus::Completed;
-            task.current_activity = None;
-            task.finished_at_ms = Some(now_ms());
-            true
-        }
-        AgentEvent::AgentError { error } => {
-            task.status = TaskStatus::Failed;
-            task.current_activity = Some(error.clone());
-            task.finished_at_ms = Some(now_ms());
-            true
-        }
-        AgentEvent::ToolExecutionStart {
-            tool_call_id, name, ..
-        } if child_task_id(tool_call_id).is_none() => {
-            task.current_activity = Some(name.clone());
-            true
-        }
-        AgentEvent::ToolExecutionEnd { tool_call_id, .. }
-            if child_task_id(tool_call_id).is_none() =>
-        {
-            task.current_activity = None;
-            true
-        }
-        _ => false,
-    }
 }
 
 fn observe_subagent_lane(
@@ -1409,97 +1325,6 @@ fn observe_subagent_lane(
         });
 }
 
-fn apply_subagent_event(
-    tasks: &mut HashMap<String, TaskRecord>,
-    project_id: &str,
-    session_id: &str,
-    session_file: Option<&Path>,
-    parent_task_id: Option<&str>,
-    event: &AgentEvent,
-) -> bool {
-    match event {
-        AgentEvent::SubagentQueued {
-            run_id,
-            task_index,
-            agent,
-            task,
-        } => {
-            let id = format!("subagent-{run_id}:{task_index}");
-            tasks.insert(
-                id.clone(),
-                TaskRecord {
-                    id,
-                    project_id: project_id.to_owned(),
-                    session_id: session_id.to_owned(),
-                    session_file: session_file.map(Path::to_path_buf),
-                    parent_task_id: parent_task_id.map(str::to_owned),
-                    kind: TaskKind::Subagent,
-                    agent: agent.clone(),
-                    summary: task.clone(),
-                    current_activity: None,
-                    status: TaskStatus::Idle,
-                    started_at_ms: now_ms(),
-                    finished_at_ms: None,
-                },
-            );
-            true
-        }
-        AgentEvent::SubagentStarted {
-            run_id, task_index, ..
-        } => {
-            let id = format!("subagent-{run_id}:{task_index}");
-            let Some(task) = tasks.get_mut(&id) else {
-                return false;
-            };
-            task.status = TaskStatus::Running;
-            true
-        }
-        AgentEvent::ToolExecutionStart {
-            tool_call_id, name, ..
-        } => {
-            let Some(id) = child_task_id(tool_call_id) else {
-                return false;
-            };
-            let Some(task) = tasks.get_mut(&id) else {
-                return false;
-            };
-            task.current_activity = Some(name.clone());
-            true
-        }
-        AgentEvent::ToolExecutionEnd { tool_call_id, .. } => {
-            let Some(id) = child_task_id(tool_call_id) else {
-                return false;
-            };
-            let Some(task) = tasks.get_mut(&id) else {
-                return false;
-            };
-            task.current_activity = None;
-            true
-        }
-        AgentEvent::SubagentFinished {
-            run_id,
-            task_index,
-            succeeded,
-            error,
-            ..
-        } => {
-            let id = format!("subagent-{run_id}:{task_index}");
-            let Some(task) = tasks.get_mut(&id) else {
-                return false;
-            };
-            task.status = if *succeeded {
-                TaskStatus::Completed
-            } else {
-                TaskStatus::Failed
-            };
-            task.current_activity = error.clone();
-            task.finished_at_ms = Some(now_ms());
-            true
-        }
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1515,6 +1340,92 @@ mod tests {
     // ── Helper: open a CodingSessionHarness for test setup ────────────
     fn open_test_harness(path: &Path) -> CodingSessionHarness {
         CodingSessionHarness::open(path).unwrap()
+    }
+
+    #[test]
+    fn task_projection_uses_canonical_journal_not_cached_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("task.jsonl");
+        let mut harness = open_test_harness(&session_file);
+        harness
+            .begin_run("run-1", AgentMessage::user("prompt", Vec::new()))
+            .unwrap();
+        harness
+            .finish_run("run-1", OperationOutcome::Failed, Some("durable failure".into()))
+            .unwrap();
+
+        let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
+        supervisor.tasks.lock().unwrap().insert(
+            "task-1".into(),
+            TaskRecord {
+                id: "task-1".into(),
+                project_id: "project-1".into(),
+                session_id: "task".into(),
+                session_file: Some(session_file),
+                parent_task_id: None,
+                kind: TaskKind::Background,
+                agent: "task".into(),
+                summary: "prompt".into(),
+                current_activity: Some("stale activity".into()),
+                status: TaskStatus::Completed,
+                started_at_ms: 1,
+                finished_at_ms: None,
+            },
+        );
+
+        let task = supervisor.get_task("task-1").unwrap();
+        assert_eq!(task.status, TaskStatus::Failed);
+        assert!(task.finished_at_ms.is_some());
+        assert_eq!(task.current_activity, None);
+    }
+
+    #[test]
+    fn supervisor_restart_projects_subagent_lifecycle_from_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("task.jsonl");
+        let mut harness = open_test_harness(&session_file);
+        harness
+            .begin_run("parent-run", AgentMessage::user("prompt", Vec::new()))
+            .unwrap();
+        let child = harness
+            .start_subagent_lane("reviewer", "call-1", Some("entry-1".into()))
+            .unwrap();
+        harness
+            .finish_subagent_lane(
+                &child.lane_name,
+                &child.run_id,
+                OperationOutcome::Completed,
+                None,
+            )
+            .unwrap();
+
+        let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
+        supervisor.tasks.lock().unwrap().insert(
+            "task-1".into(),
+            TaskRecord {
+                id: "task-1".into(),
+                project_id: "project-1".into(),
+                session_id: "task".into(),
+                session_file: Some(session_file),
+                parent_task_id: None,
+                kind: TaskKind::Background,
+                agent: "task".into(),
+                summary: "prompt".into(),
+                current_activity: None,
+                status: TaskStatus::Idle,
+                started_at_ms: 1,
+                finished_at_ms: None,
+            },
+        );
+
+        let tasks = supervisor.list_tasks_for_project("project-1");
+        let subagent = tasks
+            .into_iter()
+            .find(|task| task.id == child.run_id)
+            .expect("subagent must be rebuilt from durable lifecycle records");
+        assert_eq!(subagent.kind, TaskKind::Subagent);
+        assert_eq!(subagent.status, TaskStatus::Completed);
+        assert_eq!(subagent.parent_task_id.as_deref(), Some("task-1"));
     }
 
     #[test]
@@ -1695,6 +1606,47 @@ mod tests {
             supervisor.get_task_status(&task_id),
             Some(TaskStatus::Failed)
         );
+    }
+
+    #[test]
+    fn cancel_task_uses_journal_open_operation_without_lane_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
+        let session_file = dir.path().join("session.jsonl");
+        supervisor.tasks.lock().unwrap().insert(
+            "task-1".into(),
+            TaskRecord {
+                id: "task-1".into(),
+                project_id: "project-1".into(),
+                session_id: "session-1".into(),
+                session_file: Some(session_file.clone()),
+                parent_task_id: None,
+                kind: TaskKind::Background,
+                agent: "task".into(),
+                summary: "run".into(),
+                current_activity: None,
+                status: TaskStatus::Idle,
+                started_at_ms: 1,
+                finished_at_ms: None,
+            },
+        );
+        let mut harness = open_test_harness(&session_file);
+        harness
+            .begin_run("run-1", AgentMessage::user("run", Vec::new()))
+            .unwrap();
+        drop(harness);
+
+        supervisor.cancel_task("task-1").unwrap();
+
+        let store = JsonlStore::open(&session_file).unwrap();
+        assert!(store.records().iter().any(|record| matches!(
+            record,
+            HarnessRecord::OperationFinished {
+                run_id,
+                outcome: OperationOutcome::Aborted,
+                ..
+            } if run_id == "run-1"
+        )));
     }
 
     #[test]
@@ -1891,182 +1843,6 @@ mod tests {
             .unwrap()
             .cancellation_guard
             .is_none());
-    }
-
-    #[test]
-    fn subagent_lifecycle_is_tracked_under_its_session() {
-        let mut tasks = HashMap::new();
-        let session_file = PathBuf::from("/repo/.threadlane/sessions/chat.jsonl");
-        assert!(apply_subagent_event(
-            &mut tasks,
-            "project-1",
-            "chat",
-            Some(&session_file),
-            None,
-            &AgentEvent::SubagentQueued {
-                run_id: 7,
-                task_index: 1,
-                agent: "reviewer".into(),
-                task: "Review the patch".into(),
-            },
-        ));
-        let task = &tasks["subagent-7:1"];
-        assert_eq!(task.kind, TaskKind::Subagent);
-        assert_eq!(task.project_id, "project-1");
-        assert_eq!(task.session_id, "chat");
-        assert_eq!(task.agent, "reviewer");
-        assert_eq!(task.summary, "Review the patch");
-        assert_eq!(task.status, TaskStatus::Idle);
-        assert!(!task.cancellable());
-
-        assert!(apply_subagent_event(
-            &mut tasks,
-            "project-1",
-            "chat",
-            Some(&session_file),
-            None,
-            &AgentEvent::SubagentStarted {
-                run_id: 7,
-                task_index: 1,
-                journal_run_id: "subagent-run-1".into(),
-            },
-        ));
-        assert_eq!(tasks["subagent-7:1"].status, TaskStatus::Running);
-    }
-
-    #[test]
-    fn child_tool_events_update_only_the_matching_subagent() {
-        let mut tasks = HashMap::new();
-        let session_file = PathBuf::from("/repo/.threadlane/sessions/chat.jsonl");
-        for task_index in 0..2 {
-            apply_subagent_event(
-                &mut tasks,
-                "project-1",
-                "chat",
-                Some(&session_file),
-                None,
-                &AgentEvent::SubagentQueued {
-                    run_id: 8,
-                    task_index,
-                    agent: format!("worker-{task_index}"),
-                    task: format!("Task {task_index}"),
-                },
-            );
-        }
-        apply_subagent_event(
-            &mut tasks,
-            "project-1",
-            "chat",
-            Some(&session_file),
-            None,
-            &AgentEvent::ToolExecutionStart {
-                tool_call_id: "subagent-8:1:read-1".into(),
-                name: "read_file".into(),
-                arguments: r#"{"path":"src/lib.rs"}"#.into(),
-            },
-        );
-        assert_eq!(tasks["subagent-8:0"].current_activity, None);
-        assert_eq!(
-            tasks["subagent-8:1"].current_activity.as_deref(),
-            Some("read_file")
-        );
-    }
-
-    #[test]
-    fn subagent_finish_records_failure() {
-        let mut tasks = HashMap::new();
-        apply_subagent_event(
-            &mut tasks,
-            "project-1",
-            "chat",
-            None,
-            Some("task-parent"),
-            &AgentEvent::SubagentQueued {
-                run_id: 9,
-                task_index: 0,
-                agent: "worker".into(),
-                task: "Implement".into(),
-            },
-        );
-        apply_subagent_event(
-            &mut tasks,
-            "project-1",
-            "chat",
-            None,
-            Some("task-parent"),
-            &AgentEvent::SubagentFinished {
-                run_id: 9,
-                task_index: 0,
-                journal_run_id: "subagent-run-2".into(),
-                succeeded: false,
-                error: Some("provider failed".into()),
-            },
-        );
-        let task = &tasks["subagent-9:0"];
-        assert_eq!(task.parent_task_id.as_deref(), Some("task-parent"));
-        assert_eq!(task.status, TaskStatus::Failed);
-        assert_eq!(task.current_activity.as_deref(), Some("provider failed"));
-        assert!(task.finished_at_ms.is_some());
-    }
-
-    #[test]
-    fn background_task_tracks_current_tool_and_completion() {
-        let mut task = TaskRecord {
-            id: "task-1".into(),
-            project_id: "project-1".into(),
-            session_id: "task-1".into(),
-            session_file: None,
-            parent_task_id: None,
-            kind: TaskKind::Background,
-            agent: "task".into(),
-            summary: "Run checks".into(),
-            current_activity: None,
-            status: TaskStatus::Running,
-            started_at_ms: 1,
-            finished_at_ms: None,
-        };
-        assert!(apply_background_event(
-            &mut task,
-            &AgentEvent::ToolExecutionStart {
-                tool_call_id: "command-1".into(),
-                name: "run_command".into(),
-                arguments: r#"{"command":"cargo check"}"#.into(),
-            },
-        ));
-        assert_eq!(task.current_activity.as_deref(), Some("run_command"));
-        assert!(apply_background_event(
-            &mut task,
-            &AgentEvent::AgentEnd {
-                usage: TokenUsage::default(),
-            },
-        ));
-        assert_eq!(task.status, TaskStatus::Completed);
-        assert!(task.finished_at_ms.is_some());
-    }
-
-    #[test]
-    fn unfinished_session_subagents_are_cancelled_when_parent_run_ends() {
-        let dir = tempfile::tempdir().unwrap();
-        let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
-        supervisor.observe_session_event(
-            "project-1",
-            "chat",
-            None,
-            &AgentEvent::SubagentQueued {
-                run_id: 10,
-                task_index: 0,
-                agent: "worker".into(),
-                task: "Inspect".into(),
-            },
-        );
-        assert!(supervisor.finish_session_tasks("project-1", "chat"));
-        let task = supervisor
-            .list_tasks_for_project("project-1")
-            .into_iter()
-            .find(|task| task.id == "subagent-10:0")
-            .unwrap();
-        assert_eq!(task.status, TaskStatus::Cancelled);
-        assert!(task.finished_at_ms.is_some());
     }
 
     #[test]
@@ -2738,33 +2514,6 @@ mod tests {
 
         let cancelled = supervisor.cancel_lane_hierarchy("session-1", "root");
         assert_eq!(cancelled, 2);
-    }
-
-    #[test]
-    fn subagent_events_create_sibling_supervisor_lanes() {
-        let dir = tempfile::tempdir().unwrap();
-        let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
-        supervisor.get_or_create_lane("session-1", "main");
-        for task_index in 0..2 {
-            supervisor.observe_session_event(
-                "project-1",
-                "session-1",
-                None,
-                &AgentEvent::SubagentQueued {
-                    run_id: 9,
-                    task_index,
-                    agent: "worker".into(),
-                    task: format!("task {task_index}"),
-                },
-            );
-        }
-
-        for task_index in 0..2 {
-            let lane =
-                supervisor.get_or_create_lane("session-1", &format!("subagent-9:{task_index}"));
-            assert_eq!(lane.parent_lane.as_deref(), Some("main"));
-        }
-        assert_eq!(supervisor.cancel_lane_hierarchy("session-1", "main"), 3);
     }
 
     #[test]

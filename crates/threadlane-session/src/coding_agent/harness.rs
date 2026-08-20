@@ -785,7 +785,7 @@ impl CodingSessionHarness {
 
     pub(crate) fn finish_subagent_lane(
         &mut self,
-        _lane: &str,
+        lane: &str,
         run_id: &str,
         outcome: OperationOutcome,
         error: Option<String>,
@@ -849,7 +849,35 @@ impl CodingSessionHarness {
         }
 
         self.store
-            .finish_operation(run_id, outcome, error)
+            .finish_operation(run_id, outcome.clone(), error.clone())
+            .map_err(|error| error.to_string())?;
+        self.store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())?;
+
+        let phase = match outcome {
+            OperationOutcome::Completed => SubagentLifecyclePhase::Completed,
+            OperationOutcome::Failed => SubagentLifecyclePhase::Failed,
+            OperationOutcome::Aborted | OperationOutcome::Declined => SubagentLifecyclePhase::Cancelled,
+        };
+        let seq = harness_next_seq(self.store.store());
+        self.store
+            .append_record_gated(HarnessRecord::SubagentLifecycle {
+                id: format!("subagent-finished-{run_id}-{seq}"),
+                seq,
+                lane: "main".into(),
+                timestamp: timestamp(),
+                run_id: None,
+                attempt: None,
+                child_run_id: TraceString::new(run_id.to_owned())?,
+                parent_tool_call_id: None,
+                task_index: None,
+                agent_id: TraceString::new(lane.to_owned())?,
+                subagent_lane: TraceString::new(lane.to_owned())?,
+                phase,
+                result_entry_id: None,
+                error: error.map(TraceString::new).transpose()?,
+            })
             .map_err(|error| error.to_string())?;
         self.store
             .drive_to_completion()
