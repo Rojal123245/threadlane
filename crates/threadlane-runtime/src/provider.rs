@@ -572,7 +572,9 @@ pub type AssistantMessageRecorder = Arc<
 >;
 
 pub type ModelContextRefresh = Arc<
-    dyn Fn(Arc<tokio::sync::Mutex<TurnState>>) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>
+    dyn Fn(
+            Arc<tokio::sync::Mutex<TurnState>>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>
         + Send
         + Sync,
 >;
@@ -667,7 +669,10 @@ mod tests {
 
         let codex = router.build_payload(PayloadFormat::Codex, &state, &[], None);
         let input = codex.get("input").and_then(|v| v.as_array());
-        assert!(input.is_some(), "input array must be present for multi-turn conversations");
+        assert!(
+            input.is_some(),
+            "input array must be present for multi-turn conversations"
+        );
         assert!(!input.unwrap().is_empty(), "input must not be empty");
     }
 
@@ -676,11 +681,9 @@ mod tests {
         let router = ProviderRouter::default();
         let state = TurnState {
             system_prompt: "instructions".into(),
-            messages: vec![
-                AgentMessage::System {
-                    content: "system prompt".into(),
-                },
-            ],
+            messages: vec![AgentMessage::System {
+                content: "system prompt".into(),
+            }],
             model: "test-model".into(),
             reasoning_effort: ReasoningEffort::default(),
         };

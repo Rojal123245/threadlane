@@ -596,7 +596,10 @@ pub async fn refresh_codex_account_token(account: &CodexAccount) -> Result<Codex
         .map(str::to_string)
         .or_else(|| account.refresh_token.clone());
 
-    let expires_in = val.get("expires_in").and_then(|v| v.as_u64()).unwrap_or(3600);
+    let expires_in = val
+        .get("expires_in")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(3600);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())

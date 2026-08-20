@@ -1,13 +1,13 @@
 use gpui::*;
 use gpui_component::Root;
 use std::path::PathBuf;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use threadlane_session::{CodingAgentOptions, HarnessCompositionSnapshot};
 use threadlane_gpui::assets::Assets;
 use threadlane_gpui::screens::workspace::WorkspaceView;
 use threadlane_gpui::theme;
+use threadlane_session::{CodingAgentOptions, HarnessCompositionSnapshot};
 use threadlane_skills::SkillManager;
 use threadlane_wasi::{packages::default_global_threadlane_dir, WasiExtensionManager};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 fn dump_config(args: &[String]) -> Result<(), String> {
     let project_index = args
@@ -79,7 +79,9 @@ fn main() {
         .with_thread_names(true);
     let registry = tracing_subscriber::registry().with(filter).with(fmt_layer);
     if std::env::var_os("THREADLANE_TRACE_JSON").is_some() {
-        registry.with(tracing_subscriber::fmt::layer().json()).init();
+        registry
+            .with(tracing_subscriber::fmt::layer().json())
+            .init();
     } else {
         registry.init();
     }

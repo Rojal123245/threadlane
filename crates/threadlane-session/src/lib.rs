@@ -15,15 +15,14 @@ pub mod supervisor;
 pub mod system_prompt;
 
 // ── CodingAgent (the session runtime) ─────────────────────────────────
-pub mod coding_agent;
 mod capabilities_catalog;
+pub mod coding_agent;
 pub use capabilities_catalog::CapabilityCatalog;
 pub use coding_agent::harness::{
-    CodingSessionHarness, HarnessJournal, HarnessRecord, HarnessWatch,
-    InterruptedSubagentRecoveryState,
+    CodingSessionHarness, HarnessRecord, HarnessWatch, InterruptedSubagentRecoveryState,
 };
 pub use coding_agent::runtime::{
-    AgentRunTask, cancel_open_subagent_operations, CodingAgent, CodingAgentCancellation,
+    cancel_open_subagent_operations, AgentRunTask, CodingAgent, CodingAgentCancellation,
     CodingAgentOptions, CodingAgentWorkHandle, HarnessCompositionSnapshot,
     SubagentCancellationGuard, SubagentInnerTool, SubagentInnerToolData, SubagentResult,
     SubagentSessionData,
@@ -62,8 +61,8 @@ pub use system_prompt::SystemPromptConfig;
 
 // Re-export the runtime crate's public API so downstream crates (GPUI)
 // can use a single dependency.
-pub use threadlane_runtime::*;
 pub use threadlane_mcp::*;
+pub use threadlane_runtime::*;
 pub use threadlane_skills::*;
 pub use threadlane_wasi::broker::*;
 pub use threadlane_wasi::packages::*;

@@ -224,20 +224,23 @@ impl ProviderClient {
             clients.push(self.openai.clone());
             clients.extend(self.openai_fallbacks.clone());
 
-            let tasks: Vec<Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send>> = clients
+            let tasks: Vec<
+                Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send>,
+            > = clients
                 .into_iter()
                 .map(|client| {
                     let source = source.clone();
                     let prompt_cache_key = prompt_cache_key.clone();
-                    let task: Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send> =
-                        Box::new(move |tx| {
-                            Box::pin(async move {
-                                let provider: Arc<dyn crate::traits::ModelProvider> = Arc::new(client);
-                                provider
-                                    .stream_chat_completion(source, prompt_cache_key, tx)
-                                    .await;
-                            })
-                        });
+                    let task: Box<
+                        dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send,
+                    > = Box::new(move |tx| {
+                        Box::pin(async move {
+                            let provider: Arc<dyn crate::traits::ModelProvider> = Arc::new(client);
+                            provider
+                                .stream_chat_completion(source, prompt_cache_key, tx)
+                                .await;
+                        })
+                    });
                     task
                 })
                 .collect();
@@ -272,7 +275,9 @@ impl ProviderClient {
         PrimaryFut: std::future::Future<Output = ()> + Send + 'static,
         FallbackFut: std::future::Future<Output = ()> + Send + 'static,
     {
-        let tasks: Vec<Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send>> = vec![
+        let tasks: Vec<
+            Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send>,
+        > = vec![
             Box::new(move |tx| Box::pin(primary(tx))),
             Box::new(move |tx| Box::pin(fallback(tx))),
         ];
@@ -301,9 +306,7 @@ impl ProviderClient {
                         emitted_visible_output = true;
                     }
                     StreamEvent::Error(error)
-                        if !emitted_visible_output
-                            && !is_last
-                            && is_quota_or_rate_limit(error) =>
+                        if !emitted_visible_output && !is_last && is_quota_or_rate_limit(error) =>
                     {
                         tracing::warn!(
                             attempt = idx + 1,
@@ -663,7 +666,9 @@ mod tests {
         );
         let (tx, mut rx) = mpsc::channel(8);
 
-        let tasks: Vec<Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send>> = vec![
+        let tasks: Vec<
+            Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send>,
+        > = vec![
             Box::new(|tx| {
                 Box::pin(async move {
                     tx.send(StreamEvent::Error("HTTP 429 quota exceeded".into()))
@@ -699,7 +704,9 @@ mod tests {
     async fn returns_final_error_when_all_backups_fail() {
         let (tx, mut rx) = mpsc::channel(8);
 
-        let tasks: Vec<Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send>> = vec![
+        let tasks: Vec<
+            Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send>,
+        > = vec![
             Box::new(|tx| {
                 Box::pin(async move {
                     tx.send(StreamEvent::Error("HTTP 429 quota1".into()))

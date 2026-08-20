@@ -17,7 +17,7 @@ pub mod utils;
 
 // ── AgentRuntime (sole runtime — replaces UnifiedAgent + ProviderRunExecutor) ──
 mod runtime;
-pub use runtime::{AgentRuntime, ModelContextProjector};
+pub use runtime::{AgentRuntime, ModelContextProjector, ModelContextSource};
 
 // ── AppRuntime (new composition root) ───────────────────────────────
 mod app_runtime;

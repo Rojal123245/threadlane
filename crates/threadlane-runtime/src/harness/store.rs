@@ -168,9 +168,7 @@ pub trait SessionStore {
                     entries.push(entry);
                 }
                 super::types::SurfaceOperation::Replace {
-                    start_seq,
-                    end_seq,
-                    ..
+                    start_seq, end_seq, ..
                 } => {
                     entries.retain(|e| e.seq < *start_seq || e.seq > *end_seq);
                     entries.push(entry);

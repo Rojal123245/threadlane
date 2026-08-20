@@ -482,7 +482,8 @@ impl SidebarView {
                                                         state,
                                                         AppAction::SettleSession {
                                                             work_dir: quick_settle_work_dir.clone(),
-                                                            session_id: quick_settle_session_id.clone(),
+                                                            session_id: quick_settle_session_id
+                                                                .clone(),
                                                         },
                                                     );
                                                     cx.notify();
@@ -818,7 +819,11 @@ impl SidebarView {
                     .items_center()
                     .gap_2()
                     .px_3()
-                    .pt(if group == DateGroup::Today { px(2.0) } else { px(14.0) })
+                    .pt(if group == DateGroup::Today {
+                        px(2.0)
+                    } else {
+                        px(14.0)
+                    })
                     .pb_1()
                     .child(
                         div()

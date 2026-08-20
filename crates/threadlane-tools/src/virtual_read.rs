@@ -55,7 +55,11 @@ pub fn parse_github_ref(input: &str) -> Option<ParsedGitHubRef> {
     Some(ParsedGitHubRef {
         owner,
         repo,
-        kind: if parsed.kind == "mr" { "pr".to_string() } else { parsed.kind },
+        kind: if parsed.kind == "mr" {
+            "pr".to_string()
+        } else {
+            parsed.kind
+        },
         number: parsed.number,
     })
 }
@@ -323,7 +327,9 @@ pub fn remote_ref_path(root: &Path, reference: &str) -> String {
 
     match provider {
         RepoProvider::GitHub => fetch_github(root, &owner_repo, &parsed.kind, &parsed.number),
-        RepoProvider::GitLab => fetch_gitlab(root, &host, &owner_repo, &parsed.kind, &parsed.number),
+        RepoProvider::GitLab => {
+            fetch_gitlab(root, &host, &owner_repo, &parsed.kind, &parsed.number)
+        }
     }
 }
 
@@ -352,7 +358,14 @@ fn fetch_github(root: &Path, owner_repo: &str, kind: &str, number: &str) -> Stri
     // Strategy 2: Direct curl HTTP API fallback
     let url = format!("https://api.github.com/{endpoint}");
     let mut cmd = Command::new("curl");
-    cmd.args(["-s", "-L", "-H", "User-Agent: Threadlane", "-H", "Accept: application/vnd.github+json"]);
+    cmd.args([
+        "-s",
+        "-L",
+        "-H",
+        "User-Agent: Threadlane",
+        "-H",
+        "Accept: application/vnd.github+json",
+    ]);
 
     let token = threadlane_auth::github_auth::get_github_token();
     if let Some(tok) = &token {
@@ -423,7 +436,9 @@ fn fetch_gitlab(root: &Path, host: &str, project_path: &str, kind: &str, number:
     match cmd.output() {
         Ok(output) if output.status.success() => {
             let raw = String::from_utf8_lossy(&output.stdout).into_owned();
-            if raw.contains("\"message\":\"404 Project Not Found\"") || raw.contains("\"message\":\"404 Not Found\"") {
+            if raw.contains("\"message\":\"404 Project Not Found\"")
+                || raw.contains("\"message\":\"404 Not Found\"")
+            {
                 format!(
                     "GitLab {kind} #{number} not found on {project_path}. (If private, set GITLAB_TOKEN or run 'glab auth login')"
                 )
@@ -479,7 +494,9 @@ pub fn format_github_markdown(kind: &str, number: &str, raw_json: &str) -> Strin
         if !url.is_empty() {
             out.push_str(&format!("- **URL:** {url}\n"));
         }
-        out.push_str(&format!("- **Changes:** +{additions} / -{deletions} ({changed_files} files changed)\n\n"));
+        out.push_str(&format!(
+            "- **Changes:** +{additions} / -{deletions} ({changed_files} files changed)\n\n"
+        ));
     } else {
         out.push_str(&format!("# Issue #{number}: {title}\n\n"));
         out.push_str(&format!("- **Status:** {state}\n"));
@@ -525,7 +542,9 @@ pub fn format_gitlab_markdown(kind: &str, number: &str, raw_json: &str) -> Strin
         out.push_str(&format!("# Merge Request !{number}: {title}\n\n"));
         out.push_str(&format!("- **Status:** {state}\n"));
         out.push_str(&format!("- **Author:** @{author}\n"));
-        out.push_str(&format!("- **Branches:** `{source_branch}` -> `{target_branch}`\n"));
+        out.push_str(&format!(
+            "- **Branches:** `{source_branch}` -> `{target_branch}`\n"
+        ));
         if !created_at.is_empty() {
             out.push_str(&format!("- **Created:** {created_at}\n"));
         }
@@ -602,10 +621,7 @@ pub fn agent(root: &Path, name: &str) -> String {
         return "Error: 'agent://' reference requires an agent name".to_string();
     }
 
-    let mut search_dirs = vec![
-        root.join(".threadlane/agents"),
-        root.join(".agents/agents"),
-    ];
+    let mut search_dirs = vec![root.join(".threadlane/agents"), root.join(".agents/agents")];
 
     if let Some(home) = dirs_home() {
         search_dirs.push(home.join(".threadlane/agents"));
@@ -613,10 +629,7 @@ pub fn agent(root: &Path, name: &str) -> String {
     }
 
     for dir in search_dirs {
-        let candidates = vec![
-            dir.join(clean_name),
-            dir.join(format!("{clean_name}.md")),
-        ];
+        let candidates = vec![dir.join(clean_name), dir.join(format!("{clean_name}.md"))];
 
         for candidate in candidates {
             if candidate.is_file() {

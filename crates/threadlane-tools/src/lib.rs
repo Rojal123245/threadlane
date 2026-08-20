@@ -1227,13 +1227,24 @@ mod tests {
         assert_eq!(skill_res, "ponytail instructions");
 
         // Test PR URL parsing error format when gh CLI or git remote is missing
-        let pr_url_payload = json!({ "path": "https://github.com/wheregmis/threadlane/pull/70" }).to_string();
+        let pr_url_payload =
+            json!({ "path": "https://github.com/wheregmis/threadlane/pull/70" }).to_string();
         let pr_res = execute_tool_in_workspace("read_file", &pr_url_payload, root);
-        assert!(pr_res.contains("pr://70") || pr_res.contains("\"number\": 70") || pr_res.contains("https://github.com/"));
+        assert!(
+            pr_res.contains("pr://70")
+                || pr_res.contains("\"number\": 70")
+                || pr_res.contains("https://github.com/")
+        );
 
         // Test GitLab MR URL parsing error format when glab CLI or git remote is missing
-        let mr_url_payload = json!({ "path": "https://gitlab.com/gitlab-org/gitlab/-/merge_requests/99" }).to_string();
+        let mr_url_payload =
+            json!({ "path": "https://gitlab.com/gitlab-org/gitlab/-/merge_requests/99" })
+                .to_string();
         let mr_res = execute_tool_in_workspace("read_file", &mr_url_payload, root);
-        assert!(mr_res.contains("mr://99") || mr_res.contains("GitLab mr #99") || mr_res.contains("gitlab.com"));
+        assert!(
+            mr_res.contains("mr://99")
+                || mr_res.contains("GitLab mr #99")
+                || mr_res.contains("gitlab.com")
+        );
     }
 }

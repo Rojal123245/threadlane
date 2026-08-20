@@ -21,9 +21,9 @@ use crate::app::actions::AppAction;
 use crate::app::controller;
 use crate::screens::chat::ChatListView;
 use crate::screens::right_panel::RightPanelView;
-use crate::screens::terminal::TerminalView;
 use crate::screens::settings::SettingsView;
 use crate::screens::sidebar::SidebarView;
+use crate::screens::terminal::TerminalView;
 use crate::services::updater::{self, UpdaterEvent};
 use crate::state::{AppState, WorkspacePage};
 use threadlane_updater::UpdateStatus;
@@ -101,7 +101,8 @@ impl WorkspaceView {
         let chat_list = cx.new(|cx| ChatListView::new(model.clone(), window, cx));
         let settings = cx.new(|cx| SettingsView::new(model.clone(), window, cx));
         let right_panel = cx.new(|cx| RightPanelView::new(model.clone(), window, cx));
-        let terminal_project = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let terminal_project =
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let terminal = cx.new(|cx| TerminalView::new(terminal_project, cx));
         let sidebar_resizable_state = cx.new(|_cx| ResizableState::default());
         let right_panel_resizable_state = cx.new(|_cx| ResizableState::default());
@@ -1368,16 +1369,19 @@ impl WorkspaceView {
                                     .children(matching_commands.into_iter().enumerate().map(
                                         |(index, (name, desc, action_key))| {
                                             div()
-                                                .id(SharedString::from(format!("palette-cmd-{action_key}")))
+                                                .id(SharedString::from(format!(
+                                                    "palette-cmd-{action_key}"
+                                                )))
                                                 .mx_2()
                                                 .my_0p5()
                                                 .px_3()
                                                 .py_2()
                                                 .rounded_lg()
                                                 .hover(|style| style.bg(theme.list_hover))
-                                                .when(index == self.command_palette_selected, |style| {
-                                                    style.bg(theme.list_active)
-                                                })
+                                                .when(
+                                                    index == self.command_palette_selected,
+                                                    |style| style.bg(theme.list_active),
+                                                )
                                                 .child(
                                                     div()
                                                         .flex()
@@ -1396,11 +1400,15 @@ impl WorkspaceView {
                                                                 .child(desc),
                                                         ),
                                                 )
-                                                .on_click(cx.listener(move |this, _event, window, cx| {
-                                                    this.command_palette_open = false;
-                                                    this.command_palette_selected = 0;
-                                                    this.execute_palette_action(action_key, window, cx);
-                                                }))
+                                                .on_click(cx.listener(
+                                                    move |this, _event, window, cx| {
+                                                        this.command_palette_open = false;
+                                                        this.command_palette_selected = 0;
+                                                        this.execute_palette_action(
+                                                            action_key, window, cx,
+                                                        );
+                                                    },
+                                                ))
                                         },
                                     ))
                                     .when(!session_results.is_empty(), |list| {
@@ -1416,7 +1424,10 @@ impl WorkspaceView {
                                         )
                                         .children(
                                             session_results.into_iter().enumerate().take(8).map(
-                                                |(session_idx, (work_dir, session_id, title, project))| {
+                                                |(
+                                                    session_idx,
+                                                    (work_dir, session_id, title, project),
+                                                )| {
                                                     let model = self.model.clone();
                                                     div()
                                                         .id(SharedString::from(format!(
@@ -1441,13 +1452,17 @@ impl WorkspaceView {
                                                                 .child(
                                                                     div()
                                                                         .text_sm()
-                                                                        .font_weight(FontWeight::MEDIUM)
+                                                                        .font_weight(
+                                                                            FontWeight::MEDIUM,
+                                                                        )
                                                                         .child(title),
                                                                 )
                                                                 .child(
                                                                     div()
                                                                         .text_xs()
-                                                                        .text_color(theme.muted_foreground)
+                                                                        .text_color(
+                                                                            theme.muted_foreground,
+                                                                        )
                                                                         .child(project),
                                                                 ),
                                                         )
@@ -1473,15 +1488,12 @@ impl WorkspaceView {
                                         )
                                     }),
                             )
-                            .child(
-                                div()
-                                    .absolute()
-                                    .inset_0()
-                                    .child(gpui_component::scroll::Scrollbar::vertical(
-                                        &self.command_palette_scroll_handle,
-                                    )),
-                            ),
-                    )
+                            .child(div().absolute().inset_0().child(
+                                gpui_component::scroll::Scrollbar::vertical(
+                                    &self.command_palette_scroll_handle,
+                                ),
+                            )),
+                    ),
             )
             .into_any_element()
     }
@@ -1495,7 +1507,8 @@ impl Render for WorkspaceView {
         }
         let workspace_page = self.model.read(cx).workspace_page;
         if let Some(project) = self.model.read(cx).active_work_dir.clone() {
-            self.terminal.update(cx, |terminal, cx| terminal.set_project(project, cx));
+            self.terminal
+                .update(cx, |terminal, cx| terminal.set_project(project, cx));
         }
         let theme = cx.theme().colors;
         let sidebar_tooltip = if self.sidebar_collapsed {
@@ -1508,10 +1521,7 @@ impl Render for WorkspaceView {
             let upper_content = if self.right_panel_visible {
                 h_resizable("workspace-chat-right-split")
                     .with_state(&self.right_panel_resizable_state)
-                    .child(
-                        resizable_panel()
-                            .child(self.chat_list.clone()),
-                    )
+                    .child(resizable_panel().child(self.chat_list.clone()))
                     .child(
                         resizable_panel()
                             .size(px(300.0))
@@ -1545,10 +1555,7 @@ impl Render for WorkspaceView {
 
                 v_resizable("workspace-main-bottom-split")
                     .with_state(&self.bottom_panel_resizable_state)
-                    .child(
-                        resizable_panel()
-                            .child(upper_content),
-                    )
+                    .child(resizable_panel().child(upper_content))
                     .child(
                         resizable_panel()
                             .size(px(280.0))
@@ -1569,10 +1576,7 @@ impl Render for WorkspaceView {
                             .size_range(px(160.0)..px(500.0))
                             .child(self.sidebar.clone()),
                     )
-                    .child(
-                        resizable_panel()
-                            .child(main_content),
-                    )
+                    .child(resizable_panel().child(main_content))
                     .into_any_element()
             } else {
                 main_content

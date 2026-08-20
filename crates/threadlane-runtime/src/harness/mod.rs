@@ -1,6 +1,6 @@
 mod agent;
-mod effects;
 mod diagnostics;
+mod effects;
 mod events;
 mod hooks;
 mod jsonl;
@@ -36,9 +36,7 @@ pub use procedure::{
     DeferredResolution, NavigationProcedure, NoToolRun, OperationProcedure, ProcedureError,
     PromptProcedure, QueueProcedure, RetryPolicy, RetryProcedure, ToolBatchProcedure, ToolRecovery,
 };
-pub use projections::{
-    project_chat_messages, UiChatMessage, UiMessageRole, UiToolActivity,
-};
+pub use projections::{project_chat_messages, UiChatMessage, UiMessageRole, UiToolActivity};
 pub use queue::{LaneQueue, SteerItem, SteerPriority};
 pub use reducer::Reducer;
 pub use session::{LaneHandle, SessionAgent};

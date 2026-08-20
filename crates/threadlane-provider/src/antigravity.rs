@@ -293,7 +293,9 @@ impl AntigravityClient {
                 .discover_at(&endpoint, "loadCodeAssist", &metadata, token)
                 .await
             {
-                tracing::debug!("Antigravity resolved project from {endpoint}/loadCodeAssist: {project}");
+                tracing::debug!(
+                    "Antigravity resolved project from {endpoint}/loadCodeAssist: {project}"
+                );
                 return project;
             }
         }
@@ -1269,7 +1271,9 @@ fn safe_error_text(text: &str) -> String {
             }
             if let Some(details) = error.get("details").and_then(Value::as_array) {
                 for detail in details {
-                    if let Some(violations) = detail.get("fieldViolations").and_then(Value::as_array) {
+                    if let Some(violations) =
+                        detail.get("fieldViolations").and_then(Value::as_array)
+                    {
                         for v in violations {
                             let field = v.get("field").and_then(Value::as_str).unwrap_or("");
                             let desc = v.get("description").and_then(Value::as_str).unwrap_or("");
@@ -1277,7 +1281,11 @@ fn safe_error_text(text: &str) -> String {
                                 parts.push(format!("field '{field}': {desc}"));
                             }
                         }
-                    } else if let Some(msg) = detail.get("description").or_else(|| detail.get("message")).and_then(Value::as_str) {
+                    } else if let Some(msg) = detail
+                        .get("description")
+                        .or_else(|| detail.get("message"))
+                        .and_then(Value::as_str)
+                    {
                         parts.push(msg.to_string());
                     }
                 }

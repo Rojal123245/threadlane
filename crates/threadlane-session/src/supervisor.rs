@@ -3,9 +3,7 @@
 // exercised only in tests; dead-code warnings are intentionally suppressed.
 #![allow(dead_code)]
 use crate::coding_agent::harness::CodingSessionHarness;
-use crate::coding_agent::runtime::{
-    CodingAgent, CodingAgentOptions, SubagentCancellationGuard,
-};
+use crate::coding_agent::runtime::{CodingAgent, CodingAgentOptions, SubagentCancellationGuard};
 use crate::project_registry::{
     load_project_registry_from, merge_and_save_project_registry_to, ProjectRecord,
 };
@@ -945,7 +943,8 @@ impl HarnessSupervisor {
                                 recovery.safe_tools_to_replay.iter().zip(replayed.iter())
                             {
                                 if let threadlane_runtime::Record::ToolStarted {
-                                    tool_call_id, ..
+                                    tool_call_id,
+                                    ..
                                 } = record
                                 {
                                     agent.session_tree.replace_tool_result(

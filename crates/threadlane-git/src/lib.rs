@@ -385,9 +385,16 @@ pub fn parse_gh_pr_json(json_str: &str) -> Result<GitHubPrInfo, String> {
             let conclusion_upper = conclusion.as_deref().unwrap_or("").to_uppercase();
             let status_upper = status.to_uppercase();
 
-            if matches!(conclusion_upper.as_str(), "FAILURE" | "TIMED_OUT" | "ACTION_REQUIRED" | "CANCELLED" | "ERROR") {
+            if matches!(
+                conclusion_upper.as_str(),
+                "FAILURE" | "TIMED_OUT" | "ACTION_REQUIRED" | "CANCELLED" | "ERROR"
+            ) {
                 failing_checks += 1;
-            } else if matches!(status_upper.as_str(), "IN_PROGRESS" | "QUEUED" | "PENDING" | "EXPECTED") || conclusion.is_none() {
+            } else if matches!(
+                status_upper.as_str(),
+                "IN_PROGRESS" | "QUEUED" | "PENDING" | "EXPECTED"
+            ) || conclusion.is_none()
+            {
                 pending_checks += 1;
             } else if matches!(conclusion_upper.as_str(), "SUCCESS" | "NEUTRAL" | "SKIPPED") {
                 passing_checks += 1;
@@ -461,8 +468,6 @@ pub fn checkout(work_dir: &Path, name: &str) -> Result<(), GitError> {
     command(work_dir, &["switch", &name])?;
     Ok(())
 }
-
-
 
 /// Describe changed paths in dependency-friendly groups for atomic commit planning.
 /// Source files are emitted before generated/lock files, and lock files are excluded.
@@ -597,10 +602,14 @@ fn validate_diff_path(work_dir: &Path, path: &str) -> Result<(), GitError> {
             return Err(invalid());
         }
     }
-    if !existing.canonicalize().map_err(|error| GitError {
-        work_dir: work_dir.to_path_buf(),
-        message: format!("could not resolve path: {error}"),
-    })?.starts_with(&root) {
+    if !existing
+        .canonicalize()
+        .map_err(|error| GitError {
+            work_dir: work_dir.to_path_buf(),
+            message: format!("could not resolve path: {error}"),
+        })?
+        .starts_with(&root)
+    {
         return Err(invalid());
     }
     Ok(())
@@ -643,7 +652,14 @@ pub fn diff_file(work_dir: &Path, path: &str) -> Result<String, GitError> {
     if command(work_dir, &["ls-files", "--error-unmatch", "--", path]).is_err() {
         let null_source = if cfg!(windows) { "NUL" } else { "/dev/null" };
         if let Ok(output) = Command::new("git")
-            .args(["diff", "--no-ext-diff", "--no-index", "--", null_source, path])
+            .args([
+                "diff",
+                "--no-ext-diff",
+                "--no-index",
+                "--",
+                null_source,
+                path,
+            ])
             .current_dir(work_dir)
             .output()
         {
@@ -733,8 +749,6 @@ fn default_branch(work_dir: &Path) -> Option<String> {
     }
     Some("main".to_owned())
 }
-
-
 
 fn validate_branch_name(work_dir: &Path, name: &str) -> Result<String, GitError> {
     let name = name.trim();
@@ -870,8 +884,6 @@ mod tests {
         assert!(status.branch.is_none());
     }
 
-
-
     #[test]
     fn normalizes_renamed_paths() {
         let status = parse_status(
@@ -902,8 +914,6 @@ mod tests {
         );
         assert_eq!(status.files[0].path, " leading.txt ");
     }
-
-
 
     #[test]
     fn atomic_commit_groups_exclude_locks_and_order_sources_first() {

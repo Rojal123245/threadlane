@@ -33,7 +33,8 @@ pub(crate) fn start_chatgpt_login(tx: Sender<ProviderAuthEvent>) -> Result<(), S
         .map_err(|error| format!("Failed to open ChatGPT sign-in: {error:?}"))?;
 
     let _ = tx.send(ProviderAuthEvent::Status(
-        "Finish signing in to ChatGPT in your browser (select Personal Workspace if prompted).".to_string(),
+        "Finish signing in to ChatGPT in your browser (select Personal Workspace if prompted)."
+            .to_string(),
     ));
 
     executor()?.spawn(async move {

@@ -346,10 +346,7 @@ impl McpManager {
             for t in &tools {
                 tool_defs.push(t.definition.clone());
             }
-            records.push(McpServerRecord {
-                config,
-                tools,
-            });
+            records.push(McpServerRecord { config, tools });
         }
 
         let mut guard = self.servers.lock().await;
@@ -361,10 +358,7 @@ impl McpManager {
     }
 
     /// Opens (or reuses) a session and lists the server's tools.
-    async fn connect_server(
-        &self,
-        config: &McpServerConfig,
-    ) -> Vec<McpToolInfo> {
+    async fn connect_server(&self, config: &McpServerConfig) -> Vec<McpToolInfo> {
         if matches!(config.transport, McpTransport::Sse { .. }) {
             return Vec::new();
         }

@@ -26,8 +26,25 @@ use threadlane_provider::openai::ToolCall;
 use threadlane_provider::router::{PayloadFormat, ProviderClient};
 use tokio::sync::{broadcast, Mutex};
 
-/// Model context projector — a closure that returns the canonical message
-/// list. When set, this is used instead of the harness projection.
+/// Unified source for model-visible context.
+///
+/// Durable callers should provide the canonical session projection. The
+/// legacy closure aliases below remain available for compatibility, but new
+/// integrations should use this single source instead of coordinating several
+/// precedence-based callbacks.
+pub trait ModelContextSource: Send + Sync {
+    fn project(&self) -> Result<Vec<AgentMessage>, String>;
+}
+
+impl<F> ModelContextSource for F
+where
+    F: Fn() -> Result<Vec<AgentMessage>, String> + Send + Sync,
+{
+    fn project(&self) -> Result<Vec<AgentMessage>, String> {
+        self()
+    }
+}
+
 pub type ModelContextProjector = Arc<dyn Fn() -> Vec<AgentMessage> + Send + Sync>;
 
 /// The single, unified agent runtime.
@@ -77,6 +94,7 @@ pub struct AgentRuntime {
     message_recorder: Option<crate::provider::AssistantMessageRecorder>,
     /// Optional external model context projector. When set, this is used
     /// instead of the internal harness projection for refreshing turn state.
+    model_context_source: Option<Arc<dyn ModelContextSource>>,
     model_context_projector: Option<ModelContextProjector>,
     /// Optional external model context refresh hook.
     model_context_refresh: Option<crate::provider::ModelContextRefresh>,
@@ -113,8 +131,8 @@ impl AgentRuntime {
                 .map_err(|e| AgentError::Session(format!("open session journal: {e}")))?
         } else {
             // Ephemeral store backed by a temp file.
-            let tmp = std::env::temp_dir()
-                .join(format!("threadlane-ephemeral-{}", std::process::id()));
+            let tmp =
+                std::env::temp_dir().join(format!("threadlane-ephemeral-{}", std::process::id()));
             let _ = std::fs::create_dir_all(tmp.parent().unwrap());
             JsonlStore::open(&tmp)
                 .map_err(|e| AgentError::Session(format!("open ephemeral journal: {e}")))?
@@ -154,6 +172,7 @@ impl AgentRuntime {
             allowed_tool_names: None,
             provider_trace_recorder: None,
             message_recorder: None,
+            model_context_source: None,
             model_context_projector: None,
             model_context_refresh: None,
         })
@@ -165,6 +184,12 @@ impl AgentRuntime {
     /// instead of the internal harness projection for refreshing turn state
     /// before each turn. Useful when the caller manages the session store
     /// externally (e.g. CodingSessionHarness).
+    /// Sets the unified model-context source for durable integrations.
+    pub fn set_model_context_source(&mut self, source: Option<Arc<dyn ModelContextSource>>) {
+        self.model_context_source = source;
+    }
+
+    /// Compatibility setter for older integrations.
     pub fn set_model_context_projector(&mut self, projector: Option<ModelContextProjector>) {
         self.model_context_projector = projector;
     }
@@ -181,18 +206,22 @@ impl AgentRuntime {
     /// Prefers the model_context_refresh hook, then the projector closure,
     /// then falls back to the internal harness projection.
     async fn refresh_projected_messages(&self) {
-        // External refresh hook takes priority.
+        if let Some(source) = &self.model_context_source {
+            if let Ok(messages) = source.project() {
+                self.turn.lock().await.messages = messages;
+            }
+            return;
+        }
+        // Compatibility path for older callers. New integrations should use
+        // one ModelContextSource rather than this precedence chain.
         if let Some(refresh) = &self.model_context_refresh {
             let _ = refresh(self.turn.clone()).await;
             return;
         }
-        // External projector closure.
         if let Some(projector) = &self.model_context_projector {
-            let messages = projector();
-            self.turn.lock().await.messages = messages;
+            self.turn.lock().await.messages = projector();
             return;
         }
-        // Internal harness projection.
         if let Ok(context) = self.harness.store().model_context("main") {
             let system_prompt = self.turn.lock().await.system_prompt.clone();
             let messages: Vec<AgentMessage> = std::iter::once(AgentMessage::System {
@@ -433,7 +462,9 @@ impl AgentRuntime {
     }
 
     pub async fn execute_tools_for_replay(&self, calls: &[ToolCall]) -> Vec<AgentToolResult> {
-        self.synced_dispatcher().execute_tools_for_replay(calls).await
+        self.synced_dispatcher()
+            .execute_tools_for_replay(calls)
+            .await
     }
 
     pub async fn execute_tools(&self, calls: &[ToolCall]) -> Vec<AgentToolResult> {

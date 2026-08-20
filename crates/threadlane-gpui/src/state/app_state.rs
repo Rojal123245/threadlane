@@ -413,7 +413,9 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                 threadlane_session::harness::UiMessageRole::User => MessageRole::User,
                 threadlane_session::harness::UiMessageRole::Assistant => MessageRole::Assistant,
                 threadlane_session::harness::UiMessageRole::System => MessageRole::System,
-                threadlane_session::harness::UiMessageRole::Advisor(sev) => MessageRole::Advisor(sev),
+                threadlane_session::harness::UiMessageRole::Advisor(sev) => {
+                    MessageRole::Advisor(sev)
+                }
                 threadlane_session::harness::UiMessageRole::Error => MessageRole::Error,
             },
             content: msg.content,
@@ -1752,18 +1754,28 @@ impl AppState {
             }
             let projected = match &entry.message {
                 AgentMessage::User { content } | AgentMessage::UserWithImages { content, .. } => {
-                    Some(("Input".to_string(), "User input".to_string(), content.clone()))
+                    Some((
+                        "Input".to_string(),
+                        "User input".to_string(),
+                        content.clone(),
+                    ))
                 }
                 AgentMessage::Assistant {
                     content: Some(content),
                     ..
-                } if !content.trim().is_empty() => {
-                    Some(("Assistant".to_string(), "Assistant response".to_string(), content.clone()))
-                }
+                } if !content.trim().is_empty() => Some((
+                    "Assistant".to_string(),
+                    "Assistant response".to_string(),
+                    content.clone(),
+                )),
                 AgentMessage::Custom {
                     custom_type,
                     payload,
-                } if matches!(custom_type.as_str(), "thinking" | "goal_round" | "agent_error") => {
+                } if matches!(
+                    custom_type.as_str(),
+                    "thinking" | "goal_round" | "agent_error"
+                ) =>
+                {
                     let (category, summary, detail) = if custom_type == "agent_error" {
                         let err_msg = payload
                             .get("error")
@@ -1778,7 +1790,8 @@ impl AppState {
                         (
                             "Context".to_string(),
                             custom_type.to_string(),
-                            serde_json::to_string_pretty(payload).unwrap_or_else(|_| payload.to_string()),
+                            serde_json::to_string_pretty(payload)
+                                .unwrap_or_else(|_| payload.to_string()),
                         )
                     };
                     Some((category, summary, detail))
@@ -2256,7 +2269,9 @@ impl AppState {
                         if let Err(error) =
                             self.hydrate_session_projection(&session_id, &session_file)
                         {
-                            tracing::warn!("Failed to reconcile completed session trajectory: {error}");
+                            tracing::warn!(
+                                "Failed to reconcile completed session trajectory: {error}"
+                            );
                         }
                         self.active_plan = load_session_plan(&session_file);
                         self.is_generating = false;
@@ -2587,7 +2602,10 @@ fn project_recovery_diagnostics(
                 turn: None,
                 category: "Interrupted Tool".into(),
                 summary: format!("{} · replay {:?}", tool.name, tool.replay),
-                detail: format!("call={} result_entry={}", tool.call_id, tool.result_entry_id),
+                detail: format!(
+                    "call={} result_entry={}",
+                    tool.call_id, tool.result_entry_id
+                ),
                 lane: Some(lane.lane.clone()),
                 correlation_id: Some(tool.call_id.clone()),
             });
@@ -2715,11 +2733,11 @@ mod tests {
 
     #[test]
     fn app_state_startup_hydrates_complete_initial_session_history() {
+        use threadlane_provider::openai::{ToolCall, ToolCallFunction};
         use threadlane_session::harness::{
             CapabilitySnapshot, OperationIntent, PromptSnapshot, ProviderOutcome, Record,
             SessionStore, TraceString, UsageCause,
         };
-        use threadlane_provider::openai::{ToolCall, ToolCallFunction};
 
         let unique = std::time::SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2971,11 +2989,11 @@ mod tests {
 
     #[test]
     fn durable_projection_restores_ordered_tool_lifecycle_and_exact_usage() {
+        use threadlane_provider::openai::{ToolCall, ToolCallFunction};
         use threadlane_session::harness::{
             Entry, OperationIntent, OperationOutcome, Record, SessionStore, ToolReplaySafety,
             UsageCause,
         };
-        use threadlane_provider::openai::{ToolCall, ToolCallFunction};
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");

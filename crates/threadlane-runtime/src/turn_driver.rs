@@ -453,9 +453,8 @@ impl<'a> TurnDriver<'a> {
                         );
                         // Store the full provider error text so the trajectory
                         // inspector can show it inline with the request row.
-                        let error_code = TraceString::new(
-                            err.chars().take(2048).collect::<String>()
-                        ).ok();
+                        let error_code =
+                            TraceString::new(err.chars().take(2048).collect::<String>()).ok();
                         if let Err(error) = self
                             .record_provider_trace(ProviderTraceEvent::Finished {
                                 attempt: turn_number as u32,
@@ -620,7 +619,11 @@ impl<'a> TurnDriver<'a> {
                 });
                 return;
             }
-            self.turn.lock().await.messages.extend(step_messages.iter().cloned());
+            self.turn
+                .lock()
+                .await
+                .messages
+                .extend(step_messages.iter().cloned());
 
             self.emit_event(AgentEvent::MessageEnd {
                 message: assistant_msg,
@@ -648,7 +651,9 @@ impl<'a> TurnDriver<'a> {
                     let items: Vec<_> = self.follow_up_queue.drain(..).collect();
                     if let Err(error) = self.persist_messages(&items).await {
                         self.emit_event(AgentEvent::AgentError {
-                            error: format!("failed to persist follow-up before provider work: {error}"),
+                            error: format!(
+                                "failed to persist follow-up before provider work: {error}"
+                            ),
                         });
                         return;
                     }

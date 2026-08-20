@@ -9,7 +9,6 @@ use crate::harness::{HookContext, HookRegistry};
 use crate::loop_engine::AbortOnDrop;
 use crate::tool_executor::ToolExecutor;
 use crate::types::{AgentToolCall, AgentToolDefinition, AgentToolResult, ToolExecutionMode};
-use tracing::{debug, warn};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -21,6 +20,7 @@ use threadlane_tools::{
     execute_tool, execute_tool_in_workspace, get_available_tools, get_codex_tools,
 };
 use tokio::sync::broadcast;
+use tracing::{debug, warn};
 
 use futures::FutureExt;
 

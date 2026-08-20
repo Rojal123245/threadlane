@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, OnceLock};
 
-use threadlane_session::{AgentEvent, ImageAttachment, ReasoningEffort, SessionTree};
 use threadlane_provider::ProviderClient;
+use threadlane_session::{AgentEvent, ImageAttachment, ReasoningEffort, SessionTree};
 
 use crate::services::sessions::SessionRuntime;
 use crate::state::ChatStreamEvent;

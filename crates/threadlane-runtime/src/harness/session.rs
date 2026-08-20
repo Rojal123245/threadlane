@@ -400,7 +400,11 @@ impl<S: SessionStore> SessionAgent<S> {
             .lane(lane.name())
             .ok_or_else(|| ReduceError::InvalidLane(lane.name().to_string()))?;
 
-        let open_operation_ids = lane_state.open_operation.iter().cloned().collect::<Vec<_>>();
+        let open_operation_ids = lane_state
+            .open_operation
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
         let mut safe_tools_to_replay = Vec::new();
         let mut unreplayable_tools = 0;
 
@@ -433,7 +437,13 @@ impl<S: SessionStore> SessionAgent<S> {
             .entries()
             .iter()
             .map(|e| e.seq)
-            .chain(self.harness.store().records().iter().map(super::Record::seq))
+            .chain(
+                self.harness
+                    .store()
+                    .records()
+                    .iter()
+                    .map(super::Record::seq),
+            )
             .max()
             .unwrap_or(0);
 

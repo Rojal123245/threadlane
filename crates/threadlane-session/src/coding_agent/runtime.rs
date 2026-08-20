@@ -1,6 +1,7 @@
 //! CodingAgent composition root — agent construction, lifecycle, subagent dispatch,
 //! harness journal extension, and event-loop orchestration.
 
+use super::broker::ManagedProcessRegistry;
 use super::capabilities::{
     build_broker_dispatcher, create_after_tool_hook_handler, dispatch_hook_requests,
     extension_before_tool_hook_handler, render_agent_catalog, restored_tool_policy, McpCapability,
@@ -10,8 +11,6 @@ use super::harness::{
     harness_cancellation_state, CodingSessionHarness, HarnessWatch,
     InterruptedSubagentRecoveryState, SubagentLaneIdentity, SubagentStartError,
 };
-use super::harness::CodingSessionHarness as HarnessJournal;
-use super::broker::ManagedProcessRegistry;
 use crate::agents::{discover_agents, AgentDefinition, AgentScope};
 use crate::commands::{execute_slash_command, parse_slash_command, CommandAction};
 use crate::context::ProjectContext;
@@ -33,20 +32,20 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use threadlane_mcp::McpManager;
+use threadlane_provider::openai::fetch_available_models;
 use threadlane_runtime::harness::{
     DeferredResolution, Entry as HarnessEntry, HookContext, HookKind, JsonlStore, OperationOutcome,
     PromptSnapshot, ProvisionedEntry, QueueKind, Record as HarnessRecord, Reducer, SessionStore,
     Snapshot, ToolRecovery, ToolSpec,
 };
 use threadlane_runtime::{
-    repair_interrupted_tool_turn, AgentEvent, AgentMessage, AgentToolResult, ImageAttachment,
-    AgentRuntime, ReasoningEffort, SessionTree, SubagentRecoveryStatus, TokenUsage,
-    TurnState,
+    repair_interrupted_tool_turn, AgentEvent, AgentMessage, AgentRuntime, AgentToolResult,
+    ImageAttachment, ModelContextSource, ReasoningEffort, SessionTree, SubagentRecoveryStatus,
+    TokenUsage, TurnState,
 };
 #[cfg(test)]
 use threadlane_runtime::{AgentToolDefinition, ToolExecutor};
-use threadlane_mcp::McpManager;
-use threadlane_provider::openai::fetch_available_models;
 use threadlane_skills::{SkillManager, SkillRegistry};
 use threadlane_wasi::packages::default_global_threadlane_dir;
 use threadlane_wasi::{WasiExtensionManager, WasiLegacyEffect};
@@ -239,7 +238,6 @@ pub(crate) enum SubagentLaneStatus {
 pub(crate) struct CompletedSubagentLane {
     lane_name: String,
     run_id: String,
-    parent_leaf_id: Option<String>,
     task: String,
     agent: String,
     status: SubagentLaneStatus,
@@ -384,7 +382,7 @@ impl CodingAgentCancellation {
 
     pub fn cancel(&self) -> Result<(), String> {
         let durable_run_id = if let Some(path) = self.harness_session_file.as_deref() {
-            let mut journal = HarnessJournal::open(path)?;
+            let mut journal = CodingSessionHarness::open(path)?;
             journal.request_abort()?
         } else {
             None
@@ -401,7 +399,7 @@ impl CodingAgentCancellation {
             self.harness_session_file.as_deref(),
             durable_run_id.as_deref(),
         ) {
-            HarnessJournal::open(path)?.observe_abort_signal(run_id, acknowledged)?;
+            CodingSessionHarness::open(path)?.observe_abort_signal(run_id, acknowledged)?;
         }
         let _ = self.event_tx.send(AgentEvent::AgentError {
             error: "Generation cancelled".into(),
@@ -412,7 +410,7 @@ impl CodingAgentCancellation {
 
 pub fn cancel_open_subagent_operations(session_file: &Path) -> Result<(), String> {
     if session_file.exists() {
-        let mut journal = HarnessJournal::open(session_file)?;
+        let mut journal = CodingSessionHarness::open(session_file)?;
         journal.refresh()?;
         let open_runs = Reducer::reduce(&journal.store)
             .map_err(|error| error.to_string())?
@@ -484,14 +482,20 @@ impl AgentWorkScheduler {
                 AgentWork::DurableQueueWake { queue, entry_id } => {
                     let Some(path) = session_file else { continue };
                     if let Ok(mut harness) = CodingSessionHarness::open(path) {
-                        if let Ok(Some(message)) = harness.consume_unbound_queue_entry(queue.clone(), &entry_id) {
+                        if let Ok(Some(message)) =
+                            harness.consume_unbound_queue_entry(queue.clone(), &entry_id)
+                        {
                             match queue {
                                 QueueKind::Steer => agent.steer(message),
-                                QueueKind::FollowUp | QueueKind::NextRun => agent.follow_up(message),
+                                QueueKind::FollowUp | QueueKind::NextRun => {
+                                    agent.follow_up(message)
+                                }
                             }
                             match queue {
                                 QueueKind::Steer => agent.run_steer().await,
-                                QueueKind::FollowUp | QueueKind::NextRun => agent.run_follow_up().await,
+                                QueueKind::FollowUp | QueueKind::NextRun => {
+                                    agent.run_follow_up().await
+                                }
                             }
                         }
                     }
@@ -744,24 +748,24 @@ impl CodingAgent {
                 let path = provider_path.clone();
                 let run_id = provider_run_id.clone();
                 Box::pin(async move {
-                    HarnessJournal::record_provider_trace_to_path(&path, &run_id, event)
+                    CodingSessionHarness::record_provider_trace_to_path(&path, &run_id, event)
                 })
             })));
         let message_path = path.clone();
-        self.agent.set_message_recorder(Some(Arc::new(move |message| {
-            let path = message_path.clone();
-            Box::pin(async move {
-                let mut journal = HarnessJournal::open(&path)?;
-                journal.append_message(message).map(|_| ())
-            })
-        })));
+        self.agent
+            .set_message_recorder(Some(Arc::new(move |message| {
+                let path = message_path.clone();
+                Box::pin(
+                    async move { CodingSessionHarness::append_message_to_path(&path, message) },
+                )
+            })));
         let tool_path = path.clone();
         let tool_run_id = run_id.clone();
         self.agent.tool_dispatcher.tool_execution_trace_recorder = Some(Arc::new(move |event| {
             let path = tool_path.clone();
             let run_id = tool_run_id.clone();
             Box::pin(async move {
-                HarnessJournal::record_tool_execution_to_path(&path, &run_id, event).await
+                CodingSessionHarness::record_tool_execution_to_path(&path, &run_id, event).await
             })
         }));
         let completion_path = path.clone();
@@ -771,7 +775,7 @@ impl CodingAgent {
             let run_id = completion_run_id.clone();
             let result = result.clone();
             Box::pin(async move {
-                HarnessJournal::record_tool_result_to_path(&path, &run_id, &result).await
+                CodingSessionHarness::record_tool_result_to_path(&path, &run_id, &result).await
             })
         }));
         self.permission_handle
@@ -779,7 +783,11 @@ impl CodingAgent {
                 let path = path.clone();
                 let run_id = run_id.clone();
                 Box::pin(async move {
-                    HarnessJournal::record_permission_trace_to_path(&path, Some(&run_id), event)
+                    CodingSessionHarness::record_permission_trace_to_path(
+                        &path,
+                        Some(&run_id),
+                        event,
+                    )
                 })
             })));
     }
@@ -824,10 +832,8 @@ impl CodingAgent {
                         tools: None,
                         model: None,
                     };
-                    let parent_leaf = self.prompt_parent_leaf(
-                        AgentMessage::user(prompt, Vec::new()),
-                        true,
-                    );
+                    let parent_leaf =
+                        self.prompt_parent_leaf(AgentMessage::user(prompt, Vec::new()), true);
                     *self.dispatch_parent_leaf.lock().unwrap() = parent_leaf;
                     let result = match (self.agent_runner)(vec![task], false, None).await {
                         Ok(result) => result,
@@ -859,7 +865,9 @@ impl CodingAgent {
                 }
             }
             if let Some(cmd_action) = parse_slash_command(prompt) {
-                let output = execute_slash_command(cmd_action, &mut self.agent, &mut self.session_tree).await;
+                let output =
+                    execute_slash_command(cmd_action, &mut self.agent, &mut self.session_tree)
+                        .await;
                 if let Some(harness) = self.harness.as_mut() {
                     let _ = harness.append_message_to_lane(
                         "main",
@@ -876,11 +884,13 @@ impl CodingAgent {
             }
         }
         self.harness_journal_error = None;
-        self.agent.run_accepted(
-            &accepted.run_id,
-            &accepted.lane,
-            accepted.accepted_through_seq,
-        ).await;
+        self.agent
+            .run_accepted(
+                &accepted.run_id,
+                &accepted.lane,
+                accepted.accepted_through_seq,
+            )
+            .await;
         self.sync_session_tree_and_dispatch_assistant_hooks().await;
         if let Some(error) = self.harness_journal_error.take() {
             return Err(error);
@@ -898,7 +908,9 @@ impl CodingAgent {
             .map_err(|_| "Harness run state is unavailable".to_string())?
             .clone()
         {
-            return Err(format!("run {run_id} is already active; prompt acceptance cannot be repeated"));
+            return Err(format!(
+                "run {run_id} is already active; prompt acceptance cannot be repeated"
+            ));
         }
         let turn = self.agent.get_state().await;
         let model = self
@@ -1204,17 +1216,14 @@ impl CodingAgent {
             return Some(self.session_tree.add_message(message));
         }
         let leaf = self.session_tree.active_node_id().map(str::to_owned);
-        let projected_last = self
-            .harness
-            .as_mut()
-            .and_then(|journal| {
-                let _ = journal.refresh();
-                journal
-                    .store
-                    .model_context("main")
-                    .ok()
-                    .and_then(|projection| projection.messages().pop())
-            });
+        let projected_last = self.harness.as_mut().and_then(|journal| {
+            let _ = journal.refresh();
+            journal
+                .store
+                .model_context("main")
+                .ok()
+                .and_then(|projection| projection.messages().pop())
+        });
         if projected_last.as_ref() != Some(&message) {
             warn!("Persisted prompt is not the canonical model-context leaf; subagents will use the canonical active leaf");
         }
@@ -1537,7 +1546,8 @@ impl CodingAgent {
                 session_tree.name = Some(name.clone());
             }
             if let Some(plan_json) = h.store.facts().get("session_plan") {
-                if let Ok(plan) = serde_json::from_str::<threadlane_runtime::SessionPlan>(plan_json) {
+                if let Ok(plan) = serde_json::from_str::<threadlane_runtime::SessionPlan>(plan_json)
+                {
                     session_tree.plan = plan;
                 }
             }
@@ -1594,27 +1604,14 @@ impl CodingAgent {
             agent.harness_event_hub = h.events.clone();
             let store = h.store.store().clone();
             let system_prompt = agent_config.default_system_prompt().to_owned();
-            agent.set_model_context_projector(Some(Arc::new(move || {
-                store
-                    .model_context("main")
-                    .map(|projection| {
-                        std::iter::once(AgentMessage::System {
-                            content: system_prompt.clone(),
-                        })
-                        .chain(projection.messages())
-                        .collect()
-                    })
-                    .unwrap_or_default()
-            })));
-            let refresh_store = h.store.store().clone();
-            agent.set_model_context_refresh(Some(Arc::new(move |turn| {
-                let store = refresh_store.clone();
-                Box::pin(async move {
-                    let projection = store.model_context("main").map_err(|e| e.to_string())?;
-                    turn.lock().await.messages = projection.messages();
-                    Ok(())
+            agent.set_model_context_source(Some(Arc::new(move || {
+                let projection = store.model_context("main").map_err(|e| e.to_string())?;
+                Ok(std::iter::once(AgentMessage::System {
+                    content: system_prompt.clone(),
                 })
-            })));
+                .chain(projection.messages())
+                .collect())
+            }) as Arc<dyn ModelContextSource>));
         }
         let harness_run_id: Arc<std::sync::Mutex<Option<String>>> =
             Arc::new(std::sync::Mutex::new(None));
@@ -2133,7 +2130,7 @@ impl CodingAgent {
                 .map_err(|_| "Completed subagent lane sink is unavailable".to_string())?;
             std::mem::take(&mut *completed)
         };
-        for (index, lane) in lanes.iter().enumerate() {
+        for lane in &lanes {
             let status = match lane.status {
                 SubagentLaneStatus::Completed => "completed",
                 SubagentLaneStatus::Failed => "failed",
@@ -2152,22 +2149,14 @@ impl CodingAgent {
             });
             messages.extend(lane.messages.clone());
             if let Some(path) = self.session_tree.file_path.as_deref() {
-                if let Ok(mut journal) = CodingSessionHarness::open(path) {
-                    for msg in &messages {
-                        let _ = journal.append_message_to_lane(&lane.lane_name, &lane.run_id, msg.clone());
-                    }
+                let mut journal = CodingSessionHarness::open(path)?;
+                for msg in &messages {
+                    journal.append_message_to_lane(&lane.lane_name, &lane.run_id, msg.clone())?;
                 }
             }
-            if let Err(error) = self
-                .session_tree
-                .append_passive_branch(lane.parent_leaf_id.as_deref(), messages)
-            {
-                self.completed_subagent_lanes
-                    .lock()
-                    .map_err(|_| "Completed subagent lane sink is unavailable".to_string())?
-                    .extend_from_slice(&lanes[index..]);
-                return Err(error);
-            }
+            // Harness-backed sessions derive the navigation projection from
+            // canonical lane entries. Do not append the same branch directly
+            // to SessionTree, which would create a second V2 write path.
             #[cfg(test)]
             if let Some(observer) = self.subagent_branch_observer.as_ref() {
                 observer();
@@ -2179,7 +2168,7 @@ impl CodingAgent {
                     SubagentLaneStatus::Completed => OperationOutcome::Completed,
                     SubagentLaneStatus::Failed => OperationOutcome::Failed,
                 };
-                let mut journal = HarnessJournal::open(path)?;
+                let mut journal = CodingSessionHarness::open(path)?;
                 if let Err(error) = journal.finish_subagent_lane(
                     &lane.lane_name,
                     &lane.run_id,
@@ -2258,7 +2247,7 @@ impl CodingAgent {
                     });
                     error
                 };
-                let mut journal = HarnessJournal::open(&path).map_err(&retrying)?;
+                let mut journal = CodingSessionHarness::open(&path).map_err(&retrying)?;
                 let _ = self.agent.event_tx.send(AgentEvent::SubagentRecovery {
                     run_id: lane.run_id.clone(),
                     status: SubagentRecoveryStatus::Started,
@@ -2277,9 +2266,11 @@ impl CodingAgent {
                             "error": error,
                         }),
                     }];
-                    self.session_tree
-                        .append_passive_branch_in_memory(lane.source_leaf_id.as_deref(), messages)
-                        .map_err(&retrying)?;
+                    for message in messages {
+                        journal
+                            .append_message_to_lane(&lane.lane, &lane.run_id, message)
+                            .map_err(&retrying)?;
+                    }
                     journal
                         .finish_subagent_lane(
                             &lane.lane,
@@ -3481,7 +3472,8 @@ impl CodingAgent {
                                         }
                                     }
                                     WasiLegacyEffect::RequestModelTurn { prompt } => {
-                                        self.agent.follow_up(AgentMessage::user(prompt, Vec::new()));
+                                        self.agent
+                                            .follow_up(AgentMessage::user(prompt, Vec::new()));
                                         self.agent.run_follow_up().await;
                                         self.sync_session_tree_and_dispatch_assistant_hooks().await;
                                     }
@@ -3526,7 +3518,11 @@ impl CodingAgent {
                             OperationOutcome::Failed
                         };
                         if let Err(error) = self
-                            .finish_harness_run(harness_run_id.as_ref().map(|run| run.run_id.as_str()), outcome, None)
+                            .finish_harness_run(
+                                harness_run_id.as_ref().map(|run| run.run_id.as_str()),
+                                outcome,
+                                None,
+                            )
                             .await
                         {
                             return Some(Err(format!("Harness Error: {error}")));
@@ -3700,7 +3696,10 @@ impl CodingAgent {
         };
         let parent_leaf = self.prompt_parent_leaf(msg.clone(), harness_run_id.is_some());
         *self.dispatch_parent_leaf.lock().unwrap() = parent_leaf;
-        if let (Some(run_id), Some(harness)) = (harness_run_id.as_ref().map(|run| run.run_id.as_str()), self.harness.as_mut()) {
+        if let (Some(run_id), Some(harness)) = (
+            harness_run_id.as_ref().map(|run| run.run_id.as_str()),
+            self.harness.as_mut(),
+        ) {
             if let Err(error) = harness.prepare_assistant_attempt(run_id) {
                 let _ = self
                     .finish_harness_run(Some(run_id), OperationOutcome::Failed, Some(error.clone()))
@@ -3820,7 +3819,11 @@ impl CodingAgent {
             }
         }
         if let Err(error) = self
-            .finish_harness_run(harness_run_id.as_ref().map(|run| run.run_id.as_str()), OperationOutcome::Completed, None)
+            .finish_harness_run(
+                harness_run_id.as_ref().map(|run| run.run_id.as_str()),
+                OperationOutcome::Completed,
+                None,
+            )
             .await
         {
             return Some(Err(format!("Harness Error: {error}")));
@@ -3933,7 +3936,6 @@ mod compaction_sync_tests {
             .push(CompletedSubagentLane {
                 lane_name: identity.lane_name,
                 run_id: identity.run_id,
-                parent_leaf_id: identity.source_leaf_id,
                 task: "inspect".into(),
                 agent: "worker".into(),
                 status: SubagentLaneStatus::Completed,
@@ -4059,7 +4061,7 @@ async fn run_subagents_with_context(
                 .map_err(|_| "Subagent concurrency limiter closed".to_string())?;
             let start = match context.session_file.as_deref() {
                 Some(path) => {
-                    let mut journal = HarnessJournal::open(path)?;
+                    let mut journal = CodingSessionHarness::open(path)?;
                     let result = journal.start_subagent_lane(
                         &lane_hint,
                         &task.task,
@@ -4148,7 +4150,6 @@ async fn run_subagents_with_context(
             let lane = CompletedSubagentLane {
                 lane_name: identity.lane_name,
                 run_id: identity.run_id,
-                parent_leaf_id: identity.source_leaf_id,
                 task: lane_task,
                 agent: lane_agent,
                 status: if succeeded {
@@ -4220,7 +4221,7 @@ async fn checkpoint_new_subagent_messages(
 ) -> Result<(), String> {
     let messages = state.lock().await.messages.clone();
     if let Some(path) = session_file {
-        let mut journal = HarnessJournal::open(path)?;
+        let mut journal = CodingSessionHarness::open(path)?;
         journal.checkpoint(lane_name, run_id, &messages[*checkpoint_cursor..])?;
     }
     *checkpoint_cursor = messages.len();
@@ -4491,7 +4492,13 @@ async fn run_subagent_task(
         subagent_harness
             .validate_accepted_run(&accepted)
             .map_err(|error| format!("Invalid subagent accepted run token: {error}"))?;
-        agent.run_accepted(&accepted.run_id, &accepted.lane, accepted.accepted_through_seq).await;
+        agent
+            .run_accepted(
+                &accepted.run_id,
+                &accepted.lane,
+                accepted.accepted_through_seq,
+            )
+            .await;
     } else {
         agent.steer(AgentMessage::user(prompt_text.to_string(), Vec::new()));
         agent.run_steer().await;

@@ -206,9 +206,10 @@ impl GatedEffects {
         self.closed
     }
 
-    pub fn execute_action<S: SessionStore>(
+    fn execute_pending<S: SessionStore>(
         &mut self,
         store: &mut S,
+        lane: Option<&str>,
         id: &str,
     ) -> Result<EffectAction, EffectsError> {
         if let Some(error) = &self.fault {
@@ -217,39 +218,11 @@ impl GatedEffects {
         if self.closed {
             return Err(EffectsError::Closed);
         }
-        let Some(action) = self.pending.front() else {
-            return Err(EffectsError::Empty);
-        };
-        if action.id() != id {
-            return Err(EffectsError::UnexpectedAction {
-                expected: action.id().to_owned(),
-                actual: id.to_owned(),
-            });
+        let index = match lane {
+            Some(lane) => self.pending.iter().position(|action| action.lane() == lane),
+            None => (!self.pending.is_empty()).then_some(0),
         }
-        if let Err(error) = action.apply(store) {
-            self.fault = Some(error.clone());
-            return Err(EffectsError::Faulted(error));
-        }
-        let action = self.pending.pop_front().expect("front was present");
-        self.notify_committed(&action);
-        Ok(action)
-    }
-
-    fn execute_action_on_lane<S: SessionStore>(
-        &mut self,
-        store: &mut S,
-        lane: &str,
-        id: &str,
-    ) -> Result<EffectAction, EffectsError> {
-        if let Some(error) = &self.fault {
-            return Err(EffectsError::Faulted(error.clone()));
-        }
-        if self.closed {
-            return Err(EffectsError::Closed);
-        }
-        let Some(index) = self.pending.iter().position(|action| action.lane() == lane) else {
-            return Err(EffectsError::Empty);
-        };
+        .ok_or(EffectsError::Empty)?;
         let action = &self.pending[index];
         if action.id() != id {
             return Err(EffectsError::UnexpectedAction {
@@ -267,6 +240,23 @@ impl GatedEffects {
             .expect("action index was present");
         self.notify_committed(&action);
         Ok(action)
+    }
+
+    pub fn execute_action<S: SessionStore>(
+        &mut self,
+        store: &mut S,
+        id: &str,
+    ) -> Result<EffectAction, EffectsError> {
+        self.execute_pending(store, None, id)
+    }
+
+    fn execute_action_on_lane<S: SessionStore>(
+        &mut self,
+        store: &mut S,
+        lane: &str,
+        id: &str,
+    ) -> Result<EffectAction, EffectsError> {
+        self.execute_pending(store, Some(lane), id)
     }
 
     pub fn run_to_completion<S: SessionStore>(
@@ -295,13 +285,14 @@ impl GatedEffects {
         Ok(completed)
     }
 
-    pub(crate) fn execute_action_with_events<S: SessionStore>(
+    fn execute_with_events<S: SessionStore>(
         &mut self,
         store: &mut S,
         hub: &mut HarnessEventHub,
+        lane: Option<&str>,
         id: &str,
     ) -> Result<EffectAction, EffectsError> {
-        let action = match self.execute_action(store, id) {
+        let action = match self.execute_pending(store, lane, id) {
             Ok(action) => action,
             Err(error) => {
                 hub.publish(EventPayload::Fault(format!("{error:?}")));
@@ -314,21 +305,35 @@ impl GatedEffects {
                 EventPayload::RecordCommitted(record.clone())
             }
         };
-        match &action {
-            EffectAction::AppendRecord { record, .. } => {
-                hub.publish_identified_with_turn(
-                    payload,
-                    Some(record.lane().to_owned()),
-                    record.run_id().map(str::to_owned),
-                    record.turn(),
-                    None,
-                );
-            }
-            EffectAction::AppendEntry { entry } => {
-                hub.publish_identified(payload, Some(entry.lane.clone()), None, None);
-            }
+        let run_id = match &action {
+            EffectAction::AppendRecord { record, .. } => record.run_id().map(str::to_owned),
+            EffectAction::AppendEntry { .. } => None,
+        };
+        let turn = match &action {
+            EffectAction::AppendRecord { record, .. } => record.turn(),
+            EffectAction::AppendEntry { .. } => None,
+        };
+        if matches!(&action, EffectAction::AppendRecord { .. }) {
+            hub.publish_identified_with_turn(
+                payload,
+                Some(action.lane().to_owned()),
+                run_id,
+                turn,
+                None,
+            );
+        } else {
+            hub.publish_identified(payload, Some(action.lane().to_owned()), None, None);
         }
         Ok(action)
+    }
+
+    pub(crate) fn execute_action_with_events<S: SessionStore>(
+        &mut self,
+        store: &mut S,
+        hub: &mut HarnessEventHub,
+        id: &str,
+    ) -> Result<EffectAction, EffectsError> {
+        self.execute_with_events(store, hub, None, id)
     }
 
     pub(crate) fn execute_action_on_lane_with_events<S: SessionStore>(
@@ -338,33 +343,7 @@ impl GatedEffects {
         lane: &str,
         id: &str,
     ) -> Result<EffectAction, EffectsError> {
-        let action = match self.execute_action_on_lane(store, lane, id) {
-            Ok(action) => action,
-            Err(error) => {
-                hub.publish(EventPayload::Fault(format!("{error:?}")));
-                return Err(error);
-            }
-        };
-        let payload = match &action {
-            EffectAction::AppendEntry { entry } => EventPayload::EntryCommitted(entry.clone()),
-            EffectAction::AppendRecord { record, .. } => {
-                EventPayload::RecordCommitted(record.clone())
-            }
-        };
-        hub.publish_identified_with_turn(
-            payload,
-            Some(action.lane().to_owned()),
-            match &action {
-                EffectAction::AppendRecord { record, .. } => record.run_id().map(str::to_owned),
-                EffectAction::AppendEntry { .. } => None,
-            },
-            match &action {
-                EffectAction::AppendRecord { record, .. } => record.turn(),
-                EffectAction::AppendEntry { .. } => None,
-            },
-            None,
-        );
-        Ok(action)
+        self.execute_with_events(store, hub, Some(lane), id)
     }
 
     pub fn run_to_completion_with_events<S: SessionStore>(

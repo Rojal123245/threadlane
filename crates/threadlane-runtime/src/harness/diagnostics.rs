@@ -74,7 +74,10 @@ pub struct DurableEventDiagnostic {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DurableEventKind {
-    Entry { role: String, parent_id: Option<String> },
+    Entry {
+        role: String,
+        parent_id: Option<String>,
+    },
     Record,
 }
 

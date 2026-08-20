@@ -184,7 +184,9 @@ pub fn sync_from_gh_cli() -> Result<GitHubCredentials, String> {
         );
     }
 
-    let token = String::from_utf8_lossy(&token_output.stdout).trim().to_string();
+    let token = String::from_utf8_lossy(&token_output.stdout)
+        .trim()
+        .to_string();
     if token.is_empty() {
         return Err("No token returned by 'gh auth token'.".to_string());
     }

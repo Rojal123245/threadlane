@@ -352,7 +352,8 @@ impl JsonlStore {
             timestamp: 0,
             run_id: None,
             key: "session_plan".into(),
-            value: serde_json::to_string(plan).map_err(|e| ReduceError::InvalidRecord(e.to_string()))?,
+            value: serde_json::to_string(plan)
+                .map_err(|e| ReduceError::InvalidRecord(e.to_string()))?,
         };
         self.append_record(record)
     }

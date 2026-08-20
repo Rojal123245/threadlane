@@ -19,8 +19,8 @@ use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable};
 use crate::app::{actions::AppAction, controller};
 use crate::screens::editor::EditorView;
 use crate::state::{AppState, ChatMessageInfo, MessageRole, ToolActivityInfo};
-use threadlane_session::{ImageAttachment, PlanItemStatus, ReasoningEffort, SessionPlan};
 use threadlane_session::commands::available_slash_commands;
+use threadlane_session::{ImageAttachment, PlanItemStatus, ReasoningEffort, SessionPlan};
 
 actions!(threadlane_composer, [PasteClipboard]);
 

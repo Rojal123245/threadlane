@@ -639,7 +639,11 @@ impl SettingsView {
                             )
                             .child(
                                 Tag::new()
-                                    .child(if connected { status_label } else { "Not connected".to_string() })
+                                    .child(if connected {
+                                        status_label
+                                    } else {
+                                        "Not connected".to_string()
+                                    })
                                     .with_variant(if connected {
                                         TagVariant::Success
                                     } else {
@@ -653,12 +657,18 @@ impl SettingsView {
                             .mt_1()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child("Connect GitHub to inspect pr:// and issue:// virtual file references."),
+                            .child(
+                            "Connect GitHub to inspect pr:// and issue:// virtual file references.",
+                        ),
                     ),
             )
             .child(
                 Button::new("github-auth-button")
-                    .label(if connected { "Disconnect" } else { "Connect via gh CLI" })
+                    .label(if connected {
+                        "Disconnect"
+                    } else {
+                        "Connect via gh CLI"
+                    })
                     .when(!connected, |button| button.primary())
                     .when(connected, |button| button.ghost())
                     .on_click(move |_event, _window, cx| {
@@ -673,7 +683,8 @@ impl SettingsView {
                             } else {
                                 let result = provider_auth::connect_github_cli(tx);
                                 if let Err(err) = result {
-                                    this.auth_message = Some(format!("GitHub CLI connection: {err}"));
+                                    this.auth_message =
+                                        Some(format!("GitHub CLI connection: {err}"));
                                 }
                             }
                             cx.notify();
@@ -716,7 +727,8 @@ impl SettingsView {
                                 let _ = view.update(cx, |this, cx| {
                                     if val.trim().is_empty() {
                                         let _ = provider_auth::disconnect_github();
-                                        this.auth_message = Some("Cleared GitHub token.".to_string());
+                                        this.auth_message =
+                                            Some("Cleared GitHub token.".to_string());
                                     } else {
                                         let _ = provider_auth::save_github_pat(&val, tx);
                                     }
@@ -776,7 +788,11 @@ impl SettingsView {
                             )
                             .child(
                                 Tag::new()
-                                    .child(if connected { status_label } else { "Not connected".to_string() })
+                                    .child(if connected {
+                                        status_label
+                                    } else {
+                                        "Not connected".to_string()
+                                    })
                                     .with_variant(if connected {
                                         TagVariant::Success
                                     } else {
@@ -790,7 +806,9 @@ impl SettingsView {
                             .mt_1()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child("Connect GitLab to inspect mr:// and GitLab issue virtual references."),
+                            .child(
+                            "Connect GitLab to inspect mr:// and GitLab issue virtual references.",
+                        ),
                     ),
             )
             .child(

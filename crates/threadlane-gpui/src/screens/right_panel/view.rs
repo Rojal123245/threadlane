@@ -17,7 +17,6 @@ use threadlane_git::GitFile;
 
 use crate::state::AppState;
 
-
 fn detect_language(path_str: &str) -> &'static str {
     let path = Path::new(path_str);
     match path
@@ -94,7 +93,6 @@ enum PanelEvent {
         files: Vec<GitFile>,
         error: Option<String>,
     },
-
 }
 
 pub struct RightPanelView {
@@ -234,7 +232,6 @@ impl RightPanelView {
         cx.notify();
     }
 
-
     fn close_document(&mut self, cx: &mut Context<Self>) {
         self.document_title = None;
         self.editor_state = None;
@@ -346,24 +343,22 @@ impl RightPanelView {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .children(
-                        [Surface::Review, Surface::Files].map(|surface| {
-                            Button::new(SharedString::from(format!(
-                                "right-panel-tab-{}",
-                                surface.label().to_lowercase()
-                            )))
-                            .icon(surface.icon())
-                            .label(surface.label())
-                            .ghost()
-                            .selected(active == Some(surface))
-                            .small()
-                            .on_click(cx.listener(
-                                move |this, _event, _window, cx| {
-                                    this.open_surface(surface, cx);
-                                },
-                            ))
-                        }),
-                    )
+                    .children([Surface::Review, Surface::Files].map(|surface| {
+                        Button::new(SharedString::from(format!(
+                            "right-panel-tab-{}",
+                            surface.label().to_lowercase()
+                        )))
+                        .icon(surface.icon())
+                        .label(surface.label())
+                        .ghost()
+                        .selected(active == Some(surface))
+                        .small()
+                        .on_click(cx.listener(
+                            move |this, _event, _window, cx| {
+                                this.open_surface(surface, cx);
+                            },
+                        ))
+                    }))
                     .child(div().flex_1())
                     .child(
                         Button::new("right-panel-refresh")
@@ -493,17 +488,13 @@ impl RightPanelView {
                                         .font_weight(FontWeight::MEDIUM)
                                         .child(title.clone()),
                                 )
-                                .children(is_dirty.then(|| {
-                                    Tag::warning()
-                                        .child("modified")
-                                        .xsmall()
-                                }))
-                                .children(has_editor.then(|| {
-                                    Tag::secondary()
-                                        .child(lang)
-                                        .outline()
-                                        .xsmall()
-                                })),
+                                .children(
+                                    is_dirty.then(|| Tag::warning().child("modified").xsmall()),
+                                )
+                                .children(
+                                    has_editor
+                                        .then(|| Tag::secondary().child(lang).outline().xsmall()),
+                                ),
                         )
                         .child(
                             div()
@@ -620,16 +611,15 @@ impl RightPanelView {
                             let text = path.clone();
                             let ed_path = editor_path.clone();
                             let model_ref = model.clone();
-                            let menu = menu.item(
-                                PopupMenuItem::new("Open in Editor Tab").on_click(
+                            let menu =
+                                menu.item(PopupMenuItem::new("Open in Editor Tab").on_click(
                                     move |_event, _window, cx| {
                                         model_ref.update(cx, |state, cx| {
                                             state.request_open_file(ed_path.clone());
                                             cx.notify();
                                         });
                                     },
-                                ),
-                            );
+                                ));
                             let menu =
                                 menu.item(PopupMenuItem::new("Copy Relative Path").on_click(
                                     move |_event, _window, cx| {
@@ -772,7 +762,9 @@ impl RightPanelView {
                             )
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 let target_path = path.clone();
-                                let Some(project) = this.project.clone() else { return; };
+                                let Some(project) = this.project.clone() else {
+                                    return;
+                                };
                                 let diff_project = project.clone();
                                 let model = this.model.clone();
                                 cx.spawn(async move |_this, cx| {
@@ -804,7 +796,9 @@ impl RightPanelView {
                                     let menu = menu.item(
                                         PopupMenuItem::new("Open Diff in Editor Tab").on_click(
                                             move |_event, _window, cx| {
-                                                let Some(proj) = project_ref.clone() else { return; };
+                                                let Some(proj) = project_ref.clone() else {
+                                                    return;
+                                                };
                                                 let diff_project = proj.clone();
                                                 let target = diff_path.clone();
                                                 let m = model_ref.clone();
@@ -813,12 +807,19 @@ impl RightPanelView {
                                                     let content = cx
                                                         .background_executor()
                                                         .spawn(async move {
-                                                            threadlane_git::diff_file(&diff_project, &diff_target)
-                                                                .unwrap_or_else(|error| error.to_string())
+                                                            threadlane_git::diff_file(
+                                                                &diff_project,
+                                                                &diff_target,
+                                                            )
+                                                            .unwrap_or_else(|error| {
+                                                                error.to_string()
+                                                            })
                                                         })
                                                         .await;
                                                     let _ = m.update(cx, |state, cx| {
-                                                        state.request_open_diff(proj, target, content);
+                                                        state.request_open_diff(
+                                                            proj, target, content,
+                                                        );
                                                         cx.notify();
                                                     });
                                                 })
@@ -855,7 +856,6 @@ impl RightPanelView {
             )
             .into_any_element()
     }
-
 
     fn render_empty(&self, title: &str, description: &str, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().colors;

@@ -1,7 +1,7 @@
-use super::broker::{HostCapabilityHandler, ManagedProcessRegistry, MAX_BROKER_CONTINUATION_ROUNDS};
-use super::runtime::{
-    AgentRunTask, AgentRunner, AgentWorkScheduler, MAX_SUBAGENT_TASKS,
+use super::broker::{
+    HostCapabilityHandler, ManagedProcessRegistry, MAX_BROKER_CONTINUATION_ROUNDS,
 };
+use super::runtime::{AgentRunTask, AgentRunner, AgentWorkScheduler, MAX_SUBAGENT_TASKS};
 use crate::agents::{discover_agents, AgentScope};
 use crate::extension_broker::{
     BrokerError, CapabilityDispatcher, HostBrokerRequest, BROKER_API_VERSION,
@@ -15,13 +15,13 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use threadlane_mcp::{McpManager, McpToolExecutor};
+use threadlane_provider::router::ProviderClient;
 use threadlane_runtime::harness::{HookContext, HookEffect, HookHandler, HookKind};
 use threadlane_runtime::Capability;
 use threadlane_runtime::{
     AgentConfig, AgentEvent, AgentToolCall, AgentToolDefinition, ToolExecutor, TurnState,
 };
-use threadlane_mcp::{McpManager, McpToolExecutor};
-use threadlane_provider::router::ProviderClient;
 use threadlane_skills::{LoadSkillToolExecutor, SkillRegistry};
 use threadlane_wasi::WasiExtensionManager;
 use tokio::sync::broadcast;

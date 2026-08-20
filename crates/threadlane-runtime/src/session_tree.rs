@@ -30,11 +30,14 @@ pub struct SessionTree {
     pub file_path: Option<PathBuf>,
     pub v2_lines: Vec<String>,
     pub v2_entry_ids: HashSet<String>,
+    /// New in-memory trees are canonical V2 sessions even before their first
+    /// entry is appended. This marker is not serialized or written to disk.
+    v2_default: bool,
 }
 
 impl SessionTree {
     fn next_persisted_seq(&self) -> u64 {
-        let max_seq = self
+        let node_max = self
             .node_order
             .iter()
             .enumerate()
@@ -45,9 +48,12 @@ impl SessionTree {
             })
             .max()
             .unwrap_or(0);
-        for line in &self.v2_lines {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
-                let seq = value
+        let v2_max = self
+            .v2_lines
+            .iter()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter_map(|value| {
+                value
                     .get("seq")
                     .and_then(serde_json::Value::as_u64)
                     .or_else(|| {
@@ -57,13 +63,16 @@ impl SessionTree {
                             .and_then(|record| record.get("seq"))
                             .and_then(serde_json::Value::as_u64)
                     })
-                    .unwrap_or(0);
-                let _ = max_seq.max(seq);
-            }
-        }
-        max_seq + 1
+            })
+            .max()
+            .unwrap_or(0);
+        node_max.max(v2_max) + 1
     }
 
+    /// Creates a new canonical V2 session projection.
+    ///
+    /// New sessions always start in the harness-backed format. Legacy node
+    /// loading remains supported by `load_from_file` for existing journals.
     pub fn new(session_id: impl Into<String>) -> Self {
         Self {
             session_id: session_id.into(),
@@ -77,13 +86,20 @@ impl SessionTree {
             node_order: Vec::new(),
             active_node_id: None,
             file_path: None,
+            // New trees represent canonical V2 sessions even before their
+            // first durable entry is appended. Legacy-only state is detected
+            // by the loader and remains readable for compatibility.
             v2_lines: Vec::new(),
             v2_entry_ids: HashSet::new(),
+            v2_default: true,
         }
     }
 
+    /// Returns whether this projection contains canonical harness entries or
+    /// records. New sessions are V2 by default; legacy-only files remain
+    /// readable through `load_from_file`.
     pub fn is_v2(&self) -> bool {
-        true
+        self.v2_default || !self.v2_entry_ids.is_empty() || !self.v2_lines.is_empty()
     }
 
     pub fn has_name(&self) -> bool {
@@ -426,6 +442,7 @@ impl SessionTree {
 
         let mut tree = SessionTree::new(session_id);
         tree.file_path = Some(path.to_path_buf());
+        tree.v2_default = false;
 
         if !path.exists() {
             return Ok(tree);
@@ -637,6 +654,12 @@ mod tests {
     }
 
     #[test]
+    fn new_sessions_default_to_v2_projection() {
+        let tree = SessionTree::new("new-session");
+        assert!(tree.is_v2());
+    }
+
+    #[test]
     fn global_facts_in_memory_lookup() {
         let mut tree = SessionTree::new("facts_session");
         tree.set_fact("git_branch", "feat/multi-lane").unwrap();
@@ -660,7 +683,11 @@ mod tests {
             AgentMessage::user("hello v2", Vec::new()),
             false,
         );
-        std::fs::write(&path, format!("{}\n", serde_json::to_string(&entry).unwrap())).unwrap();
+        std::fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&entry).unwrap()),
+        )
+        .unwrap();
 
         let mut tree = SessionTree::load_from_file(&path).unwrap();
         assert!(tree.is_v2());
