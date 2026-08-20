@@ -597,7 +597,7 @@ mod tests {
     #[test]
     fn chat_adapter_builds_payload_with_reasoning() {
         let adapter = ChatCompletionsAdapter;
-        let mut state = TurnState {
+        let state = TurnState {
             system_prompt: "system".into(),
             messages: Vec::new(),
             model: "gpt-4o".into(),
@@ -612,7 +612,7 @@ mod tests {
     #[test]
     fn codex_adapter_builds_payload_with_reasoning() {
         let adapter = CodexResponsesAdapter;
-        let mut state = TurnState {
+        let state = TurnState {
             system_prompt: "system".into(),
             messages: Vec::new(),
             model: "gpt-5.6-luna".into(),

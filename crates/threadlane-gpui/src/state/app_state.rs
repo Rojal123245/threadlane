@@ -10,7 +10,7 @@ use threadlane_session::{
 
 use crate::adapters::agent_events::{adapt_agent_event, ChatAgentUpdate};
 use crate::persistence::load_project_registry;
-use crate::services::sessions::{SessionRuntime, SessionRuntimeStatus};
+use crate::services::sessions::{ExecutionMode, SessionRuntime, SessionRuntimeStatus};
 
 const CHAT_HISTORY_PAGE_SIZE: usize = 40;
 pub type AttachedProject = threadlane_session::ProjectRecord;
@@ -589,12 +589,15 @@ impl AppState {
         let history_has_older = initial_history_has_older;
         let messages = match (active_work_dir.as_ref(), active_session_file.as_ref()) {
             (Some(work_dir), Some(session_file)) => {
-                let runtime = SessionRuntime::new(coding_agent_options(
-                    work_dir.clone(),
-                    session_file.clone(),
-                    selected_model.clone(),
-                    model_roles.clone(),
-                ));
+                let runtime = SessionRuntime::new(
+                    coding_agent_options(
+                        work_dir.clone(),
+                        session_file.clone(),
+                        selected_model.clone(),
+                        model_roles.clone(),
+                    ),
+                    ExecutionMode::Interactive,
+                );
                 let messages = initial_messages.clone();
                 selected_model = runtime.selected_model.clone();
                 session_status = runtime_status_text(runtime.status());
@@ -1037,12 +1040,15 @@ impl AppState {
         if let Some(runtime) = self.session_runtimes.get(&session_file) {
             return runtime.clone();
         }
-        let runtime = SessionRuntime::new(coding_agent_options(
-            work_dir,
-            session_file.clone(),
-            self.selected_model.clone(),
-            self.model_roles.clone(),
-        ));
+        let runtime = SessionRuntime::new(
+            coding_agent_options(
+                work_dir,
+                session_file.clone(),
+                self.selected_model.clone(),
+                self.model_roles.clone(),
+            ),
+            ExecutionMode::Interactive,
+        );
         self.session_runtimes.insert(session_file, runtime.clone());
         runtime
     }

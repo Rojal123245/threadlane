@@ -69,7 +69,8 @@ fn classify_provider_error(error: &str) -> ErrorCategory {
 pub struct ProviderStepResult {
     pub(crate) text: String,
     pub(crate) reasoning: String,
-    tool_calls: Vec<ToolCall>,
+    #[allow(dead_code)]
+    pub(crate) tool_calls: Vec<ToolCall>,
     pub(crate) usage: TokenUsage,
 }
 

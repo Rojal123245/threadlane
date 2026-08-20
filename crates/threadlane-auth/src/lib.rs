@@ -33,6 +33,7 @@ fn test_env_guard_lock() -> std::sync::MutexGuard<'static, ()> {
 mod tests {
     use super::*;
 
+    #[test]
     fn oauth_parse_errors_do_not_include_response_bodies() {
         let secret_body = r#"{"access_token":"secret-token""#;
 

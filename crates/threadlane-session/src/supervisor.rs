@@ -3,7 +3,8 @@
 // exercised only in tests; dead-code warnings are intentionally suppressed.
 #![allow(dead_code)]
 use crate::coding_agent::harness::CodingSessionHarness;
-use crate::coding_agent::{CodingAgent, CodingAgentOptions, SubagentCancellationGuard};
+use crate::coding_agent::{CodingAgentOptions, SubagentCancellationGuard};
+use crate::controller::{ExecutionMode, SessionController};
 use crate::project_registry::{
     load_project_registry_from, merge_and_save_project_registry_to, ProjectRecord,
 };
@@ -15,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use threadlane_runtime::harness::{DurableEvent, HarnessEvent};
-use threadlane_runtime::{AgentEvent, AgentMessage, LaneQueue, QueueKind, TokenUsage};
+use threadlane_runtime::{AgentEvent, AgentMessage, TokenUsage};
 use threadlane_wasi::packages::ExtensionScope;
 use tokio::sync::broadcast;
 use tokio::time::{interval, MissedTickBehavior};
@@ -59,7 +60,6 @@ pub struct Lane {
     parent_lane: Option<String>,
     leaf_id: Option<String>,
     status: LaneStatus,
-    queue: LaneQueue,
     active_run_id: Option<String>,
     session_file: Option<PathBuf>,
     accumulated_usage: TokenUsage,
@@ -73,7 +73,6 @@ impl Lane {
             parent_lane: None,
             leaf_id: None,
             status: LaneStatus::Idle,
-            queue: LaneQueue::default(),
             active_run_id: None,
             session_file: None,
             accumulated_usage: TokenUsage::default(),
@@ -157,12 +156,10 @@ impl TaskAgentEvent {
 }
 
 struct TaskRuntime {
-    agent: Arc<tokio::sync::Mutex<CodingAgent>>,
+    controller: Arc<SessionController>,
     status: TaskStatus,
-    prompt_lock: Arc<tokio::sync::Mutex<()>>,
     run_handle: Option<tokio::task::AbortHandle>,
     cancellation_guard: Option<SubagentCancellationGuard>,
-    recovery_loaded: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -307,21 +304,19 @@ impl HarnessSupervisor {
         cancelled_count
     }
 
-    /// Queue a steer message in the in-memory lane projection only.
-    /// Persistence is handled by `CodingSessionHarness` during the agent run.
+    /// Queue a steer message on the lane, persisting directly to CodingSessionHarness if session_file exists.
     fn enqueue_steer(
         &self,
         session_id: &str,
         lane_name: &str,
         message: AgentMessage,
     ) -> Result<(), String> {
-        let key = format!("{session_id}:{lane_name}");
-        let mut lock = self.lanes.lock().unwrap();
-        let lane = lock
-            .entry(key)
-            .or_insert_with(|| Lane::new(lane_name, session_id));
-        lane.queue.enqueue(QueueKind::Steer, message);
-        Ok(())
+        self.enqueue_steer_priority(
+            session_id,
+            lane_name,
+            message,
+            threadlane_runtime::SteerPriority::Normal,
+        )
     }
 
     fn enqueue_steer_priority(
@@ -332,11 +327,29 @@ impl HarnessSupervisor {
         priority: threadlane_runtime::SteerPriority,
     ) -> Result<(), String> {
         let key = format!("{session_id}:{lane_name}");
-        let mut lock = self.lanes.lock().unwrap();
-        let lane = lock
-            .entry(key)
-            .or_insert_with(|| Lane::new(lane_name, session_id));
-        lane.queue.enqueue_steer_with_priority(message, priority);
+        let session_file = {
+            let mut lock = self.lanes.lock().unwrap();
+            let lane = lock
+                .entry(key)
+                .or_insert_with(|| Lane::new(lane_name, session_id));
+            lane.session_file.clone()
+        };
+        if let Some(session_file) = session_file {
+            let mut harness = CodingSessionHarness::open(&session_file)?;
+            let id = format!("steer-{}", now_ms());
+            let target = threadlane_runtime::harness::ProvisionedEntry {
+                id,
+                surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
+                parent_id: None,
+                message,
+            };
+            harness.enqueue_unbound_on_lane_with_priority(
+                lane_name,
+                threadlane_runtime::harness::QueueKind::Steer,
+                target,
+                Some(priority),
+            )?;
+        }
         Ok(())
     }
 
@@ -347,11 +360,29 @@ impl HarnessSupervisor {
         message: AgentMessage,
     ) -> Result<(), String> {
         let key = format!("{session_id}:{lane_name}");
-        let mut lock = self.lanes.lock().unwrap();
-        let lane = lock
-            .entry(key)
-            .or_insert_with(|| Lane::new(lane_name, session_id));
-        lane.queue.enqueue(QueueKind::FollowUp, message);
+        let session_file = {
+            let mut lock = self.lanes.lock().unwrap();
+            let lane = lock
+                .entry(key)
+                .or_insert_with(|| Lane::new(lane_name, session_id));
+            lane.session_file.clone()
+        };
+        if let Some(session_file) = session_file {
+            let mut harness = CodingSessionHarness::open(&session_file)?;
+            let id = format!("followup-{}", now_ms());
+            let target = threadlane_runtime::harness::ProvisionedEntry {
+                id,
+                surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
+                parent_id: None,
+                message,
+            };
+            harness.enqueue_unbound_on_lane_with_priority(
+                lane_name,
+                threadlane_runtime::harness::QueueKind::FollowUp,
+                target,
+                None,
+            )?;
+        }
         Ok(())
     }
 
@@ -365,12 +396,29 @@ impl HarnessSupervisor {
 
     pub fn checkpoint_lane(&self, session_id: &str, lane_name: &str) -> CheckpointResult {
         let key = format!("{session_id}:{lane_name}");
-        let mut lock = self.lanes.lock().unwrap();
-        let mut steer_messages = Vec::new();
+        let session_file = self
+            .lanes
+            .lock()
+            .unwrap()
+            .get(&key)
+            .and_then(|lane| lane.session_file.clone());
 
-        if let Some(lane) = lock.get_mut(&key) {
-            while let Some(msg) = lane.queue.pop_steer() {
-                steer_messages.push(msg);
+        let mut steer_messages = Vec::new();
+        if let Some(session_file) = session_file {
+            if let Ok(mut harness) = CodingSessionHarness::open(&session_file) {
+                if let Ok(snapshot) = harness.snapshot() {
+                    if let Some(lane_snap) =
+                        snapshot.state.lanes.iter().find(|l| l.name == lane_name)
+                    {
+                        for queued in &lane_snap.queued {
+                            if queued.queue == threadlane_runtime::harness::QueueKind::Steer {
+                                steer_messages.push(queued.target.message.clone());
+                            }
+                        }
+                    }
+                }
+                let _ = harness
+                    .consume_first_unbound_queue(threadlane_runtime::harness::QueueKind::Steer);
             }
         }
 
@@ -491,25 +539,6 @@ impl HarnessSupervisor {
                 .as_ref()
                 .map(|_| LaneStatus::Suspended)
                 .unwrap_or(LaneStatus::Idle);
-            lane.queue = LaneQueue::default();
-            for queued in &lane_snap.queued {
-                match queued.queue {
-                    threadlane_runtime::harness::QueueKind::Steer => {
-                        lane.queue.enqueue_steer_with_priority(
-                            queued.target.message.clone(),
-                            queued
-                                .priority
-                                .unwrap_or(threadlane_runtime::SteerPriority::Normal),
-                        )
-                    }
-                    threadlane_runtime::harness::QueueKind::FollowUp => lane
-                        .queue
-                        .enqueue(QueueKind::FollowUp, queued.target.message.clone()),
-                    threadlane_runtime::harness::QueueKind::NextRun => lane
-                        .queue
-                        .enqueue(QueueKind::NextRun, queued.target.message.clone()),
-                }
-            }
             if let Some(run_id) = lane_snap.open_operation.clone() {
                 open_operation_ids.push(run_id.clone());
                 if lane_snap.abort_requested {
@@ -634,11 +663,15 @@ impl HarnessSupervisor {
         opts.work_dir = project.path.clone();
         opts.session_file = Some(final_session_file.clone());
 
-        let mut coding_agent = CodingAgent::new(opts);
-        let rx = coding_agent.subscribe();
-        let harness_watch = coding_agent.watch_harness().ok().flatten();
+        let controller = SessionController::new(opts, ExecutionMode::Background);
+        let (rx, harness_watch) = {
+            let mut agent = controller
+                .agent
+                .try_lock()
+                .expect("Fresh agent is not locked");
+            (agent.subscribe(), agent.watch_harness().ok().flatten())
+        };
 
-        let agent_arc = Arc::new(tokio::sync::Mutex::new(coding_agent));
         let task_record = TaskRecord {
             id: task_id.clone(),
             project_id: project_id.to_string(),
@@ -658,12 +691,10 @@ impl HarnessSupervisor {
         };
 
         let runtime = TaskRuntime {
-            agent: agent_arc,
+            controller,
             status: TaskStatus::Idle,
-            prompt_lock: Arc::new(tokio::sync::Mutex::new(())),
             run_handle: None,
             cancellation_guard: None,
-            recovery_loaded: false,
         };
 
         {
@@ -803,21 +834,13 @@ impl HarnessSupervisor {
                         .as_ref()
                         .is_some_and(|project_id| task_projects.get(*task_id) == Some(project_id))
             })
-            .map(|(task_id, runtime)| {
-                (
-                    task_id.clone(),
-                    runtime.prompt_lock.clone(),
-                    runtime.agent.clone(),
-                )
-            })
+            .map(|(task_id, runtime)| (task_id.clone(), runtime.controller.clone()))
             .collect();
 
         let mut reloaded = 0;
         let mut failures = Vec::new();
-        for (task_id, prompt_lock, agent) in targets {
-            let _prompt_guard = prompt_lock.lock().await;
-            let mut agent = agent.lock().await;
-            match agent.reload_extensions().await {
+        for (task_id, controller) in targets {
+            match controller.reload_extensions().await {
                 Ok(_) => reloaded += 1,
                 Err(error) => failures.push(format!("{task_id}: {error}")),
             }
@@ -834,7 +857,7 @@ impl HarnessSupervisor {
     /// acceptance, and tool intent/completion recording — all routed through
     /// `CodingSessionHarness`.
     pub fn submit_input(&self, task_id: &str, prompt: String) -> Result<(), String> {
-        let (agent_arc, prompt_lock, session_id, session_file) = {
+        let (controller, session_id, session_file) = {
             let task = self
                 .tasks
                 .lock()
@@ -846,12 +869,7 @@ impl HarnessSupervisor {
             let rt = runtimes
                 .get(task_id)
                 .ok_or_else(|| format!("Task ID '{task_id}' not found"))?;
-            (
-                rt.agent.clone(),
-                rt.prompt_lock.clone(),
-                task.session_id,
-                task.session_file,
-            )
+            (rt.controller.clone(), task.session_id, task.session_file)
         };
 
         let session_file_for_log = session_file
@@ -901,32 +919,19 @@ impl HarnessSupervisor {
         let run_id_for_run = accepted_run.run_id.clone();
 
         let handle = tokio::spawn(async move {
-            let _guard = prompt_lock.lock().await;
+            let _guard = controller.prompt_lock.lock().await;
             let _cancellation_guard = runtimes_map
                 .lock()
                 .unwrap()
                 .get_mut(&tid)
                 .and_then(|runtime| runtime.cancellation_guard.take());
-            let mut agent = agent_arc.lock().await;
-            let should_restore = {
-                let mut runtimes = runtimes_map.lock().unwrap();
-                runtimes
-                    .get_mut(&tid)
-                    .map(|runtime| !runtime.recovery_loaded)
-                    .unwrap_or(false)
-            };
+            let mut agent = controller.agent.lock().await;
+            let should_restore =
+                !controller.recovery_loaded.swap(true, std::sync::atomic::Ordering::SeqCst);
             if should_restore {
                 if let Some(session_file) = session_file_for_run.as_deref() {
-                    match supervisor.restore_session_lanes(
-                        &session_id_for_run,
-                        session_file,
-                    ) {
+                    match supervisor.restore_session_lanes(&session_id_for_run, session_file) {
                         Ok(recovery) => {
-                            if let Ok(mut runtimes) = runtimes_map.lock() {
-                                if let Some(runtime) = runtimes.get_mut(&tid) {
-                                    runtime.recovery_loaded = true;
-                                }
-                            }
                             let replayed = agent
                                 .replay_safe_tools(&recovery.safe_tools_to_replay)
                                 .await;
@@ -1498,6 +1503,7 @@ fn apply_subagent_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::coding_agent::CodingAgent;
     use std::time::Duration;
     use threadlane_runtime::harness::JsonlStore;
     use threadlane_runtime::harness::{
@@ -1846,6 +1852,7 @@ mod tests {
             .unwrap()
             .get(&task_id)
             .unwrap()
+            .controller
             .prompt_lock
             .clone();
         let held_prompt = prompt_lock.lock().await;
@@ -2102,10 +2109,10 @@ mod tests {
 
         let updated_lane = supervisor.get_or_create_lane("session-1", "main");
         assert_eq!(updated_lane.leaf_id.as_deref(), Some("node_1"));
-        assert_eq!(updated_lane.queue.steer.len(), 1);
-        // Verify the in-memory queue state is correct.
+        let checkpoint = supervisor.checkpoint_lane("session-1", "main");
+        assert_eq!(checkpoint.steer_messages.len(), 1);
         assert!(matches!(
-            updated_lane.queue.steer.first().map(|s| &s.message),
+            checkpoint.steer_messages.first(),
             Some(AgentMessage::User { content }) if content == "steer msg"
         ));
     }
@@ -2156,13 +2163,22 @@ mod tests {
             .unwrap();
         harness.store.drive_to_completion().unwrap();
 
-        // Also enqueue via supervisor (in-memory only)
+        // Set up supervisor lane projection with session_file
+        {
+            let mut lanes = supervisor.lanes.lock().unwrap();
+            let lane = lanes
+                .entry("session-1:main".into())
+                .or_insert_with(|| Lane::new("main", "session-1"));
+            lane.session_file = Some(session_file.clone());
+        }
+
+        // Also enqueue via supervisor (persisting directly to harness)
         supervisor
             .enqueue_followup(
                 "session-1",
                 "main",
                 AgentMessage::User {
-                    content: "next".into(),
+                    content: "next-from-supervisor".into(),
                 },
             )
             .unwrap();
@@ -2171,7 +2187,7 @@ mod tests {
                 "session-1",
                 "main",
                 AgentMessage::User {
-                    content: "urgent".into(),
+                    content: "urgent-from-supervisor".into(),
                 },
                 threadlane_runtime::SteerPriority::High,
             )
@@ -2188,6 +2204,20 @@ mod tests {
         ));
         assert!(matches!(
             store.records().iter().find(|record| matches!(record, HarnessRecord::QueueEnqueued { target, .. } if matches!(target.message, AgentMessage::User { ref content } if content == "urgent"))),
+            Some(HarnessRecord::QueueEnqueued {
+                queue: HarnessQueueKind::Steer,
+                ..
+            })
+        ));
+        assert!(matches!(
+            store.records().iter().find(|record| matches!(record, HarnessRecord::QueueEnqueued { target, .. } if matches!(target.message, AgentMessage::User { ref content } if content == "next-from-supervisor"))),
+            Some(HarnessRecord::QueueEnqueued {
+                queue: HarnessQueueKind::FollowUp,
+                ..
+            })
+        ));
+        assert!(matches!(
+            store.records().iter().find(|record| matches!(record, HarnessRecord::QueueEnqueued { target, .. } if matches!(target.message, AgentMessage::User { ref content } if content == "urgent-from-supervisor"))),
             Some(HarnessRecord::QueueEnqueued {
                 queue: HarnessQueueKind::Steer,
                 ..
@@ -2233,18 +2263,29 @@ mod tests {
         supervisor
             .restore_session_lanes("session-1", &session_file)
             .unwrap();
-        let restored = supervisor.get_or_create_lane("session-1", "main");
-        // Restored has: 1 follow_up (from harness), and steers (from harness + high-priority record)
-
-        // The high-priority record is the LAST steer to be restored, so it's at position 1
-        // Restored has: 1 follow_up, and steers (from harness + high-priority record)
-        assert_eq!(restored.queue.follow_up.len(), 1);
-        assert_eq!(restored.queue.steer.len(), 2);
-        let has_high_priority = restored
-            .queue
-            .steer
+        let snap = open_test_harness(&session_file).snapshot().unwrap();
+        let main_lane = snap
+            .state
+            .lanes
             .iter()
-            .any(|s| s.priority == threadlane_runtime::SteerPriority::High);
+            .find(|l| l.name == "main")
+            .unwrap();
+        let follow_up_count = main_lane
+            .queued
+            .iter()
+            .filter(|q| q.queue == HarnessQueueKind::FollowUp)
+            .count();
+        let steer_count = main_lane
+            .queued
+            .iter()
+            .filter(|q| q.queue == HarnessQueueKind::Steer)
+            .count();
+        assert_eq!(follow_up_count, 2);
+        assert_eq!(steer_count, 3);
+        let has_high_priority = main_lane
+            .queued
+            .iter()
+            .any(|q| q.priority == Some(threadlane_runtime::SteerPriority::High));
         assert!(
             has_high_priority,
             "expected at least one High-priority steer in restored queue"
@@ -2256,23 +2297,14 @@ mod tests {
             .get_mut("session-1:main")
             .unwrap()
             .session_file = Some(dir.path().join("missing/session.jsonl"));
-        supervisor
-            .enqueue_followup(
-                "session-1",
-                "main",
-                AgentMessage::User {
-                    content: "must not queue".into(),
-                },
-            )
-            .unwrap();
-        assert_eq!(
-            supervisor
-                .get_or_create_lane("session-1", "main")
-                .queue
-                .follow_up
-                .len(),
-            2
+        let err = supervisor.enqueue_followup(
+            "session-1",
+            "main",
+            AgentMessage::User {
+                content: "must not queue".into(),
+            },
         );
+        assert!(err.is_err());
     }
 
     #[test]
@@ -2548,11 +2580,33 @@ mod tests {
         let lane = supervisor.get_or_create_lane("session-1", "subagent-1");
         assert_eq!(lane.status, LaneStatus::Suspended);
         assert_eq!(lane.active_run_id.as_deref(), Some("run-subagent"));
-        assert_eq!(lane.queue.follow_up.len(), 1);
-        assert_eq!(lane.queue.steer.len(), 1);
+
+        let snap = open_test_harness(&session_file).snapshot().unwrap();
+        let sub_lane = snap
+            .state
+            .lanes
+            .iter()
+            .find(|l| l.name == "subagent-1")
+            .unwrap();
+        let follow_up_count = sub_lane
+            .queued
+            .iter()
+            .filter(|q| q.queue == HarnessQueueKind::FollowUp)
+            .count();
+        let steer_count = sub_lane
+            .queued
+            .iter()
+            .filter(|q| q.queue == HarnessQueueKind::Steer)
+            .count();
+        assert_eq!(follow_up_count, 1);
+        assert_eq!(steer_count, 1);
         assert_eq!(
-            lane.queue.steer[0].priority,
-            threadlane_runtime::SteerPriority::High
+            sub_lane
+                .queued
+                .iter()
+                .find(|q| q.queue == HarnessQueueKind::Steer)
+                .and_then(|q| q.priority),
+            Some(threadlane_runtime::SteerPriority::High)
         );
     }
 

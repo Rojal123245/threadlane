@@ -403,7 +403,7 @@ impl AdvisorNote {
     }
 
     /// Formats the advisor note as prompt steering text for the task model.
-    pub(crate) fn to_steering_prompt(&self) -> String {
+    pub fn to_steering_prompt(&self) -> String {
         let tag = match self.severity {
             AdvisorSeverity::Aside => "ADVISOR NOTE (Aside)",
             AdvisorSeverity::Concern => "ADVISOR NOTE (Concern)",

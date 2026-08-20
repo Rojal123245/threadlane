@@ -150,10 +150,6 @@ impl CodingAgent {
         self.cancellation.clone()
     }
 
-    pub(crate) fn current_plan(&self) -> threadlane_runtime::SessionPlan {
-        self.plan_store.current()
-    }
-
     pub fn has_interrupted_work(&self) -> bool {
         matches!(
             self.interrupted_subagent_recovery,
@@ -163,10 +159,6 @@ impl CodingAgent {
 
     pub async fn resume_interrupted_turn(&mut self) -> Result<usize, String> {
         self.recover_interrupted_subagent_lanes().await
-    }
-
-    pub(crate) fn set_credentials(&mut self, api_key: String, account_id: Option<String>) {
-        self.agent.set_credentials(api_key, account_id);
     }
 
     pub fn set_model_roles(&mut self, roles: threadlane_runtime::ModelRoles) {
@@ -262,21 +254,6 @@ impl CodingAgent {
                 .map_err(|error| error.to_string())?;
         }
         Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_subagent_work_observer(
-        &self,
-        observer: Arc<std::sync::Mutex<Vec<AgentWork>>>,
-    ) {
-        if let Ok(mut current) = self.subagent_work_observer.lock() {
-            *current = Some(observer);
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_subagent_branch_observer(&mut self, observer: SubagentBoundaryObserver) {
-        self.subagent_branch_observer = Some(observer);
     }
 
     pub fn new(options: CodingAgentOptions) -> Self {
@@ -569,10 +546,6 @@ impl CodingAgent {
             #[cfg(test)]
             subagent_branch_observer: None,
         }
-    }
-
-    pub(crate) async fn handle_input(&mut self, input: &str) -> Option<Result<String, String>> {
-        self.handle_input_with_images(input, Vec::new()).await
     }
 
     pub async fn handle_input_with_images(

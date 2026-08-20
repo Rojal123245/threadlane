@@ -5,8 +5,6 @@ use super::runtime::CodingAgent;
 use super::subagents::{
     run_subagent_task, SubagentLaneStatus, SubagentRunContext, NEXT_SUBAGENT_UI_RUN_ID,
 };
-#[cfg(test)]
-use super::scheduler::SubagentBoundaryObserver;
 use crate::agents::AgentDefinition;
 use crate::commands::{execute_slash_command, parse_slash_command};
 use log::warn;
@@ -16,7 +14,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use threadlane_runtime::harness::{
     HookContext, HookKind, JsonlStore, OperationOutcome, PromptSnapshot, Record as HarnessRecord,
     Reducer, SessionStore,
@@ -85,13 +82,6 @@ pub(crate) fn generation_event_drain_error(
             Some("generation ended without a durable AgentEnd event")
         }
     }
-}
-
-pub(crate) fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
 
 pub(crate) fn requires_harness_compaction_reset(
@@ -621,42 +611,6 @@ impl CodingAgent {
             }
         }
         Ok(())
-    }
-
-    pub(crate) async fn navigate_tree_branch(&mut self, node_id: &str) -> Result<String, String> {
-        let Some(journal) = self.harness.as_mut() else {
-            return Err("Navigation requires a durable session harness".into());
-        };
-        journal.refresh()?;
-        let snapshot = journal.snapshot()?;
-        if !snapshot.entries.iter().any(|e| e.id == node_id) {
-            return Err(format!("Entry ID not found: {node_id}"));
-        }
-        let mut branch_ids = Vec::new();
-        let mut current = Some(node_id.to_owned());
-        while let Some(id) = current {
-            branch_ids.push(id.clone());
-            current = snapshot
-                .entries
-                .iter()
-                .find(|e| e.id == id)
-                .and_then(|e| e.parent_id.clone());
-        }
-        branch_ids.reverse();
-        journal.navigate_branch(&branch_ids)?;
-        let run_id = journal.unique_run_id("foreground-navigation")?;
-        journal
-            .store
-            .accept_navigation(&run_id, node_id, None)
-            .map_err(|error| error.to_string())?;
-        journal
-            .store
-            .drive_to_completion()
-            .map_err(|error| error.to_string())?;
-        self.sync_turn_from_model_context()
-            .await
-            .map_err(|error| format!("failed to project navigated context: {error}"))?;
-        Ok(format!("Switched session branch to entry: {node_id}"))
     }
 
     pub async fn sync_turn_from_model_context(&self) -> Result<(), String> {

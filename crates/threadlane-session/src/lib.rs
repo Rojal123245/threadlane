@@ -4,6 +4,7 @@ pub mod agents;
 pub mod commands;
 pub mod config;
 pub mod context;
+pub mod controller;
 pub mod error;
 pub mod extension_broker;
 pub mod permission;
@@ -14,10 +15,11 @@ pub mod prompt_templates;
 pub mod supervisor;
 pub mod system_prompt;
 
-// ── CodingAgent (the session runtime) ─────────────────────────────────
+// ── SessionController & CodingAgent ──────────────────────────────────
 mod capabilities_catalog;
 pub mod coding_agent;
 pub use capabilities_catalog::CapabilityCatalog;
+pub use controller::{ExecutionMode, SessionController, SessionStatus};
 pub use coding_agent::harness::{
     CodingSessionHarness, HarnessRecord, HarnessWatch, InterruptedSubagentRecoveryState,
 };

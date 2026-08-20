@@ -444,7 +444,7 @@ mod tests {
         let store = SessionPlanStore::new(Default::default(), Some(path.clone()));
         let executor = UpdatePlanToolExecutor::new(store.clone(), event_tx);
 
-        let result = executor
+        let _result = executor
             .execute_tool(
                 UPDATE_PLAN_TOOL_NAME,
                 r#"{"plan":[{"step":"Inspect","status":"completed"}]}"#,

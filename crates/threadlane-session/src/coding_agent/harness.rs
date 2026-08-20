@@ -924,6 +924,55 @@ impl CodingSessionHarness {
         Ok(id)
     }
 
+    pub(crate) fn enqueue_unbound_on_lane_with_priority(
+        &mut self,
+        lane: &str,
+        queue: QueueKind,
+        target: ProvisionedEntry,
+        priority: Option<threadlane_runtime::SteerPriority>,
+    ) -> Result<String, String> {
+        self.refresh()?;
+        let id = target.id.clone();
+        if let Some(priority) = priority {
+            let underlying = self.store.store();
+            let queue_seq = underlying
+                .entries()
+                .iter()
+                .map(|e| e.seq)
+                .chain(underlying.records().iter().map(|r| r.seq()))
+                .max()
+                .unwrap_or(0)
+                + 1;
+            let record_id = format!(
+                "queue-{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0)
+            );
+            self.store
+                .append_record_gated(threadlane_runtime::harness::Record::QueueEnqueued {
+                    id: record_id,
+                    seq: queue_seq,
+                    lane: lane.to_string(),
+                    timestamp: queue_seq,
+                    run_id: None,
+                    queue,
+                    priority: Some(priority),
+                    target,
+                })
+                .map_err(|error| error.to_string())?;
+        } else {
+            self.store
+                .enqueue_unbound_on_lane(lane, queue, target)
+                .map_err(|error| error.to_string())?;
+        }
+        self.store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())?;
+        Ok(id)
+    }
+
     pub(crate) fn consume_first_unbound_queue(&mut self, queue: QueueKind) -> Result<(), String> {
         self.refresh()?;
         let state = Reducer::reduce(self.store.store())
@@ -2249,7 +2298,6 @@ impl CodingSessionHarness {
     ) -> Result<Option<String>, String> {
         self.refresh()?;
         let mut harness_target_id = None;
-        let mut parent_id: Option<String> = None;
         for legacy_id in branch_ids {
             let entry = self
                 .store
@@ -2261,7 +2309,6 @@ impl CodingSessionHarness {
             if matches!(entry.message, AgentMessage::System { .. }) {
                 continue;
             }
-            parent_id = Some(entry.id.clone());
             if *legacy_id == branch_ids[branch_ids.len() - 1] {
                 harness_target_id = Some(entry.id);
             }
