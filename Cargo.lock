@@ -7329,6 +7329,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "threadlane-auth",
  "threadlane-hashline",
 ]
 

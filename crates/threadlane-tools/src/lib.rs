@@ -20,11 +20,11 @@ fn tool_definitions() -> Vec<Value> {
     vec![
         json!({
             "name": "read_file",
-            "description": "Read content of a file or virtual scheme (e.g. pr://70, issue://12, skill://name, agent://name, or GitHub PR/issue URL) with line numbers and hash anchors (e.g. 12:a3f|content), optionally specifying start and end lines (1-indexed).",
+            "description": "Read content of a file or virtual scheme (e.g. pr://70, mr://15, issue://12, skill://name, agent://name, or GitHub/GitLab PR/issue URL) with line numbers and hash anchors (e.g. 12:a3f|content), optionally specifying start and end lines (1-indexed).",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Absolute or relative file path, virtual URI (pr://70, issue://12, skill://name, agent://name), or GitHub PR/issue URL" },
+                    "path": { "type": "string", "description": "Absolute or relative file path, virtual URI (pr://70, mr://15, issue://12, skill://name, agent://name), or GitHub/GitLab PR/issue URL" },
                     "start_line": { "type": "integer", "description": "Optional starting line number (1-based)" },
                     "end_line": { "type": "integer", "description": "Optional ending line number (1-based)" }
                 },
@@ -379,17 +379,16 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
                 Some(path) if path.starts_with("agent://") => {
                     return read_virtual_agent(workspace_root, &path[8..]);
                 }
-                Some(path) if path.starts_with("pr://") => {
-                    return virtual_read::github_path(workspace_root, path);
-                }
-                Some(path) if path.starts_with("issue://") => {
-                    return virtual_read::github_path(workspace_root, path);
-                }
                 Some(path)
-                    if path.starts_with("https://github.com/")
-                        || path.starts_with("http://github.com/") =>
+                    if path.starts_with("pr://")
+                        || path.starts_with("mr://")
+                        || path.starts_with("issue://")
+                        || path.starts_with("https://github.com/")
+                        || path.starts_with("http://github.com/")
+                        || path.starts_with("https://gitlab.com/")
+                        || path.starts_with("http://gitlab.com/") =>
                 {
-                    return virtual_read::github_path(workspace_root, path);
+                    return virtual_read::remote_ref_path(workspace_root, path);
                 }
                 Some(p) => p,
                 None => return "Error: 'path' parameter is required".into(),
@@ -1290,5 +1289,10 @@ mod tests {
         let pr_url_payload = json!({ "path": "https://github.com/wheregmis/threadlane/pull/70" }).to_string();
         let pr_res = execute_tool_in_workspace("read_file", &pr_url_payload, root);
         assert!(pr_res.contains("pr://70") || pr_res.contains("\"number\": 70") || pr_res.contains("https://github.com/"));
+
+        // Test GitLab MR URL parsing error format when glab CLI or git remote is missing
+        let mr_url_payload = json!({ "path": "https://gitlab.com/gitlab-org/gitlab/-/merge_requests/99" }).to_string();
+        let mr_res = execute_tool_in_workspace("read_file", &mr_url_payload, root);
+        assert!(mr_res.contains("mr://99") || mr_res.contains("GitLab mr #99") || mr_res.contains("gitlab.com"));
     }
 }

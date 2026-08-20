@@ -1,12 +1,14 @@
 pub mod antigravity_auth;
 pub mod auth;
 pub mod codex_auth;
+pub mod github_auth;
 pub mod openai_auth;
 pub mod opencode_auth;
 pub mod traits;
 
 pub use antigravity_auth::*;
 pub use codex_auth::*;
+pub use github_auth::*;
 pub use openai_auth::*;
 pub use opencode_auth::*;
 

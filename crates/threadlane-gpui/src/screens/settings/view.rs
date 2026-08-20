@@ -35,6 +35,7 @@ pub struct SettingsView {
     model: Entity<AppState>,
     openai_input: Entity<InputState>,
     opencode_input: Entity<InputState>,
+    github_input: Entity<InputState>,
     acp_name_input: Entity<InputState>,
     acp_command_input: Entity<InputState>,
     page: SettingsPage,
@@ -70,6 +71,15 @@ impl SettingsView {
             InputState::new(window, cx)
                 .placeholder("opencode-key-...")
                 .default_value(&opencode_key)
+                .masked(true)
+        });
+        let github_token = threadlane_auth::github_auth::load_github_credentials()
+            .map(|c| c.token)
+            .unwrap_or_default();
+        let github_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("ghp_... / github_pat_...")
+                .default_value(&github_token)
                 .masked(true)
         });
         let acp_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("Claude Code"));
@@ -108,25 +118,6 @@ impl SettingsView {
         .detach();
 
         let (settings_tx, settings_rx) = mpsc::channel();
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(100))
-                .await;
-            let events = settings_rx.try_iter().collect::<Vec<_>>();
-            if events.is_empty() {
-                continue;
-            }
-            let _ = this.update(cx, |this, cx| {
-                for event in events {
-                    match event {
-                        SettingsEvent::AcpRefreshed(records) => this.acp_rows = records,
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-
         let observe_model = cx.observe(&model, |_this, _model, cx| cx.notify());
         let openai_model = model.clone();
         let save_openai = cx.subscribe_in(
@@ -154,11 +145,46 @@ impl SettingsView {
                 }
             },
         );
+        let github_tx = auth_tx.clone();
+        let save_github = cx.subscribe_in(
+            &github_input,
+            window,
+            move |_this, input, event: &InputEvent, _window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    let key = input.read(cx).value().to_string();
+                    let tx = github_tx.clone();
+                    if key.trim().is_empty() {
+                        let _ = provider_auth::disconnect_github();
+                    } else {
+                        let _ = provider_auth::save_github_pat(&key, tx);
+                    }
+                }
+            },
+        );
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(100))
+                .await;
+            let events = settings_rx.try_iter().collect::<Vec<_>>();
+            if events.is_empty() {
+                continue;
+            }
+            let _ = this.update(cx, |this, cx| {
+                for event in events {
+                    match event {
+                        SettingsEvent::AcpRefreshed(records) => this.acp_rows = records,
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
 
         Self {
             model,
             openai_input,
             opencode_input,
+            github_input,
             acp_name_input,
             acp_command_input,
             page: SettingsPage::default(),
@@ -170,7 +196,7 @@ impl SettingsView {
             auth_tx,
             settings_tx,
             auth_message: None,
-            _subscriptions: vec![observe_model, save_openai, save_opencode],
+            _subscriptions: vec![observe_model, save_openai, save_opencode, save_github],
         }
     }
 
@@ -563,6 +589,230 @@ impl SettingsView {
             )
     }
 
+    fn render_github_connection(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().colors;
+        let view = cx.entity().downgrade();
+        let github_status = threadlane_auth::github_auth::get_github_auth_status();
+        let connected = github_status.is_some();
+        let status_label = github_status.unwrap_or_else(|| "Not connected".to_string());
+        let auth_tx = self.auth_tx.clone();
+
+        div()
+            .py_4()
+            .border_b_1()
+            .border_color(theme.border)
+            .flex()
+            .items_center()
+            .gap_4()
+            .child(
+                div()
+                    .w(px(36.0))
+                    .h(px(36.0))
+                    .flex_none()
+                    .rounded_lg()
+                    .bg(theme.muted)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(if connected {
+                        theme.success
+                    } else {
+                        theme.muted_foreground
+                    })
+                    .child(IconName::Globe),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.foreground)
+                                    .child("GitHub"),
+                            )
+                            .child(
+                                Tag::new()
+                                    .child(if connected { status_label } else { "Not connected".to_string() })
+                                    .with_variant(if connected {
+                                        TagVariant::Success
+                                    } else {
+                                        TagVariant::Secondary
+                                    })
+                                    .small(),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .mt_1()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("Connect GitHub to inspect pr:// and issue:// virtual file references."),
+                    ),
+            )
+            .child(
+                Button::new("github-auth-button")
+                    .label(if connected { "Disconnect" } else { "Connect via gh CLI" })
+                    .when(!connected, |button| button.primary())
+                    .when(connected, |button| button.ghost())
+                    .on_click(move |_event, _window, cx| {
+                        let tx = auth_tx.clone();
+                        let _ = view.update(cx, |this, cx| {
+                            if connected {
+                                let result = provider_auth::disconnect_github();
+                                this.auth_message = Some(match result {
+                                    Ok(()) => "Disconnected GitHub.".to_string(),
+                                    Err(err) => format!("Failed to disconnect GitHub: {err}"),
+                                });
+                            } else {
+                                let result = provider_auth::connect_github_cli(tx);
+                                if let Err(err) = result {
+                                    this.auth_message = Some(format!("GitHub CLI connection: {err}"));
+                                }
+                            }
+                            cx.notify();
+                        });
+                    }),
+            )
+    }
+
+    fn render_github_pat_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().colors;
+        let view = cx.entity().downgrade();
+        let input = self.github_input.clone();
+        let auth_tx = self.auth_tx.clone();
+
+        div()
+            .py_4()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.foreground)
+                    .child("GitHub Personal Access Token (PAT)"),
+            )
+            .child(
+                div()
+                    .mt_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_1().child(Input::new(&input).mask_toggle()))
+                    .child(
+                        Button::new("save-github-token")
+                            .label("Save")
+                            .primary()
+                            .on_click(move |_event, _window, cx| {
+                                let val = input.read(cx).value().to_string();
+                                let tx = auth_tx.clone();
+                                let _ = view.update(cx, |this, cx| {
+                                    if val.trim().is_empty() {
+                                        let _ = provider_auth::disconnect_github();
+                                        this.auth_message = Some("Cleared GitHub token.".to_string());
+                                    } else {
+                                        let _ = provider_auth::save_github_pat(&val, tx);
+                                    }
+                                    cx.notify();
+                                });
+                            }),
+                    ),
+            )
+    }
+
+    fn render_gitlab_connection(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().colors;
+        let view = cx.entity().downgrade();
+        let gitlab_status = threadlane_auth::github_auth::get_gitlab_auth_status();
+        let connected = gitlab_status.is_some();
+        let status_label = gitlab_status.unwrap_or_else(|| "Not connected".to_string());
+
+        div()
+            .py_4()
+            .border_b_1()
+            .border_color(theme.border)
+            .flex()
+            .items_center()
+            .gap_4()
+            .child(
+                div()
+                    .w(px(36.0))
+                    .h(px(36.0))
+                    .flex_none()
+                    .rounded_lg()
+                    .bg(theme.muted)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(if connected {
+                        theme.success
+                    } else {
+                        theme.muted_foreground
+                    })
+                    .child(IconName::Globe),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.foreground)
+                                    .child("GitLab"),
+                            )
+                            .child(
+                                Tag::new()
+                                    .child(if connected { status_label } else { "Not connected".to_string() })
+                                    .with_variant(if connected {
+                                        TagVariant::Success
+                                    } else {
+                                        TagVariant::Secondary
+                                    })
+                                    .small(),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .mt_1()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("Connect GitLab to inspect mr:// and GitLab issue virtual references."),
+                    ),
+            )
+            .child(
+                Button::new("gitlab-auth-button")
+                    .label("Disconnect")
+                    .disabled(!connected)
+                    .ghost()
+                    .on_click(move |_event, _window, cx| {
+                        let _ = view.update(cx, |this, cx| {
+                            if connected {
+                                let result = provider_auth::disconnect_gitlab();
+                                this.auth_message = Some(match result {
+                                    Ok(()) => "Disconnected GitLab.".to_string(),
+                                    Err(err) => format!("Failed to disconnect GitLab: {err}"),
+                                });
+                            }
+                            cx.notify();
+                        });
+                    }),
+            )
+    }
+
     fn render_chatgpt_connections(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
         let view = cx.entity().downgrade();
@@ -891,165 +1141,10 @@ impl SettingsView {
 
     fn render_providers(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().colors;
-        let (selected_model, state_status) = {
-            let state = self.model.read(cx);
-            (state.selected_model.clone(), state.auth_status_msg.clone())
-        };
+        let state_status = self.model.read(cx).auth_status_msg.clone();
         let status = self.auth_message.clone().or(state_status);
         let antigravity_connected =
             threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some();
-        let model = self.model.clone();
-        let project_root = self.active_project(cx);
-        let model_options =
-            crate::model_catalog::available_models_for_project(project_root.as_deref());
-        let has_models = !model_options.is_empty();
-        let selected_option = crate::model_catalog::available_option_for_project(
-            &selected_model,
-            project_root.as_deref(),
-        );
-        let selected_model_label = selected_option
-            .as_ref()
-            .map(|option| option.label.clone())
-            .unwrap_or_else(|| "Connect a provider".to_string());
-        let picker_model = model.clone();
-        let picker_selected_model = selected_model.clone();
-        let model_picker = Button::new("settings-default-model-picker")
-            .label(selected_model_label)
-            .dropdown_caret(true)
-            .outline()
-            .disabled(!has_models);
-        let model_picker = if let Some(option) = selected_option.as_ref() {
-            model_picker.icon(Icon::default().path(option.provider.icon_path()))
-        } else {
-            model_picker
-        };
-        let task_model_options = model_options.clone();
-        let model_picker = model_picker.dropdown_menu(move |menu, _window, _cx| {
-            let mut menu = menu;
-            for option in task_model_options.iter().cloned() {
-                let selected = option.id == picker_selected_model;
-                let id = option.id.to_string();
-                let model = picker_model.clone();
-                menu = menu.item(
-                    PopupMenuItem::new(option.label)
-                        .icon(Icon::default().path(option.provider.icon_path()))
-                        .checked(selected)
-                        .on_click(move |_event, _window, cx| {
-                            model.update(cx, |state, _cx| {
-                                controller::dispatch(state, AppAction::SelectModel(id.clone()));
-                            });
-                        }),
-                );
-            }
-            menu
-        });
-
-        let (plan_model_id, advisor_model_id, advisor_enabled) = {
-            let state = self.model.read(cx);
-            (
-                state
-                    .model_roles
-                    .plan
-                    .clone()
-                    .unwrap_or_else(|| selected_model.clone()),
-                state
-                    .model_roles
-                    .advisor
-                    .clone()
-                    .unwrap_or_else(|| selected_model.clone()),
-                state.model_roles.advisor_enabled,
-            )
-        };
-
-        let plan_option = crate::model_catalog::available_option_for_project(
-            &plan_model_id,
-            project_root.as_deref(),
-        );
-        let plan_model_label = plan_option
-            .as_ref()
-            .map(|option| option.label.clone())
-            .unwrap_or_else(|| "Default (same as Task)".to_string());
-        let plan_picker_model = model.clone();
-        let plan_picker_selected = plan_model_id.clone();
-        let plan_model_options = model_options.clone();
-        let plan_picker = Button::new("settings-plan-model-picker")
-            .label(plan_model_label)
-            .dropdown_caret(true)
-            .outline()
-            .disabled(!has_models);
-        let plan_picker = if let Some(option) = plan_option.as_ref() {
-            plan_picker.icon(Icon::default().path(option.provider.icon_path()))
-        } else {
-            plan_picker
-        };
-        let plan_picker = plan_picker.dropdown_menu(move |menu, _window, _cx| {
-            let mut menu = menu;
-            for option in plan_model_options.iter().cloned() {
-                let selected = option.id == plan_picker_selected;
-                let id = option.id.to_string();
-                let model = plan_picker_model.clone();
-                menu = menu.item(
-                    PopupMenuItem::new(option.label)
-                        .icon(Icon::default().path(option.provider.icon_path()))
-                        .checked(selected)
-                        .on_click(move |_event, _window, cx| {
-                            model.update(cx, |state, cx| {
-                                let mut roles = state.model_roles.clone();
-                                roles.plan = Some(id.clone());
-                                state.update_model_roles(roles);
-                                cx.notify();
-                            });
-                        }),
-                );
-            }
-            menu
-        });
-
-        let advisor_option = crate::model_catalog::available_option_for_project(
-            &advisor_model_id,
-            project_root.as_deref(),
-        );
-        let advisor_model_label = advisor_option
-            .as_ref()
-            .map(|option| option.label.clone())
-            .unwrap_or_else(|| "Default (same as Task)".to_string());
-        let advisor_picker_model = model.clone();
-        let advisor_picker_selected = advisor_model_id.clone();
-        let advisor_model_options = model_options.clone();
-        let advisor_picker = Button::new("settings-advisor-model-picker")
-            .label(advisor_model_label)
-            .dropdown_caret(true)
-            .outline()
-            .disabled(!has_models);
-        let advisor_picker = if let Some(option) = advisor_option.as_ref() {
-            advisor_picker.icon(Icon::default().path(option.provider.icon_path()))
-        } else {
-            advisor_picker
-        };
-        let advisor_picker = advisor_picker.dropdown_menu(move |menu, _window, _cx| {
-            let mut menu = menu;
-            for option in advisor_model_options.iter().cloned() {
-                let selected = option.id == advisor_picker_selected;
-                let id = option.id.to_string();
-                let model = advisor_picker_model.clone();
-                menu = menu.item(
-                    PopupMenuItem::new(option.label)
-                        .icon(Icon::default().path(option.provider.icon_path()))
-                        .checked(selected)
-                        .on_click(move |_event, _window, cx| {
-                            model.update(cx, |state, cx| {
-                                let mut roles = state.model_roles.clone();
-                                roles.advisor = Some(id.clone());
-                                state.update_model_roles(roles);
-                                cx.notify();
-                            });
-                        }),
-                );
-            }
-            menu
-        });
-
-        let advisor_toggle_model = model.clone();
 
         div()
             .mt_5()
@@ -1076,140 +1171,9 @@ impl SettingsView {
                 true,
                 cx,
             ))
-            .child(
-                div()
-                    .py_4()
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .flex()
-                    .items_center()
-                    .gap_6()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(theme.foreground)
-                                    .child("Task Model (Execution)"),
-                            )
-                            .child(
-                                div()
-                                    .mt_1()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child("Main coding model used for executing tools and code modifications."),
-                            ),
-                    )
-                    .child(model_picker),
-            )
-            .child(
-                div()
-                    .py_4()
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .flex()
-                    .items_center()
-                    .gap_6()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(theme.foreground)
-                                    .child("Plan Model (Architecture)"),
-                            )
-                            .child(
-                                div()
-                                    .mt_1()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child("High-reasoning model used for /plan breakdown and architecture decomposition."),
-                            ),
-                    )
-                    .child(plan_picker),
-            )
-            .child(
-                div()
-                    .py_4()
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .flex()
-                    .items_center()
-                    .gap_6()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(theme.foreground)
-                                    .child("Advisor Model (Reviewer)"),
-                            )
-                            .child(
-                                div()
-                                    .mt_1()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child("Secondary model paired to review turns and catch blockers."),
-                            ),
-                    )
-                    .child(advisor_picker),
-            )
-            .child(
-                div()
-                    .py_4()
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .flex()
-                    .items_center()
-                    .gap_6()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(theme.foreground)
-                                    .child("Advisor Turn-Watcher"),
-                            )
-                            .child(
-                                div()
-                                    .mt_1()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child("Runs the advisor model on every turn to inject inline asides, concerns, and blockers."),
-                            ),
-                    )
-                    .child(
-                        Switch::new("settings-advisor-toggle")
-                            .checked(advisor_enabled)
-                            .tooltip(if advisor_enabled {
-                                "Disable advisor turn watcher"
-                            } else {
-                                "Enable advisor turn watcher"
-                            })
-                            .on_click(move |checked, _window, cx| {
-                                let checked = *checked;
-                                advisor_toggle_model.update(cx, |state, cx| {
-                                    let mut roles = state.model_roles.clone();
-                                    roles.advisor_enabled = checked;
-                                    state.update_model_roles(roles);
-                                    cx.notify();
-                                });
-                            }),
-
-                    ),
-            )
+            .child(self.render_github_connection(cx))
+            .child(self.render_github_pat_row(cx))
+            .child(self.render_gitlab_connection(cx))
             .child(self.render_key_row(
                 "OpenAI API key",
                 &self.openai_input,
@@ -1224,7 +1188,6 @@ impl SettingsView {
                 AppAction::SaveOpenCodeKey,
                 cx,
             ))
-
             .into_any_element()
     }
 

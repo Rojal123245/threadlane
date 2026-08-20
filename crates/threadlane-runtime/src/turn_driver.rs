@@ -625,25 +625,6 @@ impl<'a> TurnDriver<'a> {
                     tool_results: Vec::new(),
                 });
 
-                // Run Advisor watcher if enabled
-                if self.config.model_roles.advisor_enabled {
-                    let advisor_model = self.config.model_roles.resolve_advisor(&model).to_string();
-                    let evaluator = crate::advisor::AdvisorEvaluator::new(
-                        self.provider_client.clone(),
-                        advisor_model,
-                    );
-                    let current_messages = {
-                        let turn = self.turn.lock().await;
-                        turn.messages.clone()
-                    };
-                    if let Some(note) = evaluator.evaluate_turn(&current_messages).await {
-                        self.emit_event(AgentEvent::AdvisorNote { note: note.clone() });
-                        let prompt = note.to_steering_prompt();
-                        self.steering_queue
-                            .push(AgentMessage::user(prompt, Vec::new()));
-                    }
-                }
-
                 if !self.steering_queue.is_empty() {
                     let items: Vec<_> = self.steering_queue.drain(..).collect();
                     if let Err(error) = self.persist_messages(&items).await {
@@ -721,25 +702,6 @@ impl<'a> TurnDriver<'a> {
                 turn_number,
                 tool_results: tool_results.clone(),
             });
-
-            // Run Advisor watcher after tool executions if enabled
-            if self.config.model_roles.advisor_enabled {
-                let advisor_model = self.config.model_roles.resolve_advisor(&model).to_string();
-                let evaluator = crate::advisor::AdvisorEvaluator::new(
-                    self.provider_client.clone(),
-                    advisor_model,
-                );
-                let current_messages = {
-                    let turn = self.turn.lock().await;
-                    turn.messages.clone()
-                };
-                if let Some(note) = evaluator.evaluate_turn(&current_messages).await {
-                    self.emit_event(AgentEvent::AdvisorNote { note: note.clone() });
-                    let prompt = note.to_steering_prompt();
-                    self.steering_queue
-                        .push(AgentMessage::user(prompt, Vec::new()));
-                }
-            }
 
             if tool_results.iter().any(|r| r.terminate) {
                 break;

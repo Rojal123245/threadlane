@@ -99,3 +99,46 @@ pub(crate) fn start_antigravity_login(tx: Sender<ProviderAuthEvent>) -> Result<(
     });
     Ok(())
 }
+
+pub(crate) fn connect_github_cli(tx: Sender<ProviderAuthEvent>) -> Result<(), String> {
+    match threadlane_auth::github_auth::sync_from_gh_cli() {
+        Ok(creds) => {
+            let label = creds.username.unwrap_or_else(|| "GitHub user".to_string());
+            let _ = tx.send(ProviderAuthEvent::Connected(format!(
+                "Connected GitHub via CLI as @{label}."
+            )));
+            Ok(())
+        }
+        Err(err) => {
+            let _ = tx.send(ProviderAuthEvent::Error(format!(
+                "Failed to connect GitHub CLI: {err}"
+            )));
+            Err(err)
+        }
+    }
+}
+
+pub(crate) fn save_github_pat(token: &str, tx: Sender<ProviderAuthEvent>) -> Result<(), String> {
+    match threadlane_auth::github_auth::save_github_token(token, None, "pat") {
+        Ok(_) => {
+            let _ = tx.send(ProviderAuthEvent::Connected(
+                "Connected GitHub using Personal Access Token.".to_string(),
+            ));
+            Ok(())
+        }
+        Err(err) => {
+            let _ = tx.send(ProviderAuthEvent::Error(format!(
+                "Failed to save GitHub token: {err}"
+            )));
+            Err(err)
+        }
+    }
+}
+
+pub(crate) fn disconnect_github() -> Result<(), String> {
+    threadlane_auth::github_auth::remove_github_credentials()
+}
+
+pub(crate) fn disconnect_gitlab() -> Result<(), String> {
+    threadlane_auth::github_auth::remove_gitlab_credentials()
+}

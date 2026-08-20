@@ -76,7 +76,7 @@ Legend: ✅ have · 🟡 partial · ❌ missing · — not applicable to a nativ
 | Real DAP debugger drive (breakpoints/stepping) | 🟡 (`debug_ext` exists) | verify multi-step resume UX | **P2** |
 | Agent-curated memory (`retain`/`recall`/`learn`) | ✅ | project-scoped durable memory | **P2** |
 | Stream rules (abort + inject mid-token) | ✅ | one-time corrective retry | **P2** |
-| Virtual `://` schemes (`pr://`, `agent://`, `skill://`) | ✅ (local `agent://`, `skill://`) | provider-backed PR/issues later | **P2** |
+| Virtual `://` schemes (`pr://`, `mr://`, `issue://`, `agent://`, `skill://`) | ✅ | GitHub/GitLab API connectors & fallback | **P2** |
 | Provider fallback chains + role routing | ✅ | persisted roles, fallback, cooldown | **P2** |
 | Atomic commit splitting (dependency-ordered) | ✅ | deterministic source-first grouping | **P3** |
 | Browser/desktop drive | 🟡 (`web_ext`, headless browser N/A) | — | **P3/—** |
@@ -183,12 +183,13 @@ have; P1/P2 add flywheel capabilities; P3 is parity/ambition.
       **Gate:** a failing primary transparently fails over to the next provider for the
       same turn; role selection persists per session like the current model id.
       *(rate-limit detection and fallback/cooldown selection are unit-tested)*
-- [x] **Virtual `://` schemes.** The existing `read_file` path now resolves project-scoped
-      `skill://` and `agent://` references and returns clear provider-required errors for
-      `pr://`/`issue://` until an approved repository provider is configured.
-      **Gate:** `read pr://N` returns the same shape as `read <file>`; unknown schemes
-      degrade to a clear error.
-      *(local virtual schemes and safe unknown-reference behavior completed)*
+- [x] **Virtual `://` schemes.** The `read_file` path resolves project-scoped
+      `skill://` and `agent://` references and connects `pr://`, `mr://`, `issue://`, and
+      GitHub/GitLab URLs through authenticated CLI (`gh`/`glab`) and HTTP fallback connectors
+      with structured Markdown synthesis.
+      **Gate:** `read pr://N` and `read mr://N` return structured Markdown with metadata and body;
+      unknown schemes degrade to a clear error.
+      *(local virtual schemes, remote GitHub/GitLab connectors, and markdown synthesis completed)*
 
 ### P3 — Collaboration, commits, and parity (ambition)
 

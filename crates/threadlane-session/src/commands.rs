@@ -14,12 +14,8 @@ pub fn builtin_commands() -> Vec<SlashCommandInfo> {
     [
         ("model", "Switch model, or show the current one"),
         (
-            "advisor",
-            "Toggle or configure the advisor reviewer model (/advisor on|off|status|model <id>)",
-        ),
-        (
             "plan",
-            "Create or refine an implementation plan using the plan model (/plan <objective>)",
+            "Create or refine an implementation plan using the active model (/plan <objective>)",
         ),
         (
             "roles",
@@ -144,72 +140,18 @@ pub async fn execute_slash_command(
                 format!("Switched model to: {}", new_model)
             }
         }
-        CommandAction::Advisor(arg) => {
-            let mut roles = agent.model_roles().clone();
-            let trimmed = arg.trim();
-            if trimmed.is_empty() || trimmed == "status" {
-                let status = if roles.advisor_enabled {
-                    "ENABLED"
-                } else {
-                    "DISABLED"
-                };
-                let model = roles.advisor.as_deref().unwrap_or("inherit main");
-                format!("Advisor status: {status}\nAdvisor model: {model}\nUsage: /advisor on | off | model <model-id>")
-            } else if trimmed == "on" || trimmed == "enable" {
-                roles.advisor_enabled = true;
-                agent.set_model_roles(roles);
-                "Advisor reviewer turned ON (watching every turn).".to_string()
-            } else if trimmed == "off" || trimmed == "disable" {
-                roles.advisor_enabled = false;
-                agent.set_model_roles(roles);
-                "Advisor reviewer turned OFF.".to_string()
-            } else if let Some(model_id) = trimmed.strip_prefix("model ") {
-                let model_id = model_id.trim().to_string();
-                roles.advisor = Some(model_id.clone());
-                agent.set_model_roles(roles);
-                format!("Advisor model set to: {model_id}")
-            } else {
-                format!("Unknown advisor subcommand: {trimmed}. Use: /advisor on | off | status | model <id>")
-            }
+        CommandAction::Advisor(_) => {
+            "Threadlane relies on the active model's native reasoning (Chain-of-Thought / <think> tokens) for unified turn planning, self-reflection, and execution without secondary reviewer latency.".to_string()
         }
-        CommandAction::Roles(arg) => {
-            let mut roles = agent.model_roles().clone();
-            let trimmed = arg.trim();
-            if trimmed.is_empty() {
-                let main_model = agent.get_state().await.model;
-                format!(
-                    "Model Roles:\n  Task (execution): {}\n  Plan (architecture): {}\n  Advisor (reviewer): {} [{}]\n\nUsage: /roles plan=<model> | task=<model> | advisor=<model>",
-                    roles.resolve_task(&main_model),
-                    roles.resolve_plan(&main_model),
-                    roles.resolve_advisor(&main_model),
-                    if roles.advisor_enabled { "active" } else { "inactive" }
-                )
-            } else if let Some((key, val)) = trimmed.split_once('=') {
-                let key = key.trim().to_lowercase();
-                let val = val.trim().to_string();
-                match key.as_str() {
-                    "task" => {
-                        roles.task = Some(val.clone());
-                        agent.set_model_roles(roles);
-                        format!("Task model role set to: {val}")
-                    }
-                    "plan" => {
-                        roles.plan = Some(val.clone());
-                        agent.set_model_roles(roles);
-                        format!("Plan model role set to: {val}")
-                    }
-                    "advisor" => {
-                        roles.advisor = Some(val.clone());
-                        agent.set_model_roles(roles);
-                        format!("Advisor model role set to: {val}")
-                    }
-                    other => {
-                        format!("Unknown model role: {other}. Available roles: task, plan, advisor")
-                    }
-                }
+        CommandAction::Roles(_) => {
+            let roles = agent.model_roles().clone();
+            let main_model = agent.get_state().await.model;
+            let fallbacks = if roles.fallback_chain.is_empty() {
+                "None".to_string()
             } else {
-                format!("Usage: /roles plan=<model> | task=<model> | advisor=<model>")
-            }
+                roles.fallback_chain.join(" -> ")
+            };
+            format!("Model Configuration:\n  Active Model: {main_model}\n  Rate-limit Failover Chain: {fallbacks}")
         }
         CommandAction::Plan(objective) => {
             if objective.trim().is_empty() {

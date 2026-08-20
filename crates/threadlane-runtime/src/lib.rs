@@ -1,4 +1,3 @@
-pub(crate) mod advisor;
 pub mod capability;
 pub mod compaction;
 pub mod config;

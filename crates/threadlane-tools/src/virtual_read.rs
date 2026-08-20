@@ -1,43 +1,90 @@
+use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct ParsedGitHubRef<'a> {
-    pub owner: Option<&'a str>,
-    pub repo: Option<&'a str>,
-    pub kind: &'a str,
-    pub number: &'a str,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepoProvider {
+    GitHub,
+    GitLab,
 }
 
-pub fn parse_github_ref(input: &str) -> Option<ParsedGitHubRef<'_>> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedRemoteRef {
+    pub provider: Option<RepoProvider>,
+    pub host: Option<String>,
+    pub owner_repo: Option<String>,
+    pub kind: String, // "pr", "mr", or "issue"
+    pub number: String,
+}
+
+pub fn parse_remote_ref(input: &str) -> Option<ParsedRemoteRef> {
     let input = input.trim();
     if let Some(rest) = input.strip_prefix("pr://") {
-        parse_scheme_or_path("pr", rest)
+        parse_scheme_or_path(Some(RepoProvider::GitHub), "pr", rest)
+    } else if let Some(rest) = input.strip_prefix("mr://") {
+        parse_scheme_or_path(Some(RepoProvider::GitLab), "mr", rest)
     } else if let Some(rest) = input.strip_prefix("issue://") {
-        parse_scheme_or_path("issue", rest)
+        parse_scheme_or_path(None, "issue", rest)
     } else if let Some(rest) = input
         .strip_prefix("https://github.com/")
         .or_else(|| input.strip_prefix("http://github.com/"))
     {
-        parse_url_path(rest)
+        parse_github_url_path(rest)
+    } else if input.starts_with("https://") || input.starts_with("http://") {
+        parse_gitlab_or_generic_url(input)
     } else {
         None
     }
 }
 
-fn parse_scheme_or_path<'a>(default_kind: &'a str, rest: &'a str) -> Option<ParsedGitHubRef<'a>> {
+// Backward compatibility alias for tests and callers
+pub fn parse_github_ref(input: &str) -> Option<ParsedGitHubRef> {
+    let parsed = parse_remote_ref(input)?;
+    let (owner, repo) = if let Some(ref or) = parsed.owner_repo {
+        let parts: Vec<&str> = or.split('/').collect();
+        if parts.len() == 2 {
+            (Some(parts[0].to_string()), Some(parts[1].to_string()))
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+
+    Some(ParsedGitHubRef {
+        owner,
+        repo,
+        kind: if parsed.kind == "mr" { "pr".to_string() } else { parsed.kind },
+        number: parsed.number,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedGitHubRef {
+    pub owner: Option<String>,
+    pub repo: Option<String>,
+    pub kind: String,
+    pub number: String,
+}
+
+fn parse_scheme_or_path(
+    provider: Option<RepoProvider>,
+    default_kind: &str,
+    rest: &str,
+) -> Option<ParsedRemoteRef> {
     let rest = rest.trim_matches('/');
     if rest.is_empty() {
         return None;
     }
 
     if rest.bytes().all(|b| b.is_ascii_digit()) {
-        return Some(ParsedGitHubRef {
-            owner: None,
-            repo: None,
-            kind: default_kind,
-            number: rest,
+        return Some(ParsedRemoteRef {
+            provider,
+            host: None,
+            owner_repo: None,
+            kind: default_kind.to_string(),
+            number: rest.to_string(),
         });
     }
 
@@ -45,33 +92,38 @@ fn parse_scheme_or_path<'a>(default_kind: &'a str, rest: &'a str) -> Option<Pars
     if parts.len() >= 3 {
         let owner = parts[0];
         let repo = parts[1];
+        let owner_repo = format!("{owner}/{repo}");
         if parts.len() >= 4
             && (parts[2] == "pull"
                 || parts[2] == "pulls"
+                || parts[2] == "merge_requests"
                 || parts[2] == "issues"
                 || parts[2] == "issue")
         {
             let kind = match parts[2] {
                 "pull" | "pulls" => "pr",
+                "merge_requests" => "mr",
                 _ => "issue",
             };
             let number = parts[3];
             if number.bytes().all(|b| b.is_ascii_digit()) {
-                return Some(ParsedGitHubRef {
-                    owner: Some(owner),
-                    repo: Some(repo),
-                    kind,
-                    number,
+                return Some(ParsedRemoteRef {
+                    provider,
+                    host: None,
+                    owner_repo: Some(owner_repo),
+                    kind: kind.to_string(),
+                    number: number.to_string(),
                 });
             }
         } else {
             let number = parts[2];
             if number.bytes().all(|b| b.is_ascii_digit()) {
-                return Some(ParsedGitHubRef {
-                    owner: Some(owner),
-                    repo: Some(repo),
-                    kind: default_kind,
-                    number,
+                return Some(ParsedRemoteRef {
+                    provider,
+                    host: None,
+                    owner_repo: Some(owner_repo),
+                    kind: default_kind.to_string(),
+                    number: number.to_string(),
                 });
             }
         }
@@ -80,7 +132,7 @@ fn parse_scheme_or_path<'a>(default_kind: &'a str, rest: &'a str) -> Option<Pars
     None
 }
 
-fn parse_url_path(rest: &str) -> Option<ParsedGitHubRef<'_>> {
+fn parse_github_url_path(rest: &str) -> Option<ParsedRemoteRef> {
     let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
     if parts.len() >= 4 {
         let owner = parts[0];
@@ -92,73 +144,66 @@ fn parse_url_path(rest: &str) -> Option<ParsedGitHubRef<'_>> {
         };
         let number = parts[3];
         if number.bytes().all(|b| b.is_ascii_digit()) {
-            return Some(ParsedGitHubRef {
-                owner: Some(owner),
-                repo: Some(repo),
-                kind,
-                number,
+            return Some(ParsedRemoteRef {
+                provider: Some(RepoProvider::GitHub),
+                host: Some("github.com".to_string()),
+                owner_repo: Some(format!("{owner}/{repo}")),
+                kind: kind.to_string(),
+                number: number.to_string(),
             });
         }
     }
     None
 }
 
-pub fn github_path(root: &Path, reference: &str) -> String {
-    let parsed = match parse_github_ref(reference) {
-        Some(p) => p,
-        None => {
-            return format!(
-                "Invalid GitHub reference '{reference}': expected pr://<num>, issue://<num>, or https://github.com/<owner>/<repo>/pull/<num>"
-            );
-        }
-    };
+fn parse_gitlab_or_generic_url(url: &str) -> Option<ParsedRemoteRef> {
+    let without_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
 
-    let (owner, repo) = match (parsed.owner, parsed.repo) {
-        (Some(o), Some(r)) => (o.to_string(), r.to_string()),
-        _ => match get_github_remote_owner_repo(root) {
-            Some((o, r)) => (o, r),
-            None => {
-                return format!(
-                    "{}://{} requires a GitHub origin remote or an explicit owner/repo URL (e.g. https://github.com/owner/repo/pull/{})",
-                    parsed.kind, parsed.number, parsed.number
-                );
+    let (host, path) = without_scheme.split_once('/')?;
+    let is_gitlab = host.contains("gitlab")
+        || path.contains("/-/merge_requests/")
+        || path.contains("/-/issues/");
+
+    if is_gitlab {
+        let (project_path, rest_path) = if let Some(idx) = path.find("/-/") {
+            (&path[..idx], &path[idx + 3..])
+        } else {
+            (path, "")
+        };
+
+        let rest_parts: Vec<&str> = rest_path.split('/').filter(|s| !s.is_empty()).collect();
+        if rest_parts.len() >= 2 {
+            let kind = match rest_parts[0] {
+                "merge_requests" => "mr",
+                "issues" => "issue",
+                _ => return None,
+            };
+            let number = rest_parts[1];
+            if number.bytes().all(|b| b.is_ascii_digit()) {
+                return Some(ParsedRemoteRef {
+                    provider: Some(RepoProvider::GitLab),
+                    host: Some(host.to_string()),
+                    owner_repo: Some(project_path.trim_matches('/').to_string()),
+                    kind: kind.to_string(),
+                    number: number.to_string(),
+                });
             }
-        },
-    };
-
-    let endpoint = match parsed.kind {
-        "pr" => format!("repos/{owner}/{repo}/pulls/{}", parsed.number),
-        "issue" => format!("repos/{owner}/{repo}/issues/{}", parsed.number),
-        _ => return format!("Unknown virtual reference scheme '{}://'", parsed.kind),
-    };
-
-    match Command::new("gh")
-        .args(["api", &endpoint])
-        .current_dir(root)
-        .output()
-    {
-        Ok(output) if output.status.success() => {
-            String::from_utf8_lossy(&output.stdout).into_owned()
         }
-        Ok(output) => format!(
-            "{}://{} GitHub CLI error: {}",
-            parsed.kind,
-            parsed.number,
-            String::from_utf8_lossy(&output.stderr).trim()
-        ),
-        Err(error) => format!(
-            "{}://{} requires the authenticated GitHub CLI: {}",
-            parsed.kind, parsed.number, error
-        ),
     }
+
+    None
 }
 
-#[allow(dead_code)]
-pub fn github(root: &Path, kind: &str, number: &str) -> String {
-    github_path(root, &format!("{kind}://{number}"))
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitRemoteInfo {
+    pub provider: RepoProvider,
+    pub host: String,
+    pub owner_repo: String,
 }
 
-fn get_github_remote_owner_repo(root: &Path) -> Option<(String, String)> {
+pub fn get_git_remote_info(root: &Path) -> Option<GitRemoteInfo> {
     let output = Command::new("git")
         .args(["remote", "get-url", "origin"])
         .current_dir(root)
@@ -169,15 +214,344 @@ fn get_github_remote_owner_repo(root: &Path) -> Option<(String, String)> {
         return None;
     }
     let remote = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    github_owner_repo(&remote).map(|(o, r)| (o.to_string(), r.to_string()))
+    parse_git_remote_url(&remote)
 }
 
-fn github_owner_repo(remote: &str) -> Option<(&str, &str)> {
-    let remote = remote.strip_suffix(".git").unwrap_or(remote);
-    let path = remote
-        .strip_prefix("git@github.com:")
-        .or_else(|| remote.strip_prefix("https://github.com/"))?;
+pub fn parse_git_remote_url(remote: &str) -> Option<GitRemoteInfo> {
+    let remote = remote.strip_suffix(".git").unwrap_or(remote).trim();
+
+    // SSH forms: git@github.com:owner/repo or git@gitlab.com:group/subgroup/repo
+    if let Some(rest) = remote.strip_prefix("git@") {
+        if let Some((host, path)) = rest.split_once(':') {
+            let provider = if host.contains("gitlab") {
+                RepoProvider::GitLab
+            } else {
+                RepoProvider::GitHub
+            };
+            return Some(GitRemoteInfo {
+                provider,
+                host: host.to_string(),
+                owner_repo: path.trim_matches('/').to_string(),
+            });
+        }
+    }
+
+    // HTTPS forms: https://github.com/owner/repo or https://gitlab.com/group/repo
+    if let Some(rest) = remote
+        .strip_prefix("https://")
+        .or_else(|| remote.strip_prefix("http://"))
+    {
+        if let Some((host, path)) = rest.split_once('/') {
+            let provider = if host.contains("gitlab") {
+                RepoProvider::GitLab
+            } else {
+                RepoProvider::GitHub
+            };
+            return Some(GitRemoteInfo {
+                provider,
+                host: host.to_string(),
+                owner_repo: path.trim_matches('/').to_string(),
+            });
+        }
+    }
+
+    None
+}
+
+// Backward compatibility helper
+pub fn github_owner_repo(remote: &str) -> Option<(&str, &str)> {
+    let remote_clean = remote.strip_suffix(".git").unwrap_or(remote).trim();
+    if remote_clean.contains("gitlab") {
+        return None;
+    }
+    let path = if let Some(rest) = remote_clean.strip_prefix("git@github.com:") {
+        rest
+    } else if let Some(rest) = remote_clean
+        .strip_prefix("https://github.com/")
+        .or_else(|| remote_clean.strip_prefix("http://github.com/"))
+    {
+        rest
+    } else {
+        return None;
+    };
     path.split_once('/')
+}
+
+pub fn remote_ref_path(root: &Path, reference: &str) -> String {
+    let parsed = match parse_remote_ref(reference) {
+        Some(p) => p,
+        None => {
+            return format!(
+                "Invalid repository reference '{reference}': expected pr://<num>, issue://<num>, mr://<num>, or GitHub/GitLab URL"
+            );
+        }
+    };
+
+    let remote_info = get_git_remote_info(root);
+
+    let provider = parsed
+        .provider
+        .or_else(|| remote_info.as_ref().map(|r| r.provider))
+        .unwrap_or_else(|| {
+            if parsed.kind == "mr" {
+                RepoProvider::GitLab
+            } else {
+                RepoProvider::GitHub
+            }
+        });
+
+    let host = parsed
+        .host
+        .or_else(|| remote_info.as_ref().map(|r| r.host.clone()))
+        .unwrap_or_else(|| match provider {
+            RepoProvider::GitHub => "github.com".to_string(),
+            RepoProvider::GitLab => "gitlab.com".to_string(),
+        });
+
+    let owner_repo = match parsed.owner_repo {
+        Some(or) => or,
+        None => match remote_info {
+            Some(info) => info.owner_repo,
+            None => {
+                return format!(
+                    "{}://{} requires a git origin remote or an explicit repository URL (e.g. pr://owner/repo/{})",
+                    parsed.kind, parsed.number, parsed.number
+                );
+            }
+        },
+    };
+
+    match provider {
+        RepoProvider::GitHub => fetch_github(root, &owner_repo, &parsed.kind, &parsed.number),
+        RepoProvider::GitLab => fetch_gitlab(root, &host, &owner_repo, &parsed.kind, &parsed.number),
+    }
+}
+
+pub fn github_path(root: &Path, reference: &str) -> String {
+    remote_ref_path(root, reference)
+}
+
+fn fetch_github(root: &Path, owner_repo: &str, kind: &str, number: &str) -> String {
+    let endpoint = match kind {
+        "pr" | "mr" => format!("repos/{owner_repo}/pulls/{number}"),
+        _ => format!("repos/{owner_repo}/issues/{number}"),
+    };
+
+    // Strategy 1: gh CLI
+    if let Ok(output) = Command::new("gh")
+        .args(["api", &endpoint])
+        .current_dir(root)
+        .output()
+    {
+        if output.status.success() {
+            let raw = String::from_utf8_lossy(&output.stdout).into_owned();
+            return format_github_markdown(kind, number, &raw);
+        }
+    }
+
+    // Strategy 2: Direct curl HTTP API fallback
+    let url = format!("https://api.github.com/{endpoint}");
+    let mut cmd = Command::new("curl");
+    cmd.args(["-s", "-L", "-H", "User-Agent: Threadlane", "-H", "Accept: application/vnd.github+json"]);
+
+    let token = threadlane_auth::github_auth::get_github_token();
+    if let Some(tok) = &token {
+        cmd.args(["-H", &format!("Authorization: Bearer {tok}")]);
+    }
+    cmd.arg(&url);
+
+    match cmd.output() {
+        Ok(output) if output.status.success() => {
+            let raw = String::from_utf8_lossy(&output.stdout).into_owned();
+            if raw.contains("\"message\": \"Not Found\"") {
+                format!(
+                    "GitHub {kind} #{number} not found on {owner_repo}. (If private, set GITHUB_TOKEN, connect GitHub in Settings, or run 'gh auth login')"
+                )
+            } else if raw.contains("\"message\": \"Bad credentials\"") {
+                "GitHub API error: Bad credentials. Check your GITHUB_TOKEN, Settings > Integrations, or 'gh auth status'.".to_string()
+            } else {
+                format_github_markdown(kind, number, &raw)
+            }
+        }
+        Ok(output) => {
+            format!(
+                "GitHub API request failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
+        }
+        Err(e) => {
+            format!(
+                "{}://{number} requires 'gh' CLI or 'curl' with GITHUB_TOKEN: {e}",
+                kind
+            )
+        }
+    }
+}
+
+fn fetch_gitlab(root: &Path, host: &str, project_path: &str, kind: &str, number: &str) -> String {
+    let encoded_project = project_path.replace('/', "%2F");
+    let endpoint = match kind {
+        "pr" | "mr" => format!("projects/{encoded_project}/merge_requests/{number}"),
+        _ => format!("projects/{encoded_project}/issues/{number}"),
+    };
+
+    // Strategy 1: glab CLI
+    let mut glab_cmd = Command::new("glab");
+    glab_cmd.args(["api", &endpoint]).current_dir(root);
+    if host != "gitlab.com" {
+        glab_cmd.args(["--hostname", host]);
+    }
+
+    if let Ok(output) = glab_cmd.output() {
+        if output.status.success() {
+            let raw = String::from_utf8_lossy(&output.stdout).into_owned();
+            return format_gitlab_markdown(kind, number, &raw);
+        }
+    }
+
+    // Strategy 2: Direct curl HTTP API fallback
+    let url = format!("https://{host}/api/v4/{endpoint}");
+    let mut cmd = Command::new("curl");
+    cmd.args(["-s", "-L", "-H", "User-Agent: Threadlane"]);
+
+    let token = threadlane_auth::github_auth::get_gitlab_token();
+    if let Some(tok) = &token {
+        cmd.args(["-H", &format!("PRIVATE-TOKEN: {tok}")]);
+    }
+    cmd.arg(&url);
+
+    match cmd.output() {
+        Ok(output) if output.status.success() => {
+            let raw = String::from_utf8_lossy(&output.stdout).into_owned();
+            if raw.contains("\"message\":\"404 Project Not Found\"") || raw.contains("\"message\":\"404 Not Found\"") {
+                format!(
+                    "GitLab {kind} #{number} not found on {project_path}. (If private, set GITLAB_TOKEN or run 'glab auth login')"
+                )
+            } else {
+                format_gitlab_markdown(kind, number, &raw)
+            }
+        }
+        Ok(output) => {
+            format!(
+                "GitLab API request failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
+        }
+        Err(e) => {
+            format!(
+                "{}://{number} requires 'glab' CLI or 'curl' with GITLAB_TOKEN: {e}",
+                kind
+            )
+        }
+    }
+}
+
+pub fn format_github_markdown(kind: &str, number: &str, raw_json: &str) -> String {
+    let val: Value = match serde_json::from_str(raw_json) {
+        Ok(v) => v,
+        Err(_) => return raw_json.to_string(),
+    };
+
+    let title = val["title"].as_str().unwrap_or("Untitled");
+    let state = val["state"].as_str().unwrap_or("unknown").to_uppercase();
+    let author = val["user"]["login"].as_str().unwrap_or("unknown");
+    let created_at = val["created_at"].as_str().unwrap_or("");
+    let url = val["html_url"].as_str().unwrap_or("");
+    let body = val["body"].as_str().unwrap_or("").trim();
+
+    let mut out = String::new();
+    if kind == "pr" || kind == "mr" {
+        let head = val["head"]["ref"].as_str().unwrap_or("unknown");
+        let base = val["base"]["ref"].as_str().unwrap_or("unknown");
+        let additions = val["additions"].as_u64().unwrap_or(0);
+        let deletions = val["deletions"].as_u64().unwrap_or(0);
+        let changed_files = val["changed_files"].as_u64().unwrap_or(0);
+        let merged = val["merged"].as_bool().unwrap_or(false);
+        let status_str = if merged { "MERGED" } else { &state };
+
+        out.push_str(&format!("# Pull Request #{number}: {title}\n\n"));
+        out.push_str(&format!("- **Status:** {status_str}\n"));
+        out.push_str(&format!("- **Author:** @{author}\n"));
+        out.push_str(&format!("- **Branches:** `{head}` -> `{base}`\n"));
+        if !created_at.is_empty() {
+            out.push_str(&format!("- **Created:** {created_at}\n"));
+        }
+        if !url.is_empty() {
+            out.push_str(&format!("- **URL:** {url}\n"));
+        }
+        out.push_str(&format!("- **Changes:** +{additions} / -{deletions} ({changed_files} files changed)\n\n"));
+    } else {
+        out.push_str(&format!("# Issue #{number}: {title}\n\n"));
+        out.push_str(&format!("- **Status:** {state}\n"));
+        out.push_str(&format!("- **Author:** @{author}\n"));
+        if !created_at.is_empty() {
+            out.push_str(&format!("- **Created:** {created_at}\n"));
+        }
+        if !url.is_empty() {
+            out.push_str(&format!("- **URL:** {url}\n"));
+        }
+        let comments = val["comments"].as_u64().unwrap_or(0);
+        out.push_str(&format!("- **Comments:** {comments}\n\n"));
+    }
+
+    out.push_str("## Description\n\n");
+    if body.is_empty() {
+        out.push_str("*No description provided.*");
+    } else {
+        out.push_str(body);
+    }
+
+    out
+}
+
+pub fn format_gitlab_markdown(kind: &str, number: &str, raw_json: &str) -> String {
+    let val: Value = match serde_json::from_str(raw_json) {
+        Ok(v) => v,
+        Err(_) => return raw_json.to_string(),
+    };
+
+    let title = val["title"].as_str().unwrap_or("Untitled");
+    let state = val["state"].as_str().unwrap_or("unknown").to_uppercase();
+    let author = val["author"]["username"].as_str().unwrap_or("unknown");
+    let created_at = val["created_at"].as_str().unwrap_or("");
+    let url = val["web_url"].as_str().unwrap_or("");
+    let body = val["description"].as_str().unwrap_or("").trim();
+
+    let mut out = String::new();
+    if kind == "mr" || kind == "pr" {
+        let source_branch = val["source_branch"].as_str().unwrap_or("unknown");
+        let target_branch = val["target_branch"].as_str().unwrap_or("unknown");
+
+        out.push_str(&format!("# Merge Request !{number}: {title}\n\n"));
+        out.push_str(&format!("- **Status:** {state}\n"));
+        out.push_str(&format!("- **Author:** @{author}\n"));
+        out.push_str(&format!("- **Branches:** `{source_branch}` -> `{target_branch}`\n"));
+        if !created_at.is_empty() {
+            out.push_str(&format!("- **Created:** {created_at}\n"));
+        }
+        if !url.is_empty() {
+            out.push_str(&format!("- **URL:** {url}\n\n"));
+        }
+    } else {
+        out.push_str(&format!("# Issue #{number}: {title}\n\n"));
+        out.push_str(&format!("- **Status:** {state}\n"));
+        out.push_str(&format!("- **Author:** @{author}\n"));
+        if !created_at.is_empty() {
+            out.push_str(&format!("- **Created:** {created_at}\n"));
+        }
+        if !url.is_empty() {
+            out.push_str(&format!("- **URL:** {url}\n\n"));
+        }
+    }
+
+    out.push_str("## Description\n\n");
+    if body.is_empty() {
+        out.push_str("*No description provided.*");
+    } else {
+        out.push_str(body);
+    }
+
+    out
 }
 
 fn dirs_home() -> Option<PathBuf> {
@@ -261,74 +635,160 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_github_remote_forms() {
+    fn parses_git_remote_forms() {
         assert_eq!(
-            github_owner_repo("git@github.com:owner/repo.git"),
-            Some(("owner", "repo"))
+            parse_git_remote_url("git@github.com:owner/repo.git"),
+            Some(GitRemoteInfo {
+                provider: RepoProvider::GitHub,
+                host: "github.com".to_string(),
+                owner_repo: "owner/repo".to_string(),
+            })
         );
         assert_eq!(
-            github_owner_repo("https://github.com/owner/repo"),
-            Some(("owner", "repo"))
+            parse_git_remote_url("https://github.com/owner/repo"),
+            Some(GitRemoteInfo {
+                provider: RepoProvider::GitHub,
+                host: "github.com".to_string(),
+                owner_repo: "owner/repo".to_string(),
+            })
         );
-        assert_eq!(github_owner_repo("https://gitlab.com/owner/repo"), None);
+        assert_eq!(
+            parse_git_remote_url("git@gitlab.com:gitlab-org/gitlab.git"),
+            Some(GitRemoteInfo {
+                provider: RepoProvider::GitLab,
+                host: "gitlab.com".to_string(),
+                owner_repo: "gitlab-org/gitlab".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_git_remote_url("https://gitlab.mycorp.io/eng/subteam/service.git"),
+            Some(GitRemoteInfo {
+                provider: RepoProvider::GitLab,
+                host: "gitlab.mycorp.io".to_string(),
+                owner_repo: "eng/subteam/service".to_string(),
+            })
+        );
     }
 
     #[test]
-    fn parses_github_refs_correctly() {
+    fn parses_remote_refs_correctly() {
         assert_eq!(
-            parse_github_ref("pr://70"),
-            Some(ParsedGitHubRef {
-                owner: None,
-                repo: None,
-                kind: "pr",
-                number: "70"
+            parse_remote_ref("pr://70"),
+            Some(ParsedRemoteRef {
+                provider: Some(RepoProvider::GitHub),
+                host: None,
+                owner_repo: None,
+                kind: "pr".to_string(),
+                number: "70".to_string(),
             })
         );
         assert_eq!(
-            parse_github_ref("issue://12"),
-            Some(ParsedGitHubRef {
-                owner: None,
-                repo: None,
-                kind: "issue",
-                number: "12"
+            parse_remote_ref("mr://15"),
+            Some(ParsedRemoteRef {
+                provider: Some(RepoProvider::GitLab),
+                host: None,
+                owner_repo: None,
+                kind: "mr".to_string(),
+                number: "15".to_string(),
             })
         );
         assert_eq!(
-            parse_github_ref("pr://wheregmis/threadlane/70"),
-            Some(ParsedGitHubRef {
-                owner: Some("wheregmis"),
-                repo: Some("threadlane"),
-                kind: "pr",
-                number: "70"
+            parse_remote_ref("issue://12"),
+            Some(ParsedRemoteRef {
+                provider: None,
+                host: None,
+                owner_repo: None,
+                kind: "issue".to_string(),
+                number: "12".to_string(),
             })
         );
         assert_eq!(
-            parse_github_ref("https://github.com/wheregmis/threadlane/pull/70"),
-            Some(ParsedGitHubRef {
-                owner: Some("wheregmis"),
-                repo: Some("threadlane"),
-                kind: "pr",
-                number: "70"
+            parse_remote_ref("pr://wheregmis/threadlane/70"),
+            Some(ParsedRemoteRef {
+                provider: Some(RepoProvider::GitHub),
+                host: None,
+                owner_repo: Some("wheregmis/threadlane".to_string()),
+                kind: "pr".to_string(),
+                number: "70".to_string(),
             })
         );
         assert_eq!(
-            parse_github_ref("https://github.com/wheregmis/threadlane/pull/70/files"),
-            Some(ParsedGitHubRef {
-                owner: Some("wheregmis"),
-                repo: Some("threadlane"),
-                kind: "pr",
-                number: "70"
+            parse_remote_ref("https://github.com/wheregmis/threadlane/pull/70"),
+            Some(ParsedRemoteRef {
+                provider: Some(RepoProvider::GitHub),
+                host: Some("github.com".to_string()),
+                owner_repo: Some("wheregmis/threadlane".to_string()),
+                kind: "pr".to_string(),
+                number: "70".to_string(),
             })
         );
         assert_eq!(
-            parse_github_ref("https://github.com/wheregmis/threadlane/issues/42"),
-            Some(ParsedGitHubRef {
-                owner: Some("wheregmis"),
-                repo: Some("threadlane"),
-                kind: "issue",
-                number: "42"
+            parse_remote_ref("https://gitlab.com/gitlab-org/gitlab/-/merge_requests/99"),
+            Some(ParsedRemoteRef {
+                provider: Some(RepoProvider::GitLab),
+                host: Some("gitlab.com".to_string()),
+                owner_repo: Some("gitlab-org/gitlab".to_string()),
+                kind: "mr".to_string(),
+                number: "99".to_string(),
             })
         );
+        assert_eq!(
+            parse_remote_ref("https://gitlab.example.com/company/project/-/issues/404"),
+            Some(ParsedRemoteRef {
+                provider: Some(RepoProvider::GitLab),
+                host: Some("gitlab.example.com".to_string()),
+                owner_repo: Some("company/project".to_string()),
+                kind: "issue".to_string(),
+                number: "404".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn formats_github_pr_markdown() {
+        let json = r#"{
+            "title": "Add virtual repository schemes",
+            "state": "open",
+            "user": { "login": "alice" },
+            "created_at": "2026-08-19T20:00:00Z",
+            "html_url": "https://github.com/owner/repo/pull/70",
+            "body": "This PR adds pr:// and issue:// connectors.",
+            "head": { "ref": "feature/pr-schemes" },
+            "base": { "ref": "main" },
+            "additions": 150,
+            "deletions": 20,
+            "changed_files": 3,
+            "merged": false
+        }"#;
+
+        let formatted = format_github_markdown("pr", "70", json);
+        assert!(formatted.contains("# Pull Request #70: Add virtual repository schemes"));
+        assert!(formatted.contains("- **Status:** OPEN"));
+        assert!(formatted.contains("- **Author:** @alice"));
+        assert!(formatted.contains("- **Branches:** `feature/pr-schemes` -> `main`"));
+        assert!(formatted.contains("- **Changes:** +150 / -20 (3 files changed)"));
+        assert!(formatted.contains("This PR adds pr:// and issue:// connectors."));
+    }
+
+    #[test]
+    fn formats_gitlab_mr_markdown() {
+        let json = r#"{
+            "title": "Fix pipeline timeout",
+            "state": "opened",
+            "author": { "username": "bob" },
+            "created_at": "2026-08-19T21:00:00Z",
+            "web_url": "https://gitlab.com/owner/repo/-/merge_requests/15",
+            "description": "Increases runner timeout to 60m.",
+            "source_branch": "fix/runner",
+            "target_branch": "main"
+        }"#;
+
+        let formatted = format_gitlab_markdown("mr", "15", json);
+        assert!(formatted.contains("# Merge Request !15: Fix pipeline timeout"));
+        assert!(formatted.contains("- **Status:** OPENED"));
+        assert!(formatted.contains("- **Author:** @bob"));
+        assert!(formatted.contains("- **Branches:** `fix/runner` -> `main`"));
+        assert!(formatted.contains("Increases runner timeout to 60m."));
     }
 
     #[test]
