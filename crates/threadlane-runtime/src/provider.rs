@@ -16,7 +16,8 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use threadlane_provider::router::PayloadFormat;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayloadFormat { ChatCompletions, Codex }
 
 /// Opaque provider-specific message representation.
 ///
@@ -184,6 +185,7 @@ impl Clone for ProviderRouter {
 
 impl ProviderRouter {
     /// Creates a router with the default adapters (Chat Completions + Codex).
+    #[allow(dead_code)]
     pub(crate) fn new() -> Self {
         Self::default()
     }
@@ -195,6 +197,7 @@ impl ProviderRouter {
     }
 
     /// Returns the first adapter whose format matches the given format.
+    #[allow(dead_code)]
     fn select(&self, format: PayloadFormat) -> Arc<dyn ProviderAdapter> {
         self.adapters
             .iter()
@@ -205,6 +208,7 @@ impl ProviderRouter {
 
     /// Builds a complete payload for the given format, reading state and tools
     /// from the caller.
+    #[allow(dead_code)]
     pub(crate) fn build_payload(
         &self,
         format: PayloadFormat,
@@ -217,6 +221,7 @@ impl ProviderRouter {
     }
 }
 
+#[allow(dead_code)]
 fn default_adapter_for(format: PayloadFormat) -> Arc<dyn ProviderAdapter> {
     match format {
         PayloadFormat::ChatCompletions => Arc::new(ChatCompletionsAdapter),

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use threadlane_provider::openai::ToolCall;
+use threadlane_protocol::RuntimeToolCall as ToolCall;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentToolDefinition {

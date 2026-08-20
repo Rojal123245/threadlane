@@ -1,5 +1,6 @@
 use crate::antigravity::AntigravityClient;
-use crate::openai::{OpenAIClient, StreamEvent};
+use crate::openai::OpenAIClient;
+use threadlane_protocol::{DeferredResponse as RuntimeDeferredResponse, ProviderPort, RuntimeRequest, RuntimeStreamEvent as StreamEvent};
 use crate::opencode::OpenCodeGoClient;
 use crate::title_generator::{title_payload, TITLE_REQUEST_TIMEOUT};
 use crate::traits::ModelProvider;
@@ -107,6 +108,30 @@ pub struct ProviderClient {
     openai_fallbacks: Vec<OpenAIClient>,
     antigravity: AntigravityClient,
     opencode: OpenCodeGoClient,
+}
+
+#[async_trait::async_trait]
+impl ProviderPort for ProviderClient {
+    async fn stream_request(&self, request: RuntimeRequest, events: mpsc::Sender<StreamEvent>) {
+        let payload = PayloadSource::ChatCompletions(request.messages);
+        self.stream_chat_completion(payload, request.prompt_cache_key, events).await;
+    }
+
+    async fn fetch_deferred(&self, model: &str, handle_id: &str) -> Result<RuntimeDeferredResponse, String> {
+        self.fetch_deferred(model, handle_id).await.map(|response| match response {
+            crate::traits::DeferredResponse::Pending => RuntimeDeferredResponse::Pending,
+            crate::traits::DeferredResponse::Ready { content } => RuntimeDeferredResponse::Ready { content },
+            crate::traits::DeferredResponse::Error { message } => RuntimeDeferredResponse::Error { message },
+        })
+    }
+
+    async fn cancel_deferred(&self, model: &str, handle_id: &str) -> Result<(), String> {
+        self.cancel_deferred(model, handle_id).await
+    }
+
+    fn provider_kind(&self, model: &str) -> &'static str {
+        self.provider_kind(model)
+    }
 }
 
 impl ProviderClient {

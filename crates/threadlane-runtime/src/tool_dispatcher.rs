@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Arc;
-use threadlane_provider::openai::ToolCall;
+use threadlane_protocol::RuntimeToolCall as ToolCall;
 use threadlane_tools::{
     execute_tool, execute_tool_in_workspace, get_available_tools, get_codex_tools,
 };
@@ -827,7 +827,7 @@ mod tests {
             .execute_tools_without_intent_recording(&[ToolCall {
                 id: "call_1".into(),
                 r#type: "function".into(),
-                function: threadlane_provider::openai::ToolCallFunction {
+                function: threadlane_protocol::RuntimeToolCallFunction {
                     name: "hello".into(),
                     arguments: "{}".into(),
                 },
@@ -865,7 +865,7 @@ mod tests {
             .execute_tools_without_intent_recording(&[ToolCall {
                 id: "call_1".into(),
                 r#type: "function".into(),
-                function: threadlane_provider::openai::ToolCallFunction {
+                function: threadlane_protocol::RuntimeToolCallFunction {
                     name: "hello".into(),
                     arguments: "{}".into(),
                 },
@@ -933,7 +933,7 @@ mod tests {
             .execute_tools_without_intent_recording(&[ToolCall {
                 id: "call_1".into(),
                 r#type: "function".into(),
-                function: threadlane_provider::openai::ToolCallFunction {
+                function: threadlane_protocol::RuntimeToolCallFunction {
                     name: "stub_write".into(),
                     arguments: "{}".into(),
                 },
@@ -954,7 +954,7 @@ mod tests {
             .execute_tools_without_intent_recording(&[ToolCall {
                 id: "call_1".into(),
                 r#type: "function".into(),
-                function: threadlane_provider::openai::ToolCallFunction {
+                function: threadlane_protocol::RuntimeToolCallFunction {
                     name: "nonexistent_tool_xyz".into(),
                     arguments: "{}".into(),
                 },

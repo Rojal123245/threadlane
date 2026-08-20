@@ -5,7 +5,7 @@ edition = "2021"
 description = "Threadlane agent runtime: harness, provider routing, tool dispatch, and composition"
 
 [dependencies]
-threadlane-provider = { version = "0.1.0", path = "../threadlane-provider" }
+threadlane-protocol = { version = "0.1.0", path = "../threadlane-protocol" }
 threadlane-tools = { version = "0.1.0", path = "../threadlane-tools" }
 tokio = { version = "1.38", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }

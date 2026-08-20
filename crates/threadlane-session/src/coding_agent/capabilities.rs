@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use threadlane_mcp::{McpManager, McpToolExecutor};
-use threadlane_provider::router::ProviderClient;
+use threadlane_protocol::ProviderPort;
 use threadlane_runtime::harness::{HookContext, HookEffect, HookHandler, HookKind};
 use threadlane_runtime::Capability;
 use threadlane_runtime::{
@@ -63,7 +63,7 @@ impl Capability for SubagentCapability {
 pub(crate) struct PlanCapability {
     pub(crate) plan_store: SessionPlanStore,
     pub(crate) event_tx: broadcast::Sender<AgentEvent>,
-    pub(crate) provider_client: ProviderClient,
+    pub(crate) provider_client: Arc<dyn ProviderPort>,
     pub(crate) turn: Arc<tokio::sync::Mutex<TurnState>>,
     pub(crate) config: AgentConfig,
 }

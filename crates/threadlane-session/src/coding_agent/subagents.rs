@@ -558,12 +558,16 @@ pub(crate) async fn run_subagent_task(
         .session_file
         .clone()
         .unwrap_or_else(|| std::env::temp_dir().join(format!("subagent-{lane_name}.jsonl")));
-    let mut agent = AgentRuntime::new(
+    let mut agent = AgentRuntime::new_with_provider(
         context.api_key.clone(),
         context.account_id.clone(),
         &model,
         Some(&subagent_session),
         threadlane_runtime::AgentConfig::default(),
+        Arc::new(threadlane_provider::router::ProviderClient::new(
+            context.api_key.clone(),
+            context.account_id.clone(),
+        )),
     )
     .unwrap();
 

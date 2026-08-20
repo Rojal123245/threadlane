@@ -1021,6 +1021,7 @@ impl AppState {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub(crate) fn update_model_roles(&mut self, roles: threadlane_session::ModelRoles) {
         self.model_roles = roles.clone();
         for runtime in self.session_runtimes.values() {

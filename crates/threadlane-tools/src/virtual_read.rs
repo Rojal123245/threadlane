@@ -38,7 +38,8 @@ pub fn parse_remote_ref(input: &str) -> Option<ParsedRemoteRef> {
     }
 }
 
-// Backward compatibility alias for tests and callers
+#[allow(dead_code)]
+// Backward compatibility alias for external callers
 pub fn parse_github_ref(input: &str) -> Option<ParsedGitHubRef> {
     let parsed = parse_remote_ref(input)?;
     let (owner, repo) = if let Some(ref or) = parsed.owner_repo {
@@ -64,6 +65,7 @@ pub fn parse_github_ref(input: &str) -> Option<ParsedGitHubRef> {
     })
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedGitHubRef {
     pub owner: Option<String>,
@@ -262,6 +264,7 @@ pub fn parse_git_remote_url(remote: &str) -> Option<GitRemoteInfo> {
     None
 }
 
+#[allow(dead_code)]
 // Backward compatibility helper
 pub fn github_owner_repo(remote: &str) -> Option<(&str, &str)> {
     let remote_clean = remote.strip_suffix(".git").unwrap_or(remote).trim();
@@ -333,6 +336,7 @@ pub fn remote_ref_path(root: &Path, reference: &str) -> String {
     }
 }
 
+#[allow(dead_code)]
 pub fn github_path(root: &Path, reference: &str) -> String {
     remote_ref_path(root, reference)
 }

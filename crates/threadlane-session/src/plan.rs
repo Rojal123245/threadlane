@@ -7,6 +7,7 @@ use threadlane_runtime::{
     ToolExecutor,
 };
 use tokio::sync::broadcast;
+use threadlane_protocol::ProviderPort;
 
 pub(crate) const UPDATE_PLAN_TOOL_NAME: &str = "update_plan";
 const MAX_PLAN_ITEMS: usize = 20;
@@ -31,12 +32,11 @@ Rules:
 
 /// Generates a structured [`SessionPlan`] using the designated Plan model.
 pub async fn generate_plan_with_model(
-    provider_client: &threadlane_provider::router::ProviderClient,
+    provider_client: Arc<dyn ProviderPort>,
     model: &str,
     task_prompt: &str,
 ) -> Result<SessionPlan, String> {
-    use threadlane_provider::openai::StreamEvent;
-    use threadlane_provider::router::{PayloadFormat, PayloadSource};
+    use threadlane_protocol::{RuntimeRequest, RuntimeStreamEvent as StreamEvent};
     use tokio::sync::mpsc;
 
     let model_str = model.to_string();
@@ -45,45 +45,21 @@ pub async fn generate_plan_with_model(
         task_prompt
     );
 
-    let payload_source = PayloadSource::lazy(model_str.clone(), {
-        let model = model_str.clone();
-        let prompt_text = prompt_text.clone();
-        move |format| {
-            let model = model.clone();
-            let prompt_text = prompt_text.clone();
-            Box::pin(async move {
-                match format {
-                    PayloadFormat::Codex => serde_json::json!({
-                        "model": model,
-                        "instructions": PLAN_SYSTEM_PROMPT,
-                        "input": [{
-                            "type": "message",
-                            "role": "user",
-                            "content": [{"type": "input_text", "text": prompt_text.as_str()}]
-                        }],
-                        "store": false,
-                        "stream": true,
-                    }),
-                    PayloadFormat::ChatCompletions => serde_json::json!({
-                        "model": model,
-                        "messages": [
-                            {"role": "system", "content": PLAN_SYSTEM_PROMPT},
-                            {"role": "user", "content": prompt_text.as_str()}
-                        ],
-                        "temperature": 0.2,
-                        "stream": true,
-                    }),
-                }
-            })
-        }
-    });
+    let request = RuntimeRequest {
+        model: model_str,
+        messages: serde_json::json!([
+            {"role": "system", "content": PLAN_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt_text}
+        ]),
+        tools: serde_json::json!([]),
+        prompt_cache_key: None,
+        reasoning_effort: None,
+    };
 
     let (tx, mut rx) = mpsc::channel(50);
     let client = provider_client.clone();
     tokio::spawn(async move {
-        client
-            .stream_chat_completion(payload_source, None, tx)
-            .await;
+        client.stream_request(request, tx).await;
     });
 
     let mut output = String::new();
@@ -297,7 +273,7 @@ struct GeneratePlanArgs {
 pub(crate) struct GeneratePlanToolExecutor {
     store: SessionPlanStore,
     event_tx: broadcast::Sender<AgentEvent>,
-    provider_client: threadlane_provider::router::ProviderClient,
+    provider_client: Arc<dyn ProviderPort>,
     turn: Arc<tokio::sync::Mutex<threadlane_runtime::TurnState>>,
     config: threadlane_runtime::AgentConfig,
 }
@@ -306,7 +282,7 @@ impl GeneratePlanToolExecutor {
     pub(crate) fn new(
         store: SessionPlanStore,
         event_tx: broadcast::Sender<AgentEvent>,
-        provider_client: threadlane_provider::router::ProviderClient,
+        provider_client: Arc<dyn ProviderPort>,
         turn: Arc<tokio::sync::Mutex<threadlane_runtime::TurnState>>,
         config: threadlane_runtime::AgentConfig,
     ) -> Self {
@@ -363,7 +339,7 @@ impl ToolExecutor for GeneratePlanToolExecutor {
             .resolve_plan(&current_model)
             .to_string();
 
-        match generate_plan_with_model(&self.provider_client, &plan_model, &parsed.objective).await
+        match generate_plan_with_model(self.provider_client.clone(), &plan_model, &parsed.objective).await
         {
             Ok(plan) => {
                 if let Err(error) = self.store.replace(plan.clone()) {

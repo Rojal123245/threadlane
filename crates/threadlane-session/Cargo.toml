@@ -6,6 +6,7 @@ description = "Threadlane session management: CodingAgent, SessionConfig, subage
 
 [dependencies]
 threadlane-runtime = { version = "0.1.0", path = "../threadlane-runtime" }
+threadlane-protocol = { version = "0.1.0", path = "../threadlane-protocol" }
 threadlane-tools = { version = "0.1.0", path = "../threadlane-tools" }
 threadlane-provider = { version = "0.1.0", path = "../threadlane-provider" }
 threadlane-mcp = { version = "0.1.0", path = "../threadlane-mcp" }

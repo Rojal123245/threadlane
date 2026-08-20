@@ -7102,6 +7102,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "threadlane-protocol"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "threadlane-provider"
 version = "0.1.0"
 dependencies = [
@@ -7115,6 +7125,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "threadlane-auth",
+ "threadlane-protocol",
  "threadlane-tools",
  "tokio",
  "tokio-tungstenite",
@@ -7136,7 +7147,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.19",
- "threadlane-provider",
+ "threadlane-protocol",
  "threadlane-tools",
  "tokio",
  "tracing",
@@ -7159,6 +7170,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "threadlane-mcp",
+ "threadlane-protocol",
  "threadlane-provider",
  "threadlane-runtime",
  "threadlane-skills",

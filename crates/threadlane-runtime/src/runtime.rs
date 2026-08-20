@@ -13,7 +13,6 @@ use crate::harness::{
     AgentHarness, HarnessEventHub, HookRegistry, JsonlStore, ProcedureError, ProvisionedEntry,
     QueueKind, Reducer, SessionStore,
 };
-use crate::provider::ProviderRouter;
 use crate::tool_dispatcher::ToolDispatcher;
 use crate::types::{
     AgentMessage, AgentToolDefinition, AgentToolResult, ImageAttachment, TokenUsage,
@@ -22,8 +21,7 @@ use crate::types::{
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use threadlane_provider::openai::ToolCall;
-use threadlane_provider::router::{PayloadFormat, ProviderClient};
+use threadlane_protocol::{DeferredResponse, ProviderPort, RuntimeToolCall as ToolCall};
 use tokio::sync::{broadcast, Mutex};
 
 /// Unified source for model-visible context.
@@ -57,10 +55,8 @@ pub struct AgentRuntime {
     harness: AgentHarness<JsonlStore>,
     /// Tool dispatch with hook-based routing.
     pub tool_dispatcher: ToolDispatcher,
-    /// Provider client for API calls.
-    provider_client: ProviderClient,
-    /// Provider format router (Chat Completions vs Codex Responses).
-    provider_router: ProviderRouter,
+    /// Provider port for API calls.
+    provider_client: Arc<dyn ProviderPort>,
     /// In-memory working copy of turn state. The harness is authoritative;
     /// this copy is refreshed from the canonical store before each turn.
     pub turn: Arc<Mutex<TurnState>>,
@@ -102,12 +98,14 @@ impl AgentRuntime {
     /// Create a new runtime directly backed by an existing [`AgentHarness`].
     ///
     /// The runtime shares the harness's store, hooks, and event hub directly.
-    pub fn from_harness(
+
+    pub fn from_harness_with_provider(
         api_key: impl Into<String>,
         account_id: Option<String>,
         model: impl Into<String>,
         harness: AgentHarness<JsonlStore>,
         config: AgentConfig,
+        provider_client: Arc<dyn ProviderPort>,
     ) -> Self {
         let api_key: String = api_key.into();
         let model = model.into();
@@ -115,7 +113,6 @@ impl AgentRuntime {
         let harness_event_hub = harness.events().clone();
         let hooks = harness.hooks().clone();
         let tool_dispatcher = ToolDispatcher::new(event_tx.clone(), hooks.clone());
-        let provider_client = ProviderClient::new(api_key.clone(), account_id.clone());
         let turn = Arc::new(Mutex::new(TurnState {
             system_prompt: config.default_system_prompt.clone(),
             messages: Vec::new(),
@@ -127,7 +124,6 @@ impl AgentRuntime {
             harness,
             tool_dispatcher,
             provider_client,
-            provider_router: ProviderRouter::new(),
             turn,
             config,
             api_key,
@@ -152,9 +148,9 @@ impl AgentRuntime {
     /// If `session_file` is provided, opens (or creates) a JSONL journal.
     /// Otherwise, an in-memory store is used.
     pub fn new(
-        api_key: impl Into<String>,
-        account_id: Option<String>,
-        model: impl Into<String>,
+        _api_key: impl Into<String>,
+        _account_id: Option<String>,
+        _model: impl Into<String>,
         session_file: Option<&Path>,
         config: AgentConfig,
     ) -> Result<Self, AgentError> {
@@ -178,8 +174,29 @@ impl AgentRuntime {
         };
 
         let harness_event_hub = HarnessEventHub::new(config.event_channel_capacity);
+        let _harness = AgentHarness::with_events(store, harness_event_hub);
+        Err(AgentError::Session("AgentRuntime requires an injected ProviderPort; use new_with_provider".into()))
+    }
+
+    pub fn new_with_provider(
+        api_key: impl Into<String>,
+        account_id: Option<String>,
+        model: impl Into<String>,
+        session_file: Option<&Path>,
+        config: AgentConfig,
+        provider_client: Arc<dyn ProviderPort>,
+    ) -> Result<Self, AgentError> {
+        let store = if let Some(path) = session_file {
+            if let Some(parent) = path.parent() { std::fs::create_dir_all(parent).ok(); }
+            if !path.exists() { std::fs::File::create(path).map_err(|e| AgentError::Session(format!("create session file: {e}")))?; }
+            JsonlStore::open(path).map_err(|e| AgentError::Session(format!("open session journal: {e}")))?
+        } else {
+            let tmp = std::env::temp_dir().join(format!("threadlane-ephemeral-{}", std::process::id()));
+            JsonlStore::open(&tmp).map_err(|e| AgentError::Session(format!("open ephemeral journal: {e}")))?
+        };
+        let harness_event_hub = HarnessEventHub::new(config.event_channel_capacity);
         let harness = AgentHarness::with_events(store, harness_event_hub);
-        Ok(Self::from_harness(api_key, account_id, model, harness, config))
+        Ok(Self::from_harness_with_provider(api_key, account_id, model, harness, config, provider_client))
     }
 
     // ── Model context ─────────────────────────────────────────────────
@@ -319,7 +336,6 @@ impl AgentRuntime {
     pub fn set_credentials(&mut self, api_key: String, account_id: Option<String>) {
         self.api_key = api_key;
         self.account_id = account_id;
-        self.provider_client = ProviderClient::new(self.api_key.clone(), self.account_id.clone());
     }
 
     pub fn set_prompt_cache_key(&mut self, key: Option<String>) {
@@ -352,8 +368,12 @@ impl AgentRuntime {
         &self.config.model_roles
     }
 
-    pub fn provider_client(&self) -> &ProviderClient {
-        &self.provider_client
+    pub fn provider_client(&self) -> &dyn ProviderPort {
+        self.provider_client.as_ref()
+    }
+
+    pub fn provider_client_arc(&self) -> Arc<dyn ProviderPort> {
+        self.provider_client.clone()
     }
 
     pub fn config(&self) -> &AgentConfig {
@@ -461,27 +481,6 @@ impl AgentRuntime {
         self.synced_dispatcher().execute_tools(calls).await
     }
 
-    pub async fn build_api_payloads(&self) -> (serde_json::Value, serde_json::Value) {
-        let mut turn = self.turn.lock().await.clone();
-        if let Ok(messages) = self.projected_messages().await {
-            turn.messages = messages;
-        }
-        let tools: Vec<_> = self.configured_tool_definitions();
-        let chat = self.provider_router.build_payload(
-            PayloadFormat::ChatCompletions,
-            &turn,
-            &tools,
-            self.prompt_cache_key.as_deref(),
-        );
-        let codex = self.provider_router.build_payload(
-            PayloadFormat::Codex,
-            &turn,
-            &tools,
-            self.prompt_cache_key.as_deref(),
-        );
-        (chat, codex)
-    }
-
     pub async fn run_steer(&mut self) {
         if !self.steering_queue.is_empty() {
             let items: Vec<_> = self.steering_queue.drain(..).collect();
@@ -518,7 +517,7 @@ impl AgentRuntime {
         &self,
         model: &str,
         handle_id: &str,
-    ) -> Result<threadlane_provider::DeferredResponse, String> {
+    ) -> Result<DeferredResponse, String> {
         self.provider_client.fetch_deferred(model, handle_id).await
     }
 
@@ -624,7 +623,6 @@ impl AgentRuntime {
             turn: self.turn.clone(),
             harness: &self.harness,
             provider_client: self.provider_client.clone(),
-            provider_router: self.provider_router.clone(),
             prompt_cache_key: self.prompt_cache_key.clone(),
             tool_dispatcher,
             config: self.config.clone(),

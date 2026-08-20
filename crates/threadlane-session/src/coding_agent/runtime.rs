@@ -24,6 +24,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use threadlane_mcp::McpManager;
 use threadlane_provider::openai::fetch_available_models;
+use threadlane_provider::router::ProviderClient;
 use threadlane_runtime::harness::{
     OperationOutcome, QueueKind, Reducer, SessionStore, Snapshot,
 };
@@ -317,20 +318,22 @@ impl CodingAgent {
                 h.events.clone(),
                 h.hooks.clone(),
             );
-            AgentRuntime::from_harness(
+            AgentRuntime::from_harness_with_provider(
                 &options.api_key,
                 options.account_id.clone(),
                 &effective_model,
                 runtime_harness,
                 agent_config.clone(),
+                Arc::new(ProviderClient::new(&options.api_key, options.account_id.clone())),
             )
         } else {
-            AgentRuntime::new(
+            AgentRuntime::new_with_provider(
                 &options.api_key,
                 options.account_id.clone(),
                 &effective_model,
                 options.session_file.as_deref(),
                 agent_config.clone(),
+                Arc::new(ProviderClient::new(&options.api_key, options.account_id.clone())),
             )
             .unwrap_or_else(|error| {
                 panic!("Failed to create agent runtime: {error}");
@@ -465,7 +468,7 @@ impl CodingAgent {
         registry.register(Box::new(PlanCapability {
             plan_store: plan_store.clone(),
             event_tx: agent.event_tx.clone(),
-            provider_client: agent.provider_client().clone(),
+            provider_client: agent.provider_client_arc(),
             turn: agent.turn.clone(),
             config: agent.config().clone(),
         }));
@@ -972,17 +975,14 @@ impl CodingAgent {
                     if task_prompt.is_empty() {
                         return Some(Ok("Usage: /plan <task objective> - generate an implementation plan with the Plan model.".into()));
                     }
-                    let client = threadlane_provider::router::ProviderClient::new(
-                        self.agent.api_key.clone(),
-                        self.agent.account_id.clone(),
-                    );
+                    let client = self.agent.provider_client_arc();
                     let active_model = self.agent.turn.lock().await.model.clone();
                     let plan_model = self
                         .agent
                         .model_roles()
                         .resolve_plan(&active_model)
                         .to_string();
-                    match crate::plan::generate_plan_with_model(&client, &plan_model, task_prompt)
+                    match crate::plan::generate_plan_with_model(client, &plan_model, task_prompt)
                         .await
                     {
                         Ok(plan) => {

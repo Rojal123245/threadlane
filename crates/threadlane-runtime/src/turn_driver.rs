@@ -11,7 +11,7 @@ use crate::events::AgentEvent;
 use crate::harness::{
     ErrorCategory, ProviderErrorSummary, ProviderOutcome, SessionStore, TraceString,
 };
-use crate::provider::{ProviderRouter, ProviderTraceEvent, ProviderTraceRecorder};
+use crate::provider::{ProviderTraceEvent, ProviderTraceRecorder};
 use crate::rules::{StreamRule, StreamRuleMonitor};
 use crate::tool_dispatcher::ToolDispatcher;
 use crate::types::{AgentMessage, TokenUsage, ToolExecutionMode, TurnState};
@@ -20,8 +20,8 @@ use regex::Regex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use threadlane_provider::openai::{StreamEvent, ToolCall};
-use threadlane_provider::router::{PayloadSource, ProviderClient};
+use threadlane_protocol::{ProviderPort, RuntimeRequest, RuntimeStreamEvent as StreamEvent, RuntimeToolCall as ToolCall};
+
 use tokio::sync::{broadcast, mpsc, Mutex};
 
 const STREAM_CHECKPOINT_BYTES: usize = 16 * 1024;
@@ -39,6 +39,11 @@ async fn persist_messages_with(
     Ok(())
 }
 
+fn is_quota_or_rate_limit(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("429") || error.contains("rate limit") || error.contains("rate_limit") || error.contains("quota") || error.contains("too many requests") || error.contains("resource_exhausted")
+}
+
 fn classify_provider_error(error: &str) -> ErrorCategory {
     let error = error.to_ascii_lowercase();
     if error.contains("401")
@@ -48,7 +53,7 @@ fn classify_provider_error(error: &str) -> ErrorCategory {
         ErrorCategory::Authentication
     } else if error.contains("403") || error.contains("permission denied") {
         ErrorCategory::Authorization
-    } else if threadlane_provider::router::is_quota_or_rate_limit(&error) {
+    } else if is_quota_or_rate_limit(&error) {
         ErrorCategory::RateLimit
     } else if error.contains("timeout") || error.contains("timed out") {
         ErrorCategory::Timeout
@@ -124,8 +129,7 @@ impl ProviderStepAccumulator {
 pub(crate) struct TurnDriver<'a> {
     pub(crate) turn: Arc<Mutex<TurnState>>,
     pub(crate) harness: &'a crate::harness::AgentHarness<crate::harness::JsonlStore>,
-    pub(crate) provider_client: ProviderClient,
-    pub(crate) provider_router: ProviderRouter,
+    pub(crate) provider_client: Arc<dyn ProviderPort>,
     pub(crate) prompt_cache_key: Option<String>,
     pub(crate) tool_dispatcher: ToolDispatcher,
     pub(crate) config: AgentConfig,
@@ -252,30 +256,24 @@ impl<'a> TurnDriver<'a> {
             let tool_definitions = self.tool_dispatcher.configured_tool_definitions();
             let payload_cache_key = pc_key.clone();
 
-            let payload_source = PayloadSource::lazy(model.clone(), {
-                let turn_clone = self.turn.clone();
-                let router = self.provider_router.clone();
-                move |format| {
-                    let turn = turn_clone.clone();
-                    let router = router.clone();
-                    let tool_definitions = tool_definitions.clone();
-                    let prompt_cache_key = payload_cache_key.clone();
-                    Box::pin(async move {
-                        let turn = turn.lock().await;
-                        router.build_payload(
-                            format,
-                            &turn,
-                            &tool_definitions,
-                            prompt_cache_key.as_deref(),
-                        )
-                    })
+            let request = {
+                let turn = self.turn.lock().await;
+                RuntimeRequest {
+                    model: model.clone(),
+                    messages: serde_json::to_value(&turn.messages).unwrap_or_default(),
+                    tools: serde_json::Value::Array(
+                        tool_definitions
+                            .iter()
+                            .map(|tool| tool.to_chat_completions_tool())
+                            .collect(),
+                    ),
+                    prompt_cache_key: payload_cache_key.clone(),
+                    reasoning_effort: turn.reasoning_effort.as_api_str().map(str::to_owned),
                 }
-            });
+            };
 
             let _stream_task = AbortOnDrop::new(tokio::spawn(async move {
-                client
-                    .stream_chat_completion(payload_source, pc_key, stream_tx)
-                    .await;
+                client.stream_request(request, stream_tx).await;
             }));
 
             self.emit_event(AgentEvent::MessageStart {
@@ -494,7 +492,7 @@ impl<'a> TurnDriver<'a> {
                         }
                         if !provider_fallback_attempted
                             && current_text.is_empty()
-                            && threadlane_provider::router::is_quota_or_rate_limit(&err)
+                            && is_quota_or_rate_limit(&err)
                         {
                             provider_fallback_attempted = true;
                             let fallback = self.config.model_roles.fallback_after(&model);

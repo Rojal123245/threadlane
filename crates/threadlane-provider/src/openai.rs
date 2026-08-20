@@ -1,7 +1,6 @@
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
-use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::{
@@ -36,24 +35,7 @@ static CLIENT_SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 type CodexSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCallFunction {
-    pub name: String,
-    pub arguments: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCall {
-    pub id: String,
-    pub r#type: String,
-    pub function: ToolCallFunction,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "thoughtSignature"
-    )]
-    pub thought_signature: Option<String>,
-}
+pub use threadlane_protocol::{RuntimeToolCall as ToolCall, RuntimeToolCallFunction as ToolCallFunction};
 
 pub(crate) const OPENAI_PROMPT_CACHE_KEY_MAX_CHARS: usize = 64;
 
@@ -72,31 +54,7 @@ fn generated_session_key() -> String {
     clamp_prompt_cache_key(&format!("threadlane-{nanos:x}-{counter:x}"))
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ProviderUsage {
-    pub input_tokens: u32,
-    pub output_tokens: u32,
-    pub cache_read_tokens: u32,
-    pub cache_write_tokens: u32,
-    pub total_tokens: u32,
-}
-
-#[derive(Debug, Clone)]
-pub enum StreamEvent {
-    ContentToken(String),
-    ReasoningToken(String),
-    ToolCallStart {
-        name: String,
-    },
-    ToolCallArgsDelta {
-        args_chunk: String,
-    },
-    Finished {
-        tool_calls: Vec<ToolCall>,
-        usage: ProviderUsage,
-    },
-    Error(String),
-}
+pub use threadlane_protocol::{RuntimeStreamEvent as StreamEvent, RuntimeUsage as ProviderUsage};
 
 fn is_responses_text_delta(event_type: &str) -> bool {
     matches!(
