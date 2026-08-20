@@ -1,7 +1,6 @@
 use crate::capabilities_catalog::CapabilityCatalog;
 use std::path::Path;
 use threadlane_runtime::AgentRuntime;
-use threadlane_runtime::SessionTree;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlashCommandInfo {
@@ -24,9 +23,6 @@ pub fn builtin_commands() -> Vec<SlashCommandInfo> {
         ("compact", "Compact the conversation context"),
         ("session", "Show session info"),
         ("name", "Name this session"),
-        ("tree", "Switch session tree branch"),
-        ("fork", "Fork a session tree branch"),
-        ("clone", "Clone the active session tree"),
         ("skill", "Load a discovered skill by ID"),
         (
             "subagent",
@@ -77,9 +73,6 @@ pub enum CommandAction {
     Compact,
     ShowSession,
     SetName(String),
-    SwitchTreeBranch(String),
-    Fork(String),
-    CloneSession,
     InvokeSkill(String),
     PromptTemplate(String),
     Subagent(String),
@@ -105,9 +98,6 @@ pub fn parse_slash_command(input: &str) -> Option<CommandAction> {
         "compact" => Some(CommandAction::Compact),
         "session" => Some(CommandAction::ShowSession),
         "name" => Some(CommandAction::SetName(arg)),
-        "tree" => Some(CommandAction::SwitchTreeBranch(arg)),
-        "fork" => Some(CommandAction::Fork(arg)),
-        "clone" => Some(CommandAction::CloneSession),
         "skill" => Some(CommandAction::InvokeSkill(arg)),
         "prompt" => Some(CommandAction::PromptTemplate(arg)),
         "subagent" => Some(CommandAction::Subagent(arg)),
@@ -120,16 +110,17 @@ pub fn parse_slash_command(input: &str) -> Option<CommandAction> {
 pub async fn execute_slash_command(
     action: CommandAction,
     agent: &mut AgentRuntime,
-    session_tree: &mut SessionTree,
 ) -> String {
     match action {
         CommandAction::SwitchModel(new_model) => {
             if new_model.is_empty() {
                 let st = agent.get_state().await;
                 format!("Current model: {}", st.model)
-            } else if let Err(error) = session_tree.set_model(new_model.clone()) {
-                format!("Could not persist model switch: {error}")
             } else {
+                let _ = agent
+                    .harness_mut()
+                    .set_fact("main", "model", new_model.clone(), None);
+                let _ = agent.drive_harness();
                 {
                     let mut st = agent.turn.lock().await;
                     st.model = new_model.clone();
@@ -163,57 +154,25 @@ pub async fn execute_slash_command(
         CommandAction::Compact => {
             if !agent.compact_history(None).await {
                 "Nothing to compact yet.".to_string()
-            } else if session_tree.file_path.is_none() {
-                // Legacy in-memory sessions have no canonical journal yet.
-                let state = agent.get_state().await;
-                session_tree.replace_active_branch(state.messages);
-                "Context compacted in the current session.".to_string()
             } else {
-                "Context compaction requires the durable session harness.".to_string()
+                "Context compacted in the current session.".to_string()
             }
         }
         CommandAction::ShowSession => {
             let st = agent.get_state().await;
             format!(
-                "Session ID: {}\nName: {}\nMessage Count: {}\nModel: {}",
-                session_tree.session_id,
-                session_tree.name.as_deref().unwrap_or("unnamed"),
+                "Session ID: {}\nMessage Count: {}\nModel: {}",
+                agent.session_id,
                 st.messages.len(),
                 st.model,
             )
         }
         CommandAction::SetName(name) => {
-            session_tree.name = Some(name.clone());
+            let _ = agent
+                .harness_mut()
+                .set_fact("main", "name", name.clone(), None);
+            let _ = agent.drive_harness();
             format!("Session name set to: {}", name)
-        }
-        CommandAction::SwitchTreeBranch(node_id) => {
-            if session_tree.switch_active_node(&node_id) {
-                if session_tree.file_path.is_none() {
-                    let branch_msgs = session_tree.get_active_branch_messages();
-                    let mut st = agent.turn.lock().await;
-                    st.messages = branch_msgs;
-                    format!("Switched session tree to node: {}", node_id)
-                } else {
-                    "Branch switching requires the durable session harness.".to_string()
-                }
-            } else {
-                format!("Node ID not found in session tree: {}", node_id)
-            }
-        }
-        CommandAction::Fork(node_id) => {
-            if let Some(forked) = session_tree.fork_branch(&node_id) {
-                format!(
-                    "Forked session tree successfully into ID: {}",
-                    forked.session_id
-                )
-            } else {
-                format!("Failed to fork. Node ID not found: {}", node_id)
-            }
-        }
-        CommandAction::CloneSession => {
-            let mut cloned = session_tree.clone();
-            cloned.session_id = format!("{}_clone", session_tree.session_id);
-            format!("Cloned active session tree into ID: {}", cloned.session_id)
         }
         CommandAction::InvokeSkill(skill) => format!("Invoking skill: {}", skill),
         CommandAction::PromptTemplate(tmpl) => format!("Prompt template: {}", tmpl),

@@ -395,7 +395,8 @@ impl ToolExecutor for GeneratePlanToolExecutor {
 mod tests {
     use super::*;
     use std::time::Duration;
-    use threadlane_runtime::{AgentEvent, PlanItemStatus, SessionTree, ToolExecutor};
+    use threadlane_runtime::harness::SessionStore;
+    use threadlane_runtime::{AgentEvent, PlanItemStatus, ToolExecutor};
 
     #[test]
     fn parses_a_complete_replacement_plan() {
@@ -451,10 +452,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.is_ok());
         assert_eq!(
-            SessionTree::load_from_file(&path).unwrap().plan(),
-            &store.current()
+            threadlane_runtime::harness::JsonlStore::open_read_only(&path)
+                .unwrap()
+                .plan(),
+            store.current()
         );
         assert!(matches!(
             tokio::time::timeout(Duration::from_secs(1), event_rx.recv())

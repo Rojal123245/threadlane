@@ -3,10 +3,9 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use threadlane_session::harness::SessionStore;
+use threadlane_session::harness::{JsonlStore, SessionStore};
 use threadlane_session::{
-    AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, SessionPlan, SessionTree,
-    TokenUsage,
+    AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, SessionPlan, TokenUsage,
 };
 
 use crate::adapters::agent_events::{adapt_agent_event, ChatAgentUpdate};
@@ -219,16 +218,16 @@ fn file_mtime(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-fn extract_session_title(tree: &SessionTree, fallback_id: &str) -> String {
-    if let Some(ref name) = tree.name {
+fn extract_session_title(store: &impl SessionStore, fallback_id: &str) -> String {
+    if let Some(name) = store.name() {
         if !name.trim().is_empty() {
-            return name.clone();
+            return name;
         }
     }
     let messages = {
-        let active = tree.get_active_branch_messages();
+        let active = store.active_branch_messages("main");
         if active.is_empty() {
-            tree.get_persisted_messages()
+            store.get_persisted_messages()
         } else {
             active
         }
@@ -299,9 +298,9 @@ fn discover_sessions_in_project_cached(
                     .file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "session".into());
-                let (title, health, updated_at) = match SessionTree::load_from_file(&path) {
-                    Ok(tree) => (
-                        extract_session_title(&tree, &id),
+                let (title, health, updated_at) = match JsonlStore::open_read_only(&path) {
+                    Ok(store) => (
+                        extract_session_title(&store, &id),
                         SessionHealth::Healthy,
                         file_mtime(&path),
                     ),
@@ -343,8 +342,8 @@ fn discover_sessions_in_project_cached(
 }
 
 pub fn load_session_plan(session_file: &Path) -> SessionPlan {
-    SessionTree::load_from_file(session_file)
-        .map(|tree| tree.plan().clone())
+    JsonlStore::open_read_only(session_file)
+        .map(|store| store.plan())
         .unwrap_or_default()
 }
 
@@ -355,19 +354,17 @@ pub fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
 fn load_session_projection(
     session_file: &Path,
 ) -> (SessionPlan, Vec<ChatMessageInfo>, usize, bool) {
-    let Ok(tree) = SessionTree::load_from_file(session_file) else {
+    let Ok(store) = JsonlStore::open_read_only(session_file) else {
         return (SessionPlan::default(), Vec::new(), 0, false);
     };
     // UI history is the durable chronological transcript projection, distinct
     // from the active model-context branch used for provider requests.
-    let agent_messages = threadlane_session::harness::JsonlStore::open_read_only(session_file)
-        .map(|store| store.transcript("main").messages())
-        .unwrap_or_else(|_| tree.get_persisted_messages());
+    let agent_messages = store.transcript("main").messages();
     let projected = project_agent_messages(agent_messages);
     let end = projected.len();
     let start = end.saturating_sub(CHAT_HISTORY_PAGE_SIZE);
     (
-        tree.plan().clone(),
+        store.plan(),
         projected[start..end].to_vec(),
         start,
         start > 0,
@@ -378,12 +375,10 @@ fn load_session_message_page(
     session_file: &Path,
     end: usize,
 ) -> (Vec<ChatMessageInfo>, usize, bool) {
-    let Ok(tree) = SessionTree::load_from_file(session_file) else {
+    let Ok(store) = JsonlStore::open_read_only(session_file) else {
         return (Vec::new(), 0, false);
     };
-    let agent_messages = threadlane_session::harness::JsonlStore::open_read_only(session_file)
-        .map(|store| store.transcript("main").messages())
-        .unwrap_or_else(|_| tree.get_persisted_messages());
+    let agent_messages = store.transcript("main").messages();
     let projected = project_agent_messages(agent_messages);
     let end = end.min(projected.len());
     let start = end.saturating_sub(CHAT_HISTORY_PAGE_SIZE);
@@ -1211,9 +1206,7 @@ impl AppState {
         let session_id = format!("session_{now_nanos}");
         let session_file = sessions_dir.join(format!("{session_id}.jsonl"));
 
-        let mut tree = SessionTree::new(&session_id);
-        tree.file_path = Some(session_file.clone());
-        let _ = tree.append_passive_branch(None, Vec::new());
+        let _ = std::fs::File::create(&session_file);
 
         if let Some(project) = self
             .projects
@@ -2504,7 +2497,7 @@ impl AppState {
                 correlation_id: None,
             });
         if !threadlane_provider::router::is_antigravity_model(&model) {
-            crate::services::chat::spawn_session_title(
+            crate::services::chat::maybe_generate_session_title(
                 session_file,
                 session_id.clone(),
                 text.clone(),
@@ -2516,7 +2509,7 @@ impl AppState {
         }
 
         // Present the accepted prompt immediately. CodingAgent owns durable
-        // persistence; writing it through SessionTree here would duplicate it.
+        // persistence; writing it directly here would duplicate it.
         self.messages.push(ChatMessageInfo {
             id: format!("pending-user-{session_id}-{}", self.messages.len()),
             role: MessageRole::User,
@@ -3294,29 +3287,50 @@ mod tests {
             .join(format!("{session_id}.jsonl"));
         std::fs::create_dir_all(session_file.parent().unwrap()).unwrap();
         std::fs::write(&session_file, "").unwrap();
-        let mut durable_tree = threadlane_session::SessionTree::new(&session_id);
-        durable_tree.file_path = Some(session_file.clone());
-        durable_tree.add_message(AgentMessage::Assistant {
-            content: None,
-            tool_calls: Some(vec![threadlane_provider::openai::ToolCall {
-                id: "call-1".into(),
-                r#type: "function".into(),
-                function: threadlane_provider::openai::ToolCallFunction {
-                    name: "read_file".into(),
-                    arguments: r#"{"path":"src/lib.rs"}"#.into(),
+        let mut store = threadlane_session::harness::JsonlStore::open(&session_file).unwrap();
+        store
+            .append_entry(threadlane_session::harness::Entry {
+                id: "call-1-assistant".into(),
+                parent_id: None,
+                lane: "main".into(),
+                seq: 1,
+                timestamp: 1,
+                message: AgentMessage::Assistant {
+                    content: None,
+                    tool_calls: Some(vec![threadlane_provider::openai::ToolCall {
+                        id: "call-1".into(),
+                        r#type: "function".into(),
+                        function: threadlane_provider::openai::ToolCallFunction {
+                            name: "read_file".into(),
+                            arguments: r#"{"path":"src/lib.rs"}"#.into(),
+                        },
+                        thought_signature: None,
+                    }]),
+                    stop_reason: None,
+                    deferred_handle: None,
                 },
-                thought_signature: None,
-            }]),
-            stop_reason: None,
-            deferred_handle: None,
-        });
-        durable_tree.add_message(AgentMessage::Tool {
-            tool_call_id: "call-1".into(),
-            name: "read_file".into(),
-            content: "file contents".into(),
-            is_error: false,
-            terminate: false,
-        });
+                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
+        store
+            .append_entry(threadlane_session::harness::Entry {
+                id: "call-1-tool".into(),
+                parent_id: Some("call-1-assistant".into()),
+                lane: "main".into(),
+                seq: 2,
+                timestamp: 2,
+                message: AgentMessage::Tool {
+                    tool_call_id: "call-1".into(),
+                    name: "read_file".into(),
+                    content: "file contents".into(),
+                    is_error: false,
+                    terminate: false,
+                },
+                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
 
         let mut state = AppState::load_from_registry(Vec::new());
         state.projects.push(ProjectInfo {
@@ -3753,27 +3767,55 @@ mod tests {
         let path = root.join("session.jsonl");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
 
-        let mut tree = SessionTree::new("Branch Test");
-        tree.file_path = Some(path.clone());
-        let root_msg = tree.add_message(AgentMessage::User {
-            content: "Root question".into(),
-        });
-        let _branch_a = tree.add_message(AgentMessage::Assistant {
-            content: Some("Branch A answer".into()),
-            tool_calls: None,
-            stop_reason: None,
-            deferred_handle: None,
-        });
-
-        tree.switch_active_node(&root_msg);
-        let _branch_b = tree.add_message(AgentMessage::Assistant {
-            content: Some("Branch B alternative answer".into()),
-            tool_calls: None,
-            stop_reason: None,
-            deferred_handle: None,
-        });
-
         let mut store = threadlane_session::harness::JsonlStore::open(&path).unwrap();
+        store
+            .append_entry(threadlane_session::harness::Entry {
+                id: "msg-root".into(),
+                parent_id: None,
+                lane: "main".into(),
+                seq: 1,
+                timestamp: 1,
+                message: AgentMessage::User {
+                    content: "Root question".into(),
+                },
+                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
+        store
+            .append_entry(threadlane_session::harness::Entry {
+                id: "msg-branch-a".into(),
+                parent_id: Some("msg-root".into()),
+                lane: "main".into(),
+                seq: 2,
+                timestamp: 2,
+                message: AgentMessage::Assistant {
+                    content: Some("Branch A answer".into()),
+                    tool_calls: None,
+                    stop_reason: None,
+                    deferred_handle: None,
+                },
+                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
+        store
+            .append_entry(threadlane_session::harness::Entry {
+                id: "msg-branch-b".into(),
+                parent_id: Some("msg-root".into()),
+                lane: "main".into(),
+                seq: 3,
+                timestamp: 3,
+                message: AgentMessage::Assistant {
+                    content: Some("Branch B alternative answer".into()),
+                    tool_calls: None,
+                    stop_reason: None,
+                    deferred_handle: None,
+                },
+                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
         store
             .append_record(Record::OperationStarted {
                 id: "run-branch-a".into(),
@@ -3822,7 +3864,7 @@ mod tests {
             .hydrate_session_projection("branch-session", &path)
             .unwrap();
 
-        let branch_messages = tree.get_active_branch_messages();
+        let branch_messages = store.active_branch_messages("main");
         assert_eq!(branch_messages.len(), 2);
         assert!(matches!(
             &branch_messages[0],

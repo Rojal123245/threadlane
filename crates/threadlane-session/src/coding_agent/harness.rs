@@ -20,7 +20,6 @@ use threadlane_runtime::harness::{
     ToolReplaySafety as HarnessToolReplaySafety, ToolResult as HarnessToolResult, ToolSpec,
     TraceString,
 };
-use threadlane_runtime::session_tree::SessionTree;
 use threadlane_runtime::{
     AgentMessage, AgentToolResult, ImageAttachment, ProviderTraceEvent, ReasoningEffort,
     TokenUsage, ToolExecutionTraceEvent,
@@ -2243,64 +2242,28 @@ impl CodingSessionHarness {
         Ok(claimed)
     }
 
-    /// Materialize a session tree branch path as harness entries.
+    /// Materialize a session branch path as harness entries.
     pub(crate) fn navigate_branch(
         &mut self,
         branch_ids: &[String],
-        session_tree: &SessionTree,
     ) -> Result<Option<String>, String> {
         self.refresh()?;
         let mut harness_target_id = None;
         let mut parent_id: Option<String> = None;
         for legacy_id in branch_ids {
-            let node = session_tree
-                .nodes
-                .get(legacy_id)
-                .ok_or_else(|| format!("Node ID not found in session tree: {legacy_id}"))?;
-            if matches!(node.message, AgentMessage::System { .. }) {
+            let entry = self
+                .store
+                .entries()
+                .iter()
+                .find(|entry| entry.id == *legacy_id)
+                .cloned()
+                .ok_or_else(|| format!("Entry ID not found in session: {legacy_id}"))?;
+            if matches!(entry.message, AgentMessage::System { .. }) {
                 continue;
             }
-            let entry_id = if self
-                .store
-                .entries()
-                .iter()
-                .any(|entry| entry.id == *legacy_id)
-            {
-                legacy_id.clone()
-            } else {
-                format!("v2-navigation-{legacy_id}")
-            };
-            if !self
-                .store
-                .entries()
-                .iter()
-                .any(|entry| entry.id == entry_id)
-            {
-                self.store
-                    .append_entry_gated(HarnessEntry {
-                        id: entry_id.clone(),
-                        parent_id: parent_id.clone(),
-                        lane: "main".into(),
-                        seq: harness_next_seq(self.store.store()),
-                        timestamp: timestamp(),
-                        message: node.message.clone(),
-                        surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
-                        terminate: matches!(
-                            node.message,
-                            AgentMessage::Tool {
-                                terminate: true,
-                                ..
-                            }
-                        ),
-                    })
-                    .map_err(|error| error.to_string())?;
-                self.store
-                    .drive_to_completion()
-                    .map_err(|error| error.to_string())?;
-            }
-            parent_id = Some(entry_id.clone());
+            parent_id = Some(entry.id.clone());
             if *legacy_id == branch_ids[branch_ids.len() - 1] {
-                harness_target_id = Some(entry_id);
+                harness_target_id = Some(entry.id);
             }
         }
         Ok(harness_target_id)
@@ -3251,8 +3214,8 @@ mod tests {
         harness.begin_run(&run_id, prompt.clone()).unwrap();
         harness.prepare_assistant_attempt(&run_id).unwrap();
 
-        let mut stale_tree = SessionTree::load_from_file(&path).unwrap();
-        stale_tree.set_name("stale metadata".into()).unwrap();
+        let mut stale_store = threadlane_runtime::harness::JsonlStore::open(&path).unwrap();
+        stale_store.set_name("stale metadata").unwrap();
 
         let assistant = AgentMessage::Assistant {
             content: None,

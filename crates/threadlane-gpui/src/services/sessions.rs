@@ -36,7 +36,6 @@ impl SessionRuntime {
             .session_file
             .clone()
             .expect("GPUI session runtimes require a durable session file");
-        let requested_model = options.model.clone();
         let agent = CodingAgent::new(options);
         let cancellation = agent.cancellation_handle();
         let work_handle = agent.work_handle();
@@ -52,7 +51,7 @@ impl SessionRuntime {
             SessionRuntimeStatus::Ready
         };
 
-        let selected_model = agent.session_tree.model.clone().unwrap_or(requested_model);
+        let selected_model = agent.model().to_string();
 
         Arc::new(Self {
             agent: Arc::new(tokio::sync::Mutex::new(agent)),

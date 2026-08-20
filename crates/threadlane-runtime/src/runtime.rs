@@ -262,17 +262,49 @@ impl AgentRuntime {
         self.harness.store().transcript("main")
     }
 
-    // ── Public API ────────────────────────────────────────────────────
-
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
         self.event_tx.subscribe()
     }
 
+    pub fn model(&self) -> String {
+        self.turn
+            .try_lock()
+            .map(|t| t.model.clone())
+            .unwrap_or_else(|_| {
+                self.harness
+                    .store()
+                    .model()
+                    .unwrap_or_else(|| "gpt-4o".to_string())
+            })
+    }
+
     pub fn steer(&mut self, message: AgentMessage) {
+        let seq = self.harness.store().next_sequence();
+        let _ = self.harness.enqueue_unbound(
+            QueueKind::Steer,
+            ProvisionedEntry {
+                id: format!("queued-steer-{seq}"),
+                parent_id: None,
+                message: message.clone(),
+                surface_op: crate::harness::SurfaceOperation::Append,
+            },
+        );
+        let _ = self.harness.drive_to_completion();
         self.steering_queue.push(message);
     }
 
     pub fn follow_up(&mut self, message: AgentMessage) {
+        let seq = self.harness.store().next_sequence();
+        let _ = self.harness.enqueue_unbound(
+            QueueKind::FollowUp,
+            ProvisionedEntry {
+                id: format!("queued-followup-{seq}"),
+                parent_id: None,
+                message: message.clone(),
+                surface_op: crate::harness::SurfaceOperation::Append,
+            },
+        );
+        let _ = self.harness.drive_to_completion();
         self.follow_up_queue.push(message);
     }
 
@@ -495,6 +527,11 @@ impl AgentRuntime {
     pub async fn run_steer(&mut self) {
         if !self.steering_queue.is_empty() {
             let items: Vec<_> = self.steering_queue.drain(..).collect();
+            if let Some(recorder) = self.message_recorder.as_ref() {
+                for item in &items {
+                    let _ = recorder(item.clone()).await;
+                }
+            }
             {
                 let mut turn = self.turn.lock().await;
                 turn.messages.extend(items);
@@ -506,6 +543,11 @@ impl AgentRuntime {
     pub async fn run_follow_up(&mut self) {
         if !self.follow_up_queue.is_empty() {
             let items: Vec<_> = self.follow_up_queue.drain(..).collect();
+            if let Some(recorder) = self.message_recorder.as_ref() {
+                for item in &items {
+                    let _ = recorder(item.clone()).await;
+                }
+            }
             {
                 let mut turn = self.turn.lock().await;
                 turn.messages.extend(items);

@@ -1,7 +1,6 @@
 use super::reducer::{validate_candidate_entry, validate_candidate_record};
 use super::store::SessionStore;
 use super::types::{Entry, Record, ReduceError};
-use crate::session_tree::SessionNode;
 use crate::types::PlanItem;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -97,14 +96,26 @@ enum KnownSessionRecord {
     GlobalFact { key: String, value: String },
 }
 
+#[derive(Debug, Deserialize)]
+struct LegacySessionNode {
+    id: String,
+    parent_id: Option<String>,
+    #[serde(default)]
+    timestamp: u64,
+    #[serde(default)]
+    seq: Option<u64>,
+    message: crate::types::AgentMessage,
+}
+
 #[derive(Debug, Clone)]
 pub struct JsonlStore {
     path: PathBuf,
+    session_id: String,
     claim: Arc<WriterClaim>,
     writable: bool,
-    tree: crate::SessionTree,
     entries: Vec<Entry>,
     records: Vec<Record>,
+    preferred_leaf: Option<String>,
     session_file_len: u64,
     harness_file_len: u64,
 }
@@ -129,8 +140,7 @@ impl JsonlStore {
 
     fn load(path: PathBuf, claim: Arc<WriterClaim>, writable: bool) -> io::Result<Self> {
         validate_session_lines(&path)?;
-        let tree = crate::SessionTree::load_from_file(&path)?;
-        let (entries, mut records) = read_entries(&path)?;
+        let (session_id, preferred_leaf, entries, mut records) = read_entries(&path)?;
         records.extend(read_strict(&path.with_extension("harness.jsonl"))?);
         records.sort_by_key(Record::seq);
         validate_harness_records(&records, &path.with_extension("harness.jsonl"))?;
@@ -138,11 +148,12 @@ impl JsonlStore {
         let harness_file_len = file_len(&path.with_extension("harness.jsonl"))?;
         let store = Self {
             path,
+            session_id,
             claim,
             writable,
-            tree,
             entries,
             records,
+            preferred_leaf,
             session_file_len,
             harness_file_len,
         };
@@ -158,9 +169,10 @@ impl JsonlStore {
             .lock()
             .map_err(|_| io::Error::other("writer claim poisoned"))?;
         let refreshed = Self::load_parts(&self.path)?;
-        self.tree = refreshed.0;
-        self.entries = refreshed.1;
-        self.records = refreshed.2;
+        self.session_id = refreshed.0;
+        self.preferred_leaf = refreshed.1;
+        self.entries = refreshed.2;
+        self.records = refreshed.3;
         self.refresh_file_lengths()?;
         super::Reducer::reduce(self)
             .map(|_| ())
@@ -178,27 +190,22 @@ impl JsonlStore {
             && self.harness_file_len == file_len(&self.path.with_extension("harness.jsonl"))?)
     }
 
-    fn load_parts(path: &Path) -> io::Result<(crate::SessionTree, Vec<Entry>, Vec<Record>)> {
+    fn load_parts(
+        path: &Path,
+    ) -> io::Result<(String, Option<String>, Vec<Entry>, Vec<Record>)> {
         validate_session_lines(path)?;
-        let tree = crate::SessionTree::load_from_file(path)?;
-        let (entries, mut records) = read_entries(path)?;
+        let (session_id, preferred_leaf, entries, mut records) = read_entries(path)?;
         let record_path = path.with_extension("harness.jsonl");
         records.extend(read_strict(&record_path)?);
         records.sort_by_key(Record::seq);
         validate_harness_records(&records, &record_path)?;
-        Ok((tree, entries, records))
+        Ok((session_id, preferred_leaf, entries, records))
     }
 
     pub fn path(&self) -> &Path {
         &self.path
     }
-    pub fn tree(&self) -> &crate::SessionTree {
-        &self.tree
-    }
 
-    pub fn parent_session_id(&self) -> Option<&str> {
-        self.tree.parent_session_id.as_deref()
-    }
     pub fn entries(&self) -> &[Entry] {
         &self.entries
     }
@@ -210,7 +217,7 @@ impl JsonlStore {
 
 impl SessionStore for JsonlStore {
     fn session_id(&self) -> &str {
-        &self.tree.session_id
+        &self.session_id
     }
     fn next_sequence(&self) -> u64 {
         self.next_seq()
@@ -219,12 +226,7 @@ impl SessionStore for JsonlStore {
         JsonlStore::refresh(self).map_err(|error| ReduceError::Storage(error.to_string()))
     }
     fn facts(&self) -> std::collections::BTreeMap<String, String> {
-        let mut facts = self
-            .tree
-            .global_facts
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut facts = std::collections::BTreeMap::new();
         for record in &self.records {
             if let Record::FactSet {
                 key,
@@ -241,7 +243,7 @@ impl SessionStore for JsonlStore {
 
     fn preferred_leaf(&self, lane: &str) -> Option<String> {
         (lane == "main")
-            .then(|| self.tree.active_node_id().map(str::to_owned))
+            .then(|| self.preferred_leaf.clone())
             .flatten()
     }
 
@@ -296,7 +298,9 @@ impl SessionStore for JsonlStore {
         append_json_line(&self.path, &entry)?;
         self.session_file_len =
             file_len(&self.path).map_err(|error| ReduceError::Storage(error.to_string()))?;
-        self.tree.project_harness_entry(&entry);
+        if entry.lane == "main" {
+            self.preferred_leaf = Some(entry.id.clone());
+        }
         self.entries.push(entry);
         super::Reducer::reduce(self).map(|_| ())
     }
@@ -337,7 +341,6 @@ impl SessionStore for JsonlStore {
         append_json_line(&self.path, &record)?;
         self.session_file_len =
             file_len(&self.path).map_err(|error| ReduceError::Storage(error.to_string()))?;
-        self.tree.project_harness_record(&record);
         self.records.push(record);
         super::Reducer::reduce(self).map(|_| ())
     }
@@ -413,7 +416,7 @@ impl JsonlStore {
             key: "parent_session_id".into(),
             value: self.session_id().to_string(),
         })?;
-        if let Some(model) = &self.tree.model {
+        if let Some(model) = self.model() {
             fork.append_record(Record::FactSet {
                 id: "fact-main-model".into(),
                 seq: fork.next_sequence(),
@@ -421,10 +424,10 @@ impl JsonlStore {
                 timestamp: 0,
                 run_id: None,
                 key: "model".into(),
-                value: model.clone(),
+                value: model,
             })?;
         }
-        if let Some(name) = &self.tree.name {
+        if let Some(name) = self.name() {
             fork.append_record(Record::FactSet {
                 id: "fact-main-name".into(),
                 seq: fork.next_sequence(),
@@ -432,7 +435,7 @@ impl JsonlStore {
                 timestamp: 0,
                 run_id: None,
                 key: "name".into(),
-                value: name.clone(),
+                value: name,
             })?;
         }
         for source in self
@@ -458,9 +461,9 @@ impl JsonlStore {
         {
             fork.append_record(source.clone().with_seq(fork.next_sequence()))?;
         }
-        for (key, value) in &self.tree.global_facts {
-            if !self.records.iter().any(|record| {
-                matches!(record, Record::FactSet { key: record_key, .. } if record_key == key)
+        for (key, value) in self.facts() {
+            if !fork.records.iter().any(|record| {
+                matches!(record, Record::FactSet { key: record_key, .. } if record_key == &key)
             }) {
                 fork.append_record(Record::FactSet {
                     id: format!("fact-main-{key}"),
@@ -483,9 +486,10 @@ impl JsonlStore {
     fn reload_unlocked(&mut self) -> Result<(), ReduceError> {
         let refreshed = Self::load_parts(&self.path)
             .map_err(|error| ReduceError::Storage(error.to_string()))?;
-        self.tree = refreshed.0;
-        self.entries = refreshed.1;
-        self.records = refreshed.2;
+        self.session_id = refreshed.0;
+        self.preferred_leaf = refreshed.1;
+        self.entries = refreshed.2;
+        self.records = refreshed.3;
         super::Reducer::reduce(self).map(|_| ())
     }
 
@@ -530,7 +534,14 @@ fn append_json_line<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), R
     append_session_json_line(path, value).map_err(|error| ReduceError::Storage(error.to_string()))
 }
 
-fn read_entries(path: &Path) -> io::Result<(Vec<Entry>, Vec<Record>)> {
+fn read_entries(
+    path: &Path,
+) -> io::Result<(String, Option<String>, Vec<Entry>, Vec<Record>)> {
+    let session_id = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "session".into());
+    let mut preferred_leaf = None;
     let values: Vec<serde_json::Value> = read_strict(path)?;
     let mut entries = Vec::new();
     let mut records = Vec::new();
@@ -539,20 +550,88 @@ fn read_entries(path: &Path) -> io::Result<(Vec<Entry>, Vec<Record>)> {
             records.push(record);
             continue;
         }
-        if value.get("type").is_some() {
-            continue;
-        }
-        if value.get("seq").is_none() && serde_json::from_value::<Record>(value.clone()).is_ok() {
+        if let Ok(known) = serde_json::from_value::<KnownSessionRecord>(value.clone()) {
+            match known {
+                KnownSessionRecord::Metadata {
+                    name,
+                    title_attempted,
+                    active_node_id,
+                    model,
+                } => {
+                    if let Some(active) = active_node_id {
+                        preferred_leaf = Some(active);
+                    }
+                    if let Some(name) = name {
+                        records.push(Record::FactSet {
+                            id: format!("fact-name-{}", index + 1),
+                            seq: (index + 1) as u64,
+                            lane: "main".into(),
+                            timestamp: 0,
+                            run_id: None,
+                            key: "name".into(),
+                            value: name,
+                        });
+                    }
+                    if let Some(model) = model {
+                        records.push(Record::FactSet {
+                            id: format!("fact-model-{}", index + 1),
+                            seq: (index + 1) as u64,
+                            lane: "main".into(),
+                            timestamp: 0,
+                            run_id: None,
+                            key: "model".into(),
+                            value: model,
+                        });
+                    }
+                    if title_attempted {
+                        records.push(Record::FactSet {
+                            id: format!("fact-title-attempted-{}", index + 1),
+                            seq: (index + 1) as u64,
+                            lane: "main".into(),
+                            timestamp: 0,
+                            run_id: None,
+                            key: "title_attempted".into(),
+                            value: "true".into(),
+                        });
+                    }
+                }
+                KnownSessionRecord::Plan { items, explanation } => {
+                    let plan = crate::types::SessionPlan { explanation, items };
+                    if let Ok(plan_json) = serde_json::to_string(&plan) {
+                        records.push(Record::FactSet {
+                            id: format!("fact-plan-{}", index + 1),
+                            seq: (index + 1) as u64,
+                            lane: "main".into(),
+                            timestamp: 0,
+                            run_id: None,
+                            key: "session_plan".into(),
+                            value: plan_json,
+                        });
+                    }
+                }
+                KnownSessionRecord::GlobalFact { key, value } => {
+                    records.push(Record::FactSet {
+                        id: format!("fact-{key}-{}", index + 1),
+                        seq: (index + 1) as u64,
+                        lane: "main".into(),
+                        timestamp: 0,
+                        run_id: None,
+                        key,
+                        value,
+                    });
+                }
+            }
             continue;
         }
         if value.get("seq").is_some() {
-            entries.push(
-                serde_json::from_value(value)
-                    .map_err(|error| invalid_line(path, index + 1, error))?,
-            );
-        } else {
-            let node: SessionNode = serde_json::from_value(value)
-                .map_err(|error| invalid_line(path, index + 1, error))?;
+            if let Ok(entry) = serde_json::from_value::<Entry>(value.clone()) {
+                if entry.lane == "main" {
+                    preferred_leaf = Some(entry.id.clone());
+                }
+                entries.push(entry);
+            }
+        } else if let Ok(node) = serde_json::from_value::<LegacySessionNode>(value) {
+            preferred_leaf = Some(node.id.clone());
             entries.push(Entry {
                 id: node.id,
                 parent_id: node.parent_id,
@@ -565,7 +644,7 @@ fn read_entries(path: &Path) -> io::Result<(Vec<Entry>, Vec<Record>)> {
             });
         }
     }
-    Ok((entries, records))
+    Ok((session_id, preferred_leaf, entries, records))
 }
 
 fn validate_harness_records(records: &[Record], path: &Path) -> io::Result<()> {
@@ -613,7 +692,7 @@ fn validate_session_lines(path: &Path) -> io::Result<()> {
         } else if value.get("type").is_some() {
             serde_json::from_value::<KnownSessionRecord>(value).map(|_| ())
         } else {
-            serde_json::from_value::<SessionNode>(value).map(|_| ())
+            serde_json::from_value::<LegacySessionNode>(value).map(|_| ())
         };
         if let Err(error) = result {
             return Err(invalid_line(path, index + 1, error));

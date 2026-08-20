@@ -8,7 +8,6 @@ pub mod harness;
 pub(crate) mod loop_engine;
 pub mod provider;
 pub mod rules;
-pub mod session_tree;
 pub mod tool_dispatcher;
 pub mod tool_executor;
 pub(crate) mod turn_driver;
@@ -39,9 +38,9 @@ pub use events::{
     AgentEvent, HarnessMetrics, PermissionRequest, PermissionScope, SubagentRecoveryStatus,
 };
 pub use harness::{
-    has_open_subagent_lanes, interrupted_subagent_lanes, AcceptedRun, InterruptedSubagentLane,
-    LaneQueue, OperationOutcome, QueueKind, Record, RecoveryResult, SteerItem, SteerPriority,
-    ToolReplaySafety,
+    has_open_subagent_lanes, interrupted_subagent_lanes, AcceptedRun, DurableEvent, DurablePayload,
+    InterruptedSubagentLane, LaneQueue, OperationOutcome, QueueKind, Record, RecoveryResult,
+    SteerItem, SteerPriority, ToolReplaySafety,
 };
 pub use loop_engine::repair_interrupted_tool_turn;
 pub use provider::{
@@ -52,7 +51,6 @@ pub use provider::{
     ToolIntentRecorder,
 };
 pub use rules::*;
-pub use session_tree::{SessionNode, SessionTree};
 pub use tool_dispatcher::ToolDispatcher;
 pub use tool_executor::ToolExecutor;
 pub use types::*;

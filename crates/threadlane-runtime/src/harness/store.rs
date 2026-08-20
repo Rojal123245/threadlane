@@ -142,6 +142,72 @@ pub trait SessionStore {
     fn preferred_leaf(&self, _lane: &str) -> Option<String> {
         None
     }
+    fn name(&self) -> Option<String> {
+        self.facts().get("name").cloned()
+    }
+    fn has_name(&self) -> bool {
+        self.name().as_ref().is_some_and(|n| !n.trim().is_empty())
+    }
+    fn model(&self) -> Option<String> {
+        self.facts().get("model").cloned()
+    }
+    fn parent_session_id(&self) -> Option<String> {
+        self.facts().get("parent_session_id").cloned()
+    }
+    fn title_attempted(&self) -> bool {
+        self.facts()
+            .get("title_attempted")
+            .map_or(false, |v| v == "true")
+    }
+    fn plan(&self) -> crate::types::SessionPlan {
+        if let Some(plan_json) = self.facts().get("session_plan") {
+            if let Ok(plan) = serde_json::from_str::<crate::types::SessionPlan>(plan_json) {
+                return plan;
+            }
+        }
+        crate::types::SessionPlan::default()
+    }
+    fn active_branch_messages(&self, lane: &str) -> Vec<AgentMessage>
+    where
+        Self: Sized,
+    {
+        self.model_context(lane)
+            .map(|ctx| ctx.messages())
+            .unwrap_or_default()
+    }
+    fn get_persisted_messages(&self) -> Vec<AgentMessage> {
+        self.entries()
+            .iter()
+            .map(|entry| entry.message.clone())
+            .collect()
+    }
+    fn mark_title_attempted(&mut self) -> Result<bool, ReduceError> {
+        if self.title_attempted() {
+            return Ok(false);
+        }
+        self.append_fact("main", "title_attempted", "true", None)?;
+        Ok(true)
+    }
+    fn set_name(&mut self, name: impl Into<String>) -> Result<(), ReduceError> {
+        let name = name.into();
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err(ReduceError::InvalidRecord(
+                "session name cannot be empty".into(),
+            ));
+        }
+        self.append_fact("main", "name", trimmed, None)
+    }
+    fn set_model(&mut self, model: impl Into<String>) -> Result<(), ReduceError> {
+        let model = model.into();
+        let trimmed = model.trim();
+        if trimmed.is_empty() {
+            return Err(ReduceError::InvalidRecord(
+                "session model cannot be empty".into(),
+            ));
+        }
+        self.append_fact("main", "model", trimmed, None)
+    }
     /// Build the model-facing context projection for one lane's selected branch.
     ///
     /// The append-only log remains the source of truth. This projection selects

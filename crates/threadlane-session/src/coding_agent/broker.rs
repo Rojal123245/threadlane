@@ -14,10 +14,9 @@ use threadlane_wasi::WasiExtensionManager;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::time::{timeout, Duration};
 
-use super::runtime::{
-    enqueue_harness_follow_up, AgentRunTask, AgentRunner, AgentWork, AgentWorkScheduler,
-    MAX_SUBAGENT_TASKS, MAX_SUBAGENT_TASK_CHARS,
-};
+use super::cancellation::AgentRunTask;
+use super::scheduler::{enqueue_harness_follow_up, AgentWork, AgentWorkScheduler};
+use super::subagents::{AgentRunner, MAX_SUBAGENT_TASKS, MAX_SUBAGENT_TASK_CHARS};
 
 pub(crate) const CAPABILITY_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const MAX_CAPABILITY_BUFFER_BYTES: usize = 64 * 1024;

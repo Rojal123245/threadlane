@@ -21,7 +21,7 @@ pub use capabilities_catalog::CapabilityCatalog;
 pub use coding_agent::harness::{
     CodingSessionHarness, HarnessRecord, HarnessWatch, InterruptedSubagentRecoveryState,
 };
-pub use coding_agent::runtime::{
+pub use coding_agent::{
     cancel_open_subagent_operations, AgentRunTask, CodingAgent, CodingAgentCancellation,
     CodingAgentOptions, CodingAgentWorkHandle, HarnessCompositionSnapshot,
     SubagentCancellationGuard, SubagentInnerTool, SubagentInnerToolData, SubagentResult,

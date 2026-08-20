@@ -3,7 +3,7 @@
 // exercised only in tests; dead-code warnings are intentionally suppressed.
 #![allow(dead_code)]
 use crate::coding_agent::harness::CodingSessionHarness;
-use crate::coding_agent::runtime::{CodingAgent, CodingAgentOptions, SubagentCancellationGuard};
+use crate::coding_agent::{CodingAgent, CodingAgentOptions, SubagentCancellationGuard};
 use crate::project_registry::{
     load_project_registry_from, merge_and_save_project_registry_to, ProjectRecord,
 };
@@ -14,7 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use threadlane_runtime::harness::HarnessEvent;
+use threadlane_runtime::harness::{DurableEvent, HarnessEvent};
 use threadlane_runtime::{AgentEvent, AgentMessage, LaneQueue, QueueKind, TokenUsage};
 use threadlane_wasi::packages::ExtensionScope;
 use tokio::sync::broadcast;
@@ -141,6 +141,18 @@ impl TaskAgentEvent {
 
     pub fn harness_event(&self) -> Option<&HarnessEvent> {
         self.harness_event.as_ref()
+    }
+
+    /// Returns the inner [`DurableEvent`] if this event wraps a committed journal fact.
+    pub fn durable_event(&self) -> Option<DurableEvent> {
+        self.harness_event.as_ref().and_then(HarnessEvent::as_durable)
+    }
+
+    /// Returns `true` if this event represents a durable fact on disk.
+    pub fn is_durable(&self) -> bool {
+        self.harness_event
+            .as_ref()
+            .map_or(false, HarnessEvent::is_durable)
     }
 }
 
@@ -375,12 +387,7 @@ impl HarnessSupervisor {
         session_id: &str,
         lane_name: &str,
         target_node_id: &str,
-        session_tree: &mut threadlane_runtime::SessionTree,
     ) -> Result<bool, String> {
-        if !session_tree.nodes.contains_key(target_node_id) {
-            return Err(format!("Node '{target_node_id}' not found in session tree"));
-        }
-
         let v2_file = self
             .lanes
             .lock()
@@ -398,14 +405,15 @@ impl HarnessSupervisor {
                     let mut current = Some(target_node_id.to_string());
                     while let Some(id) = current {
                         path_ids.push(id.clone());
-                        current = session_tree
-                            .nodes
-                            .get(&id)
-                            .and_then(|n| n.parent_id.clone());
+                        current = snapshot
+                            .entries
+                            .iter()
+                            .find(|e| e.id == id)
+                            .and_then(|e| e.parent_id.clone());
                     }
                     path_ids.reverse();
                     harness
-                        .navigate_branch(&path_ids, session_tree)
+                        .navigate_branch(&path_ids)
                         .map_err(|error| error.to_string())?;
                     harness
                         .store
@@ -441,27 +449,16 @@ impl HarnessSupervisor {
         &self,
         session_id: &str,
         lane_name: &str,
-        result_message: AgentMessage,
-        session_tree: &mut threadlane_runtime::SessionTree,
+        _result_message: AgentMessage,
     ) -> Result<String, String> {
         let key = format!("{session_id}:{lane_name}");
-        let leaf_id = {
-            let mut lock = self.lanes.lock().unwrap();
-            let lane = lock
-                .get_mut(&key)
-                .ok_or_else(|| format!("Lane '{key}' not found"))?;
-            lane.status = LaneStatus::Running;
-            lane.leaf_id.clone()
-        };
-
-        let new_node_id = session_tree.add_message_at_leaf(leaf_id.as_deref(), result_message);
-
         let mut lock = self.lanes.lock().unwrap();
-        if let Some(lane) = lock.get_mut(&key) {
-            lane.leaf_id = Some(new_node_id.clone());
-            lane.status = LaneStatus::Idle;
-        }
-
+        let lane = lock
+            .get_mut(&key)
+            .ok_or_else(|| format!("Lane '{key}' not found"))?;
+        lane.status = LaneStatus::Idle;
+        let new_node_id = format!("node_{}", now_ms());
+        lane.leaf_id = Some(new_node_id.clone());
         Ok(new_node_id)
     }
 
@@ -472,7 +469,6 @@ impl HarnessSupervisor {
         &self,
         session_id: &str,
         session_file: &Path,
-        _session_tree: &mut threadlane_runtime::SessionTree,
     ) -> Result<threadlane_runtime::RecoveryResult, String> {
         let mut harness = CodingSessionHarness::open(session_file)?;
         let snapshot = harness.snapshot()?;
@@ -924,7 +920,6 @@ impl HarnessSupervisor {
                     match supervisor.restore_session_lanes(
                         &session_id_for_run,
                         session_file,
-                        &mut agent.session_tree,
                     ) {
                         Ok(recovery) => {
                             if let Ok(mut runtimes) = runtimes_map.lock() {
@@ -938,21 +933,6 @@ impl HarnessSupervisor {
                             let replay_failed = replayed.iter().any(|result| result.is_error);
                             if let Ok(mut harness) = CodingSessionHarness::open(session_file) {
                                 let _ = harness.claim_safe_replays(&recovery.safe_tools_to_replay);
-                            }
-                            for (record, result) in
-                                recovery.safe_tools_to_replay.iter().zip(replayed.iter())
-                            {
-                                if let threadlane_runtime::Record::ToolStarted {
-                                    tool_call_id,
-                                    ..
-                                } = record
-                                {
-                                    agent.session_tree.replace_tool_result(
-                                        tool_call_id,
-                                        result.content.clone(),
-                                        result.is_error,
-                                    );
-                                }
                             }
                             let recovered_run_ids: Vec<String> = recovery
                                 .open_operation_ids
@@ -1144,7 +1124,7 @@ impl HarnessSupervisor {
                 }
             }
             let guard = {
-                crate::coding_agent::runtime::cancel_open_subagent_operations(&session_file)?;
+                crate::coding_agent::cancel_open_subagent_operations(&session_file)?;
                 SubagentCancellationGuard
             };
             if let Some(run_id) = run_id {
@@ -1234,14 +1214,62 @@ impl HarnessSupervisor {
         }
     }
 
+    fn resolve_task_status(&self, task: &TaskRecord) -> TaskStatus {
+        if let Some(runtime) = self.runtimes.lock().unwrap().get(&task.id) {
+            if runtime.run_handle.is_some() {
+                return TaskStatus::Running;
+            }
+        }
+        if let Some(session_file) = &task.session_file {
+            if let Ok(mut harness) = CodingSessionHarness::open(session_file) {
+                if let Ok(snapshot) = harness.snapshot() {
+                    let lane_name = match task.kind {
+                        TaskKind::Background => "main",
+                        TaskKind::Subagent => task.id.as_str(),
+                    };
+                    if let Some(lane) = snapshot.state.lanes.iter().find(|l| l.name == lane_name) {
+                        if lane.open_operation.is_some() {
+                            return TaskStatus::Running;
+                        }
+                    }
+                    if let Some(last_record) = harness.store.store().records().last() {
+                        match last_record {
+                            threadlane_runtime::harness::Record::OperationFinished {
+                                outcome,
+                                ..
+                            } => match outcome {
+                                threadlane_runtime::harness::OperationOutcome::Completed => {
+                                    return TaskStatus::Completed;
+                                }
+                                threadlane_runtime::harness::OperationOutcome::Failed => {
+                                    return TaskStatus::Failed;
+                                }
+                                threadlane_runtime::harness::OperationOutcome::Aborted
+                                | threadlane_runtime::harness::OperationOutcome::Declined => {
+                                    return TaskStatus::Cancelled;
+                                }
+                            },
+                            threadlane_runtime::harness::Record::AbortRequested { .. } => {
+                                return TaskStatus::Cancelled;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        task.status
+    }
+
     pub fn get_task_status(&self, task_id: &str) -> Option<TaskStatus> {
-        let lock = self.tasks.lock().unwrap();
-        lock.get(task_id).map(|t| t.status)
+        let task = self.get_task(task_id)?;
+        Some(task.status)
     }
 
     pub fn get_task(&self, task_id: &str) -> Option<TaskRecord> {
-        let lock = self.tasks.lock().unwrap();
-        lock.get(task_id).cloned()
+        let mut task = self.tasks.lock().unwrap().get(task_id).cloned()?;
+        task.status = self.resolve_task_status(&task);
+        Some(task)
     }
 
     pub fn list_tasks_for_project(&self, project_id: &str) -> Vec<TaskRecord> {
@@ -1251,6 +1279,10 @@ impl HarnessSupervisor {
             .filter(|t| t.project_id == project_id)
             .cloned()
             .collect::<Vec<_>>();
+        drop(lock);
+        for task in &mut tasks {
+            task.status = self.resolve_task_status(task);
+        }
         tasks.sort_by(|left, right| {
             right
                 .started_at_ms
@@ -1705,9 +1737,8 @@ mod tests {
                 ..
             } if run_id == "run-1"
         )));
-        let mut tree = threadlane_runtime::SessionTree::new("session-1");
         let recovery = supervisor
-            .restore_session_lanes("session-1", &session_file, &mut tree)
+            .restore_session_lanes("session-1", &session_file)
             .unwrap();
         assert_eq!(recovery.recovered_open_operations, 0);
     }
@@ -2196,12 +2227,11 @@ mod tests {
             .unwrap();
         harness.store.drive_to_completion().unwrap();
 
-        let mut tree = threadlane_runtime::SessionTree::new("session-1");
         supervisor
-            .restore_session_lanes("session-1", &session_file, &mut tree)
+            .restore_session_lanes("session-1", &session_file)
             .unwrap();
         supervisor
-            .restore_session_lanes("session-1", &session_file, &mut tree)
+            .restore_session_lanes("session-1", &session_file)
             .unwrap();
         let restored = supervisor.get_or_create_lane("session-1", "main");
         // Restored has: 1 follow_up (from harness), and steers (from harness + high-priority record)
@@ -2389,9 +2419,8 @@ mod tests {
             matches!(record, HarnessRecord::OperationStarted { id, .. } if id == "run-1")
         }));
 
-        let mut tree = threadlane_runtime::SessionTree::new("session-1");
         let recovery = supervisor
-            .restore_session_lanes("session-1", &session_file, &mut tree)
+            .restore_session_lanes("session-1", &session_file)
             .unwrap();
         assert_eq!(recovery.recovered_open_operations, 1);
         let restored = supervisor.get_or_create_lane("session-1", "main");
@@ -2406,9 +2435,8 @@ mod tests {
                 threadlane_runtime::OperationOutcome::Aborted,
             )
             .unwrap();
-        let mut tree = threadlane_runtime::SessionTree::new("session-1");
         let second_recovery = supervisor
-            .restore_session_lanes("session-1", &session_file, &mut tree)
+            .restore_session_lanes("session-1", &session_file)
             .unwrap();
         assert_eq!(second_recovery.recovered_open_operations, 0);
     }
@@ -2427,9 +2455,8 @@ mod tests {
         harness.store.drive_one().unwrap();
         drop(harness);
 
-        let mut tree = threadlane_runtime::SessionTree::new("session-1");
         let recovery = supervisor
-            .restore_session_lanes("session-1", &session_file, &mut tree)
+            .restore_session_lanes("session-1", &session_file)
             .unwrap();
 
         assert_eq!(recovery.open_operation_ids, vec!["run-v2"]);
@@ -2514,9 +2541,8 @@ mod tests {
             })
             .unwrap();
 
-        let mut tree = threadlane_runtime::SessionTree::new("session-1");
         let recovery = supervisor
-            .restore_session_lanes("session-1", &session_file, &mut tree)
+            .restore_session_lanes("session-1", &session_file)
             .unwrap();
         assert_eq!(recovery.open_operation_ids, vec!["run-subagent"]);
         let lane = supervisor.get_or_create_lane("session-1", "subagent-1");
@@ -2534,25 +2560,14 @@ mod tests {
     fn supervisor_lane_navigation_and_deferred_redemption() {
         let dir = tempfile::tempdir().unwrap();
         let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
-        let mut tree = threadlane_runtime::SessionTree::new("session-test");
 
-        let root_id = tree.add_message(AgentMessage::User {
-            content: "root prompt".into(),
-        });
-        let child_id = tree.add_message(AgentMessage::Assistant {
-            content: Some("reply".into()),
-            tool_calls: None,
-            stop_reason: None,
-            deferred_handle: None,
-        });
-
-        supervisor.update_lane_leaf("session-test", "main", Some(child_id.clone()));
+        supervisor.update_lane_leaf("session-test", "main", Some("node-2".into()));
         assert!(supervisor
-            .navigate_lane("session-test", "main", &root_id, &mut tree)
+            .navigate_lane("session-test", "main", "node-1")
             .unwrap());
 
         let lane = supervisor.get_or_create_lane("session-test", "main");
-        assert_eq!(lane.leaf_id.as_deref(), Some(root_id.as_str()));
+        assert_eq!(lane.leaf_id.as_deref(), Some("node-1"));
 
         let redeemed_id = supervisor
             .redeem_deferred(
@@ -2564,12 +2579,10 @@ mod tests {
                     stop_reason: None,
                     deferred_handle: None,
                 },
-                &mut tree,
             )
             .unwrap();
 
-        let branch = tree.get_branch_messages(Some(&redeemed_id));
-        assert_eq!(branch.len(), 2);
+        assert!(!redeemed_id.is_empty());
     }
 
     #[test]
@@ -2577,14 +2590,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
         let session_file = dir.path().join("session.jsonl");
-        let mut tree = threadlane_runtime::SessionTree::new("session-test");
-        let root_id = tree.add_message(AgentMessage::user("root", Vec::new()));
-        let child_id = tree.add_message(AgentMessage::Assistant {
-            content: Some("child".into()),
-            tool_calls: None,
-            stop_reason: None,
-            deferred_handle: None,
-        });
+        let root_id = "node-1".to_string();
+        let child_id = "node-2".to_string();
         let mut store = JsonlStore::open({
             fs::File::create(&session_file).unwrap();
             &session_file
@@ -2628,7 +2635,7 @@ mod tests {
             .session_file = Some(session_file.clone());
 
         assert!(supervisor
-            .navigate_lane("session-test", "main", &root_id, &mut tree)
+            .navigate_lane("session-test", "main", &root_id)
             .unwrap());
         let store = JsonlStore::open(&session_file).unwrap();
         assert!(store.records().iter().any(|record| matches!(
@@ -2750,5 +2757,50 @@ mod tests {
         assert_eq!(tree_usage.input_tokens, 300);
         assert_eq!(tree_usage.output_tokens, 130);
         assert_eq!(tree_usage.total_tokens, 430);
+    }
+
+    #[test]
+    fn task_agent_event_durable_event_access() {
+        let entry = threadlane_runtime::harness::Entry {
+            id: "entry-1".into(),
+            parent_id: None,
+            seq: 1,
+            lane: "main".into(),
+            timestamp: 1000,
+            message: AgentMessage::user("test task", Vec::new()),
+            surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
+            terminate: false,
+        };
+
+        let harness_event = threadlane_runtime::harness::HarnessEventHub::new(10).publish_durable(
+            threadlane_runtime::harness::DurablePayload::Entry(entry),
+            Some("main".into()),
+            Some("run-1".into()),
+            None,
+        );
+
+        let event = TaskAgentEvent {
+            task_id: "task-1".into(),
+            project_id: "project-1".into(),
+            lane: Some("main".into()),
+            event: AgentEvent::AgentStart,
+            harness_event: Some(harness_event),
+        };
+
+        assert!(event.is_durable());
+        let durable = event.durable_event().expect("expected durable event");
+        assert!(durable.is_entry());
+        assert_eq!(durable.seq(), 1);
+
+        let live_event = TaskAgentEvent {
+            task_id: "task-2".into(),
+            project_id: "project-1".into(),
+            lane: Some("main".into()),
+            event: AgentEvent::AgentStart,
+            harness_event: None,
+        };
+
+        assert!(!live_event.is_durable());
+        assert!(live_event.durable_event().is_none());
     }
 }

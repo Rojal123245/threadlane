@@ -23,8 +23,9 @@ pub use diagnostics::{
 };
 pub use effects::{EffectAction, EffectsError, GatedEffects};
 pub use events::{
-    has_open_subagent_lanes, interrupted_subagent_lanes, EventError, EventPayload, HarnessEvent,
-    HarnessEventHub, ProjectedAgentEvent, Snapshot, StreamingState, Subscription,
+    has_open_subagent_lanes, interrupted_subagent_lanes, DurableEvent, DurablePayload, EventError,
+    EventPayload, HarnessEvent, HarnessEventHub, ProjectedAgentEvent, Snapshot, StreamingState,
+    Subscription,
 };
 pub use hooks::{
     HookContext, HookEffect, HookFailure, HookHandler, HookKind, HookRegistry, HookRun,

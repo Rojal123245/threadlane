@@ -5,7 +5,8 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, OnceLock};
 
 use threadlane_provider::ProviderClient;
-use threadlane_session::{AgentEvent, ImageAttachment, ReasoningEffort, SessionTree};
+use threadlane_session::harness::{JsonlStore, SessionStore};
+use threadlane_session::{AgentEvent, ImageAttachment, ReasoningEffort};
 
 use crate::services::sessions::SessionRuntime;
 use crate::state::ChatStreamEvent;
@@ -165,7 +166,7 @@ pub(crate) fn execute_prompt(
     Ok(())
 }
 
-pub(crate) fn spawn_session_title(
+pub(crate) fn maybe_generate_session_title(
     session_file: PathBuf,
     session_id: String,
     submitted_prompt: String,
@@ -174,8 +175,8 @@ pub(crate) fn spawn_session_title(
     model: String,
     stream_tx: Sender<ChatStreamEvent>,
 ) {
-    let mut tree = match SessionTree::load_from_file(&session_file) {
-        Ok(tree) => tree,
+    let mut store = match JsonlStore::open(&session_file) {
+        Ok(store) => store,
         Err(error) => {
             tracing::warn!(
                 "unable to load session {} for automatic title generation ({}): {}",
@@ -186,10 +187,10 @@ pub(crate) fn spawn_session_title(
             return;
         }
     };
-    if tree.has_name() || submitted_prompt.trim().is_empty() {
+    if store.has_name() || submitted_prompt.trim().is_empty() {
         return;
     }
-    match tree.mark_title_attempted() {
+    match store.mark_title_attempted() {
         Ok(true) => {}
         Ok(false) => return,
         Err(error) => {
@@ -213,12 +214,13 @@ pub(crate) fn spawn_session_title(
             if title.is_empty() {
                 return Err("title normalization produced an empty title".to_string());
             }
-            let mut tree = SessionTree::load_from_file(&session_file)
+            let mut store = JsonlStore::open(&session_file)
                 .map_err(|error| format!("reload failed: {error}"))?;
-            if tree.has_name() {
+            if store.has_name() {
                 return Err("session was named while title generation was running".to_string());
             }
-            tree.set_name(title)
+            store
+                .set_name(&title)
                 .map_err(|error| format!("persistence failed: {error}"))
         }
         .await;
