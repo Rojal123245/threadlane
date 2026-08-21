@@ -113,6 +113,7 @@ fn command(work_dir: &Path, args: &[&str]) -> Result<String, GitError> {
         let output = Command::new("git")
             .args(args)
             .current_dir(work_dir)
+            .env("GIT_TERMINAL_PROMPT", "0")
             .output()
             .map_err(|error| GitError {
                 work_dir: work_dir.to_path_buf(),
@@ -262,6 +263,11 @@ fn apply_numstats(work_dir: &Path, status: &mut GitStatus) {
             }
         }
     }
+}
+
+pub fn sync_remote(work_dir: &Path) -> Result<(), GitError> {
+    command(work_dir, &["fetch", "--prune", "--quiet"])?;
+    Ok(())
 }
 
 pub fn inspect(work_dir: &Path) -> Result<GitStatus, GitError> {
@@ -451,7 +457,46 @@ pub fn inspect_pr(work_dir: &Path) -> Result<Option<GitHubPrInfo>, GitError> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    if let Ok(info) = parse_gh_pr_json(&stdout) {
+    if let Ok(mut info) = parse_gh_pr_json(&stdout) {
+        // `gh pr view --json comments` exposes issue comments only. Inline
+        // review comments live on the REST review-comments endpoint.
+        if let Some((repo, number)) = info
+            .url
+            .split_once("/pull/")
+            .and_then(|(repo, number)| number.parse::<u64>().ok().map(|n| (repo, n)))
+        {
+            let api_path = format!(
+                "repos/{}/pulls/{}/comments",
+                repo.trim_start_matches("https://github.com/"),
+                number
+            );
+            if let Ok(review_output) = Command::new("gh")
+                .args(["api", &api_path, "--paginate", "--slurp"])
+                .current_dir(work_dir)
+                .output()
+            {
+                if review_output.status.success() {
+                    let pages = String::from_utf8_lossy(&review_output.stdout);
+                    if let Ok(pages) = serde_json::from_str::<Vec<Vec<serde_json::Value>>>(&pages) {
+                        for item in pages.into_iter().flatten() {
+                            info.review_comments.push(PrReviewComment {
+                                author: item["user"]["login"]
+                                    .as_str()
+                                    .unwrap_or("unknown")
+                                    .to_string(),
+                                body: item["body"].as_str().unwrap_or("").to_string(),
+                                path: item["path"].as_str().map(str::to_string),
+                                line: item["line"]
+                                    .as_u64()
+                                    .or_else(|| item["original_line"].as_u64()),
+                                created_at: item["created_at"].as_str().unwrap_or("").to_string(),
+                            });
+                        }
+                        info.comments_count = info.review_comments.len();
+                    }
+                }
+            }
+        }
         if info.number > 0 {
             return Ok(Some(info));
         }

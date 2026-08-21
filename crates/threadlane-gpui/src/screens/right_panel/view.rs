@@ -318,6 +318,9 @@ impl RightPanelView {
                 let _ = tx.send(PanelEvent::FilesLoaded { project, nodes });
             }
             Surface::Review => {
+                // Keep ahead/behind and PR checks current when the user refreshes Review.
+                // Fetch failures are tolerated so local status remains available offline.
+                let _ = threadlane_git::sync_remote(&project);
                 let (status, files, error) = match threadlane_git::inspect(&project) {
                     Ok(status) => {
                         let files = status.files.clone();

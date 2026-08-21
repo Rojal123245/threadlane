@@ -95,6 +95,13 @@ fn main() {
         threadlane_gpui::screens::workspace::init(cx);
         theme::init(cx);
 
+        cx.on_window_closed(|cx, _window_id| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
+
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                 None,

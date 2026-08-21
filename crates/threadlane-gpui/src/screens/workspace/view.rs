@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -5,6 +6,7 @@ use std::time::Duration;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandGroup, CommandItem, CommandState};
+use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::resizable::{h_resizable, resizable_panel, v_resizable, ResizableState};
 use gpui_component::status_bar::StatusBar;
 use gpui_component::{
@@ -63,6 +65,27 @@ enum GitEvent {
     },
 }
 
+struct TerminalGroup {
+    tabs: Vec<Entity<TerminalView>>,
+    active_tab: usize,
+}
+
+fn normalize_generated_commit_message(raw: &str) -> String {
+    let line = raw
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("```"))
+        .unwrap_or_default()
+        .trim_matches('`')
+        .trim();
+    let line = line
+        .strip_prefix("Commit message:")
+        .or_else(|| line.strip_prefix("Commit:"))
+        .unwrap_or(line)
+        .trim();
+    line.chars().take(72).collect()
+}
+
 fn git_result_matches_active(requested: &Path, active: &Path) -> bool {
     requested == active
 }
@@ -73,7 +96,8 @@ pub struct WorkspaceView {
     chat_list: Entity<ChatListView>,
     settings: Entity<SettingsView>,
     right_panel: Entity<RightPanelView>,
-    terminal: Entity<TerminalView>,
+    fallback_terminal: Option<Entity<TerminalView>>,
+    terminal_groups: HashMap<PathBuf, TerminalGroup>,
     sidebar_collapsed: bool,
     right_panel_visible: bool,
     bottom_panel_visible: bool,
@@ -128,9 +152,6 @@ impl WorkspaceView {
         let chat_list = cx.new(|cx| ChatListView::new(model.clone(), window, cx));
         let settings = cx.new(|cx| SettingsView::new(model.clone(), window, cx));
         let right_panel = cx.new(|cx| RightPanelView::new(model.clone(), window, cx));
-        let terminal_project =
-            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let terminal = cx.new(|cx| TerminalView::new(terminal_project, cx));
         let sidebar_resizable_state = cx.new(|_cx| ResizableState::default());
         let right_panel_resizable_state = cx.new(|_cx| ResizableState::default());
         let bottom_panel_resizable_state = cx.new(|_cx| ResizableState::default());
@@ -203,7 +224,8 @@ impl WorkspaceView {
                 chat_list,
                 settings,
                 right_panel,
-                terminal,
+                fallback_terminal: None,
+                terminal_groups: HashMap::new(),
                 sidebar_collapsed: false,
                 right_panel_visible: false,
                 bottom_panel_visible: false,
@@ -262,6 +284,65 @@ impl WorkspaceView {
         });
         self.refresh_git_status(cx);
         cx.notify();
+    }
+
+    fn add_terminal_tab(&mut self, project: PathBuf, cx: &mut Context<Self>) {
+        let terminal = cx.new(|cx| TerminalView::new(project.clone(), cx));
+        let group = self.terminal_groups.entry(project).or_insert(TerminalGroup {
+            tabs: Vec::new(),
+            active_tab: 0,
+        });
+        group.tabs.push(terminal);
+        group.active_tab = group.tabs.len() - 1;
+        cx.notify();
+    }
+
+    fn fallback_terminal(&mut self, cx: &mut Context<Self>) -> Entity<TerminalView> {
+        self.fallback_terminal
+            .get_or_insert_with(|| {
+                let project = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                cx.new(|cx| TerminalView::new(project, cx))
+            })
+            .clone()
+    }
+
+    fn select_terminal_tab(&mut self, project: &PathBuf, tab: usize, cx: &mut Context<Self>) {
+        if let Some(group) = self.terminal_groups.get_mut(project) {
+            group.active_tab = tab.min(group.tabs.len().saturating_sub(1));
+            cx.notify();
+        }
+    }
+
+    fn close_terminal_tab(&mut self, project: &PathBuf, tab: usize, cx: &mut Context<Self>) {
+        if let Some(group) = self.terminal_groups.get_mut(project) {
+            if tab >= group.tabs.len() {
+                return;
+            }
+            if group.tabs.len() > 1 {
+                group.tabs.remove(tab);
+                if tab < group.active_tab {
+                    group.active_tab -= 1;
+                } else if tab == group.active_tab {
+                    group.active_tab = group.active_tab.min(group.tabs.len() - 1);
+                }
+            } else {
+                group.tabs = vec![cx.new(|cx| TerminalView::new(project.clone(), cx))];
+                group.active_tab = 0;
+                self.bottom_panel_visible = false;
+            }
+            cx.notify();
+        }
+    }
+
+    fn close_other_terminal_tabs(&mut self, project: &PathBuf, keep_tab: usize, cx: &mut Context<Self>) {
+        if let Some(group) = self.terminal_groups.get_mut(project) {
+            if keep_tab < group.tabs.len() && group.tabs.len() > 1 {
+                let keep_elem = group.tabs.remove(keep_tab);
+                group.tabs = vec![keep_elem];
+                group.active_tab = 0;
+                cx.notify();
+            }
+        }
     }
 
     fn toggle_command_palette(
@@ -366,6 +447,9 @@ impl WorkspaceView {
     fn spawn_git_status_refresh(&self, work_dir: PathBuf) {
         let tx = self.git_event_tx.clone();
         std::thread::spawn(move || {
+            // Refresh remote-tracking refs before calculating ahead/behind and PR state.
+            // A failed fetch should not hide the local Git status (offline use is valid).
+            let _ = threadlane_git::sync_remote(&work_dir);
             let result = threadlane_git::inspect(&work_dir).map_err(|error| error.to_string());
             let _ = tx.send(GitEvent::Loaded { work_dir, result });
         });
@@ -879,7 +963,14 @@ impl WorkspaceView {
                             .on_click(cx.listener(|this, _event, window, cx| {
                                 this.bottom_panel_visible = !this.bottom_panel_visible;
                                 if this.bottom_panel_visible {
-                                    let focus = this.terminal.read(cx).focus_handle(cx);
+                                    let project = this.model.read(cx).active_work_dir.clone();
+                                    let terminal = project
+                                        .as_ref()
+                                        .and_then(|project| this.terminal_groups.get(project))
+                                        .and_then(|group| group.tabs.get(group.active_tab))
+                                        .cloned()
+                                        .unwrap_or_else(|| this.fallback_terminal(cx));
+                                    let focus = terminal.read(cx).focus_handle(cx);
                                     focus.focus(window, cx);
                                 }
                                 cx.notify();
@@ -925,7 +1016,14 @@ impl WorkspaceView {
     ) {
         self.bottom_panel_visible = !self.bottom_panel_visible;
         if self.bottom_panel_visible {
-            let focus = self.terminal.read(cx).focus_handle(cx);
+            let project = self.model.read(cx).active_work_dir.clone();
+            let terminal = project
+                .as_ref()
+                .and_then(|project| self.terminal_groups.get(project))
+                .and_then(|group| group.tabs.get(group.active_tab))
+                .cloned()
+                .unwrap_or_else(|| self.fallback_terminal(cx));
+            let focus = terminal.read(cx).focus_handle(cx);
             focus.focus(window, cx);
         }
         cx.notify();
@@ -974,12 +1072,25 @@ impl WorkspaceView {
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let workspace_page = self.model.read(cx).workspace_page;
-        if let Some(project) = self.model.read(cx).active_work_dir.clone() {
-            self.terminal
-                .update(cx, |terminal, cx| terminal.set_project(project, cx));
-        }
-
-        let _is_macos = cfg!(target_os = "macos");
+        let terminal_project = self.model.read(cx).active_work_dir.clone();
+        let (terminal_tabs, active_terminal_tab, active_terminal) = if let Some(project) = &terminal_project {
+            let group = self.terminal_groups.entry(project.clone()).or_insert_with(|| {
+                TerminalGroup {
+                    tabs: vec![cx.new(|cx| TerminalView::new(project.clone(), cx))],
+                    active_tab: 0,
+                }
+            });
+            group.active_tab = group.active_tab.min(group.tabs.len().saturating_sub(1));
+            (
+                group.tabs.clone(),
+                group.active_tab,
+                group.tabs[group.active_tab].clone(),
+            )
+        } else {
+            let fallback = self.fallback_terminal(cx);
+            (vec![fallback.clone()], 0, fallback)
+        };
+        let theme = cx.theme().colors;
         let sidebar_tooltip = if self.sidebar_collapsed {
             "Expand sidebar"
         } else {
@@ -1004,13 +1115,209 @@ impl Render for WorkspaceView {
             };
 
             let main_content = if self.bottom_panel_visible {
+                let tab_buttons = terminal_tabs.iter().enumerate().map(|(tab, _)| {
+                    let select_project = terminal_project.clone();
+                    let close_project = terminal_project.clone();
+                    let other_project = terminal_project.clone();
+                    let new_tab_project = terminal_project.clone();
+                    let restart_terminal = terminal_tabs[tab].clone();
+                    let select_view = cx.entity().clone();
+                    let close_view = cx.entity().clone();
+                    let other_view = cx.entity().clone();
+                    let new_view = cx.entity().clone();
+                    let is_selected = tab == active_terminal_tab;
+                    let total_tabs = terminal_tabs.len();
+
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_0p5()
+                        .child(
+                            Button::new(SharedString::from(format!("terminal-tab-{tab}")))
+                                .label(format!("Shell {}", tab + 1))
+                                .icon(IconName::SquareTerminal)
+                                .ghost()
+                                .selected(is_selected)
+                                .xsmall()
+                                .on_click(move |_event, _window, cx| {
+                                    if let Some(project) = &select_project {
+                                        select_view.update(cx, |this, cx| {
+                                            this.select_terminal_tab(project, tab, cx)
+                                        });
+                                    }
+                                })
+                                .context_menu(move |menu, _window, _cx| {
+                                    let c_proj = close_project.clone();
+                                    let c_view = close_view.clone();
+                                    let mut menu = menu.item(PopupMenuItem::new("Close Shell").on_click(
+                                        move |_event, _window, cx| {
+                                            if let Some(project) = &c_proj {
+                                                c_view.update(cx, |this, cx| {
+                                                    this.close_terminal_tab(project, tab, cx);
+                                                });
+                                            }
+                                        },
+                                    ));
+
+                                    if total_tabs > 1 {
+                                        let o_proj = other_project.clone();
+                                        let o_view = other_view.clone();
+                                        menu = menu.item(PopupMenuItem::new("Close Other Tabs").on_click(
+                                            move |_event, _window, cx| {
+                                                if let Some(project) = &o_proj {
+                                                    o_view.update(cx, |this, cx| {
+                                                        this.close_other_terminal_tabs(project, tab, cx);
+                                                    });
+                                                }
+                                            },
+                                        ));
+                                    }
+
+                                    let r_term = restart_terminal.clone();
+                                    menu = menu.item(PopupMenuItem::new("Restart Shell").on_click(
+                                        move |_event, _window, cx| {
+                                            r_term.update(cx, |t, cx| t.restart(cx));
+                                        },
+                                    ));
+
+                                    let n_proj = new_tab_project.clone();
+                                    let n_view = new_view.clone();
+                                    menu.item(PopupMenuItem::new("New Terminal Tab").on_click(
+                                        move |_event, _window, cx| {
+                                            if let Some(project) = &n_proj {
+                                                n_view.update(cx, |this, cx| {
+                                                    this.add_terminal_tab(project.clone(), cx);
+                                                });
+                                            }
+                                        },
+                                    ))
+                                }),
+                        )
+                        .child({
+                            let close_p = terminal_project.clone();
+                            let close_v = cx.entity().clone();
+                            Button::new(SharedString::from(format!("terminal-tab-close-{tab}")))
+                                .icon(IconName::Close)
+                                .tooltip("Close shell")
+                                .ghost()
+                                .xsmall()
+                                .on_click(move |_event, _window, cx| {
+                                    if let Some(project) = &close_p {
+                                        close_v.update(cx, |this, cx| {
+                                            this.close_terminal_tab(project, tab, cx)
+                                        });
+                                    }
+                                })
+                        })
+                });
+
+                let active_terminal_clear = active_terminal.clone();
+                let active_terminal_restart = active_terminal.clone();
+                let new_project = terminal_project.clone();
+                let new_view = cx.entity().clone();
+                let close_panel_view = cx.entity().clone();
+
+                let project_badge = {
+                    let name = terminal_project
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("Terminal");
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(theme.secondary)
+                        .child(Icon::new(IconName::SquareTerminal).xsmall().text_color(theme.primary))
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.foreground)
+                                .child(name.to_string()),
+                        )
+                };
+
+                let toolbar_actions = div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .children(new_project.clone().map(|project| {
+                        Button::new("terminal-new-tab")
+                            .icon(IconName::Plus)
+                            .tooltip("New terminal tab")
+                            .ghost()
+                            .xsmall()
+                            .on_click(move |_event, _window, cx| {
+                                new_view.update(cx, |this, cx| {
+                                    this.add_terminal_tab(project.clone(), cx)
+                                });
+                            })
+                    }))
+                    .child(
+                        Button::new("terminal-clear-btn")
+                            .icon(IconName::Undo2)
+                            .tooltip("Clear terminal")
+                            .ghost()
+                            .xsmall()
+                            .on_click(move |_event, _window, cx| {
+                                active_terminal_clear.update(cx, |t, cx| t.clear(cx));
+                            }),
+                    )
+                    .child(
+                        Button::new("terminal-restart-btn")
+                            .icon(IconName::Redo)
+                            .tooltip("Restart shell")
+                            .ghost()
+                            .xsmall()
+                            .on_click(move |_event, _window, cx| {
+                                active_terminal_restart.update(cx, |t, cx| t.restart(cx));
+                            }),
+                    )
+                    .child(
+                        Button::new("terminal-close-panel-btn")
+                            .icon(IconName::Close)
+                            .tooltip("Hide terminal (Cmd+J)")
+                            .ghost()
+                            .xsmall()
+                            .on_click(move |_event, _window, cx| {
+                                close_panel_view.update(cx, |this, cx| {
+                                    this.bottom_panel_visible = false;
+                                    cx.notify();
+                                });
+                            }),
+                    );
+
                 let terminal_panel = div()
                     .size_full()
                     .min_h_0()
                     .flex()
                     .flex_col()
                     .bg(theme.background)
-                    .child(div().flex_1().min_h_0().child(self.terminal.clone()));
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .h(px(34.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .px_2()
+                            .gap_2()
+                            .overflow_x_hidden()
+                            .bg(theme.tab_bar)
+                            .border_b_1()
+                            .border_color(theme.border)
+                            .child(project_badge)
+                            .child(div().w(px(1.0)).h(px(16.0)).bg(theme.border))
+                            .children(tab_buttons)
+                            .child(div().flex_1())
+                            .child(toolbar_actions),
+                    )
+                    .child(div().flex_1().min_h_0().child(active_terminal));
 
                 v_resizable("workspace-main-bottom-split")
                     .with_state(&self.bottom_panel_resizable_state)
@@ -1018,7 +1325,7 @@ impl Render for WorkspaceView {
                     .child(
                         resizable_panel()
                             .size(px(280.0))
-                            .size_range(px(120.0)..px(600.0))
+                            .size_range(px(120.0)..px(800.0))
                             .child(terminal_panel),
                     )
                     .into_any_element()
