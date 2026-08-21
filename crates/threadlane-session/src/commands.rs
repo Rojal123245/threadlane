@@ -1,0 +1,191 @@
+use crate::capabilities_catalog::CapabilityCatalog;
+use std::path::Path;
+use threadlane_runtime::AgentRuntime;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlashCommandInfo {
+    pub name: String,
+    pub description: String,
+}
+
+/// Built-in slash commands handled by the coding agent.
+pub fn builtin_commands() -> Vec<SlashCommandInfo> {
+    [
+        ("model", "Switch model, or show the current one"),
+        (
+            "plan",
+            "Create or refine an implementation plan using the active model (/plan <objective>)",
+        ),
+        (
+            "roles",
+            "View or configure model roles (task, plan, advisor)",
+        ),
+        ("compact", "Compact the conversation context"),
+        ("session", "Show session info"),
+        ("name", "Name this session"),
+        ("skill", "Load a discovered skill by ID"),
+        (
+            "subagent",
+            "Delegate tasks to subagents in parallel or sequentially",
+        ),
+        ("task", "Run a prompt as a background task"),
+        ("quit", "Quit threadlane agent"),
+    ]
+    .into_iter()
+    .map(|(name, description)| SlashCommandInfo {
+        name: name.to_string(),
+        description: description.to_string(),
+    })
+    .collect()
+}
+
+/// All slash commands available to the user, including built-ins and
+/// commands contributed by active extensions.
+pub fn available_slash_commands(project_root: Option<&Path>) -> Vec<SlashCommandInfo> {
+    let mut commands = builtin_commands();
+    let catalog = CapabilityCatalog::discover(project_root);
+    for record in catalog.extensions() {
+        if !record.is_effective() || !record.is_enabled() {
+            continue;
+        }
+        if let Ok(ext) =
+            threadlane_wasi::WasiExtension::load_from_file_requiring_manifest(record.module_path())
+        {
+            for cmd in ext.manifest.commands {
+                if !commands.iter().any(|c| c.name == cmd.name) {
+                    commands.push(SlashCommandInfo {
+                        name: cmd.name,
+                        description: cmd.description,
+                    });
+                }
+            }
+        }
+    }
+    commands
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandAction {
+    SwitchModel(String),
+    Advisor(String),
+    Plan(String),
+    Roles(String),
+    Compact,
+    ShowSession,
+    SetName(String),
+    InvokeSkill(String),
+    PromptTemplate(String),
+    Subagent(String),
+    Quit,
+    Unknown(String),
+}
+
+pub fn parse_slash_command(input: &str) -> Option<CommandAction> {
+    let trimmed = input.trim();
+    if !trimmed.starts_with('/') {
+        return None;
+    }
+
+    let mut parts = trimmed[1..].split_whitespace();
+    let cmd = parts.next()?;
+    let arg = parts.collect::<Vec<&str>>().join(" ");
+
+    match cmd {
+        "model" => Some(CommandAction::SwitchModel(arg)),
+        "advisor" => Some(CommandAction::Advisor(arg)),
+        "plan" => Some(CommandAction::Plan(arg)),
+        "roles" => Some(CommandAction::Roles(arg)),
+        "compact" => Some(CommandAction::Compact),
+        "session" => Some(CommandAction::ShowSession),
+        "name" => Some(CommandAction::SetName(arg)),
+        "skill" => Some(CommandAction::InvokeSkill(arg)),
+        "prompt" => Some(CommandAction::PromptTemplate(arg)),
+        "subagent" => Some(CommandAction::Subagent(arg)),
+
+        "quit" | "exit" => Some(CommandAction::Quit),
+        other => Some(CommandAction::Unknown(other.to_string())),
+    }
+}
+
+pub async fn execute_slash_command(
+    action: CommandAction,
+    agent: &mut AgentRuntime,
+) -> String {
+    match action {
+        CommandAction::SwitchModel(new_model) => {
+            if new_model.is_empty() {
+                let st = agent.get_state().await;
+                format!("Current model: {}", st.model)
+            } else {
+                let _ = agent
+                    .harness_mut()
+                    .set_fact("main", "model", new_model.clone(), None);
+                let _ = agent.drive_harness();
+                {
+                    let mut st = agent.turn.lock().await;
+                    st.model = new_model.clone();
+                }
+                let mut roles = agent.model_roles().clone();
+                roles.task = Some(new_model.clone());
+                agent.set_model_roles(roles);
+                format!("Switched model to: {}", new_model)
+            }
+        }
+        CommandAction::Advisor(_) => {
+            "Threadlane relies on the active model's native reasoning (Chain-of-Thought / <think> tokens) for unified turn planning, self-reflection, and execution without secondary reviewer latency.".to_string()
+        }
+        CommandAction::Roles(_) => {
+            let roles = agent.model_roles().clone();
+            let main_model = agent.get_state().await.model;
+            let fallbacks = if roles.fallback_chain.is_empty() {
+                "None".to_string()
+            } else {
+                roles.fallback_chain.join(" -> ")
+            };
+            format!("Model Configuration:\n  Active Model: {main_model}\n  Rate-limit Failover Chain: {fallbacks}")
+        }
+        CommandAction::Plan(objective) => {
+            if objective.trim().is_empty() {
+                "Usage: /plan <task objective or prompt> to generate a structured implementation plan.".to_string()
+            } else {
+                format!("Generating implementation plan for: {}", objective.trim())
+            }
+        }
+        CommandAction::Compact => {
+            if !agent.compact_history(None).await {
+                "Nothing to compact yet.".to_string()
+            } else {
+                "Context compacted in the current session.".to_string()
+            }
+        }
+        CommandAction::ShowSession => {
+            let st = agent.get_state().await;
+            format!(
+                "Session ID: {}\nMessage Count: {}\nModel: {}",
+                agent.session_id,
+                st.messages.len(),
+                st.model,
+            )
+        }
+        CommandAction::SetName(name) => {
+            let _ = agent
+                .harness_mut()
+                .set_fact("main", "name", name.clone(), None);
+            let _ = agent.drive_harness();
+            format!("Session name set to: {}", name)
+        }
+        CommandAction::InvokeSkill(skill) => format!("Invoking skill: {}", skill),
+        CommandAction::PromptTemplate(tmpl) => format!("Prompt template: {}", tmpl),
+        CommandAction::Subagent(task) => {
+            let trimmed = task.trim();
+            if trimmed.is_empty() {
+                "Usage: /subagent <task description>".to_string()
+            } else {
+                format!("Delegating subagent task: {trimmed}")
+            }
+        }
+
+        CommandAction::Quit => "Quitting threadlane agent.".to_string(),
+        CommandAction::Unknown(cmd) => format!("Unknown command: /{}", cmd),
+    }
+}

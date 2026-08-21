@@ -227,8 +227,8 @@ The Threadlane workspace is modularized into focused crates:
 | Crate | Path | Responsibility |
 | --- | --- | --- |
 | `threadlane-gpui` | [`crates/threadlane-gpui`](crates/threadlane-gpui) | Native GPUI desktop application, view hierarchy, PTY terminal, and UI event loops. |
-| `threadlane-coding-agent` | [`crates/threadlane-coding-agent`](crates/threadlane-coding-agent) | Coding agent orchestration, `CodingSessionHarness`, supervisor, subagents, and ACP engine. |
-| `threadlane-agent` | [`crates/threadlane-agent`](crates/threadlane-agent) | Core agent loop, `AgentHarness` V2 state machine, multi-lane reducer, and session trees. |
+| `threadlane-session` | [`crates/threadlane-session`](crates/threadlane-session) | Coding agent orchestration, `CodingSessionHarness`, supervisor, subagents, and ACP engine. |
+| `threadlane-runtime` | [`crates/threadlane-runtime`](crates/threadlane-runtime) | Core agent loop, `AgentHarness` V2 state machine, multi-lane reducer, and session trees. |
 | `threadlane-provider` | [`crates/threadlane-provider`](crates/threadlane-provider) | Multi-provider routing (Antigravity, OpenAI/Codex, OpenCode) and streaming parsers. |
 | `threadlane-tools` | [`crates/threadlane-tools`](crates/threadlane-tools) | Workspace-contained file tools, ripgrep search, and sandboxed process execution. |
 | `threadlane-hashline` | [`crates/threadlane-hashline`](crates/threadlane-hashline) | High-precision `line:hash` anchor calculation and drift-proof text editing. |
@@ -269,8 +269,8 @@ cargo check -p threadlane-gpui
 git diff --check
 
 # Focused crate tests
-cargo test -p threadlane-agent
-cargo test -p threadlane-coding-agent
+cargo test -p threadlane-runtime
+cargo test -p threadlane-session
 cargo test -p threadlane-updater
 
 # Full workspace test suite

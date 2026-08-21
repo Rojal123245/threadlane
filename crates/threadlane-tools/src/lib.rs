@@ -14,17 +14,16 @@ use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, OnceLock};
 
 fn tool_definitions() -> Vec<Value> {
     vec![
         json!({
             "name": "read_file",
-            "description": "Read content of a file or virtual scheme (e.g. pr://70, issue://12, skill://name, agent://name, or GitHub PR/issue URL) with line numbers and hash anchors (e.g. 12:a3f|content), optionally specifying start and end lines (1-indexed).",
+            "description": "Read content of a file or virtual scheme (e.g. pr://70, mr://15, issue://12, skill://name, agent://name, or GitHub/GitLab PR/issue URL) with line numbers and hash anchors (e.g. 12:a3f|content), optionally specifying start and end lines (1-indexed).",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Absolute or relative file path, virtual URI (pr://70, issue://12, skill://name, agent://name), or GitHub PR/issue URL" },
+                    "path": { "type": "string", "description": "Absolute or relative file path, virtual URI (pr://70, mr://15, issue://12, skill://name, agent://name), or GitHub/GitLab PR/issue URL" },
                     "start_line": { "type": "integer", "description": "Optional starting line number (1-based)" },
                     "end_line": { "type": "integer", "description": "Optional ending line number (1-based)" }
                 },
@@ -78,15 +77,6 @@ fn tool_definitions() -> Vec<Value> {
                     "glob": { "type": "string" }
                 },
                 "required": ["pattern"]
-            }
-        }),
-        json!({
-            "name": "accept_edit",
-            "description": "Apply a previously staged edit proposal by ID.",
-            "parameters": {
-                "type": "object",
-                "properties": { "proposal_id": { "type": "string" } },
-                "required": ["proposal_id"]
             }
         }),
         json!({
@@ -320,18 +310,6 @@ fn validate_cwd_in_workspace(
     Ok(canonical_target)
 }
 
-#[derive(Debug, Clone)]
-struct EditProposal {
-    path: PathBuf,
-    content: String,
-}
-
-fn proposals() -> &'static Mutex<std::collections::HashMap<String, EditProposal>> {
-    static PROPOSALS: OnceLock<Mutex<std::collections::HashMap<String, EditProposal>>> =
-        OnceLock::new();
-    PROPOSALS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
-}
-
 pub fn execute_tool(name: &str, args_json: &str) -> String {
     execute_tool_in_workspace(name, args_json, Path::new("."))
 }
@@ -344,21 +322,7 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
 
     match name {
         "accept_edit" => {
-            let proposal_id = match args.get("proposal_id").and_then(Value::as_str) {
-                Some(id) => id,
-                None => return "Error: 'proposal_id' parameter is required".into(),
-            };
-            let Some(proposal) = proposals()
-                .lock()
-                .ok()
-                .and_then(|mut map| map.remove(proposal_id))
-            else {
-                return format!("Error: unknown edit proposal '{proposal_id}'");
-            };
-            match fs::write(&proposal.path, proposal.content) {
-                Ok(()) => format!("Accepted edit proposal '{proposal_id}'."),
-                Err(error) => format!("Error applying proposal '{proposal_id}': {error}"),
-            }
+            "Error: accept_edit is deprecated; edits are applied directly via edit_file_hashline or write_file.".to_string()
         }
         "grep_search" => {
             let pattern = match args.get("pattern").and_then(Value::as_str) {
@@ -379,17 +343,16 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
                 Some(path) if path.starts_with("agent://") => {
                     return read_virtual_agent(workspace_root, &path[8..]);
                 }
-                Some(path) if path.starts_with("pr://") => {
-                    return virtual_read::github_path(workspace_root, path);
-                }
-                Some(path) if path.starts_with("issue://") => {
-                    return virtual_read::github_path(workspace_root, path);
-                }
                 Some(path)
-                    if path.starts_with("https://github.com/")
-                        || path.starts_with("http://github.com/") =>
+                    if path.starts_with("pr://")
+                        || path.starts_with("mr://")
+                        || path.starts_with("issue://")
+                        || path.starts_with("https://github.com/")
+                        || path.starts_with("http://github.com/")
+                        || path.starts_with("https://gitlab.com/")
+                        || path.starts_with("http://gitlab.com/") =>
                 {
-                    return virtual_read::github_path(workspace_root, path);
+                    return virtual_read::remote_ref_path(workspace_root, path);
                 }
                 Some(p) => p,
                 None => return "Error: 'path' parameter is required".into(),
@@ -492,40 +455,27 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
                 };
 
             match fs::read_to_string(&validated_path) {
-                Ok(content) => match hashline::apply_hashline_edits(&content, &edits) {
-                    Ok(new_content) => {
-                        let interactive = args
-                            .get("interactive")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false);
-                        if interactive {
-                            let proposal_id = format!(
-                                "edit-{}",
-                                std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_nanos()
-                            );
-                            if let Ok(mut map) = proposals().lock() {
-                                map.insert(
-                                    proposal_id.clone(),
-                                    EditProposal {
-                                        path: validated_path,
-                                        content: new_content,
-                                    },
-                                );
-                            }
-                            format!("Proposed edit '{}'. Review the staged result, then call accept_edit with proposal_id.", proposal_id)
-                        } else {
-                            match fs::write(&validated_path, new_content) {
-                                Ok(_) => {
-                                    let diag = run_post_edit_diagnostics(workspace_root, raw_path);
-                                    format!("Successfully applied {} hashline edit(s) to '{raw_path}'{diag}", edits.len())
-                                }
-                                Err(e) => format!("Error writing file '{raw_path}': {e}"),
-                            }
+                Ok(content) => match hashline::apply_hashline_edits_detailed(&content, &edits, 5) {
+                    Ok(result) => match fs::write(&validated_path, result.new_content) {
+                        Ok(_) => {
+                            let diag = run_post_edit_diagnostics(workspace_root, raw_path);
+                            let diff_section = if !result.diff.is_empty() {
+                                format!("\n\nDiff:\n{}", result.diff)
+                            } else {
+                                String::new()
+                            };
+                            let anchors_section = if !result.updated_context.is_empty() {
+                                format!("\n\nUpdated Line Hashes:\n{}", result.updated_context)
+                            } else {
+                                String::new()
+                            };
+                            format!(
+                                "Successfully applied {} hashline edit(s) to '{raw_path}'{diag}{diff_section}{anchors_section}",
+                                edits.len()
+                            )
                         }
-                    }
+                        Err(e) => format!("Error writing file '{raw_path}': {e}"),
+                    },
                     Err(e) => format!("Error applying hashline edits to '{raw_path}': {e}"),
                 },
                 Err(e) => format!("Error reading file '{raw_path}': {e}"),
@@ -1287,8 +1237,24 @@ mod tests {
         assert_eq!(skill_res, "ponytail instructions");
 
         // Test PR URL parsing error format when gh CLI or git remote is missing
-        let pr_url_payload = json!({ "path": "https://github.com/wheregmis/threadlane/pull/70" }).to_string();
+        let pr_url_payload =
+            json!({ "path": "https://github.com/wheregmis/threadlane/pull/70" }).to_string();
         let pr_res = execute_tool_in_workspace("read_file", &pr_url_payload, root);
-        assert!(pr_res.contains("pr://70"));
+        assert!(
+            pr_res.contains("pr://70")
+                || pr_res.contains("\"number\": 70")
+                || pr_res.contains("https://github.com/")
+        );
+
+        // Test GitLab MR URL parsing error format when glab CLI or git remote is missing
+        let mr_url_payload =
+            json!({ "path": "https://gitlab.com/gitlab-org/gitlab/-/merge_requests/99" })
+                .to_string();
+        let mr_res = execute_tool_in_workspace("read_file", &mr_url_payload, root);
+        assert!(
+            mr_res.contains("mr://99")
+                || mr_res.contains("GitLab mr #99")
+                || mr_res.contains("gitlab.com")
+        );
     }
 }

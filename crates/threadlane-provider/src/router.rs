@@ -1,5 +1,6 @@
 use crate::antigravity::AntigravityClient;
-use crate::openai::{OpenAIClient, StreamEvent};
+use crate::openai::OpenAIClient;
+use threadlane_protocol::{DeferredResponse as RuntimeDeferredResponse, ProviderPort, RuntimeRequest, RuntimeStreamEvent as StreamEvent};
 use crate::opencode::OpenCodeGoClient;
 use crate::title_generator::{title_payload, TITLE_REQUEST_TIMEOUT};
 use crate::traits::ModelProvider;
@@ -26,6 +27,8 @@ pub fn is_quota_or_rate_limit(error: &str) -> bool {
         || error.contains("rate_limit")
         || error.contains("quota")
         || error.contains("too many requests")
+        || error.contains("resource_exhausted")
+        || error.contains("resource has been exhausted")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,12 +102,101 @@ impl From<(Value, Value)> for PayloadSource {
     }
 }
 
+/// Build a complete provider-native object for a runtime request. The runtime
+/// deliberately supplies transport-neutral message and tool arrays; the
+/// router owns their envelope so Codex never receives a bare JSON array.
+fn runtime_request_payload_source(request: &RuntimeRequest) -> PayloadSource {
+    let model = request.model.clone();
+    let messages = request.messages.clone();
+    let tools = request.tools.clone();
+    let reasoning_effort = request.reasoning_effort.clone();
+    PayloadSource::lazy(model.clone(), move |format| {
+        let model = model.clone();
+        let messages = messages.clone();
+        let tools = tools.clone();
+        let reasoning_effort = reasoning_effort.clone();
+        Box::pin(async move {
+            match format {
+                PayloadFormat::ChatCompletions => {
+                    let agent_messages: Vec<threadlane_runtime::AgentMessage> =
+                        serde_json::from_value(messages).unwrap_or_default();
+                    let chat_messages = threadlane_runtime::convert_to_llm(&agent_messages);
+                    let mut payload = serde_json::json!({
+                        "model": model,
+                        "messages": chat_messages,
+                        "tools": tools,
+                        "stream": true,
+                        "stream_options": { "include_usage": true },
+                    });
+                    if let Some(effort) = reasoning_effort {
+                        payload["reasoning_effort"] = effort.into();
+                    }
+                    payload
+                }
+                PayloadFormat::Codex => {
+                    let agent_messages: Vec<threadlane_runtime::AgentMessage> =
+                        serde_json::from_value(messages).unwrap_or_default();
+                    let codex_tools = tools
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|tool| {
+                            threadlane_runtime::types::AgentToolDefinition::from_provider_schema(tool).ok()
+                        })
+                        .map(|tool| tool.to_codex_responses_tool())
+                        .collect::<Vec<_>>();
+                    let (instructions, input) = threadlane_runtime::convert_to_codex_llm(&agent_messages);
+                    let mut payload = serde_json::json!({
+                        "model": model,
+                        "instructions": instructions,
+                        "input": input,
+                        "tools": codex_tools,
+                        "store": false,
+                        "stream": true,
+                    });
+                    if let Some(effort) = reasoning_effort {
+                        payload["reasoning"] = serde_json::json!({
+                            "effort": effort,
+                            "summary": "auto",
+                        });
+                    }
+                    payload
+                }
+            }
+        })
+    })
+}
+
 #[derive(Clone)]
 pub struct ProviderClient {
     openai: OpenAIClient,
     openai_fallbacks: Vec<OpenAIClient>,
     antigravity: AntigravityClient,
     opencode: OpenCodeGoClient,
+}
+
+#[async_trait::async_trait]
+impl ProviderPort for ProviderClient {
+    async fn stream_request(&self, request: RuntimeRequest, events: mpsc::Sender<StreamEvent>) {
+        let payload = runtime_request_payload_source(&request);
+        self.stream_chat_completion(payload, request.prompt_cache_key, events).await;
+    }
+
+    async fn fetch_deferred(&self, model: &str, handle_id: &str) -> Result<RuntimeDeferredResponse, String> {
+        self.fetch_deferred(model, handle_id).await.map(|response| match response {
+            crate::traits::DeferredResponse::Pending => RuntimeDeferredResponse::Pending,
+            crate::traits::DeferredResponse::Ready { content } => RuntimeDeferredResponse::Ready { content },
+            crate::traits::DeferredResponse::Error { message } => RuntimeDeferredResponse::Error { message },
+        })
+    }
+
+    async fn cancel_deferred(&self, model: &str, handle_id: &str) -> Result<(), String> {
+        self.cancel_deferred(model, handle_id).await
+    }
+
+    fn provider_kind(&self, model: &str) -> &'static str {
+        self.provider_kind(model)
+    }
 }
 
 impl ProviderClient {
@@ -193,7 +285,10 @@ impl ProviderClient {
     ) {
         let source = payload_source.into();
         let model = source.model().to_string();
+        let span = tracing::info_span!("provider.stream", model = %model);
+        tracing::debug!(parent: &span, "routing stream request");
         if is_antigravity_model(&model) {
+            tracing::debug!(provider = "antigravity", "selected provider");
             let provider = Arc::new(self.antigravity.clone());
             provider
                 .stream_chat_completion(source, prompt_cache_key, event_tx)
@@ -201,6 +296,7 @@ impl ProviderClient {
             return;
         }
         if is_opencode_model(&model) {
+            tracing::debug!(provider = "opencode-go", "selected provider");
             let provider = Arc::new(self.opencode.clone());
             provider
                 .stream_chat_completion(source, prompt_cache_key, event_tx)
@@ -209,30 +305,39 @@ impl ProviderClient {
         }
 
         if !self.openai_fallbacks.is_empty() {
+            tracing::debug!(
+                provider = "openai",
+                fallback_count = self.openai_fallbacks.len(),
+                "selected provider with fallbacks"
+            );
             let mut clients = Vec::with_capacity(1 + self.openai_fallbacks.len());
             clients.push(self.openai.clone());
             clients.extend(self.openai_fallbacks.clone());
 
-            let tasks: Vec<Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send>> = clients
+            let tasks: Vec<
+                Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send>,
+            > = clients
                 .into_iter()
                 .map(|client| {
                     let source = source.clone();
                     let prompt_cache_key = prompt_cache_key.clone();
-                    let task: Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send> =
-                        Box::new(move |tx| {
-                            Box::pin(async move {
-                                let provider: Arc<dyn crate::traits::ModelProvider> = Arc::new(client);
-                                provider
-                                    .stream_chat_completion(source, prompt_cache_key, tx)
-                                    .await;
-                            })
-                        });
+                    let task: Box<
+                        dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send,
+                    > = Box::new(move |tx| {
+                        Box::pin(async move {
+                            let provider: Arc<dyn crate::traits::ModelProvider> = Arc::new(client);
+                            provider
+                                .stream_chat_completion(source, prompt_cache_key, tx)
+                                .await;
+                        })
+                    });
                     task
                 })
                 .collect();
 
             Self::execute_stream_fallback_chain(tasks, event_tx).await;
         } else {
+            tracing::debug!(provider = "openai", "selected provider");
             let provider: Arc<dyn crate::traits::ModelProvider> = Arc::new(self.openai.clone());
             provider
                 .stream_chat_completion(source, prompt_cache_key, event_tx)
@@ -260,7 +365,9 @@ impl ProviderClient {
         PrimaryFut: std::future::Future<Output = ()> + Send + 'static,
         FallbackFut: std::future::Future<Output = ()> + Send + 'static,
     {
-        let tasks: Vec<Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send>> = vec![
+        let tasks: Vec<
+            Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send>,
+        > = vec![
             Box::new(move |tx| Box::pin(primary(tx))),
             Box::new(move |tx| Box::pin(fallback(tx))),
         ];
@@ -289,10 +396,13 @@ impl ProviderClient {
                         emitted_visible_output = true;
                     }
                     StreamEvent::Error(error)
-                        if !emitted_visible_output
-                            && !is_last
-                            && is_quota_or_rate_limit(error) =>
+                        if !emitted_visible_output && !is_last && is_quota_or_rate_limit(error) =>
                     {
+                        tracing::warn!(
+                            attempt = idx + 1,
+                            error = %error,
+                            "quota or rate-limit failure; retrying on fallback"
+                        );
                         retry = true;
                         break;
                     }
@@ -545,6 +655,122 @@ mod tests {
         assert!(!is_opencode_model("antigravity/gemini-3.6-flash"));
     }
 
+    #[tokio::test]
+    async fn runtime_request_builds_an_object_for_codex() {
+        let request = RuntimeRequest {
+            model: "gpt-5.6-luna".into(),
+            messages: serde_json::json!([{"role": "user", "content": "hello"}]),
+            tools: serde_json::json!([]),
+            prompt_cache_key: Some("cache-key".into()),
+            reasoning_effort: Some("medium".into()),
+        };
+        let payload = runtime_request_payload_source(&request)
+            .resolve(PayloadFormat::Codex)
+            .await;
+        assert!(payload.is_object());
+        assert_eq!(payload["model"], "gpt-5.6-luna");
+        assert_eq!(
+            payload["input"],
+            serde_json::json!([{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hello"}],
+            }])
+        );
+        assert_eq!(payload["tools"], serde_json::json!([]));
+        assert_eq!(payload["reasoning"]["effort"], "medium");
+        assert_eq!(payload["store"], false);
+    }
+
+    #[tokio::test]
+    async fn runtime_request_flattens_tools_for_codex() {
+        let request = RuntimeRequest {
+            model: "gpt-5.6-luna".into(),
+            messages: serde_json::json!([]),
+            tools: serde_json::json!([{
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "Read a workspace file",
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            }]),
+            prompt_cache_key: None,
+            reasoning_effort: None,
+        };
+        let payload = runtime_request_payload_source(&request)
+            .resolve(PayloadFormat::Codex)
+            .await;
+        assert_eq!(
+            payload["tools"],
+            serde_json::json!([{
+                "type": "function",
+                "name": "read_file",
+                "description": "Read a workspace file",
+                "parameters": {"type": "object", "properties": {}}
+            }])
+        );
+        assert!(payload["tools"][0].get("function").is_none());
+    }
+
+    #[tokio::test]
+    async fn runtime_request_converts_custom_messages_for_codex() {
+        let request = RuntimeRequest {
+            model: "gpt-5.6-luna".into(),
+            messages: serde_json::json!([
+                {"role": "system", "content": "system context"},
+                {"role": "user", "content": "hello"},
+                {
+                    "role": "custom",
+                    "custom_type": "thinking",
+                    "payload": "internal reasoning"
+                }
+            ]),
+            tools: serde_json::json!([]),
+            prompt_cache_key: None,
+            reasoning_effort: None,
+        };
+        let payload = runtime_request_payload_source(&request)
+            .resolve(PayloadFormat::Codex)
+            .await;
+        assert_eq!(payload["instructions"], "system context");
+        assert_eq!(payload["input"].as_array().unwrap().len(), 1);
+        assert!(payload["input"].as_array().unwrap().iter().all(|item| {
+            item.get("role")
+                .and_then(Value::as_str)
+                .is_none_or(|role| role != "custom")
+        }));
+    }
+
+    #[tokio::test]
+    async fn runtime_request_preserves_chat_completions_envelope() {
+        let request = RuntimeRequest {
+            model: "gpt-5.6-luna".into(),
+            messages: serde_json::json!([
+                {"role": "user", "content": "hello"},
+                {
+                    "role": "custom",
+                    "custom_type": "thinking",
+                    "payload": { "text": "internal reasoning" }
+                }
+            ]),
+            tools: serde_json::json!([]),
+            prompt_cache_key: None,
+            reasoning_effort: Some("medium".into()),
+        };
+        let payload = runtime_request_payload_source(&request)
+            .resolve(PayloadFormat::ChatCompletions)
+            .await;
+        assert!(payload.is_object());
+        assert_eq!(
+            payload["messages"],
+            serde_json::json!([{"role": "user", "content": "hello"}])
+        );
+        assert_eq!(payload["tools"], request.tools);
+        assert_eq!(payload["reasoning_effort"], "medium");
+        assert_eq!(payload["stream_options"]["include_usage"], true);
+    }
+
     #[test]
     fn determines_payload_format_correctly() {
         let client_std = ProviderClient::new("sk-test", None);
@@ -646,7 +872,9 @@ mod tests {
         );
         let (tx, mut rx) = mpsc::channel(8);
 
-        let tasks: Vec<Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send>> = vec![
+        let tasks: Vec<
+            Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send>,
+        > = vec![
             Box::new(|tx| {
                 Box::pin(async move {
                     tx.send(StreamEvent::Error("HTTP 429 quota exceeded".into()))
@@ -682,7 +910,9 @@ mod tests {
     async fn returns_final_error_when_all_backups_fail() {
         let (tx, mut rx) = mpsc::channel(8);
 
-        let tasks: Vec<Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send>> = vec![
+        let tasks: Vec<
+            Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send>,
+        > = vec![
             Box::new(|tx| {
                 Box::pin(async move {
                     tx.send(StreamEvent::Error("HTTP 429 quota1".into()))

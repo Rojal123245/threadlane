@@ -1,27 +1,16 @@
-//! Async chat execution boundary for GPUI.
-
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
-use threadlane_agent::{AgentEvent, ImageAttachment, ReasoningEffort, SessionTree};
 use threadlane_provider::ProviderClient;
+use threadlane_session::harness::{JsonlStore, SessionStore};
+use threadlane_session::{AgentEvent, ImageAttachment, ReasoningEffort};
 
 use crate::services::sessions::SessionRuntime;
 use crate::state::ChatStreamEvent;
 
 pub(crate) fn executor() -> Result<&'static tokio::runtime::Runtime, String> {
-    static EXECUTOR: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
-    EXECUTOR
-        .get_or_init(|| {
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .thread_name("threadlane-gpui-agent")
-                .build()
-                .map_err(|error| format!("Failed to start agent runtime: {error}"))
-        })
-        .as_ref()
-        .map_err(Clone::clone)
+    Ok(threadlane_runtime::get_runtime())
 }
 
 struct RunCleanup {
@@ -72,6 +61,8 @@ pub(crate) fn execute_prompt(
             return;
         };
 
+        let turn_span = tracing::info_span!("chat.turn", session_id = %task_session_id);
+        tracing::info!(parent: &turn_span, "starting chat turn");
         let mut cleanup = RunCleanup {
             runtime: task_runtime.clone(),
             registration_id,
@@ -103,6 +94,7 @@ pub(crate) fn execute_prompt(
                                 });
                             }
                             Some(Err(error)) => {
+                                tracing::error!(error = %error, "chat turn failed");
                                 run_error = Some(error);
                             }
                             _ => {}
@@ -140,6 +132,7 @@ pub(crate) fn execute_prompt(
             run_error
         };
 
+        tracing::info!(error = ?run_error, "chat turn finished");
         drop(agent);
         cleanup.error = run_error;
     });
@@ -161,7 +154,7 @@ pub(crate) fn execute_prompt(
     Ok(())
 }
 
-pub(crate) fn spawn_session_title(
+pub(crate) fn maybe_generate_session_title(
     session_file: PathBuf,
     session_id: String,
     submitted_prompt: String,
@@ -170,10 +163,10 @@ pub(crate) fn spawn_session_title(
     model: String,
     stream_tx: Sender<ChatStreamEvent>,
 ) {
-    let mut tree = match SessionTree::load_from_file(&session_file) {
-        Ok(tree) => tree,
+    let mut store = match JsonlStore::open(&session_file) {
+        Ok(store) => store,
         Err(error) => {
-            log::warn!(
+            tracing::warn!(
                 "unable to load session {} for automatic title generation ({}): {}",
                 session_id,
                 session_file.display(),
@@ -182,14 +175,14 @@ pub(crate) fn spawn_session_title(
             return;
         }
     };
-    if tree.has_name() || submitted_prompt.trim().is_empty() {
+    if store.has_name() || submitted_prompt.trim().is_empty() {
         return;
     }
-    match tree.mark_title_attempted() {
+    match store.mark_title_attempted() {
         Ok(true) => {}
         Ok(false) => return,
         Err(error) => {
-            log::warn!(
+            tracing::warn!(
                 "unable to persist automatic title attempt for session {}: {}",
                 session_id,
                 error
@@ -209,18 +202,19 @@ pub(crate) fn spawn_session_title(
             if title.is_empty() {
                 return Err("title normalization produced an empty title".to_string());
             }
-            let mut tree = SessionTree::load_from_file(&session_file)
+            let mut store = JsonlStore::open(&session_file)
                 .map_err(|error| format!("reload failed: {error}"))?;
-            if tree.has_name() {
+            if store.has_name() {
                 return Err("session was named while title generation was running".to_string());
             }
-            tree.set_name(title)
+            store
+                .set_name(&title)
                 .map_err(|error| format!("persistence failed: {error}"))
         }
         .await;
 
         if let Err(error) = result {
-            log::warn!(
+            tracing::warn!(
                 "automatic title generation failed for session {}: {}",
                 session_id,
                 error

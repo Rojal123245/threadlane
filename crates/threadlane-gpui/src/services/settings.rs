@@ -1,12 +1,30 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
-use std::sync::OnceLock;
 
-use threadlane_coding_agent::{
+use threadlane_session::{
     default_global_threadlane_dir, AcpAgentConfig, AcpAgentRecord, AcpAgentStatus, AcpManager,
     AcpScope, AcpSettings, ExtensionManager, ExtensionRecord, ExtensionScope, SkillManager,
     SkillMetadata, SkillSettings,
 };
+
+fn needle_preferences_path() -> Option<PathBuf> {
+    default_global_threadlane_dir().map(|dir| dir.join("gui").join("needle.json"))
+}
+
+pub(crate) fn load_needle_enabled() -> bool {
+    needle_preferences_path()
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice::<bool>(&bytes).ok())
+        .unwrap_or(false)
+}
+
+pub(crate) fn save_needle_enabled(enabled: bool) -> Result<(), String> {
+    let path = needle_preferences_path().ok_or_else(|| "Global settings directory is unavailable.".to_string())?;
+    let parent = path.parent().ok_or_else(|| "Needle settings path has no parent.".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let bytes = serde_json::to_vec(&enabled).map_err(|error| error.to_string())?;
+    std::fs::write(path, bytes).map_err(|error| error.to_string())
+}
 
 #[derive(Debug)]
 pub enum SettingsEvent {
@@ -14,17 +32,7 @@ pub enum SettingsEvent {
 }
 
 fn executor() -> Result<&'static tokio::runtime::Runtime, String> {
-    static EXECUTOR: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
-    EXECUTOR
-        .get_or_init(|| {
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .thread_name("threadlane-gpui-settings")
-                .build()
-                .map_err(|error| format!("Failed to start settings runtime: {error}"))
-        })
-        .as_ref()
-        .map_err(Clone::clone)
+    Ok(threadlane_runtime::get_runtime())
 }
 
 fn extension_manager(project_root: Option<PathBuf>) -> ExtensionManager {

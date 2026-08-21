@@ -12,8 +12,8 @@ Threadlane is a Rust workspace centered on a native GPUI desktop application (`c
 
 - `crates/threadlane-gpui/` — GPUI native desktop application and primary binary.
   - `src/` — application state, GPUI views, panels, terminal integration, and composer state.
-- `crates/threadlane-agent/` — agent runtime and event stream.
-- `crates/threadlane-coding-agent/` — coding-agent orchestration, skills, subagents, and project context.
+- `crates/threadlane-runtime/` — agent execution engine, harness V2 durability, provider routing, compaction, and turn driver.
+- `crates/threadlane-session/` — session orchestration (CodingAgent, supervisor), ACP client, WASI broker, skills, subagents, and project context.
 - `crates/threadlane-provider/` — model/provider and authentication integrations.
 - `crates/threadlane-tools/` — tool implementations and capability support.
 - `crates/threadlane-auth/` — authentication helpers.
@@ -89,7 +89,7 @@ A normal `cargo run` may be unsuitable for testing installation: update installa
 - Model-managed todo plans are session-scoped and persisted as complete `session_plan` records in the existing session JSONL. Show only the active session's plan above the project-wide task groups; do not derive plan state from compactable tool-call history or merge it into supervisor task state.
 
 - The project attach button appears while hovering the `PROJECTS` header.
-- The canonical attached-project registry is owned by `threadlane-coding-agent` at `~/.threadlane/projects.json`; GPUI must use that API rather than maintaining a second registry. On first load, merge the legacy `~/.threadlane/gui/projects.json` metadata into the canonical records and remove the legacy file only after an atomic canonical save succeeds. Preserve supervisor task metadata and newer GUI project/session selections when rebasing stale writers.
+- The canonical attached-project registry is owned by `threadlane-session` at `~/.threadlane/projects.json`; GPUI must use that API rather than maintaining a second registry. On first load, merge the legacy `~/.threadlane/gui/projects.json` metadata into the canonical records and remove the legacy file only after an atomic canonical save succeeds. Preserve supervisor task metadata and newer GUI project/session selections when rebasing stale writers.
 - The context-target state is distinct from the active-session state.
 - Archive and delete actions should flow through `SessionContextMenuAction` and the app’s existing action handler.
 
@@ -136,7 +136,7 @@ A normal `cargo run` may be unsuitable for testing installation: update installa
 ## External ACP Agents
 
 - Threadlane is an Agent Client Protocol *client*: it launches a third-party agent as a subprocess and speaks newline-delimited JSON-RPC 2.0 over its stdio pipes. It is not an ACP agent server, and ACP has no non-stdio transport, so an `AcpAgentConfig` is always a spawnable command.
-- `crates/threadlane-coding-agent/src/acp.rs` owns the protocol. Follow the `mcp.rs` precedent rather than adding a protocol SDK dependency: the wire format is hand-rolled with `serde_json` over `tokio::process`, which keeps the runtime model consistent with the rest of the workspace.
+- `crates/threadlane-session/src/acp.rs` owns the protocol. Follow the `mcp.rs` precedent rather than adding a protocol SDK dependency: the wire format is hand-rolled with `serde_json` over `tokio::process`, which keeps the runtime model consistent with the rest of the workspace.
 - Configuration mirrors MCP: `acp.json` in the global Threadlane directory and in `<project>/.threadlane/`. Project entries shadow global entries with the same `id`, unparsable or oversized files load as empty, and the scope on a loaded config always comes from the file it was read from, never from the file's contents.
 - ACP grows by adding enum variants. Decode defensively: unknown `session/update` kinds become `AcpSessionUpdate::Other`, unknown content blocks become `AcpContentBlock::Unknown`, and unknown tool kinds, tool statuses, permission kinds, and stop reasons degrade to `None`/`Unknown` instead of failing the surrounding message. A newer agent must never break an in-flight turn.
 - `AcpConnection` is bidirectional. The reader task resolves pending client requests by id and dispatches agent-initiated requests (`fs/read_text_file`, `fs/write_text_file`, `session/request_permission`) to the `AcpClientHandler`; every unimplemented method must answer `-32601` rather than going silent, or the agent blocks forever.
@@ -148,12 +148,12 @@ A normal `cargo run` may be unsuitable for testing installation: update installa
 - The default `AcpPermissionPolicy` is `Reject`. An unattended client has no informed consent to give, so auto-approval must stay opt-in and any UI-backed handler should prompt rather than raise this default.
 - Build connections through `AcpConnection::from_streams` when testing. `tests/acp_tests.rs` pairs the client with an in-process stub agent over `tokio::io::duplex`, which covers framing, request correlation, and the sandbox without depending on an installed agent binary.
 - An ACP agent is selected as a model id of the form `acp/<agent_id>`, reusing the `antigravity/` prefix convention so it flows through the existing picker, `/model`, and per-session model persistence.
-- ACP session updates are mapped onto `AgentEvent` in `acp_bridge`, not rendered through a parallel path. Keep that mapping pure and in the coding-agent crate so it stays testable.
+- ACP session updates are mapped onto `AgentEvent` in `acp_bridge`, not rendered through a parallel path. Keep that mapping pure and in the session crate so it stays testable.
 - Stopping an ACP turn must send `session/cancel` as well as aborting the task. Aborting only stops Threadlane listening; the external agent keeps working.
 
 ## Performance
 
-- Measure before changing. `crates/threadlane-mcp/tests/perf_baseline.rs` and `crates/threadlane-agent/tests/perf_baseline.rs` are `#[ignore]`d measurement harnesses, not assertions; run them with `-- --ignored --nocapture` to get a baseline and again to prove a change helped. Do not optimize a path whose cost has not been measured.
+- Measure before changing. `crates/threadlane-mcp/tests/perf_baseline.rs` and `crates/threadlane-runtime/tests/perf_baseline.rs` are `#[ignore]`d measurement harnesses, not assertions; run them with `-- --ignored --nocapture` to get a baseline and again to prove a change helped. Do not optimize a path whose cost has not been measured.
 - Beware first-exec cost when benchmarking spawned processes. The first execution of a freshly written script costs ~200ms on macOS (a one-time system check), which lands inside whatever you are timing and reads as a product problem. `perf_baseline.rs` warms the stub up first; MCP discovery is ~5.5ms, not the ~200ms an unwarmed harness reports.
 - Pin a performance fix with a *behavioral* test, not a timing one. `tests/session_reuse.rs` counts how many server processes actually start, so it fails for the right reason on a loaded CI machine.
 - MCP servers are long-lived: `McpManager` keeps one `McpSession` per server id and reuses it across tool calls. Do not reintroduce spawn-per-call — it cost ~5 ms per call against a trivial shell stub and far more against a real `npx`-based server. A failed exchange retires the session so the next call reconnects, and `Command::kill_on_drop` cleans up when the manager drops.

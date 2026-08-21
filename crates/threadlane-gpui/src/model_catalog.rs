@@ -38,8 +38,6 @@ const OPENAI_MODELS: &[(&str, &str)] = &[
 
 const ANTIGRAVITY_MODELS: &[(&str, &str)] = &[
     ("antigravity/gemini-3.7-flash", "Gemini 3.7 Flash"),
-    ("antigravity/gemini-3.6-flash", "Gemini 3.6 Flash"),
-    ("antigravity/gemini-3.5-flash", "Gemini 3.5 Flash"),
     ("antigravity/gemini-3.1-pro", "Gemini 3.1 Pro"),
     ("antigravity/claude-sonnet-4-6", "Claude Sonnet 4.6"),
     ("antigravity/claude-opus-4-6", "Claude Opus 4.6"),
@@ -106,8 +104,8 @@ fn models_for_credentials(
 }
 
 fn append_acp_models(models: &mut Vec<ModelOption>, project_root: Option<&std::path::Path>) {
-    let manager = threadlane_coding_agent::AcpManager::new(
-        threadlane_coding_agent::default_global_threadlane_dir(),
+    let manager = threadlane_session::AcpManager::new(
+        threadlane_session::default_global_threadlane_dir(),
         project_root.map(std::path::Path::to_path_buf),
     );
     for config in manager
@@ -116,7 +114,7 @@ fn append_acp_models(models: &mut Vec<ModelOption>, project_root: Option<&std::p
         .filter(|config| config.enabled)
     {
         models.push(ModelOption {
-            id: threadlane_coding_agent::acp_model_id(&config.id),
+            id: threadlane_session::acp_model_id(&config.id),
             label: config.name,
             provider: ModelProvider::Acp,
         });
@@ -233,7 +231,7 @@ mod tests {
     #[test]
     fn catalog_matches_native_provider_inventory() {
         assert_eq!(OPENAI_MODELS.len(), 9);
-        assert_eq!(ANTIGRAVITY_MODELS.len(), 7);
+        assert_eq!(ANTIGRAVITY_MODELS.len(), 5);
         assert_eq!(OPENCODE_MODELS.len(), 8);
     }
 

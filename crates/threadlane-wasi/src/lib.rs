@@ -1145,7 +1145,7 @@ fn persist_json_state(path: &Path, state: &Value) -> Result<(), String> {
 }
 
 impl WasiExtensionManager {
-    pub fn tool_definitions(&self) -> Vec<threadlane_agent::AgentToolDefinition> {
+    pub fn tool_definitions(&self) -> Vec<threadlane_runtime::AgentToolDefinition> {
         let Ok(extensions) = self.extensions.read() else {
             return Vec::new();
         };
@@ -1153,7 +1153,7 @@ impl WasiExtensionManager {
             .values()
             .flat_map(|extension| extension.manifest.tools.iter())
             .map(|tool| {
-                threadlane_agent::AgentToolDefinition::new(
+                threadlane_runtime::AgentToolDefinition::new(
                     tool.name.clone(),
                     tool.description.clone(),
                     tool.parameters.clone(),

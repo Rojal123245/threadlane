@@ -1,0 +1,864 @@
+use super::reducer::{validate_candidate_entry, validate_candidate_record};
+use super::store::SessionStore;
+use super::types::{Entry, Record, ReduceError};
+use crate::types::PlanItem;
+use serde::de::DeserializeOwned;
+use serde::Deserialize;
+use std::collections::HashSet as IdSet;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+
+#[cfg(unix)]
+const LOCK_EX: i32 = 2;
+#[cfg(unix)]
+const LOCK_NB: i32 = 4;
+#[cfg(unix)]
+const LOCK_UN: i32 = 8;
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn flock(fd: i32, operation: i32) -> i32;
+}
+
+#[derive(Debug)]
+struct WriterClaim {
+    file: Option<fs::File>,
+    gate: Mutex<()>,
+}
+
+impl Drop for WriterClaim {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        unsafe {
+            if let Some(file) = &self.file {
+                let _ = flock(file.as_raw_fd(), LOCK_UN);
+            }
+        }
+    }
+}
+
+fn writer_claim(path: &Path) -> io::Result<Arc<WriterClaim>> {
+    static CLAIMS: OnceLock<Mutex<HashMap<PathBuf, Weak<WriterClaim>>>> = OnceLock::new();
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let lock_path = canonical.with_extension("harness.lock");
+    let claims = CLAIMS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut claims = claims
+        .lock()
+        .map_err(|_| io::Error::other("writer claim registry poisoned"))?;
+    if let Some(claim) = claims.get(&lock_path).and_then(Weak::upgrade) {
+        return Ok(claim);
+    }
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)?;
+    #[cfg(unix)]
+    if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let claim = Arc::new(WriterClaim {
+        file: Some(file),
+        gate: Mutex::new(()),
+    });
+    claims.insert(lock_path, Arc::downgrade(&claim));
+    Ok(claim)
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum KnownSessionRecord {
+    #[serde(rename = "session_metadata")]
+    Metadata {
+        name: Option<String>,
+        #[serde(default)]
+        title_attempted: bool,
+        #[serde(default)]
+        active_node_id: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
+    },
+    #[serde(rename = "session_plan")]
+    Plan {
+        #[serde(default)]
+        explanation: Option<String>,
+        #[serde(default)]
+        items: Vec<PlanItem>,
+    },
+    #[serde(rename = "global_fact")]
+    GlobalFact { key: String, value: String },
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacySessionNode {
+    id: String,
+    parent_id: Option<String>,
+    #[serde(default)]
+    timestamp: u64,
+    #[serde(default)]
+    seq: Option<u64>,
+    message: crate::types::AgentMessage,
+}
+
+#[derive(Debug, Clone)]
+pub struct JsonlStore {
+    path: PathBuf,
+    session_id: String,
+    claim: Arc<WriterClaim>,
+    writable: bool,
+    entries: Vec<Entry>,
+    records: Vec<Record>,
+    preferred_leaf: Option<String>,
+    session_file_len: u64,
+    harness_file_len: u64,
+}
+
+impl JsonlStore {
+    pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let claim = writer_claim(&path)?;
+        Self::load(path, claim, true)
+    }
+
+    pub fn open_read_only(path: impl AsRef<Path>) -> io::Result<Self> {
+        Self::load(
+            path.as_ref().to_path_buf(),
+            Arc::new(WriterClaim {
+                file: None,
+                gate: Mutex::new(()),
+            }),
+            false,
+        )
+    }
+
+    fn load(path: PathBuf, claim: Arc<WriterClaim>, writable: bool) -> io::Result<Self> {
+        let _guard = claim
+            .gate
+            .lock()
+            .map_err(|_| io::Error::other("writer claim poisoned"))?;
+        validate_session_lines(&path)?;
+        let (session_id, preferred_leaf, entries, mut records) = read_entries(&path)?;
+        records.extend(read_strict(&path.with_extension("harness.jsonl"))?);
+        records.sort_by_key(Record::seq);
+        validate_harness_records(&records, &path)?;
+        let session_file_len = file_len(&path)?;
+        let harness_file_len = file_len(&path.with_extension("harness.jsonl"))?;
+        let store = Self {
+            path,
+            session_id,
+            claim: claim.clone(),
+            writable,
+            entries,
+            records,
+            preferred_leaf,
+            session_file_len,
+            harness_file_len,
+        };
+        super::Reducer::reduce(&store)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+        Ok(store)
+    }
+
+    fn refresh(&mut self) -> io::Result<()> {
+        let claim = self.claim.clone();
+        let _guard = claim
+            .gate
+            .lock()
+            .map_err(|_| io::Error::other("writer claim poisoned"))?;
+        let refreshed = Self::load_parts(&self.path)?;
+        self.session_id = refreshed.0;
+        self.preferred_leaf = refreshed.1;
+        self.entries = refreshed.2;
+        self.records = refreshed.3;
+        self.refresh_file_lengths()?;
+        super::Reducer::reduce(self)
+            .map(|_| ())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
+    }
+
+    fn refresh_file_lengths(&mut self) -> io::Result<()> {
+        self.session_file_len = file_len(&self.path)?;
+        self.harness_file_len = file_len(&self.path.with_extension("harness.jsonl"))?;
+        Ok(())
+    }
+
+    fn is_fresh(&self) -> io::Result<bool> {
+        Ok(self.session_file_len == file_len(&self.path)?
+            && self.harness_file_len == file_len(&self.path.with_extension("harness.jsonl"))?)
+    }
+
+    fn load_parts(
+        path: &Path,
+    ) -> io::Result<(String, Option<String>, Vec<Entry>, Vec<Record>)> {
+        validate_session_lines(path)?;
+        let (session_id, preferred_leaf, entries, mut records) = read_entries(path)?;
+        let record_path = path.with_extension("harness.jsonl");
+        records.extend(read_strict(&record_path)?);
+        records.sort_by_key(Record::seq);
+        validate_harness_records(&records, path)?;
+        Ok((session_id, preferred_leaf, entries, records))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn entries(&self) -> &[Entry] {
+        &self.entries
+    }
+
+    pub fn records(&self) -> &[Record] {
+        &self.records
+    }
+}
+
+impl SessionStore for JsonlStore {
+    fn session_id(&self) -> &str {
+        &self.session_id
+    }
+    fn next_sequence(&self) -> u64 {
+        self.next_seq()
+    }
+    fn refresh(&mut self) -> Result<(), ReduceError> {
+        JsonlStore::refresh(self).map_err(|error| ReduceError::Storage(error.to_string()))
+    }
+    fn facts(&self) -> std::collections::BTreeMap<String, String> {
+        let mut facts = std::collections::BTreeMap::new();
+        for record in &self.records {
+            if let Record::FactSet {
+                key,
+                value,
+                run_id: None,
+                ..
+            } = record
+            {
+                facts.insert(key.clone(), value.clone());
+            }
+        }
+        facts
+    }
+
+    fn preferred_leaf(&self, lane: &str) -> Option<String> {
+        (lane == "main")
+            .then(|| self.preferred_leaf.clone())
+            .flatten()
+    }
+
+    fn entries(&self) -> &[Entry] {
+        &self.entries
+    }
+
+    fn records(&self) -> &[Record] {
+        &self.records
+    }
+
+    fn append_entry(&mut self, mut entry: Entry) -> Result<(), ReduceError> {
+        if !self.writable {
+            return Err(ReduceError::Storage("session store is read-only".into()));
+        }
+        let claim = self.claim.clone();
+        let _guard = claim
+            .gate
+            .lock()
+            .map_err(|error| ReduceError::Storage(error.to_string()))?;
+        if !self
+            .is_fresh()
+            .map_err(|error| ReduceError::Storage(error.to_string()))?
+        {
+            self.reload_unlocked()?;
+        }
+        if entry.id.trim().is_empty() {
+            return Err(ReduceError::InvalidRecord("empty entry id".into()));
+        }
+        if entry.lane.trim().is_empty() {
+            return Err(ReduceError::InvalidLane(entry.lane));
+        }
+        if self
+            .entries
+            .iter()
+            .any(|candidate| candidate.id == entry.id)
+            || self.records.iter().any(|record| record.id() == entry.id)
+        {
+            return Err(ReduceError::DuplicateId(entry.id));
+        }
+        if let Some(parent) = &entry.parent_id {
+            if !self.entries.iter().any(|candidate| &candidate.id == parent) {
+                return Err(ReduceError::MissingParent(parent.clone()));
+            }
+        }
+        // Sequence allocation belongs to the writer, not callers. This is the
+        // only point where a sequence becomes durable.
+        entry.seq = self.next_seq();
+        validate_candidate_entry(self, &entry)?;
+        append_json_line(&self.path, &entry)?;
+        self.session_file_len =
+            file_len(&self.path).map_err(|error| ReduceError::Storage(error.to_string()))?;
+        if entry.lane == "main" {
+            self.preferred_leaf = Some(entry.id.clone());
+        }
+        self.entries.push(entry);
+        super::Reducer::reduce(self).map(|_| ())
+    }
+
+    fn append_record(&mut self, mut record: Record) -> Result<(), ReduceError> {
+        if !self.writable {
+            return Err(ReduceError::Storage("session store is read-only".into()));
+        }
+        let claim = self.claim.clone();
+        let _guard = claim
+            .gate
+            .lock()
+            .map_err(|error| ReduceError::Storage(error.to_string()))?;
+        if !self
+            .is_fresh()
+            .map_err(|error| ReduceError::Storage(error.to_string()))?
+        {
+            self.reload_unlocked()?;
+        }
+        if record.lane().trim().is_empty() {
+            return Err(ReduceError::InvalidLane(record.lane().into()));
+        }
+        if record.id().trim().is_empty()
+            || self.entries.iter().any(|entry| entry.id == record.id())
+            || self
+                .records
+                .iter()
+                .any(|current| current.id() == record.id())
+        {
+            return Err(ReduceError::DuplicateId(record.id().into()));
+        }
+        // Sequence allocation belongs to the writer, not callers. This is the
+        // only point where a sequence becomes durable.
+        record = record.with_seq(self.next_seq());
+        validate_candidate_record(self, &record)?;
+        append_json_line(&self.path, &record)?;
+        self.session_file_len =
+            file_len(&self.path).map_err(|error| ReduceError::Storage(error.to_string()))?;
+        self.records.push(record);
+        super::Reducer::reduce(self).map(|_| ())
+    }
+}
+
+impl JsonlStore {
+    pub fn append_plan(&mut self, plan: &crate::SessionPlan) -> Result<(), ReduceError> {
+        let record = Record::FactSet {
+            id: format!("fact-plan-{}", self.next_sequence()),
+            seq: self.next_sequence(),
+            lane: "main".into(),
+            timestamp: 0,
+            run_id: None,
+            key: "session_plan".into(),
+            value: serde_json::to_string(plan)
+                .map_err(|e| ReduceError::InvalidRecord(e.to_string()))?,
+        };
+        self.append_record(record)
+    }
+
+    pub fn fork_branch(
+        &self,
+        path: impl AsRef<Path>,
+        session_id: impl Into<String>,
+        leaf_id: &str,
+    ) -> Result<Self, ReduceError> {
+        let mut included = HashSet::new();
+        let mut current = Some(leaf_id.to_owned());
+        while let Some(id) = current {
+            let entry = self
+                .entries
+                .iter()
+                .find(|entry| entry.id == id)
+                .ok_or_else(|| ReduceError::MissingParent(id.clone()))?;
+            included.insert(entry.id.clone());
+            current = entry.parent_id.clone();
+        }
+        self.fork_entries(path, session_id, &included)
+    }
+
+    pub fn fork_tree(
+        &self,
+        path: impl AsRef<Path>,
+        session_id: impl Into<String>,
+    ) -> Result<Self, ReduceError> {
+        let included = self.entries.iter().map(|entry| entry.id.clone()).collect();
+        self.fork_entries(path, session_id, &included)
+    }
+
+    fn fork_entries(
+        &self,
+        path: impl AsRef<Path>,
+        _session_id: impl Into<String>,
+        included: &HashSet<String>,
+    ) -> Result<Self, ReduceError> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| ReduceError::Storage(error.to_string()))?;
+        }
+        fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(path)
+            .map_err(|error| ReduceError::Storage(error.to_string()))?;
+        let _session_id = _session_id.into();
+        let mut fork = Self::open(path).map_err(|error| ReduceError::Storage(error.to_string()))?;
+        fork.append_record(Record::FactSet {
+            id: "fact-main-parent_session_id".into(),
+            seq: fork.next_sequence(),
+            lane: "main".into(),
+            timestamp: 0,
+            run_id: None,
+            key: "parent_session_id".into(),
+            value: self.session_id().to_string(),
+        })?;
+        if let Some(model) = self.model() {
+            fork.append_record(Record::FactSet {
+                id: "fact-main-model".into(),
+                seq: fork.next_sequence(),
+                lane: "main".into(),
+                timestamp: 0,
+                run_id: None,
+                key: "model".into(),
+                value: model,
+            })?;
+        }
+        if let Some(name) = self.name() {
+            fork.append_record(Record::FactSet {
+                id: "fact-main-name".into(),
+                seq: fork.next_sequence(),
+                lane: "main".into(),
+                timestamp: 0,
+                run_id: None,
+                key: "name".into(),
+                value: name,
+            })?;
+        }
+        for source in self
+            .entries
+            .iter()
+            .filter(|entry| included.contains(&entry.id))
+        {
+            let mut entry = source.clone();
+            if entry
+                .parent_id
+                .as_ref()
+                .is_some_and(|parent| !included.contains(parent))
+            {
+                entry.parent_id = None;
+            }
+            entry.seq = fork.next_sequence();
+            fork.append_entry(entry)?;
+        }
+        for source in self
+            .records
+            .iter()
+            .filter(|record| matches!(record, Record::FactSet { .. }))
+        {
+            fork.append_record(source.clone().with_seq(fork.next_sequence()))?;
+        }
+        for (key, value) in self.facts() {
+            if !fork.records.iter().any(|record| {
+                matches!(record, Record::FactSet { key: record_key, .. } if record_key == &key)
+            }) {
+                fork.append_record(Record::FactSet {
+                    id: format!("fact-main-{key}"),
+                    seq: fork.next_sequence(),
+                    lane: "main".into(),
+                    timestamp: fork.next_sequence(),
+                    run_id: None,
+                    key: key.clone(),
+                    value: value.clone(),
+                })?;
+            }
+        }
+        Ok(fork)
+    }
+
+    pub fn next_sequence(&self) -> u64 {
+        self.next_seq()
+    }
+
+    fn reload_unlocked(&mut self) -> Result<(), ReduceError> {
+        let refreshed = Self::load_parts(&self.path)
+            .map_err(|error| ReduceError::Storage(error.to_string()))?;
+        self.session_id = refreshed.0;
+        self.preferred_leaf = refreshed.1;
+        self.entries = refreshed.2;
+        self.records = refreshed.3;
+        self.refresh_file_lengths()
+            .map_err(|error| ReduceError::Storage(error.to_string()))?;
+        super::Reducer::reduce(self).map(|_| ())
+    }
+
+    fn next_seq(&self) -> u64 {
+        self.entries
+            .iter()
+            .map(|entry| entry.seq)
+            .chain(self.records.iter().map(Record::seq))
+            .max()
+            .unwrap_or(0)
+            + 1
+    }
+}
+
+pub(crate) fn append_session_json_line<T: serde::Serialize>(
+    path: &Path,
+    value: &T,
+) -> io::Result<()> {
+    // Process-wide append lock; the session writer lease handles cross-process writers.
+    static APPEND_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = APPEND_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    serde_json::to_writer(&mut file, value).map_err(io::Error::other)?;
+    file.write_all(b"\n").and_then(|_| file.sync_all())
+}
+
+fn file_len(path: &Path) -> io::Result<u64> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.len()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error),
+    }
+}
+
+fn append_json_line<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), ReduceError> {
+    append_session_json_line(path, value).map_err(|error| ReduceError::Storage(error.to_string()))
+}
+
+fn read_entries(
+    path: &Path,
+) -> io::Result<(String, Option<String>, Vec<Entry>, Vec<Record>)> {
+    let session_id = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "session".into());
+    let mut preferred_leaf = None;
+    let values: Vec<serde_json::Value> = read_strict(path)?;
+    let mut entries = Vec::new();
+    let mut records = Vec::new();
+    for (index, value) in values.into_iter().enumerate() {
+        if let Ok(record) = serde_json::from_value::<Record>(value.clone()) {
+            records.push(record);
+            continue;
+        }
+        if let Ok(known) = serde_json::from_value::<KnownSessionRecord>(value.clone()) {
+            match known {
+                KnownSessionRecord::Metadata {
+                    name,
+                    title_attempted,
+                    active_node_id,
+                    model,
+                } => {
+                    if let Some(active) = active_node_id {
+                        preferred_leaf = Some(active);
+                    }
+                    if let Some(name) = name {
+                        records.push(Record::FactSet {
+                            id: format!("fact-name-{}", index + 1),
+                            seq: 0,
+                            lane: "main".into(),
+                            timestamp: 0,
+                            run_id: None,
+                            key: "name".into(),
+                            value: name,
+                        });
+                    }
+                    if let Some(model) = model {
+                        records.push(Record::FactSet {
+                            id: format!("fact-model-{}", index + 1),
+                            seq: 0,
+                            lane: "main".into(),
+                            timestamp: 0,
+                            run_id: None,
+                            key: "model".into(),
+                            value: model,
+                        });
+                    }
+                    if title_attempted {
+                        records.push(Record::FactSet {
+                            id: format!("fact-title-attempted-{}", index + 1),
+                            seq: 0,
+                            lane: "main".into(),
+                            timestamp: 0,
+                            run_id: None,
+                            key: "title_attempted".into(),
+                            value: "true".into(),
+                        });
+                    }
+                }
+                KnownSessionRecord::Plan { items, explanation } => {
+                    let plan = crate::types::SessionPlan { explanation, items };
+                    if let Ok(plan_json) = serde_json::to_string(&plan) {
+                        records.push(Record::FactSet {
+                            id: format!("fact-plan-{}", index + 1),
+                            seq: 0,
+                            lane: "main".into(),
+                            timestamp: 0,
+                            run_id: None,
+                            key: "session_plan".into(),
+                            value: plan_json,
+                        });
+                    }
+                }
+                KnownSessionRecord::GlobalFact { key, value } => {
+                    records.push(Record::FactSet {
+                        id: format!("fact-{key}-{}", index + 1),
+                        seq: 0,
+                        lane: "main".into(),
+                        timestamp: 0,
+                        run_id: None,
+                        key,
+                        value,
+                    });
+                }
+            }
+            continue;
+        }
+        if value.get("seq").is_some() {
+            if let Ok(entry) = serde_json::from_value::<Entry>(value.clone()) {
+                if entry.lane == "main" {
+                    preferred_leaf = Some(entry.id.clone());
+                }
+                entries.push(entry);
+            }
+        } else if let Ok(node) = serde_json::from_value::<LegacySessionNode>(value) {
+            preferred_leaf = Some(node.id.clone());
+            entries.push(Entry {
+                id: node.id,
+                parent_id: node.parent_id,
+                lane: "main".into(),
+                seq: node.seq.unwrap_or((index + 1) as u64),
+                timestamp: node.timestamp,
+                message: node.message,
+                surface_op: super::types::SurfaceOperation::Append,
+                terminate: false,
+            });
+        }
+    }
+    // Legacy metadata has no harness sequence. Allocate virtual values after
+    // the durable stream so it cannot collide with a V2 record sequence.
+    let mut next_seq = entries
+        .iter()
+        .map(|entry| entry.seq)
+        .chain(records.iter().map(Record::seq))
+        .max()
+        .unwrap_or(0)
+        + 1;
+    for record in &mut records {
+        if record.seq() == 0 {
+            *record = record.clone().with_seq(next_seq);
+            next_seq += 1;
+        }
+    }
+    Ok((session_id, preferred_leaf, entries, records))
+}
+
+fn validate_harness_records(records: &[Record], path: &Path) -> io::Result<()> {
+    let mut ids = IdSet::new();
+    let mut previous = 0;
+    for (index, record) in records.iter().enumerate() {
+        if record.id().trim().is_empty() || !ids.insert(record.id().to_owned()) {
+            return Err(invalid_line(
+                path,
+                index + 1,
+                "duplicate or empty record id",
+            ));
+        }
+        if record.seq() <= previous {
+            return Err(invalid_line(
+                path,
+                index + 1,
+                "non-monotonic record sequence",
+            ));
+        }
+        previous = record.seq();
+    }
+    Ok(())
+}
+
+fn validate_session_lines(path: &Path) -> io::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let data = fs::read_to_string(path)?;
+    for (index, line) in data.split('\n').enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let is_torn_tail = index == data.split('\n').count() - 1 && !data.ends_with('\n');
+        let value: serde_json::Value = match serde_json::from_str(line) {
+            Ok(value) => value,
+            Err(_error) if is_torn_tail => break,
+            Err(error) => return Err(invalid_line(path, index + 1, error)),
+        };
+        let result = if serde_json::from_value::<Record>(value.clone()).is_ok() {
+            Ok(())
+        } else if value.get("lane").is_some() {
+            serde_json::from_value::<Entry>(value).map(|_| ())
+        } else if value.get("type").is_some() {
+            serde_json::from_value::<KnownSessionRecord>(value).map(|_| ())
+        } else {
+            serde_json::from_value::<LegacySessionNode>(value).map(|_| ())
+        };
+        if let Err(error) = result {
+            return Err(invalid_line(path, index + 1, error));
+        }
+    }
+    Ok(())
+}
+
+fn read_strict<T: DeserializeOwned>(path: &Path) -> io::Result<Vec<T>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let data = fs::read_to_string(path)?;
+    let count = data.split('\n').count();
+    let mut values = Vec::new();
+    for (index, line) in data.split('\n').enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let is_torn_tail = index == count - 1 && !data.ends_with('\n');
+        match serde_json::from_str(line) {
+            Ok(value) => values.push(value),
+            Err(_error) if is_torn_tail => break,
+            Err(error) => return Err(invalid_line(path, index + 1, error)),
+        }
+    }
+    Ok(values)
+}
+
+fn invalid_line(path: &Path, line: usize, error: impl std::fmt::Display) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("{} line {line}: {error}", path.display()),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_entries;
+    use crate::harness::{
+        ContextItemSource, ContextItemStatus, ContextManifestItem, JsonlStore, Record, Reducer,
+        SessionStore, TraceString,
+    };
+
+    #[test]
+    fn legacy_metadata_records_get_distinct_virtual_sequences() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(
+            &path,
+            "{\"type\":\"session_metadata\",\"name\":\"One\",\"model\":\"model\",\"title_attempted\":true}\n",
+        )
+        .unwrap();
+
+        let (_, _, _, records) = read_entries(&path).unwrap();
+        let sequences = records.iter().map(|record| record.seq()).collect::<Vec<_>>();
+        assert_eq!(sequences.len(), 3);
+        assert!(sequences.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn context_manifest_captured_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut store = JsonlStore::open(&path).unwrap();
+
+        let items = vec![
+            ContextManifestItem {
+                position: 0,
+                source: ContextItemSource::SystemPrompt,
+                entry_id: None,
+                role: TraceString::new("system").unwrap(),
+                token_estimate: 42,
+                status: ContextItemStatus::Active,
+                digest_sha256: TraceString::new("abc123sha").unwrap(),
+                label: None,
+            },
+            ContextManifestItem {
+                position: 1,
+                source: ContextItemSource::Message,
+                entry_id: Some(TraceString::new("entry-1").unwrap()),
+                role: TraceString::new("user").unwrap(),
+                token_estimate: 15,
+                status: ContextItemStatus::Active,
+                digest_sha256: TraceString::new("def456sha").unwrap(),
+                label: None,
+            },
+            ContextManifestItem {
+                position: 2,
+                source: ContextItemSource::ToolSchema,
+                entry_id: None,
+                role: TraceString::new("tools").unwrap(),
+                token_estimate: 120,
+                status: ContextItemStatus::Active,
+                digest_sha256: TraceString::new("toolssha789").unwrap(),
+                label: Some(TraceString::new("3 tools").unwrap()),
+            },
+        ];
+
+        let manifest_record = Record::ContextManifestCaptured {
+            id: "context-manifest-run1-req1".into(),
+            seq: store.next_sequence(),
+            lane: "main".into(),
+            timestamp: 1234567890,
+            run_id: "run1".into(),
+            attempt: 1,
+            request_id: TraceString::new("provider-req-1").unwrap(),
+            total_estimated_tokens: Some(177),
+            items,
+        };
+
+        store.append_record(manifest_record).unwrap();
+        drop(store);
+
+        // Verify reading back from file
+        let reloaded = JsonlStore::open(&path).unwrap();
+        assert_eq!(reloaded.records().len(), 1);
+        match &reloaded.records()[0] {
+            Record::ContextManifestCaptured {
+                id,
+                seq,
+                lane,
+                run_id,
+                attempt,
+                request_id,
+                total_estimated_tokens,
+                items,
+                ..
+            } => {
+                assert_eq!(id, "context-manifest-run1-req1");
+                assert_eq!(*seq, 1);
+                assert_eq!(lane, "main");
+                assert_eq!(run_id, "run1");
+                assert_eq!(*attempt, 1);
+                assert_eq!(request_id.as_str(), "provider-req-1");
+                assert_eq!(*total_estimated_tokens, Some(177));
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[0].source, ContextItemSource::SystemPrompt);
+                assert_eq!(items[1].source, ContextItemSource::Message);
+                assert_eq!(items[2].source, ContextItemSource::ToolSchema);
+                assert_eq!(items[2].label.as_ref().unwrap().as_str(), "3 tools");
+            }
+            other => panic!("expected ContextManifestCaptured, got: {other:?}"),
+        }
+
+        // Verify reducer handles the record gracefully
+        let reduced = Reducer::reduce(&reloaded).unwrap();
+        assert_eq!(reduced.lanes.len(), 1);
+        assert_eq!(reduced.lanes[0].name, "main");
+    }
+}
