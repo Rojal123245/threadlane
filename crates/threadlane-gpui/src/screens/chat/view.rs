@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use std::time::Duration;
 
@@ -22,6 +23,7 @@ use crate::app::{actions::AppAction, controller};
 use crate::screens::editor::EditorView;
 use crate::state::{
     compute_older_message_page, AppState, ChatMessageInfo, MessageRole, ToolActivityInfo,
+    TrajectoryEntry,
 };
 use threadlane_session::commands::{available_slash_commands, SlashCommandInfo};
 use threadlane_session::{ImageAttachment, PlanItemStatus, ReasoningEffort, SessionPlan};
@@ -60,6 +62,28 @@ enum TrajectoryInspectorTab {
     Source,
 }
 
+fn should_use_markdown(streaming: bool) -> bool {
+    !streaming
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TrajectoryCacheKey {
+    revision: u64,
+    mode: TrajectoryMode,
+    query: String,
+    category: Option<String>,
+    lane: Option<String>,
+}
+
+struct TrajectoryRenderCache {
+    key: TrajectoryCacheKey,
+    all_entries: Vec<TrajectoryEntry>,
+    categories: Arc<Vec<String>>,
+    lanes: Arc<Vec<String>>,
+    lane_latest: Arc<std::collections::BTreeMap<String, String>>,
+    filtered_indices: Vec<usize>,
+}
+
 pub fn init(cx: &mut App) {
     // gpui-component's Textarea owns the focused `Input` context. Register
     // after gpui-component initialization so this action can inspect image
@@ -77,7 +101,7 @@ pub struct ChatListView {
     scroll_handle: ScrollHandle,
     trajectory_scroll_handle: ScrollHandle,
     expanded_activity_groups: HashSet<String>,
-    markdown_states: HashMap<String, (String, Entity<TextViewState>, std::time::Instant)>,
+    markdown_states: HashMap<String, (usize, Entity<TextViewState>)>,
     pasted_images: Vec<ImageAttachment>,
     last_session_key: Option<(std::path::PathBuf, String)>,
     initial_scroll_frames: u8,
@@ -91,6 +115,7 @@ pub struct ChatListView {
     trajectory_lane: Option<String>,
     selected_trajectory_index: Option<usize>,
     trajectory_inspector_tab: TrajectoryInspectorTab,
+    trajectory_cache: Option<TrajectoryRenderCache>,
     slash_command_cache: Option<(
         Option<std::path::PathBuf>,
         std::time::Instant,
@@ -282,6 +307,7 @@ impl ChatListView {
             trajectory_lane: None,
             selected_trajectory_index: None,
             trajectory_inspector_tab: TrajectoryInspectorTab::Overview,
+            trajectory_cache: None,
             slash_command_cache: None,
             _subscriptions: vec![sub1, sub2, sub3, sub_editor],
         }
@@ -831,53 +857,84 @@ impl ChatListView {
             .into_any_element()
     }
 
-    fn render_trajectory(&self, cx: &mut Context<Self>) -> AnyElement {
-        let all_entries = match self.trajectory_mode {
-            TrajectoryMode::Execution | TrajectoryMode::Requests => {
-                self.model.read(cx).active_trajectory().to_vec()
-            }
-            TrajectoryMode::ModelContext => self.model.read(cx).active_model_context_diagnostics(),
-            TrajectoryMode::DurableEvents => self.model.read(cx).active_durable_event_diagnostics(),
-            TrajectoryMode::Recovery => self.model.read(cx).active_recovery_diagnostics(),
+    fn render_trajectory(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let revision = self.model.read(cx).trajectory_revision();
+        let key = TrajectoryCacheKey {
+            revision,
+            mode: self.trajectory_mode,
+            query: self.trajectory_search.to_lowercase(),
+            category: self.trajectory_category.clone(),
+            lane: self.trajectory_lane.clone(),
         };
-        let mut categories = all_entries
-            .iter()
-            .map(|entry| entry.category.clone())
-            .collect::<Vec<_>>();
-        categories.sort();
-        categories.dedup();
-        let mut lane_latest = std::collections::BTreeMap::<String, String>::new();
-        for entry in &all_entries {
-            if let Some(lane) = &entry.lane {
-                lane_latest.insert(lane.clone(), entry.summary.clone());
+        if self
+            .trajectory_cache
+            .as_ref()
+            .is_none_or(|cache| cache.key != key)
+        {
+            let all_entries = match self.trajectory_mode {
+                TrajectoryMode::Execution | TrajectoryMode::Requests => {
+                    self.model.read(cx).active_trajectory().to_vec()
+                }
+                TrajectoryMode::ModelContext => {
+                    self.model.read(cx).active_model_context_diagnostics()
+                }
+                TrajectoryMode::DurableEvents => {
+                    self.model.read(cx).active_durable_event_diagnostics()
+                }
+                TrajectoryMode::Recovery => self.model.read(cx).active_recovery_diagnostics(),
+            };
+            let mut categories = all_entries
+                .iter()
+                .map(|entry| entry.category.clone())
+                .collect::<Vec<_>>();
+            categories.sort();
+            categories.dedup();
+            let mut lane_latest = std::collections::BTreeMap::new();
+            for entry in &all_entries {
+                if let Some(lane) = &entry.lane {
+                    lane_latest.insert(lane.clone(), entry.summary.clone());
+                }
             }
-        }
-        let lanes = lane_latest.keys().cloned().collect::<Vec<_>>();
-        let query = self.trajectory_search.to_lowercase();
-        let entries = all_entries
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| {
-                self.trajectory_category
-                    .as_ref()
-                    .is_none_or(|category| &entry.category == category)
-                    && self
-                        .trajectory_lane
+            let lanes = lane_latest.keys().cloned().collect();
+            let filtered_indices = all_entries
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| {
+                    key.category
                         .as_ref()
-                        .is_none_or(|lane| entry.lane.as_ref() == Some(lane))
-                    && (query.is_empty()
-                        || [
-                            entry.category.as_str(),
-                            entry.summary.as_str(),
-                            entry.detail.as_str(),
-                            entry.lane.as_deref().unwrap_or(""),
-                            entry.correlation_id.as_deref().unwrap_or(""),
-                        ]
-                        .iter()
-                        .any(|value| value.to_lowercase().contains(&query)))
-            })
-            .map(|(index, entry)| (index, entry.clone()))
-            .collect::<Vec<_>>();
+                        .is_none_or(|category| &entry.category == category)
+                        && key
+                            .lane
+                            .as_ref()
+                            .is_none_or(|lane| entry.lane.as_ref() == Some(lane))
+                        && (key.query.is_empty()
+                            || [
+                                entry.category.as_str(),
+                                entry.summary.as_str(),
+                                entry.detail.as_str(),
+                                entry.lane.as_deref().unwrap_or(""),
+                                entry.correlation_id.as_deref().unwrap_or(""),
+                            ]
+                            .iter()
+                            .any(|value| value.to_lowercase().contains(&key.query)))
+                })
+                .map(|(index, _)| index)
+                .collect();
+            self.trajectory_cache = Some(TrajectoryRenderCache {
+                key,
+                all_entries,
+                categories: Arc::new(categories),
+                lanes: Arc::new(lanes),
+                lane_latest: Arc::new(lane_latest),
+                filtered_indices,
+            });
+        }
+        let cache = self.trajectory_cache.as_ref().expect("trajectory cache");
+        let all_entries = &cache.all_entries;
+        let categories = Arc::clone(&cache.categories);
+        let lanes = Arc::clone(&cache.lanes);
+        let lane_latest = Arc::clone(&cache.lane_latest);
+        let entries = &cache.filtered_indices;
         let theme = cx.theme().colors;
         if entries.is_empty() {
             return div()
@@ -898,7 +955,8 @@ impl ChatListView {
         let mut previous_turn = None;
         let mut previous_request = None;
         let mut request_input_seen = false;
-        for (all_index, entry) in entries.into_iter() {
+        for &all_index in entries {
+            let entry = &all_entries[all_index];
             if self.trajectory_mode == TrajectoryMode::Requests && entry.request != previous_request
             {
                 if let Some(request) = entry.request {
@@ -1554,7 +1612,7 @@ impl ChatListView {
                                 });
                             },
                         ));
-                        for category in categories.clone() {
+                        for category in categories.iter().cloned() {
                             let selected = category.clone();
                             let view = category_view.clone();
                             menu = menu.item(PopupMenuItem::new(category).on_click(
@@ -1584,7 +1642,7 @@ impl ChatListView {
                                     cx.notify();
                                 });
                             }));
-                        for lane in lanes.clone() {
+                        for lane in lanes.iter().cloned() {
                             let selected = lane.clone();
                             let view = lane_view.clone();
                             let latest = lane_latest.get(&lane).cloned().unwrap_or_default();
@@ -1872,26 +1930,7 @@ impl ChatListView {
             });
 
         let detail = is_expanded.then(|| {
-            let now = std::time::Instant::now();
-            let entry = self
-                .markdown_states
-                .entry(format!("reasoning-{}", msg.id))
-                .or_insert_with(|| {
-                    let state = cx.new(|cx| TextViewState::markdown(reasoning, cx));
-                    (reasoning.to_string(), state, now)
-                });
-            if entry.0 != reasoning {
-                let should_update =
-                    !msg.streaming || now.duration_since(entry.2) >= Duration::from_millis(120);
-                if should_update {
-                    entry.0 = reasoning.to_string();
-                    entry.2 = now;
-                    entry.1.update(cx, |state, cx| {
-                        state.set_text(reasoning, cx);
-                    });
-                }
-            }
-            div()
+            let container = div()
                 .ml(px(26.0))
                 .mt_1()
                 .p_2()
@@ -1902,8 +1941,26 @@ impl ChatListView {
                 .bg(theme.title_bar)
                 .text_xs()
                 .text_color(theme.muted_foreground)
-                .overflow_y_scrollbar()
+                .overflow_y_scrollbar();
+            if !should_use_markdown(is_streaming) {
+                return container.child(reasoning.to_string()).into_any_element();
+            }
+            let entry = self
+                .markdown_states
+                .entry(format!("reasoning-{}", msg.id))
+                .or_insert_with(|| {
+                    let state = cx.new(|cx| TextViewState::markdown(reasoning, cx));
+                    (reasoning.len(), state)
+                });
+            if entry.0 != reasoning.len() {
+                entry.0 = reasoning.len();
+                entry
+                    .1
+                    .update(cx, |state, cx| state.set_text(reasoning, cx));
+            }
+            container
                 .child(TextView::new(&entry.1).selectable(true))
+                .into_any_element()
         });
 
         Some(
@@ -1935,7 +1992,6 @@ impl ChatListView {
                         .text_sm()
                         .text_color(theme.secondary_foreground)
                         .child({
-                            let now = std::time::Instant::now();
                             let entry =
                                 self.markdown_states
                                     .entry(msg.id.clone())
@@ -1943,11 +1999,10 @@ impl ChatListView {
                                         let content = msg.content.clone();
                                         let state =
                                             cx.new(|cx| TextViewState::markdown(&content, cx));
-                                        (content, state, now)
+                                        (content.len(), state)
                                     });
-                            if entry.0 != msg.content {
-                                entry.0 = msg.content.clone();
-                                entry.2 = now;
+                            if entry.0 != msg.content.len() {
+                                entry.0 = msg.content.len();
                                 entry.1.update(cx, |state, cx| {
                                     state.set_text(&msg.content, cx);
                                 });
@@ -1997,12 +2052,14 @@ impl ChatListView {
                             .gap_2()
                             .children(reasoning_element)
                             .children(if !msg.content.is_empty() {
-                                let content_element = div()
-                                    .w_full()
-                                    .text_sm()
-                                    .text_color(theme.foreground)
-                                    .child({
-                                        let now = std::time::Instant::now();
+                                let content_element =
+                                    div().w_full().text_sm().text_color(theme.foreground);
+                                let content_element = if !should_use_markdown(msg.streaming) {
+                                    content_element
+                                        .child(msg.content.clone())
+                                        .into_any_element()
+                                } else {
+                                    let markdown = {
                                         let entry = self
                                             .markdown_states
                                             .entry(msg.id.clone())
@@ -2011,25 +2068,22 @@ impl ChatListView {
                                                 let state = cx.new(|cx| {
                                                     TextViewState::markdown(&content, cx)
                                                 });
-                                                (content, state, now)
+                                                (content.len(), state)
                                             });
-                                        if entry.0 != msg.content {
-                                            let should_update = !msg.streaming
-                                                || now.duration_since(entry.2)
-                                                    >= Duration::from_millis(120);
-                                            if should_update {
-                                                entry.0 = msg.content.clone();
-                                                entry.2 = now;
-                                                entry.1.update(cx, |state, cx| {
-                                                    state.set_text(&msg.content, cx);
-                                                });
-                                            }
+                                        if entry.0 != msg.content.len() {
+                                            entry.0 = msg.content.len();
+                                            entry.1.update(cx, |state, cx| {
+                                                state.set_text(&msg.content, cx);
+                                            });
                                         }
                                         TextView::new(&entry.1).selectable(true)
-                                    });
+                                    };
+                                    content_element.child(markdown).into_any_element()
+                                };
 
                                 Some(if msg.streaming {
-                                    content_element
+                                    div()
+                                        .child(content_element)
                                         .with_animation(
                                             SharedString::from(format!("stream-text-{}", msg.id)),
                                             Animation::new(Duration::from_millis(150)),
@@ -3123,6 +3177,7 @@ impl Render for ChatListView {
             self.selected_trajectory_index = None;
             self.trajectory_search.clear();
             self.markdown_states.clear();
+            self.trajectory_cache = None;
             self.trajectory_search_input.update(cx, |state, cx| {
                 state.set_value("", window, cx);
             });
@@ -3249,5 +3304,34 @@ impl Render for ChatListView {
                     .flatten(),
             )
             .children((self.current_tab == CentralTab::Chat).then(|| self.render_composer(cx)))
+    }
+}
+
+#[cfg(test)]
+mod hot_path_tests {
+    use super::{should_use_markdown, TrajectoryCacheKey, TrajectoryMode};
+
+    #[test]
+    fn markdown_is_deferred_until_streaming_completes() {
+        assert!(!should_use_markdown(true));
+        assert!(should_use_markdown(false));
+    }
+
+    #[test]
+    fn trajectory_cache_key_changes_with_data_or_filter() {
+        let base = TrajectoryCacheKey {
+            revision: 7,
+            mode: TrajectoryMode::Execution,
+            query: "tool".into(),
+            category: None,
+            lane: None,
+        };
+        let mut changed = base.clone();
+        changed.revision += 1;
+        assert_ne!(base, changed);
+
+        let mut changed = base.clone();
+        changed.query = "provider".into();
+        assert_ne!(base, changed);
     }
 }

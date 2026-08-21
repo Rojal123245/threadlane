@@ -217,6 +217,7 @@ pub struct AppState {
     pending_composer_messages: HashMap<String, String>,
     session_token_usage: HashMap<String, TokenUsage>,
     trajectory_by_session: HashMap<String, Vec<TrajectoryEntry>>,
+    trajectory_revision: u64,
     diagnostics_by_session: HashMap<String, threadlane_session::harness::SessionDiagnostics>,
     session_metrics: HashMap<String, SessionMetricsInfo>,
     stashed_prompts: HashMap<String, String>,
@@ -742,6 +743,7 @@ impl AppState {
             pending_composer_messages: HashMap::new(),
             session_token_usage: HashMap::new(),
             trajectory_by_session: HashMap::new(),
+            trajectory_revision: 0,
             diagnostics_by_session: HashMap::new(),
             session_metrics: HashMap::new(),
             stashed_prompts: HashMap::new(),
@@ -788,6 +790,7 @@ impl AppState {
                         diagnostics: TrajectoryDiagnostics::default(),
                     }],
                 );
+                state.trajectory_revision = state.trajectory_revision.wrapping_add(1);
             }
         }
         state
@@ -1355,6 +1358,7 @@ impl AppState {
             .insert(session_id.to_owned(), result.diagnostics);
         self.trajectory_by_session
             .insert(session_id.into(), result.trajectory);
+        self.trajectory_revision = self.trajectory_revision.wrapping_add(1);
         self.session_metrics
             .insert(session_id.into(), result.metrics);
         self.session_token_usage
@@ -2206,6 +2210,7 @@ impl AppState {
         self.active_plan = result.plan;
         self.trajectory_by_session
             .insert(session_id.to_owned(), result.trajectory);
+        self.trajectory_revision = self.trajectory_revision.wrapping_add(1);
         self.diagnostics_by_session
             .insert(session_id.to_owned(), result.diagnostics);
         self.session_metrics
@@ -2341,6 +2346,7 @@ impl AppState {
                     },
                     diagnostics: TrajectoryDiagnostics::default(),
                 });
+            self.trajectory_revision = self.trajectory_revision.wrapping_add(1);
         }
     }
 
@@ -2451,6 +2457,10 @@ impl AppState {
             .and_then(|id| self.trajectory_by_session.get(id))
             .map(Vec::as_slice)
             .unwrap_or(&[])
+    }
+
+    pub(crate) fn trajectory_revision(&self) -> u64 {
+        self.trajectory_revision
     }
 
     pub(crate) fn session_trajectory(&self, session_id: &str) -> &[TrajectoryEntry] {
@@ -2950,6 +2960,7 @@ impl AppState {
                 correlation_id: None,
                 diagnostics: TrajectoryDiagnostics::default(),
             });
+        self.trajectory_revision = self.trajectory_revision.wrapping_add(1);
         if !threadlane_provider::router::is_antigravity_model(&model) {
             crate::services::chat::maybe_generate_session_title(
                 session_file,

@@ -182,6 +182,7 @@ A normal `cargo run` may be unsuitable for testing installation: update installa
 ## WASI Extensions
 
 - Extension crates live under `extensions/` and target `wasm32-wasip1`.
+- A loaded extension retains its compiled WASI module and creates only a fresh store/instance per invocation. Response lookup is registry-only; startup and explicit install/toggle reload signals own filesystem discovery, so a lookup miss must not recompile the inventory.
 - Extension install, toggle, and removal must reject symlinked destination components and keep every mutation inside the selected global or project `.threadlane/extensions` root. Validate staged WASM and its embedded manifest before swapping it into place so installation cannot report failure after commit.
 - Inventory and runtime loading share one scoped discovery path. Enabled project modules override enabled global modules with the same manifest name, while both rows remain visible in settings. Disabling a project override reveals an enabled global module.
 - Use `./scripts/build_extensions.sh` to compile and deploy them.

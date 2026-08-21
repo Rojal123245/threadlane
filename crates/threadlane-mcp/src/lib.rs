@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
@@ -330,24 +331,63 @@ impl McpManager {
             }
         }
 
-        let mut records = Vec::new();
-        let mut tool_defs = Vec::new();
+        let previous = self
+            .servers
+            .lock()
+            .await
+            .iter()
+            .cloned()
+            .map(|record| (record.config.id.clone(), record))
+            .collect::<HashMap<_, _>>();
+        let live_ids = self
+            .sessions
+            .lock()
+            .await
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let records = join_all(all_configs.into_iter().map(|config| async {
+            let tools = if !config.enabled {
+                Vec::new()
+            } else if live_ids.contains(&config.id)
+                && previous
+                    .get(&config.id)
+                    .is_some_and(|record| record.config == config)
+            {
+                previous[&config.id].tools.clone()
+            } else {
+                self.connect_server(&config).await
+            };
+            McpServerRecord { config, tools }
+        }))
+        .await;
 
-        for config in all_configs {
-            if !config.enabled {
-                records.push(McpServerRecord {
-                    config,
-                    tools: Vec::new(),
-                });
-                continue;
-            }
+        let retained_ids = records
+            .iter()
+            .filter(|record| record.config.enabled)
+            .map(|record| record.config.id.clone())
+            .collect::<BTreeSet<_>>();
+        let retired = {
+            let mut sessions = self.sessions.lock().await;
+            let stale_ids = sessions
+                .keys()
+                .filter(|id| !retained_ids.contains(*id))
+                .cloned()
+                .collect::<Vec<_>>();
+            stale_ids
+                .into_iter()
+                .filter_map(|id| sessions.remove(&id))
+                .collect::<Vec<_>>()
+        };
+        join_all(retired.into_iter().map(|session| async move {
+            session.lock().await.kill().await;
+        }))
+        .await;
 
-            let tools = self.connect_server(&config).await;
-            for t in &tools {
-                tool_defs.push(t.definition.clone());
-            }
-            records.push(McpServerRecord { config, tools });
-        }
+        let tool_defs = records
+            .iter()
+            .flat_map(|record| record.tools.iter().map(|tool| tool.definition.clone()))
+            .collect();
 
         let mut guard = self.servers.lock().await;
         *guard = records.clone();
@@ -363,8 +403,7 @@ impl McpManager {
             return Vec::new();
         }
 
-        // A previous session may be stale after a config change, so discovery
-        // always starts a fresh one and retires the old process.
+        // This path is reached only for a new or changed configuration.
         let previous = self.sessions.lock().await.remove(&config.id);
         if let Some(previous) = previous {
             previous.lock().await.kill().await;
