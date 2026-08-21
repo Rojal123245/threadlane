@@ -158,6 +158,11 @@ enum PanelEvent {
         sha: String,
         files: Vec<GitFile>,
     },
+    StashFilesLoaded {
+        project: PathBuf,
+        index: usize,
+        files: Vec<GitFile>,
+    },
 }
 
 pub struct RightPanelView {
@@ -192,6 +197,8 @@ pub struct RightPanelView {
     switch_target_branch: Option<String>,
     switch_stash_mode: bool,
     stash_expanded: bool,
+    stash_files: Option<(usize, Vec<GitFile>)>,
+    loading_stash_index: Option<usize>,
     last_fetched_time: Option<std::time::Instant>,
     document_title: Option<String>,
     document_state: Entity<TextViewState>,
@@ -289,6 +296,8 @@ impl RightPanelView {
             switch_target_branch: None,
             switch_stash_mode: true,
             stash_expanded: false,
+            stash_files: None,
+            loading_stash_index: None,
             last_fetched_time: None,
             document_title: None,
             document_state,
@@ -316,6 +325,9 @@ impl RightPanelView {
         self.review_files.clear();
         self.selected_files.clear();
         self.review_error = None;
+        self.stash_files = None;
+        self.loading_stash_index = None;
+        self.stash_expanded = false;
         self.document_title = None;
         self.document_state
             .update(cx, |state, cx| state.set_text("", cx));
@@ -548,6 +560,8 @@ impl RightPanelView {
                 }
                 self.review_files = files;
                 self.review_error = error;
+                self.stash_files = None;
+                self.loading_stash_index = None;
             }
             PanelEvent::MessageGenerated(result) => {
                 self.git_message_pending = false;
@@ -572,6 +586,8 @@ impl RightPanelView {
                             });
                         }
                         self.git_status = Some(status.clone());
+                        self.stash_files = None;
+                        self.loading_stash_index = None;
                         self.selected_files = status.files.iter().map(|f| f.path.clone()).collect();
                         self.review_files = status.files;
                         self.review_error = None;
@@ -592,9 +608,19 @@ impl RightPanelView {
             PanelEvent::CommitFilesLoaded { sha, files } => {
                 if self.loading_commit_sha.as_deref() == Some(&sha) {
                     self.loading_commit_sha = None;
+                    self.selected_commit_sha = Some(sha);
+                    self.selected_commit_files = files;
                 }
-                self.selected_commit_sha = Some(sha);
-                self.selected_commit_files = files;
+            }
+            PanelEvent::StashFilesLoaded {
+                project,
+                index,
+                files,
+            } if self.project.as_ref() == Some(&project) => {
+                if self.loading_stash_index == Some(index) {
+                    self.loading_stash_index = None;
+                    self.stash_files = Some((index, files));
+                }
             }
             _ => {}
         }
@@ -602,6 +628,24 @@ impl RightPanelView {
 
     pub(crate) fn refresh_review(&mut self, _cx: &mut Context<Self>) {
         self.refresh_surface(Surface::Review);
+    }
+
+    pub(crate) fn restore_current_stash(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self
+            .git_status
+            .as_ref()
+            .and_then(|status| status.current_stash.as_ref())
+            .map(|stash| stash.index)
+        else {
+            self.git_feedback = Some("No stash found for the current branch.".into());
+            cx.notify();
+            return;
+        };
+        self.run_git_action(GitAction::PopStash(Some(index)), window, cx);
     }
 
     fn generate_commit_message(&mut self, cx: &mut Context<Self>) {
@@ -2009,15 +2053,26 @@ impl RightPanelView {
             } else {
                 format!(" • {}", stash.relative_time)
             };
-            let file_count = stash.files.len();
-            let count_label = if file_count == 1 {
-                "1 file".to_string()
-            } else {
-                format!("{file_count} files")
-            };
             let idx = stash.index;
             let is_expanded = self.stash_expanded;
-            let files_clone = stash.files.clone();
+            let files_clone = self
+                .stash_files
+                .as_ref()
+                .filter(|(index, _)| *index == idx)
+                .map(|(_, files)| files.clone())
+                .unwrap_or_default();
+            let is_loading = self.loading_stash_index == Some(idx);
+            let count_label = if is_loading {
+                "Loading files…".to_string()
+            } else if self.stash_files.as_ref().is_some_and(|(index, _)| *index == idx) {
+                if files_clone.len() == 1 {
+                    "1 file".to_string()
+                } else {
+                    format!("{} files", files_clone.len())
+                }
+            } else {
+                "Stashed changes".to_string()
+            };
             let project = self.project.clone();
             let model = self.model.clone();
 
@@ -2041,8 +2096,28 @@ impl RightPanelView {
                         .justify_between()
                         .gap_2()
                         .cursor_pointer()
-                        .on_click(cx.listener(|this, _event, _window, cx| {
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
                             this.stash_expanded = !this.stash_expanded;
+                            if this.stash_expanded
+                                && this.loading_stash_index != Some(idx)
+                                && this
+                                    .stash_files
+                                    .as_ref()
+                                    .is_none_or(|(index, _)| *index != idx)
+                            {
+                                if let Some(project) = this.project.clone() {
+                                    this.loading_stash_index = Some(idx);
+                                    let tx = this.event_tx.clone();
+                                    std::thread::spawn(move || {
+                                        let files = threadlane_git::inspect_stash_files(&project, idx);
+                                        let _ = tx.send(PanelEvent::StashFilesLoaded {
+                                            project,
+                                            index: idx,
+                                            files,
+                                        });
+                                    });
+                                }
+                            }
                             cx.notify();
                         }))
                         .child(
@@ -2181,6 +2256,14 @@ impl RightPanelView {
                                         ),
                                 )
                         }))
+                        .when(is_loading, |container| {
+                            container.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("Loading stashed files…"),
+                            )
+                        })
                 }))
                 .child(
                     div()
@@ -2451,6 +2534,7 @@ impl RightPanelView {
                                 .on_click(cx.listener(move |this, _event, _window, cx| {
                                     if this.selected_commit_sha.as_deref() == Some(&click_sha) {
                                         this.selected_commit_sha = None;
+                                        this.loading_commit_sha = None;
                                         this.selected_commit_files.clear();
                                     } else {
                                         this.selected_commit_sha = Some(click_sha.clone());

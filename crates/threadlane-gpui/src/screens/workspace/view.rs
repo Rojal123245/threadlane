@@ -432,7 +432,7 @@ impl WorkspaceView {
             "git_stash_pop" => {
                 self.open_git_review(cx);
                 self.right_panel.update(cx, |panel, cx| {
-                    panel.run_git_action(crate::screens::right_panel::GitAction::PopStash(None), window, cx);
+                    panel.restore_current_stash(window, cx);
                 });
             }
             "git_pull" => {
