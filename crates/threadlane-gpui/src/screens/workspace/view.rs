@@ -96,7 +96,7 @@ pub struct WorkspaceView {
     chat_list: Entity<ChatListView>,
     settings: Entity<SettingsView>,
     right_panel: Entity<RightPanelView>,
-    fallback_terminal: Entity<TerminalView>,
+    fallback_terminal: Option<Entity<TerminalView>>,
     terminal_groups: HashMap<PathBuf, TerminalGroup>,
     sidebar_collapsed: bool,
     right_panel_visible: bool,
@@ -152,8 +152,6 @@ impl WorkspaceView {
         let chat_list = cx.new(|cx| ChatListView::new(model.clone(), window, cx));
         let settings = cx.new(|cx| SettingsView::new(model.clone(), window, cx));
         let right_panel = cx.new(|cx| RightPanelView::new(model.clone(), window, cx));
-        let terminal_project = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let fallback_terminal = cx.new(|cx| TerminalView::new(terminal_project, cx));
         let sidebar_resizable_state = cx.new(|_cx| ResizableState::default());
         let right_panel_resizable_state = cx.new(|_cx| ResizableState::default());
         let bottom_panel_resizable_state = cx.new(|_cx| ResizableState::default());
@@ -226,7 +224,7 @@ impl WorkspaceView {
                 chat_list,
                 settings,
                 right_panel,
-                fallback_terminal,
+                fallback_terminal: None,
                 terminal_groups: HashMap::new(),
                 sidebar_collapsed: false,
                 right_panel_visible: false,
@@ -299,6 +297,15 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    fn fallback_terminal(&mut self, cx: &mut Context<Self>) -> Entity<TerminalView> {
+        self.fallback_terminal
+            .get_or_insert_with(|| {
+                let project = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                cx.new(|cx| TerminalView::new(project, cx))
+            })
+            .clone()
+    }
+
     fn select_terminal_tab(&mut self, project: &PathBuf, tab: usize, cx: &mut Context<Self>) {
         if let Some(group) = self.terminal_groups.get_mut(project) {
             group.active_tab = tab.min(group.tabs.len().saturating_sub(1));
@@ -313,7 +320,11 @@ impl WorkspaceView {
             }
             if group.tabs.len() > 1 {
                 group.tabs.remove(tab);
-                group.active_tab = group.active_tab.min(group.tabs.len() - 1);
+                if tab < group.active_tab {
+                    group.active_tab -= 1;
+                } else if tab == group.active_tab {
+                    group.active_tab = group.active_tab.min(group.tabs.len() - 1);
+                }
             } else {
                 group.tabs = vec![cx.new(|cx| TerminalView::new(project.clone(), cx))];
                 group.active_tab = 0;
@@ -958,7 +969,7 @@ impl WorkspaceView {
                                         .and_then(|project| this.terminal_groups.get(project))
                                         .and_then(|group| group.tabs.get(group.active_tab))
                                         .cloned()
-                                        .unwrap_or_else(|| this.fallback_terminal.clone());
+                                        .unwrap_or_else(|| this.fallback_terminal(cx));
                                     let focus = terminal.read(cx).focus_handle(cx);
                                     focus.focus(window, cx);
                                 }
@@ -1011,7 +1022,7 @@ impl WorkspaceView {
                 .and_then(|project| self.terminal_groups.get(project))
                 .and_then(|group| group.tabs.get(group.active_tab))
                 .cloned()
-                .unwrap_or_else(|| self.fallback_terminal.clone());
+                .unwrap_or_else(|| self.fallback_terminal(cx));
             let focus = terminal.read(cx).focus_handle(cx);
             focus.focus(window, cx);
         }
@@ -1076,7 +1087,8 @@ impl Render for WorkspaceView {
                 group.tabs[group.active_tab].clone(),
             )
         } else {
-            (vec![self.fallback_terminal.clone()], 0, self.fallback_terminal.clone())
+            let fallback = self.fallback_terminal(cx);
+            (vec![fallback.clone()], 0, fallback)
         };
         let theme = cx.theme().colors;
         let sidebar_tooltip = if self.sidebar_collapsed {
@@ -1233,20 +1245,18 @@ impl Render for WorkspaceView {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .child(
+                    .children(new_project.clone().map(|project| {
                         Button::new("terminal-new-tab")
                             .icon(IconName::Plus)
                             .tooltip("New terminal tab")
                             .ghost()
                             .xsmall()
                             .on_click(move |_event, _window, cx| {
-                                if let Some(project) = &new_project {
-                                    new_view.update(cx, |this, cx| {
-                                        this.add_terminal_tab(project.clone(), cx)
-                                    });
-                                }
-                            }),
-                    )
+                                new_view.update(cx, |this, cx| {
+                                    this.add_terminal_tab(project.clone(), cx)
+                                });
+                            })
+                    }))
                     .child(
                         Button::new("terminal-clear-btn")
                             .icon(IconName::Undo2)
