@@ -48,6 +48,29 @@
         "warning.background": "#b8770c",
         "danger.background": "#cc3535",
         "info.background": "#2569d6"
+      },
+      "highlight": {
+        "editor.background": "#f9f9fa",
+        "editor.foreground": "#141517",
+        "editor.active_line.background": "#f0f1f3",
+        "editor.line_number": "#969aa5",
+        "editor.active_line_number": "#4f5561",
+        "editor.invisible": "#c9cbd1",
+        "syntax": {
+          "attribute": { "color": "#9a6208" },
+          "boolean": { "color": "#991b9f" },
+          "comment": { "color": "#686c77", "font_style": "italic" },
+          "constant": { "color": "#2265d4" },
+          "constructor": { "color": "#0c778f" },
+          "function": { "color": "#1a8549" },
+          "keyword": { "color": "#991b9f" },
+          "number": { "color": "#2265d4" },
+          "property": { "color": "#0c778f" },
+          "string": { "color": "#1a8549" },
+          "tag": { "color": "#c92a2a" },
+          "type": { "color": "#9a6208" },
+          "variable": { "color": "#141517" }
+        }
       }
     },
     {
@@ -95,6 +118,29 @@
         "warning.background": "#c99320",
         "danger.background": "#db4d4d",
         "info.background": "#4d84db"
+      },
+      "highlight": {
+        "editor.background": "#0e0f12",
+        "editor.foreground": "#e4e5e7",
+        "editor.active_line.background": "#17191e",
+        "editor.line_number": "#626773",
+        "editor.active_line_number": "#aeb2bb",
+        "editor.invisible": "#353840",
+        "syntax": {
+          "attribute": { "color": "#dfa72c" },
+          "boolean": { "color": "#cf5cd9" },
+          "comment": { "color": "#828690", "font_style": "italic" },
+          "constant": { "color": "#5993eb" },
+          "constructor": { "color": "#2ec4b6" },
+          "function": { "color": "#34ab66" },
+          "keyword": { "color": "#cf5cd9" },
+          "number": { "color": "#5993eb" },
+          "property": { "color": "#2ec4b6" },
+          "string": { "color": "#34ab66" },
+          "tag": { "color": "#e55858" },
+          "type": { "color": "#dfa72c" },
+          "variable": { "color": "#e4e5e7" }
+        }
       }
     }
   ]
