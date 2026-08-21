@@ -116,6 +116,9 @@ pub enum GitAction {
     Merge(String),
     PopStash(Option<usize>),
     DropStash(Option<usize>),
+    DiscardFile(String),
+    IgnoreFile(String),
+    IgnoreExtension(String),
 }
 
 #[derive(Clone, Debug)]
@@ -692,6 +695,9 @@ impl RightPanelView {
             GitAction::Merge(b) => format!("Merging {b}…"),
             GitAction::PopStash(_) => "Restoring stashed changes…".to_string(),
             GitAction::DropStash(_) => "Discarding stash…".to_string(),
+            GitAction::DiscardFile(p) => format!("Discarding changes in {p}…"),
+            GitAction::IgnoreFile(p) => format!("Adding {p} to .gitignore…"),
+            GitAction::IgnoreExtension(ext) => format!("Ignoring *.{ext} files…"),
         };
         self.git_feedback = Some(feedback.clone());
         window.push_notification(Notification::info(feedback), cx);
@@ -746,6 +752,15 @@ impl RightPanelView {
                     }
                     GitAction::DropStash(idx) => {
                         threadlane_git::drop_stash(&work_dir, *idx).map_err(|e| e.to_string())?;
+                    }
+                    GitAction::DiscardFile(path) => {
+                        threadlane_git::discard_file_changes(&work_dir, path).map_err(|e| e.to_string())?;
+                    }
+                    GitAction::IgnoreFile(path) => {
+                        threadlane_git::ignore_file(&work_dir, path).map_err(|e| e.to_string())?;
+                    }
+                    GitAction::IgnoreExtension(ext) => {
+                        threadlane_git::ignore_extension(&work_dir, ext).map_err(|e| e.to_string())?;
                     }
                 }
                 threadlane_git::inspect(&work_dir).map_err(|e| e.to_string())
@@ -1518,6 +1533,7 @@ impl RightPanelView {
                 )
         });
 
+        let panel_entity = cx.entity().clone();
         let file_list_content = if self.review_files.is_empty() {
             div()
                 .flex_1()
@@ -1596,33 +1612,45 @@ impl RightPanelView {
                                 .items_center()
                                 .gap_2()
                                 .cursor_pointer()
-                                .child(IconName::File)
+                                .child(
+                                    div()
+                                        .size(px(14.0))
+                                        .text_color(theme.muted_foreground)
+                                        .child(IconName::File),
+                                )
                                 .child(
                                     div()
                                         .flex_1()
-                                        .min_w_0()
                                         .truncate()
                                         .text_xs()
-                                        .child(file.path),
+                                        .text_color(theme.foreground)
+                                        .child(path.clone()),
                                 )
+                                .when(file.additions > 0, |row| {
+                                    row.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme.success)
+                                            .child(format!("+{}", file.additions)),
+                                    )
+                                })
+                                .when(file.deletions > 0, |row| {
+                                    row.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme.danger)
+                                            .child(format!("-{}", file.deletions)),
+                                    )
+                                })
                                 .child(
                                     div()
+                                        .size(px(16.0))
+                                        .rounded_sm()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
                                         .text_xs()
-                                        .text_color(theme.success)
-                                        .child(format!("+{}", file.additions)),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.danger)
-                                        .child(format!("-{}", file.deletions)),
-                                )
-                                .child(
-                                    div()
-                                        .w(px(16.0))
-                                        .text_center()
-                                        .text_xs()
-                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .font_weight(FontWeight::BOLD)
                                         .text_color(status_color)
                                         .child(status),
                                 )
@@ -1655,11 +1683,72 @@ impl RightPanelView {
                             let absolute_path = absolute_path.clone();
                             let project = self.project.clone();
                             let model = self.model.clone();
+                            let panel = panel_entity.clone();
+                            let ext = std::path::Path::new(&path)
+                                .extension()
+                                .and_then(|e| e.to_str())
+                                .map(|e| e.to_string());
                             move |menu, _window, _cx| {
                                 let diff_path = path.clone();
+                                let discard_path = path.clone();
+                                let ignore_path = path.clone();
+                                let rel_path_1 = path.clone();
+                                let rel_path_2 = path.clone();
                                 let project_ref = project.clone();
                                 let model_ref = model.clone();
-                                let mut menu = menu.item(
+                                let panel_discard = panel.clone();
+                                let panel_ignore = panel.clone();
+                                let panel_ignore_ext = panel.clone();
+
+                                let mut menu = menu
+                                    .item(
+                                        PopupMenuItem::new("Discard Changes...").on_click(
+                                            move |_event, window, cx| {
+                                                let p = discard_path.clone();
+                                                panel_discard.update(cx, |this, cx| {
+                                                    this.run_git_action(
+                                                        GitAction::DiscardFile(p),
+                                                        window,
+                                                        cx,
+                                                    );
+                                                });
+                                            },
+                                        ),
+                                    )
+                                    .item(
+                                        PopupMenuItem::new("Ignore File (Add to .gitignore)")
+                                            .on_click(move |_event, window, cx| {
+                                                let p = ignore_path.clone();
+                                                panel_ignore.update(cx, |this, cx| {
+                                                    this.run_git_action(
+                                                        GitAction::IgnoreFile(p),
+                                                        window,
+                                                        cx,
+                                                    );
+                                                });
+                                            }),
+                                    );
+
+                                if let Some(ext_str) = ext.clone() {
+                                    let ext_action = ext_str.clone();
+                                    menu = menu.item(
+                                        PopupMenuItem::new(format!(
+                                            "Ignore All .{ext_str} Files (Add to .gitignore)"
+                                        ))
+                                        .on_click(move |_event, window, cx| {
+                                            let e = ext_action.clone();
+                                            panel_ignore_ext.update(cx, |this, cx| {
+                                                this.run_git_action(
+                                                    GitAction::IgnoreExtension(e),
+                                                    window,
+                                                    cx,
+                                                );
+                                            });
+                                        }),
+                                    );
+                                }
+
+                                menu = menu.separator().item(
                                     PopupMenuItem::new("Open Diff in Editor Tab").on_click(
                                         move |_event, _window, cx| {
                                             let Some(proj) = project_ref.clone() else {
@@ -1693,21 +1782,75 @@ impl RightPanelView {
                                         },
                                     ),
                                 );
-                                if let Some(absolute_path) = absolute_path.clone() {
-                                    let text = absolute_path;
-                                    menu = menu.separator().item(
-                                        PopupMenuItem::new("Copy Absolute Path").on_click(
+
+                                menu = menu
+                                    .separator()
+                                    .item(
+                                        PopupMenuItem::new("Copy File Path").on_click(
                                             move |_event, window, cx| {
                                                 cx.write_to_clipboard(ClipboardItem::new_string(
-                                                    text.clone(),
+                                                    rel_path_1.clone(),
                                                 ));
                                                 window.push_notification(
-                                                    Notification::info("Copied absolute path"),
+                                                    Notification::info("Copied file path"),
+                                                    cx,
+                                                );
+                                            },
+                                        ),
+                                    )
+                                    .item(
+                                        PopupMenuItem::new("Copy Relative File Path").on_click(
+                                            move |_event, window, cx| {
+                                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                                    rel_path_2.clone(),
+                                                ));
+                                                window.push_notification(
+                                                    Notification::info(
+                                                        "Copied relative file path",
+                                                    ),
                                                     cx,
                                                 );
                                             },
                                         ),
                                     );
+
+                                if let Some(absolute_path) = absolute_path.clone() {
+                                    let abs_text = absolute_path.clone();
+                                    let reveal_text = absolute_path.clone();
+                                    let reveal_label = if cfg!(target_os = "macos") {
+                                        "Reveal in Finder"
+                                    } else if cfg!(target_os = "windows") {
+                                        "Reveal in File Explorer"
+                                    } else {
+                                        "Reveal in File Manager"
+                                    };
+
+                                    menu = menu
+                                        .item(
+                                            PopupMenuItem::new("Copy Absolute File Path").on_click(
+                                                move |_event, window, cx| {
+                                                    cx.write_to_clipboard(
+                                                        ClipboardItem::new_string(abs_text.clone()),
+                                                    );
+                                                    window.push_notification(
+                                                        Notification::info(
+                                                            "Copied absolute file path",
+                                                        ),
+                                                        cx,
+                                                    );
+                                                },
+                                            ),
+                                        )
+                                        .separator()
+                                        .item(
+                                            PopupMenuItem::new(reveal_label).on_click(
+                                                move |_event, _window, _cx| {
+                                                    threadlane_git::reveal_in_file_manager(
+                                                        std::path::Path::new(&reveal_text),
+                                                    );
+                                                },
+                                            ),
+                                        );
                                 }
                                 menu
                             }
