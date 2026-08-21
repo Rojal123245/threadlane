@@ -1,13 +1,15 @@
+use gpui::prelude::FluentBuilder;
 use gpui::InteractiveElement;
 use gpui::*;
 
-use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
+use gpui_component::dialog::DialogButtonProps;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::theme::ActiveTheme;
-use gpui_component::{IconName, Sizable};
+use gpui_component::{Icon, IconName, Sizable, WindowExt};
 
 use crate::app::{actions::AppAction, controller};
 use crate::state::{AppState, SessionHealth, SessionInfo, TrajectoryEntry};
@@ -69,18 +71,8 @@ fn build_diagnostic_export(
     let runtime_status = runtime.map(|runtime| format!("{:?}", runtime.status()));
     let log = if include_log {
         let canonical = read_jsonl_for_export(session_file)?;
-        let legacy_path = session_file.with_extension("harness.jsonl");
-        let legacy_harness_records = if legacy_path.exists() {
-            read_jsonl_for_export(&legacy_path)?
-        } else {
-            Vec::new()
-        };
         Some(serde_json::json!({
             "canonical_records": canonical,
-            "legacy_harness_sidecar": {
-                "path": legacy_path.display().to_string(),
-                "records": legacy_harness_records,
-            },
         }))
     } else {
         None
@@ -242,19 +234,43 @@ impl SidebarView {
     fn render_history_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let model = self.model.clone();
         let theme = cx.theme().colors;
+        let session_count = self
+            .model
+            .read(cx)
+            .projects
+            .iter()
+            .map(|project| project.sessions.len())
+            .sum::<usize>();
+
         div()
             .flex()
             .items_center()
             .justify_between()
             .px_3()
-            .pt_2()
-            .pb_2()
+            .pt_3()
+            .pb_1()
             .child(
                 div()
-                    .text_sm()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.muted_foreground)
-                    .child("Today"),
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.muted_foreground)
+                            .child("RECENT"),
+                    )
+                    .child(
+                        div()
+                            .px_1p5()
+                            .py_0p5()
+                            .rounded_full()
+                            .bg(theme.secondary)
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(session_count.to_string()),
+                    ),
             )
             .child(
                 Button::new("attach-project-btn")
@@ -288,7 +304,9 @@ impl SidebarView {
     ) -> impl IntoElement {
         let theme = cx.theme().colors;
         let is_generating = is_active && self.model.read(cx).is_generating;
-        let status_indicator = if is_generating {
+        let is_working = session.health == SessionHealth::Working || is_generating;
+
+        let status_indicator = if is_working {
             Some(
                 div()
                     .flex()
@@ -296,7 +314,7 @@ impl SidebarView {
                     .items_center()
                     .gap_1()
                     .px_1p5()
-                    .py_0p5()
+                    .py(px(0.5))
                     .rounded_full()
                     .bg(theme.primary.opacity(0.15))
                     .child(gpui_component::spinner::Spinner::new().xsmall())
@@ -311,17 +329,6 @@ impl SidebarView {
             )
         } else {
             match session.health {
-                SessionHealth::Working => Some(
-                    div()
-                        .w(px(20.0))
-                        .h(px(20.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_color(theme.primary)
-                        .child(gpui_component::spinner::Spinner::new().xsmall())
-                        .into_any_element(),
-                ),
                 SessionHealth::Warning => Some(
                     Tag::new()
                         .child("!")
@@ -329,20 +336,20 @@ impl SidebarView {
                         .small()
                         .into_any_element(),
                 ),
-                SessionHealth::Healthy => None,
+                SessionHealth::Working | SessionHealth::Healthy => None,
             }
         };
 
         let bg_color = if is_active {
-            theme.secondary_hover
+            theme.sidebar_accent
         } else {
-            theme.title_bar
+            gpui::transparent_black()
         };
 
         let border_color = if is_active {
-            theme.secondary_hover
+            theme.border.opacity(0.4)
         } else {
-            theme.title_bar
+            gpui::transparent_black()
         };
 
         let title_color = if is_active {
@@ -364,39 +371,209 @@ impl SidebarView {
         let quick_settle_work_dir = session.work_dir.clone();
         let quick_settle_session_id = session.id.clone();
         let time_ago = format_time_ago(session.updated_at);
-        let status = if session.health == SessionHealth::Working {
-            format!("Working for {}", time_ago.trim_end_matches(" ago"))
-        } else {
-            time_ago
-        };
         let project = session
             .work_dir
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| "Project".to_string());
 
-        let tooltip_text = format!(
-            "{}\n{}\nUpdated {}",
-            session.title,
-            session.work_dir.display(),
-            status,
+        let pr_info = self
+            .model
+            .read(cx)
+            .git_statuses
+            .get(&session.work_dir)
+            .and_then(|g| g.pr.as_ref())
+            .cloned();
+
+        let _tooltip_text = if let Some(pr) = &pr_info {
+            format!(
+                "{}\n{}\nUpdated {}\nPR #{}: {} (CI: {}/{} passed, {} comments)",
+                session.title,
+                session.work_dir.display(),
+                time_ago,
+                pr.number,
+                pr.title,
+                pr.passing_checks,
+                pr.total_checks,
+                pr.comments_count,
+            )
+        } else {
+            format!(
+                "{}\n{}\nUpdated {}",
+                session.title,
+                session.work_dir.display(),
+                time_ago,
+            )
+        };
+
+        let pr_meta = pr_info.map(|pr| {
+            let state_upper = pr.state.to_uppercase();
+            let is_merged = state_upper == "MERGED";
+            let is_draft = pr.is_draft || state_upper == "DRAFT";
+            let is_closed = state_upper == "CLOSED";
+
+            let (pr_bg, pr_fg, pr_label) = if is_merged {
+                (
+                    theme.accent.opacity(0.15),
+                    theme.accent,
+                    format!("#{} merged", pr.number),
+                )
+            } else if is_draft {
+                (
+                    theme.secondary,
+                    theme.muted_foreground,
+                    format!("#{} draft", pr.number),
+                )
+            } else if is_closed {
+                (
+                    theme.danger.opacity(0.12),
+                    theme.danger,
+                    format!("#{} closed", pr.number),
+                )
+            } else {
+                (
+                    theme.primary.opacity(0.12),
+                    theme.primary,
+                    format!("#{}", pr.number),
+                )
+            };
+
+            let ci_chip = if pr.failing_checks > 0 {
+                Some(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(px(2.0))
+                        .px_1()
+                        .py(px(0.5))
+                        .rounded(px(3.0))
+                        .bg(theme.danger.opacity(0.12))
+                        .text_color(theme.danger)
+                        .child(IconName::Close)
+                        .child(format!("{} fail", pr.failing_checks)),
+                )
+            } else if pr.pending_checks > 0 {
+                Some(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(px(2.0))
+                        .px_1()
+                        .py(px(0.5))
+                        .rounded(px(3.0))
+                        .bg(theme.warning.opacity(0.12))
+                        .text_color(theme.warning)
+                        .child(IconName::Asterisk)
+                        .child(format!("{}/{}", pr.passing_checks, pr.total_checks)),
+                )
+            } else if pr.total_checks > 0 {
+                Some(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(px(2.0))
+                        .px_1()
+                        .py(px(0.5))
+                        .rounded(px(3.0))
+                        .bg(theme.success.opacity(0.12))
+                        .text_color(theme.success)
+                        .child(IconName::CircleCheck)
+                        .child(format!("{}/{}", pr.passing_checks, pr.total_checks)),
+                )
+            } else {
+                None
+            };
+
+            let comments_chip = (pr.comments_count > 0).then(|| {
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(2.0))
+                    .px_1()
+                    .py(px(0.5))
+                    .rounded(px(3.0))
+                    .bg(theme.secondary)
+                    .text_color(theme.muted_foreground)
+                    .child(
+                        svg()
+                            .path("icons/git/comments.svg")
+                            .size(px(11.0))
+                            .text_color(theme.muted_foreground),
+                    )
+                    .child(format!("{}", pr.comments_count))
+            });
+
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap_1()
+                .child(
+                    div()
+                        .flex_none()
+                        .px_1p5()
+                        .py(px(0.5))
+                        .rounded(px(3.0))
+                        .bg(pr_bg)
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(pr_fg)
+                        .child(pr_label),
+                )
+                .children(ci_chip)
+                .children(comments_chip)
+        });
+
+        let mut row2_items = Vec::new();
+        row2_items.push(
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap_1()
+                .text_color(theme.muted_foreground)
+                .child(
+                    Icon::new(IconName::Folder)
+                        .xsmall()
+                        .text_color(theme.muted_foreground.opacity(0.6)),
+                )
+                .child(div().max_w(px(110.0)).truncate().child(project))
+                .into_any_element(),
         );
+
+        if let Some(pr_chips) = pr_meta {
+            row2_items.push(
+                div()
+                    .flex_none()
+                    .text_color(theme.muted_foreground.opacity(0.4))
+                    .child("•")
+                    .into_any_element(),
+            );
+            row2_items.push(pr_chips.into_any_element());
+        }
 
         div()
             .id(SharedString::from(format!("session-card-{}", session.id)))
             .group("session-card")
+            .relative()
             .flex()
-            .flex_col()
-            .gap_1()
+            .items_stretch()
             .mx_2()
-            .my_0p5()
-            .px_3()
-            .py_2()
-            .rounded_lg()
+            .my(px(1.5))
+            .rounded_md()
             .bg(bg_color)
             .border_1()
             .border_color(border_color)
-            .hover(|style| style.bg(theme.list_hover))
+            .hover(|style| {
+                style.bg(if is_active {
+                    theme.sidebar_accent
+                } else {
+                    theme.list_hover
+                })
+            })
             .cursor_pointer()
             .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                 let work_dir = work_dir.clone();
@@ -412,81 +589,101 @@ impl SidebarView {
                     cx.notify();
                 });
             })
+            .when(is_active, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .left(px(0.0))
+                        .top(px(4.0))
+                        .bottom(px(4.0))
+                        .w(px(2.5))
+                        .rounded_r_full()
+                        .bg(theme.primary),
+                )
+            })
             .child(
                 div()
+                    .flex_1()
+                    .min_w_0()
                     .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(title_color)
-                            .truncate()
-                            .child(session.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .gap_1()
-                            .children(status_indicator)
-                            .child(
-                                Button::new(SharedString::from(format!(
-                                    "settle-session-{}",
-                                    session.id
-                                )))
-                                .icon(IconName::Check)
-                                .ghost()
-                                .xsmall()
-                                .compact()
-                                .opacity(0.0)
-                                .group_hover("session-card", |style| style.opacity(1.0))
-                                .tooltip(tooltip_text)
-                                .on_click(
-                                    move |_event, _window, cx| {
-                                        quick_settle_model.update(cx, |state, cx| {
-                                            controller::dispatch(
-                                                state,
-                                                AppAction::SettleSession {
-                                                    work_dir: quick_settle_work_dir.clone(),
-                                                    session_id: quick_settle_session_id.clone(),
-                                                },
-                                            );
-                                            cx.notify();
-                                        });
-                                    },
-                                ),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
+                    .flex_col()
+                    .gap(px(3.0))
+                    .px_2p5()
+                    .py_2()
                     .child(
                         div()
                             .flex()
                             .items_center()
+                            .justify_between()
                             .gap_2()
-                            .flex_1()
-                            .min_w_0()
-                            .child(IconName::Folder)
-                            .child(div().truncate().child(project)),
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_sm()
+                                    .font_weight(if is_active {
+                                        FontWeight::SEMIBOLD
+                                    } else {
+                                        FontWeight::MEDIUM
+                                    })
+                                    .text_color(title_color)
+                                    .truncate()
+                                    .child(session.title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .children(status_indicator)
+                                    .when(!is_working, |this| {
+                                        this.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .child(time_ago),
+                                        )
+                                    })
+                                    .child(
+                                        Button::new(SharedString::from(format!(
+                                            "settle-session-{}",
+                                            session.id
+                                        )))
+                                        .icon(IconName::Check)
+                                        .ghost()
+                                        .xsmall()
+                                        .compact()
+                                        .opacity(0.0)
+                                        .group_hover("session-card", |style| style.opacity(1.0))
+                                        .tooltip("Archive session")
+                                        .on_click(
+                                            move |_event, _window, cx| {
+                                                quick_settle_model.update(cx, |state, cx| {
+                                                    controller::dispatch(
+                                                        state,
+                                                        AppAction::SettleSession {
+                                                            work_dir: quick_settle_work_dir.clone(),
+                                                            session_id: quick_settle_session_id
+                                                                .clone(),
+                                                        },
+                                                    );
+                                                    cx.notify();
+                                                });
+                                            },
+                                        ),
+                                    ),
+                            ),
                     )
                     .child(
                         div()
-                            .flex_none()
-                            .text_color(theme.muted_foreground)
-                            .child(status),
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .text_xs()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .children(row2_items),
                     ),
             )
             .context_menu(move |menu, _window, _cx| {
@@ -651,64 +848,81 @@ impl SidebarView {
                 ))
                 .separator()
                 .item(
-                    PopupMenuItem::new("Archive Session").on_click(move |_event, _window, cx| {
+                    PopupMenuItem::new("Archive Session").on_click(move |_event, window, cx| {
                         let model = settle_model.clone();
                         let work_dir = settle_work_dir.clone();
                         let session_id = settle_session_id.clone();
-                        cx.spawn(async move |cx| {
-                            let result = rfd::AsyncMessageDialog::new()
-                                .set_title("Archive session?")
-                                .set_description(format!(
-                                    "This removes session {session_id} from the active list."
-                                ))
-                                .set_buttons(rfd::MessageButtons::YesNo)
-                                .show()
-                                .await;
-                            if matches!(result, rfd::MessageDialogResult::Yes) {
-                                let _ = model.update(cx, |state, cx| {
-                                    controller::dispatch(
-                                        state,
-                                        AppAction::SettleSession {
-                                            work_dir,
-                                            session_id,
-                                        },
-                                    );
-                                    cx.notify();
-                                });
+                        window.open_alert_dialog(cx, {
+                            let model = model.clone();
+                            let work_dir = work_dir.clone();
+                            let session_id = session_id.clone();
+                            move |alert, _window, _cx| {
+                                let model = model.clone();
+                                let work_dir = work_dir.clone();
+                                let session_id = session_id.clone();
+                                alert
+                                    .title("Archive session?")
+                                    .description(format!(
+                                        "This removes session {session_id} from the active list."
+                                    ))
+                                    .show_cancel(true)
+                                    .on_ok(move |_event, _window, cx| {
+                                        model.update(cx, |state, cx| {
+                                            controller::dispatch(
+                                                state,
+                                                AppAction::SettleSession {
+                                                    work_dir: work_dir.clone(),
+                                                    session_id: session_id.clone(),
+                                                },
+                                            );
+                                            cx.notify();
+                                        });
+                                        true
+                                    })
                             }
-                        })
-                        .detach();
+                        });
                     }),
                 )
                 .separator()
                 .item(
-                    PopupMenuItem::new("Remove Session").on_click(move |_event, _window, cx| {
+                    PopupMenuItem::new("Remove Session").on_click(move |_event, window, cx| {
                         let model = remove_model.clone();
                         let work_dir = remove_work_dir.clone();
                         let session_id = remove_session_id.clone();
-                        cx.spawn(async move |cx| {
-                            let result = rfd::AsyncMessageDialog::new()
-                                .set_title("Remove session?")
-                                .set_description(format!(
-                                    "This permanently removes session {session_id}."
-                                ))
-                                .set_buttons(rfd::MessageButtons::YesNo)
-                                .show()
-                                .await;
-                            if matches!(result, rfd::MessageDialogResult::Yes) {
-                                let _ = model.update(cx, |state, cx| {
-                                    controller::dispatch(
-                                        state,
-                                        AppAction::RemoveSession {
-                                            work_dir,
-                                            session_id,
-                                        },
-                                    );
-                                    cx.notify();
-                                });
+                        window.open_alert_dialog(cx, {
+                            let model = model.clone();
+                            let work_dir = work_dir.clone();
+                            let session_id = session_id.clone();
+                            move |alert, _window, _cx| {
+                                let model = model.clone();
+                                let work_dir = work_dir.clone();
+                                let session_id = session_id.clone();
+                                alert
+                                    .title("Remove session?")
+                                    .description(format!(
+                                        "This permanently removes session {session_id}."
+                                    ))
+                                    .button_props(
+                                        DialogButtonProps::default()
+                                            .ok_text("Remove")
+                                            .ok_variant(ButtonVariant::Danger)
+                                            .show_cancel(true),
+                                    )
+                                    .on_ok(move |_event, _window, cx| {
+                                        model.update(cx, |state, cx| {
+                                            controller::dispatch(
+                                                state,
+                                                AppAction::RemoveSession {
+                                                    work_dir: work_dir.clone(),
+                                                    session_id: session_id.clone(),
+                                                },
+                                            );
+                                            cx.notify();
+                                        });
+                                        true
+                                    })
                             }
-                        })
-                        .detach();
+                        });
                     }),
                 )
             })
@@ -720,9 +934,19 @@ impl SidebarView {
 
         div().flex_none().px_3().py_2().child(
             Button::new("sidebar-settings")
-                .icon(IconName::Settings)
-                .tooltip("Settings")
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .justify_start()
+                        .gap_2()
+                        .child(IconName::Settings)
+                        .child("Settings"),
+                )
                 .ghost()
+                .w_full()
+                .justify_start()
                 .text_color(theme.muted_foreground)
                 .on_click(move |_event, _window, cx| {
                     model.update(cx, |state, cx| {
@@ -783,19 +1007,28 @@ impl SidebarView {
             if sessions.is_empty() {
                 continue;
             }
-            if group != DateGroup::Today {
-                children.push(
-                    div()
-                        .px_3()
-                        .pt_3()
-                        .pb_1()
-                        .text_sm()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.muted_foreground)
-                        .child(group.label())
-                        .into_any_element(),
-                );
-            }
+            children.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .pt(if group == DateGroup::Today {
+                        px(4.0)
+                    } else {
+                        px(12.0)
+                    })
+                    .pb_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.muted_foreground.opacity(0.8))
+                            .child(group.label()),
+                    )
+                    .child(div().h(px(1.0)).flex_1().bg(theme.border.opacity(0.35)))
+                    .into_any_element(),
+            );
             for session in sessions {
                 let is_active = active_work_dir.as_ref() == Some(&session.work_dir)
                     && active_session_id.as_deref() == Some(session.id.as_str());

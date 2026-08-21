@@ -1,7 +1,9 @@
 use crate::antigravity::AntigravityClient;
-use crate::openai::{OpenAIClient, StreamEvent};
+use crate::openai::OpenAIClient;
+use threadlane_protocol::{DeferredResponse as RuntimeDeferredResponse, ProviderPort, RuntimeRequest, RuntimeStreamEvent as StreamEvent};
 use crate::opencode::OpenCodeGoClient;
 use crate::title_generator::{title_payload, TITLE_REQUEST_TIMEOUT};
+use crate::traits::ModelProvider;
 use futures_util::future::BoxFuture;
 use serde_json::Value;
 use std::sync::Arc;
@@ -25,6 +27,8 @@ pub fn is_quota_or_rate_limit(error: &str) -> bool {
         || error.contains("rate_limit")
         || error.contains("quota")
         || error.contains("too many requests")
+        || error.contains("resource_exhausted")
+        || error.contains("resource has been exhausted")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +39,7 @@ pub enum PayloadFormat {
 
 pub type LazyPayloadBuilder = Arc<dyn Fn(PayloadFormat) -> BoxFuture<'static, Value> + Send + Sync>;
 
+#[derive(Clone)]
 pub enum PayloadSource {
     Eager {
         chat_payload: Value,
@@ -97,20 +102,156 @@ impl From<(Value, Value)> for PayloadSource {
     }
 }
 
+/// Build a complete provider-native object for a runtime request. The runtime
+/// deliberately supplies transport-neutral message and tool arrays; the
+/// router owns their envelope so Codex never receives a bare JSON array.
+fn runtime_request_payload_source(request: &RuntimeRequest) -> PayloadSource {
+    let model = request.model.clone();
+    let messages = request.messages.clone();
+    let tools = request.tools.clone();
+    let reasoning_effort = request.reasoning_effort.clone();
+    PayloadSource::lazy(model.clone(), move |format| {
+        let model = model.clone();
+        let messages = messages.clone();
+        let tools = tools.clone();
+        let reasoning_effort = reasoning_effort.clone();
+        Box::pin(async move {
+            match format {
+                PayloadFormat::ChatCompletions => {
+                    let agent_messages: Vec<threadlane_runtime::AgentMessage> =
+                        serde_json::from_value(messages).unwrap_or_default();
+                    let chat_messages = threadlane_runtime::convert_to_llm(&agent_messages);
+                    let mut payload = serde_json::json!({
+                        "model": model,
+                        "messages": chat_messages,
+                        "tools": tools,
+                        "stream": true,
+                        "stream_options": { "include_usage": true },
+                    });
+                    if let Some(effort) = reasoning_effort {
+                        payload["reasoning_effort"] = effort.into();
+                    }
+                    payload
+                }
+                PayloadFormat::Codex => {
+                    let agent_messages: Vec<threadlane_runtime::AgentMessage> =
+                        serde_json::from_value(messages).unwrap_or_default();
+                    let codex_tools = tools
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|tool| {
+                            threadlane_runtime::types::AgentToolDefinition::from_provider_schema(tool).ok()
+                        })
+                        .map(|tool| tool.to_codex_responses_tool())
+                        .collect::<Vec<_>>();
+                    let (instructions, input) = threadlane_runtime::convert_to_codex_llm(&agent_messages);
+                    let mut payload = serde_json::json!({
+                        "model": model,
+                        "instructions": instructions,
+                        "input": input,
+                        "tools": codex_tools,
+                        "store": false,
+                        "stream": true,
+                    });
+                    if let Some(effort) = reasoning_effort {
+                        payload["reasoning"] = serde_json::json!({
+                            "effort": effort,
+                            "summary": "auto",
+                        });
+                    }
+                    payload
+                }
+            }
+        })
+    })
+}
+
 #[derive(Clone)]
 pub struct ProviderClient {
     openai: OpenAIClient,
+    openai_fallbacks: Vec<OpenAIClient>,
     antigravity: AntigravityClient,
     opencode: OpenCodeGoClient,
 }
 
+#[async_trait::async_trait]
+impl ProviderPort for ProviderClient {
+    async fn stream_request(&self, request: RuntimeRequest, events: mpsc::Sender<StreamEvent>) {
+        let payload = runtime_request_payload_source(&request);
+        self.stream_chat_completion(payload, request.prompt_cache_key, events).await;
+    }
+
+    async fn fetch_deferred(&self, model: &str, handle_id: &str) -> Result<RuntimeDeferredResponse, String> {
+        self.fetch_deferred(model, handle_id).await.map(|response| match response {
+            crate::traits::DeferredResponse::Pending => RuntimeDeferredResponse::Pending,
+            crate::traits::DeferredResponse::Ready { content } => RuntimeDeferredResponse::Ready { content },
+            crate::traits::DeferredResponse::Error { message } => RuntimeDeferredResponse::Error { message },
+        })
+    }
+
+    async fn cancel_deferred(&self, model: &str, handle_id: &str) -> Result<(), String> {
+        self.cancel_deferred(model, handle_id).await
+    }
+
+    fn provider_kind(&self, model: &str) -> &'static str {
+        self.provider_kind(model)
+    }
+}
+
 impl ProviderClient {
     pub fn new(api_key: impl Into<String>, account_id: Option<String>) -> Self {
+        let api_key = api_key.into();
+        let backups = threadlane_auth::openai_auth::get_backup_codex_accounts();
+        let openai_fallbacks: Vec<OpenAIClient> = backups
+            .into_iter()
+            .filter(|backup| backup.access_token != api_key)
+            .map(|backup| OpenAIClient::new(backup.access_token, backup.account_id))
+            .collect();
+
         Self {
-            openai: OpenAIClient::new(api_key.into(), account_id),
+            openai: OpenAIClient::new(api_key, account_id),
+            openai_fallbacks,
             antigravity: AntigravityClient::new(),
             opencode: OpenCodeGoClient::new(),
         }
+    }
+
+    pub fn with_fallback_account(
+        api_key: impl Into<String>,
+        account_id: Option<String>,
+        fallback_api_key: impl Into<String>,
+        fallback_account_id: Option<String>,
+    ) -> Self {
+        Self {
+            openai: OpenAIClient::new(api_key.into(), account_id),
+            openai_fallbacks: vec![OpenAIClient::new(
+                fallback_api_key.into(),
+                fallback_account_id,
+            )],
+            antigravity: AntigravityClient::new(),
+            opencode: OpenCodeGoClient::new(),
+        }
+    }
+
+    pub fn with_fallback_accounts(
+        api_key: impl Into<String>,
+        account_id: Option<String>,
+        fallbacks: Vec<(String, Option<String>)>,
+    ) -> Self {
+        Self {
+            openai: OpenAIClient::new(api_key.into(), account_id),
+            openai_fallbacks: fallbacks
+                .into_iter()
+                .map(|(key, acc)| OpenAIClient::new(key, acc))
+                .collect(),
+            antigravity: AntigravityClient::new(),
+            opencode: OpenCodeGoClient::new(),
+        }
+    }
+
+    pub fn openai_fallback(&self) -> Option<&OpenAIClient> {
+        self.openai_fallbacks.first()
     }
 
     #[cfg(test)]
@@ -144,16 +285,64 @@ impl ProviderClient {
     ) {
         let source = payload_source.into();
         let model = source.model().to_string();
-        let provider: Arc<dyn crate::traits::ModelProvider> = if is_antigravity_model(&model) {
-            Arc::new(self.antigravity.clone())
-        } else if is_opencode_model(&model) {
-            Arc::new(self.opencode.clone())
+        let span = tracing::info_span!("provider.stream", model = %model);
+        tracing::debug!(parent: &span, "routing stream request");
+        if is_antigravity_model(&model) {
+            tracing::debug!(provider = "antigravity", "selected provider");
+            let provider = Arc::new(self.antigravity.clone());
+            provider
+                .stream_chat_completion(source, prompt_cache_key, event_tx)
+                .await;
+            return;
+        }
+        if is_opencode_model(&model) {
+            tracing::debug!(provider = "opencode-go", "selected provider");
+            let provider = Arc::new(self.opencode.clone());
+            provider
+                .stream_chat_completion(source, prompt_cache_key, event_tx)
+                .await;
+            return;
+        }
+
+        if !self.openai_fallbacks.is_empty() {
+            tracing::debug!(
+                provider = "openai",
+                fallback_count = self.openai_fallbacks.len(),
+                "selected provider with fallbacks"
+            );
+            let mut clients = Vec::with_capacity(1 + self.openai_fallbacks.len());
+            clients.push(self.openai.clone());
+            clients.extend(self.openai_fallbacks.clone());
+
+            let tasks: Vec<
+                Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send>,
+            > = clients
+                .into_iter()
+                .map(|client| {
+                    let source = source.clone();
+                    let prompt_cache_key = prompt_cache_key.clone();
+                    let task: Box<
+                        dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send,
+                    > = Box::new(move |tx| {
+                        Box::pin(async move {
+                            let provider: Arc<dyn crate::traits::ModelProvider> = Arc::new(client);
+                            provider
+                                .stream_chat_completion(source, prompt_cache_key, tx)
+                                .await;
+                        })
+                    });
+                    task
+                })
+                .collect();
+
+            Self::execute_stream_fallback_chain(tasks, event_tx).await;
         } else {
-            Arc::new(self.openai.clone())
-        };
-        provider
-            .stream_chat_completion(source, prompt_cache_key, event_tx)
-            .await;
+            tracing::debug!(provider = "openai", "selected provider");
+            let provider: Arc<dyn crate::traits::ModelProvider> = Arc::new(self.openai.clone());
+            provider
+                .stream_chat_completion(source, prompt_cache_key, event_tx)
+                .await;
+        }
     }
 
     /// Returns true for provider errors where retrying the identical request on
@@ -162,52 +351,76 @@ impl ProviderClient {
         is_quota_or_rate_limit(error)
     }
 
-    /// Routes a completed provider stream through a one-shot fallback before
+    /// Routes a completed provider stream through a sequence of fallbacks before
     /// forwarding events to the caller. Fallback is permitted only if the
-    /// primary failed before emitting visible output, preventing duplication.
+    /// preceding provider failed before emitting visible output, preventing duplication.
     pub async fn stream_with_fallback<P, F, PrimaryFut, FallbackFut>(
         &self,
         primary: P,
         fallback: F,
         event_tx: mpsc::Sender<StreamEvent>,
     ) where
-        P: FnOnce(mpsc::Sender<StreamEvent>) -> PrimaryFut,
-        F: FnOnce(mpsc::Sender<StreamEvent>) -> FallbackFut,
-        PrimaryFut: std::future::Future<Output = ()>,
-        FallbackFut: std::future::Future<Output = ()>,
+        P: FnOnce(mpsc::Sender<StreamEvent>) -> PrimaryFut + Send + 'static,
+        F: FnOnce(mpsc::Sender<StreamEvent>) -> FallbackFut + Send + 'static,
+        PrimaryFut: std::future::Future<Output = ()> + Send + 'static,
+        FallbackFut: std::future::Future<Output = ()> + Send + 'static,
     {
-        let (primary_tx, mut primary_rx) = mpsc::channel(32);
-        primary(primary_tx).await;
-        let mut emitted_visible_output = false;
-        let mut retry = false;
-        while let Some(event) = primary_rx.recv().await {
-            match &event {
-                StreamEvent::ContentToken(_)
-                | StreamEvent::ReasoningToken(_)
-                | StreamEvent::ToolCallStart { .. } => {
-                    emitted_visible_output = true;
+        let tasks: Vec<
+            Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send>,
+        > = vec![
+            Box::new(move |tx| Box::pin(primary(tx))),
+            Box::new(move |tx| Box::pin(fallback(tx))),
+        ];
+        Self::execute_stream_fallback_chain(tasks, event_tx).await;
+    }
+
+    pub async fn execute_stream_fallback_chain(
+        tasks: Vec<Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send>>,
+        event_tx: mpsc::Sender<StreamEvent>,
+    ) {
+        let total = tasks.len();
+        for (idx, task) in tasks.into_iter().enumerate() {
+            let (tx, mut rx) = mpsc::channel(32);
+            let producer_fut = task(tx);
+            let producer_handle = tokio::spawn(producer_fut);
+
+            let is_last = idx + 1 == total;
+            let mut emitted_visible_output = false;
+            let mut retry = false;
+
+            while let Some(event) = rx.recv().await {
+                match &event {
+                    StreamEvent::ContentToken(_)
+                    | StreamEvent::ReasoningToken(_)
+                    | StreamEvent::ToolCallStart { .. } => {
+                        emitted_visible_output = true;
+                    }
+                    StreamEvent::Error(error)
+                        if !emitted_visible_output && !is_last && is_quota_or_rate_limit(error) =>
+                    {
+                        tracing::warn!(
+                            attempt = idx + 1,
+                            error = %error,
+                            "quota or rate-limit failure; retrying on fallback"
+                        );
+                        retry = true;
+                        break;
+                    }
+                    _ => {}
                 }
-                StreamEvent::Error(error)
-                    if !emitted_visible_output && is_quota_or_rate_limit(error) =>
-                {
-                    retry = true;
-                    break;
+                if event_tx.send(event).await.is_err() {
+                    producer_handle.abort();
+                    return;
                 }
-                _ => {}
             }
-            if event_tx.send(event).await.is_err() {
-                return;
+
+            if retry {
+                producer_handle.abort();
+                continue;
             }
-        }
-        if !retry {
+
+            let _ = producer_handle.await;
             return;
-        }
-        let (fallback_tx, mut fallback_rx) = mpsc::channel(32);
-        fallback(fallback_tx).await;
-        while let Some(event) = fallback_rx.recv().await {
-            if event_tx.send(event).await.is_err() {
-                return;
-            }
         }
     }
 
@@ -442,6 +655,122 @@ mod tests {
         assert!(!is_opencode_model("antigravity/gemini-3.6-flash"));
     }
 
+    #[tokio::test]
+    async fn runtime_request_builds_an_object_for_codex() {
+        let request = RuntimeRequest {
+            model: "gpt-5.6-luna".into(),
+            messages: serde_json::json!([{"role": "user", "content": "hello"}]),
+            tools: serde_json::json!([]),
+            prompt_cache_key: Some("cache-key".into()),
+            reasoning_effort: Some("medium".into()),
+        };
+        let payload = runtime_request_payload_source(&request)
+            .resolve(PayloadFormat::Codex)
+            .await;
+        assert!(payload.is_object());
+        assert_eq!(payload["model"], "gpt-5.6-luna");
+        assert_eq!(
+            payload["input"],
+            serde_json::json!([{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hello"}],
+            }])
+        );
+        assert_eq!(payload["tools"], serde_json::json!([]));
+        assert_eq!(payload["reasoning"]["effort"], "medium");
+        assert_eq!(payload["store"], false);
+    }
+
+    #[tokio::test]
+    async fn runtime_request_flattens_tools_for_codex() {
+        let request = RuntimeRequest {
+            model: "gpt-5.6-luna".into(),
+            messages: serde_json::json!([]),
+            tools: serde_json::json!([{
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "Read a workspace file",
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            }]),
+            prompt_cache_key: None,
+            reasoning_effort: None,
+        };
+        let payload = runtime_request_payload_source(&request)
+            .resolve(PayloadFormat::Codex)
+            .await;
+        assert_eq!(
+            payload["tools"],
+            serde_json::json!([{
+                "type": "function",
+                "name": "read_file",
+                "description": "Read a workspace file",
+                "parameters": {"type": "object", "properties": {}}
+            }])
+        );
+        assert!(payload["tools"][0].get("function").is_none());
+    }
+
+    #[tokio::test]
+    async fn runtime_request_converts_custom_messages_for_codex() {
+        let request = RuntimeRequest {
+            model: "gpt-5.6-luna".into(),
+            messages: serde_json::json!([
+                {"role": "system", "content": "system context"},
+                {"role": "user", "content": "hello"},
+                {
+                    "role": "custom",
+                    "custom_type": "thinking",
+                    "payload": "internal reasoning"
+                }
+            ]),
+            tools: serde_json::json!([]),
+            prompt_cache_key: None,
+            reasoning_effort: None,
+        };
+        let payload = runtime_request_payload_source(&request)
+            .resolve(PayloadFormat::Codex)
+            .await;
+        assert_eq!(payload["instructions"], "system context");
+        assert_eq!(payload["input"].as_array().unwrap().len(), 1);
+        assert!(payload["input"].as_array().unwrap().iter().all(|item| {
+            item.get("role")
+                .and_then(Value::as_str)
+                .is_none_or(|role| role != "custom")
+        }));
+    }
+
+    #[tokio::test]
+    async fn runtime_request_preserves_chat_completions_envelope() {
+        let request = RuntimeRequest {
+            model: "gpt-5.6-luna".into(),
+            messages: serde_json::json!([
+                {"role": "user", "content": "hello"},
+                {
+                    "role": "custom",
+                    "custom_type": "thinking",
+                    "payload": { "text": "internal reasoning" }
+                }
+            ]),
+            tools: serde_json::json!([]),
+            prompt_cache_key: None,
+            reasoning_effort: Some("medium".into()),
+        };
+        let payload = runtime_request_payload_source(&request)
+            .resolve(PayloadFormat::ChatCompletions)
+            .await;
+        assert!(payload.is_object());
+        assert_eq!(
+            payload["messages"],
+            serde_json::json!([{"role": "user", "content": "hello"}])
+        );
+        assert_eq!(payload["tools"], request.tools);
+        assert_eq!(payload["reasoning_effort"], "medium");
+        assert_eq!(payload["stream_options"]["include_usage"], true);
+    }
+
     #[test]
     fn determines_payload_format_correctly() {
         let client_std = ProviderClient::new("sk-test", None);
@@ -480,5 +809,131 @@ mod tests {
         let payload = title_payload("opencode-go/deepseek-v4-flash", "Fix the login flow", false);
         assert!(payload.get("messages").is_some());
         assert!(payload.get("input").is_none());
+    }
+
+    #[test]
+    fn test_provider_client_with_fallback_account_creation() {
+        let client = ProviderClient::with_fallback_account(
+            "key1",
+            Some("acc1".into()),
+            "key2",
+            Some("acc2".into()),
+        );
+        assert_eq!(client.provider_kind("gpt-4o"), "codex");
+        assert!(client.openai_fallback().is_some());
+    }
+
+    #[tokio::test]
+    async fn does_not_deadlock_when_primary_emits_more_than_channel_capacity_events() {
+        let client = ProviderClient::new("test", None);
+        let (tx, mut rx) = mpsc::channel(200);
+
+        // Send 100 events, which exceeds the mpsc channel capacity of 32
+        client
+            .stream_with_fallback(
+                |tx| async move {
+                    for i in 0..100 {
+                        tx.send(StreamEvent::ContentToken(format!("token_{i}")))
+                            .await
+                            .unwrap();
+                    }
+                    tx.send(StreamEvent::Finished {
+                        tool_calls: Vec::new(),
+                        usage: crate::openai::ProviderUsage::default(),
+                    })
+                    .await
+                    .unwrap();
+                },
+                |_tx| async move {},
+                tx,
+            )
+            .await;
+
+        let mut received = 0;
+        while let Some(event) = rx.recv().await {
+            match event {
+                StreamEvent::ContentToken(_) => received += 1,
+                StreamEvent::Finished { .. } => break,
+                _ => {}
+            }
+        }
+        assert_eq!(received, 100);
+    }
+
+    #[tokio::test]
+    async fn tries_all_backups_in_fallback_chain() {
+        let _client = ProviderClient::with_fallback_accounts(
+            "key1",
+            Some("acc1".into()),
+            vec![
+                ("key2".into(), Some("acc2".into())),
+                ("key3".into(), Some("acc3".into())),
+            ],
+        );
+        let (tx, mut rx) = mpsc::channel(8);
+
+        let tasks: Vec<
+            Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send>,
+        > = vec![
+            Box::new(|tx| {
+                Box::pin(async move {
+                    tx.send(StreamEvent::Error("HTTP 429 quota exceeded".into()))
+                        .await
+                        .unwrap();
+                })
+            }),
+            Box::new(|tx| {
+                Box::pin(async move {
+                    tx.send(StreamEvent::Error("HTTP 429 quota exceeded".into()))
+                        .await
+                        .unwrap();
+                })
+            }),
+            Box::new(|tx| {
+                Box::pin(async move {
+                    tx.send(StreamEvent::ContentToken("backup3_ok".into()))
+                        .await
+                        .unwrap();
+                })
+            }),
+        ];
+
+        ProviderClient::execute_stream_fallback_chain(tasks, tx).await;
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(StreamEvent::ContentToken(text)) if text == "backup3_ok"
+        ));
+    }
+
+    #[tokio::test]
+    async fn returns_final_error_when_all_backups_fail() {
+        let (tx, mut rx) = mpsc::channel(8);
+
+        let tasks: Vec<
+            Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send>,
+        > = vec![
+            Box::new(|tx| {
+                Box::pin(async move {
+                    tx.send(StreamEvent::Error("HTTP 429 quota1".into()))
+                        .await
+                        .unwrap();
+                })
+            }),
+            Box::new(|tx| {
+                Box::pin(async move {
+                    tx.send(StreamEvent::Error("HTTP 429 quota2".into()))
+                        .await
+                        .unwrap();
+                })
+            }),
+        ];
+
+        ProviderClient::execute_stream_fallback_chain(tasks, tx).await;
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(StreamEvent::Error(err)) if err == "HTTP 429 quota2"
+        ));
     }
 }

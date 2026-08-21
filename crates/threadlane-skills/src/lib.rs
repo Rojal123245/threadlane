@@ -8,7 +8,7 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use threadlane_agent::{AgentToolDefinition, ToolExecutor};
+use threadlane_runtime::{AgentToolDefinition, ToolExecutor};
 
 pub const LOAD_SKILL_TOOL_NAME: &str = "load_skill";
 const DEFAULT_MAX_SKILL_BYTES: usize = 512 * 1024;
@@ -1534,7 +1534,7 @@ fn valid_package_component(component: &str) -> bool {
 }
 
 fn dirs_home() -> Option<PathBuf> {
-    threadlane_agent::utils::dirs_home()
+    threadlane_runtime::utils::dirs_home()
 }
 
 #[cfg(test)]

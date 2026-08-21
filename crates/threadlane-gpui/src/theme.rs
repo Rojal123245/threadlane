@@ -21,7 +21,7 @@ pub fn init(cx: &mut App) {
 
     let themes_dir = global_threadlane_dir().join("themes");
     if let Err(error) = std::fs::create_dir_all(&themes_dir) {
-        log::warn!(
+        tracing::warn!(
             "failed to create theme directory {}: {error}",
             themes_dir.display()
         );
@@ -34,7 +34,7 @@ pub fn init(cx: &mut App) {
         apply_saved_or_default_theme(cx);
         cx.refresh_windows();
     }) {
-        log::warn!("failed to watch Threadlane themes: {error}");
+        tracing::warn!("failed to watch Threadlane themes: {error}");
     }
 }
 
@@ -42,6 +42,7 @@ pub(crate) fn available_themes(cx: &App) -> Vec<(SharedString, ThemeMode)> {
     ThemeRegistry::global(cx)
         .sorted_themes()
         .into_iter()
+        .filter(|theme| theme.name.starts_with("Threadlane"))
         .map(|theme| (theme.name.clone(), theme.mode))
         .collect()
 }
@@ -59,7 +60,7 @@ pub(crate) fn apply_theme(theme_name: &str, cx: &mut App) -> bool {
     if let Err(error) = save_preferences(&ThemePreferences {
         selected_theme: Some(theme_name.to_string()),
     }) {
-        log::warn!("failed to save selected theme: {error}");
+        tracing::warn!("failed to save selected theme: {error}");
     }
     cx.refresh_windows();
     true
@@ -67,7 +68,7 @@ pub(crate) fn apply_theme(theme_name: &str, cx: &mut App) -> bool {
 
 fn register_bundled_themes(cx: &mut App) {
     if let Err(error) = ThemeRegistry::global_mut(cx).load_themes_from_str(BUNDLED_THEMES) {
-        log::error!("failed to load bundled Threadlane themes: {error}");
+        tracing::error!("failed to load bundled Threadlane themes: {error}");
     }
 }
 
@@ -92,7 +93,12 @@ fn apply_saved_or_default_theme(cx: &mut App) {
 }
 
 fn find_theme(theme_name: &str, cx: &App) -> Option<Rc<ThemeConfig>> {
-    ThemeRegistry::global(cx).themes().get(theme_name).cloned()
+    let lookup_name = match theme_name {
+        "Threadlane Black" | "Default Dark" => "Threadlane Dark",
+        "Default Light" => "Threadlane Light",
+        other => other,
+    };
+    ThemeRegistry::global(cx).themes().get(lookup_name).cloned()
 }
 
 fn apply_theme_config(theme: Rc<ThemeConfig>, cx: &mut App) {
@@ -135,5 +141,9 @@ mod tests {
             .themes
             .iter()
             .any(|theme| theme.name == "Threadlane Dark"));
+        assert!(themes
+            .themes
+            .iter()
+            .any(|theme| theme.name == "Threadlane Light"));
     }
 }

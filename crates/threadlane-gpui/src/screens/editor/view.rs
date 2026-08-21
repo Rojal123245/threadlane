@@ -247,7 +247,7 @@ impl EditorView {
         let content = match std::fs::read_to_string(&full_path) {
             Ok(c) => c,
             Err(err) => {
-                log::error!("Failed to open file {}: {}", full_path.display(), err);
+                tracing::error!("Failed to open file {}: {}", full_path.display(), err);
                 self.status_msg = Some(format!("Unable to open {}: {err}", relative_path));
                 cx.notify();
                 return;
@@ -257,7 +257,8 @@ impl EditorView {
         let lang = detect_language(relative_path);
         let content_for_sub = content.clone();
         let editor = cx.new(|cx| {
-            EditorState::new(lang, window, cx)
+            EditorState::new(window, cx)
+                .language(lang)
                 .line_number(true)
                 .folding(true)
                 .show_whitespaces(false)
@@ -411,10 +412,8 @@ impl EditorView {
                     .await;
                 if matches!(result, rfd::MessageDialogResult::Yes) {
                     let _ = this.update(cx, |this, cx| {
-                        if let Some(pos) = this
-                            .tabs
-                            .iter()
-                            .position(|t| t.relative_path == keep_path)
+                        if let Some(pos) =
+                            this.tabs.iter().position(|t| t.relative_path == keep_path)
                         {
                             let kept = this.tabs.remove(pos);
                             this.tabs = vec![kept];
@@ -507,7 +506,7 @@ impl EditorView {
                 cx.notify();
             }
             Err(err) => {
-                log::error!("Failed to save file {}: {}", file_path.display(), err);
+                tracing::error!("Failed to save file {}: {}", file_path.display(), err);
                 self.status_msg = Some(format!("Error saving {}: {}", tab.file_name, err));
                 cx.notify();
             }
@@ -557,7 +556,10 @@ impl EditorView {
                         let menu_view = view_entity.clone();
                         let close_view = view_entity.clone();
 
-                        let raw_path = tab.relative_path.strip_prefix("diff:").unwrap_or(&tab.relative_path);
+                        let raw_path = tab
+                            .relative_path
+                            .strip_prefix("diff:")
+                            .unwrap_or(&tab.relative_path);
                         let tooltip_text = if tab.is_diff {
                             format!("Git Diff: {raw_path}")
                         } else {
@@ -584,7 +586,8 @@ impl EditorView {
                                 this.hover(|s| s.bg(theme.muted.opacity(0.5)))
                             })
                             .tooltip(move |window, cx| {
-                                gpui_component::tooltip::Tooltip::new(tooltip_text.clone()).build(window, cx)
+                                gpui_component::tooltip::Tooltip::new(tooltip_text.clone())
+                                    .build(window, cx)
                             })
                             .on_click(move |_event, _window, cx| {
                                 select_view.update(cx, |this, cx| this.select_tab(idx, cx));
@@ -595,23 +598,24 @@ impl EditorView {
                                     let v1 = menu_view.clone();
                                     let v2 = menu_view.clone();
                                     let v3 = menu_view.clone();
-                                    menu.item(
-                                        PopupMenuItem::new("Close Tab")
-                                            .on_click(move |_event, _window, cx| {
-                                                v1.update(cx, |this, cx| this.close_tab(keep_idx, cx));
-                                            }),
-                                    )
+                                    menu.item(PopupMenuItem::new("Close Tab").on_click(
+                                        move |_event, _window, cx| {
+                                            v1.update(cx, |this, cx| this.close_tab(keep_idx, cx));
+                                        },
+                                    ))
+                                    .item(PopupMenuItem::new("Close Other Tabs").on_click(
+                                        move |_event, _window, cx| {
+                                            v2.update(cx, |this, cx| {
+                                                this.close_other_tabs(keep_idx, cx)
+                                            });
+                                        },
+                                    ))
                                     .item(
-                                        PopupMenuItem::new("Close Other Tabs")
-                                            .on_click(move |_event, _window, cx| {
-                                                v2.update(cx, |this, cx| this.close_other_tabs(keep_idx, cx));
-                                            }),
-                                    )
-                                    .item(
-                                        PopupMenuItem::new("Close All Tabs")
-                                            .on_click(move |_event, _window, cx| {
+                                        PopupMenuItem::new("Close All Tabs").on_click(
+                                            move |_event, _window, cx| {
                                                 v3.update(cx, |this, cx| this.close_all_tabs(cx));
-                                            }),
+                                            },
+                                        ),
                                     )
                                 }
                             })

@@ -1,21 +1,24 @@
 use super::actions::AppAction;
-use crate::state::AppState;
+use crate::state::{AppState, SessionHydrationRequest};
 
 /// Application intent boundary used by screens.
 ///
 /// The controller is intentionally small for now. Keeping actions in one place
 /// gives us a stable seam for moving backend work out of `AppState` incrementally.
-pub(crate) fn dispatch(state: &mut AppState, action: AppAction) {
+pub(crate) fn dispatch(
+    state: &mut AppState,
+    action: AppAction,
+) -> Option<SessionHydrationRequest> {
     match action {
         AppAction::AttachProject(path) => {
-            let _ = state.attach_project(path);
+            if let Err(error) = state.attach_project(path) {
+                state.session_status = Some(error);
+            }
         }
         AppAction::SelectSession {
             work_dir,
             session_id,
-        } => {
-            state.select_session(work_dir, session_id);
-        }
+        } => return Some(state.select_session(work_dir, session_id)),
         AppAction::SettleSession {
             work_dir,
             session_id,
@@ -36,10 +39,14 @@ pub(crate) fn dispatch(state: &mut AppState, action: AppAction) {
         AppAction::BeginNewTask => state.begin_new_task(),
         AppAction::SelectDraftProject(path) => state.select_draft_project(path),
         AppAction::SendPrompt(text) => {
-            let _ = state.send_prompt(text);
+            if let Err(error) = state.send_prompt(text) {
+                state.session_status = Some(error);
+            }
         }
         AppAction::SendPromptWithImages { text, images } => {
-            let _ = state.send_prompt_with_images(text, images);
+            if let Err(error) = state.send_prompt_with_images(text, images) {
+                state.session_status = Some(error);
+            }
         }
         AppAction::StageBusyMessage(text) => {
             let _ = state.stage_busy_message(text);
@@ -52,29 +59,39 @@ pub(crate) fn dispatch(state: &mut AppState, action: AppAction) {
         }
         AppAction::DismissPendingMessage => state.dismiss_pending_message(),
         AppAction::ToggleToolActivity(tool_call_id) => state.toggle_tool_activity(&tool_call_id),
-        AppAction::AcceptEditProposal(proposal_id) => {
-            if let Err(error) = state.accept_edit_proposal(&proposal_id) {
+        AppAction::CancelGeneration => {
+            if let Err(error) = state.cancel_generation() {
                 state.session_status = Some(error);
             }
-        }
-        AppAction::CancelGeneration => {
-            let _ = state.cancel_generation();
         }
         AppAction::SelectModel(model) => state.set_selected_model(model),
         AppAction::SelectReasoningEffort(effort) => state.set_reasoning_effort(effort),
         AppAction::OpenSettings => state.open_settings(),
         AppAction::CloseSettings => state.close_settings(),
         AppAction::SaveOpenAiKey(key) => {
-            let _ = state.save_openai_key(key);
+            if let Err(error) = state.save_openai_key(key) {
+                state.session_status = Some(format!("Failed to save OpenAI key: {error}"));
+            }
         }
         AppAction::SaveOpenCodeKey(key) => {
-            let _ = state.save_opencode_key(key);
+            if let Err(error) = state.save_opencode_key(key) {
+                state.session_status = Some(format!("Failed to save OpenCode key: {error}"));
+            }
+        }
+        AppAction::SetActiveCodexAccount(id) => {
+            let _ = threadlane_auth::openai_auth::set_active_codex_account(&id);
+            state.reconcile_selected_model();
+        }
+        AppAction::RemoveCodexAccount(id) => {
+            let _ = threadlane_auth::openai_auth::remove_codex_account(&id);
+            state.reconcile_selected_model();
         }
         AppAction::ToggleReasoningExpanded(msg_id) => {
-            if let Some(message) = state.messages.iter_mut().find(|m| m.id == msg_id) {
+            if let Some(message) = state.messages_mut().iter_mut().find(|m| m.id == msg_id) {
                 message.reasoning_expanded = !message.reasoning_expanded;
             }
         }
         AppAction::OpenFileInEditor(path) => state.request_open_file(path),
     }
+    None
 }

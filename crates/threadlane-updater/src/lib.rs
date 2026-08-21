@@ -18,7 +18,6 @@ const UPDATER_PUBLIC_KEY: &str = match option_env!("THREADLANE_UPDATER_PUBLIC_KE
 #[derive(Clone, Debug)]
 pub struct UpdateReleaseInfo {
     pub version: String,
-    notes: String,
     update: Update,
 }
 
@@ -73,7 +72,6 @@ pub fn check_for_update() -> Result<Option<UpdateReleaseInfo>, String> {
 
     Ok(update.map(|update| UpdateReleaseInfo {
         version: update.version.clone(),
-        notes: update.body.clone().unwrap_or_default(),
         update,
     }))
 }

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use threadlane_agent::{ImageAttachment, ReasoningEffort};
+use threadlane_session::{ImageAttachment, ReasoningEffort};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppAction {
@@ -30,7 +30,6 @@ pub enum AppAction {
     SteerPendingMessage,
     DismissPendingMessage,
     ToggleToolActivity(String),
-    AcceptEditProposal(String),
     CancelGeneration,
     SelectModel(String),
     SelectReasoningEffort(ReasoningEffort),
@@ -38,6 +37,8 @@ pub enum AppAction {
     CloseSettings,
     SaveOpenAiKey(String),
     SaveOpenCodeKey(String),
+    SetActiveCodexAccount(String),
+    RemoveCodexAccount(String),
     ToggleReasoningExpanded(String),
     OpenFileInEditor(String),
 }

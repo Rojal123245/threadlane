@@ -23,7 +23,7 @@ impl PtySession {
     fn write(&self, bytes: &[u8]) {
         if let Ok(mut writer) = self.writer.lock() {
             if let Err(error) = writer.write_all(bytes).and_then(|_| writer.flush()) {
-                log::warn!("failed to write to terminal PTY: {error}");
+                tracing::warn!("failed to write to terminal PTY: {error}");
             }
         }
     }
@@ -35,7 +35,7 @@ impl PtySession {
             pixel_width: 0,
             pixel_height: 0,
         }) {
-            log::warn!("failed to resize terminal PTY: {error}");
+            tracing::warn!("failed to resize terminal PTY: {error}");
         }
     }
 }
@@ -207,10 +207,6 @@ impl TerminalView {
 
         let bytes: Option<Vec<u8>> = if modifiers.control {
             match key.to_ascii_lowercase().as_str() {
-                "c" => Some(vec![0x03]),
-                "d" => Some(vec![0x04]),
-                "l" => Some(vec![0x0c]),
-                "z" => Some(vec![0x1a]),
                 "v" if !modifiers.platform => cx
                     .read_from_clipboard()
                     .and_then(|item| item.text())
@@ -221,6 +217,10 @@ impl TerminalView {
                             text.into_bytes()
                         }
                     }),
+                letter if letter.len() == 1 && letter.as_bytes()[0].is_ascii_lowercase() => {
+                    // Convert Ctrl+<letter> to the standard terminal control character.
+                    Some(vec![letter.as_bytes()[0] - b'a' + 1])
+                }
                 _ => None,
             }
         } else {

@@ -1,0 +1,32 @@
+[package]
+name = "threadlane-runtime"
+version = "0.1.0"
+edition = "2021"
+description = "Threadlane agent runtime: harness, provider routing, tool dispatch, and composition"
+
+[dependencies]
+threadlane-protocol = { version = "0.1.0", path = "../threadlane-protocol" }
+threadlane-tools = { version = "0.1.0", path = "../threadlane-tools" }
+tokio = { version = "1.38", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+async-trait = "0.1"
+futures = "0.3"
+regex = "1.10"
+thiserror = "2.0"
+directories = "5.0"
+tracing = "0.1"
+sha2 = "0.10"
+libsqlite3-sys = "0.30.1"
+
+[features]
+default = []
+needle = ["dep:needle-infer"]
+
+[dependencies.needle-infer]
+git = "https://github.com/Geekgineer/needle-rs"
+optional = true
+
+[dev-dependencies]
+tempfile = "3.10"
+threadlane-provider = { version = "0.1.0", path = "../threadlane-provider" }

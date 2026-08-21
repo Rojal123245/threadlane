@@ -1,52 +1,67 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::dialog::{
-    Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
-};
-use gpui_component::input::{Input, InputState};
+use gpui_component::command::{Command, CommandGroup, CommandItem, CommandState};
 use gpui_component::resizable::{h_resizable, resizable_panel, v_resizable, ResizableState};
-use gpui_component::spinner::Spinner;
-use gpui_component::switch::Switch;
-use gpui_component::tag::{Tag, TagVariant};
-use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable};
+use gpui_component::status_bar::StatusBar;
+use gpui_component::{
+    v_flex, ActiveTheme, Icon, IconName, Root, Selectable, Sizable,
+};
 
-actions!(threadlane_workspace, [ToggleCommandPalette]);
+actions!(
+    threadlane_workspace,
+    [
+        ToggleCommandPalette,
+        ToggleSidebar,
+        ToggleRightPanel,
+        ToggleTerminal,
+        BeginNewTask,
+        OpenSettings,
+        CancelActiveGeneration,
+    ]
+);
 use threadlane_git::GitStatus;
 
 use crate::app::actions::AppAction;
 use crate::app::controller;
 use crate::screens::chat::ChatListView;
 use crate::screens::right_panel::RightPanelView;
-use crate::screens::terminal::TerminalView;
 use crate::screens::settings::SettingsView;
 use crate::screens::sidebar::SidebarView;
+use crate::screens::terminal::TerminalView;
 use crate::services::updater::{self, UpdaterEvent};
-use crate::state::{AppState, WorkspacePage};
+use crate::state::{
+    compute_full_session_projection, AppState, SessionHydrationRequest, WorkspacePage,
+};
 use threadlane_updater::UpdateStatus;
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-k", ToggleCommandPalette, None),
         KeyBinding::new("ctrl-k", ToggleCommandPalette, None),
+        KeyBinding::new("cmd-b", ToggleSidebar, None),
+        KeyBinding::new("ctrl-b", ToggleSidebar, None),
+        KeyBinding::new("cmd-r", ToggleRightPanel, None),
+        KeyBinding::new("ctrl-r", ToggleRightPanel, None),
+        KeyBinding::new("cmd-j", ToggleTerminal, None),
+        KeyBinding::new("ctrl-j", ToggleTerminal, None),
+        KeyBinding::new("cmd-n", BeginNewTask, None),
+        KeyBinding::new("ctrl-n", BeginNewTask, None),
+        KeyBinding::new("cmd-,", OpenSettings, None),
+        KeyBinding::new("ctrl-,", OpenSettings, None),
+        KeyBinding::new("escape", CancelActiveGeneration, None),
     ]);
 }
 
-enum GitAction {
-    Commit,
-    CommitAndPush,
-    Push,
-}
-
 enum GitEvent {
-    Loaded(Result<GitStatus, String>),
-    Finished(Result<GitStatus, String>),
-    MessageGenerated(Result<String, String>),
+    Loaded {
+        work_dir: PathBuf,
+        result: Result<GitStatus, String>,
+    },
 }
 
 struct TerminalGroup {
@@ -70,6 +85,10 @@ fn normalize_generated_commit_message(raw: &str) -> String {
     line.chars().take(72).collect()
 }
 
+fn git_result_matches_active(requested: &Path, active: &Path) -> bool {
+    requested == active
+}
+
 pub struct WorkspaceView {
     model: Entity<AppState>,
     sidebar: Entity<SidebarView>,
@@ -81,19 +100,10 @@ pub struct WorkspaceView {
     sidebar_collapsed: bool,
     right_panel_visible: bool,
     bottom_panel_visible: bool,
-    environment_open: bool,
     command_palette_open: bool,
-    command_palette_selected: usize,
-    command_palette_scroll_handle: ScrollHandle,
-    command_palette_input: Entity<InputState>,
-    git_dialog_open: bool,
-    git_include_unstaged: bool,
-    git_busy: bool,
-    git_message_pending: bool,
-    generated_commit_message: Option<String>,
+    command_state: Entity<CommandState>,
     git_status: Option<GitStatus>,
-    git_feedback: Option<String>,
-    git_message_input: Entity<InputState>,
+    last_git_work_dir: Option<PathBuf>,
     sidebar_resizable_state: Entity<ResizableState>,
     right_panel_resizable_state: Entity<ResizableState>,
     bottom_panel_resizable_state: Entity<ResizableState>,
@@ -103,6 +113,38 @@ pub struct WorkspaceView {
 }
 
 impl WorkspaceView {
+    pub(crate) fn spawn_session_hydration(
+        model: Entity<AppState>,
+        request: SessionHydrationRequest,
+        cx: &mut AsyncApp,
+    ) {
+        cx.spawn(async move |cx| {
+            let session_file = request.session_file.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { compute_full_session_projection(&session_file) })
+                .await;
+            let _ = model.update(cx, |state, cx| {
+                if state.active_session_id.as_deref() != Some(&request.session_id) {
+                    return;
+                }
+                match result {
+                    Ok(result) => {
+                        state.apply_session_hydration(
+                            &request.session_id,
+                            &request.session_file,
+                            result,
+                        );
+                        state.session_status = state.session_status_for_file(&request.session_file);
+                    }
+                    Err(error) => state.session_status = Some(format!("Could not load session: {error}")),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub fn build(window: &mut Window, cx: &mut App) -> Entity<Self> {
         let model = cx.new(|_cx| AppState::load());
         let sidebar = cx.new(|cx| SidebarView::new(model.clone(), window, cx));
@@ -114,12 +156,7 @@ impl WorkspaceView {
         let sidebar_resizable_state = cx.new(|_cx| ResizableState::default());
         let right_panel_resizable_state = cx.new(|_cx| ResizableState::default());
         let bottom_panel_resizable_state = cx.new(|_cx| ResizableState::default());
-        let git_message_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Commit message"));
-        let command_palette_scroll_handle = ScrollHandle::new();
-        let command_palette_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Type a command or search sessions…")
-        });
+        let command_state = cx.new(|cx| CommandState::new(window, cx));
         let (git_event_tx, git_event_rx) = mpsc::channel();
         let (updater_tx, updater_rx) = mpsc::channel();
 
@@ -130,7 +167,8 @@ impl WorkspaceView {
 
         let model_clone = model.clone();
         let view = cx.new(|cx| {
-            let sub = cx.observe(&model_clone, |_this: &mut Self, _model, cx| {
+            let sub = cx.observe(&model_clone, |this: &mut Self, _model, cx| {
+                this.sync_git_status_with_active_project(cx);
                 cx.notify();
             });
 
@@ -140,9 +178,27 @@ impl WorkspaceView {
                     .await;
                 let git_events = git_event_rx.try_iter().collect::<Vec<_>>();
                 let updater_events = updater_rx.try_iter().collect::<Vec<_>>();
+                let hydration_requests = this
+                    .update(cx, |this, cx| {
+                        this.model.update(cx, |state, _cx| {
+                            std::mem::take(&mut state.pending_hydrations)
+                        })
+                    })
+                    .unwrap_or_default();
+                for request in hydration_requests {
+                    let model = this
+                        .update(cx, |this, _cx| this.model.clone())
+                        .ok();
+                    if let Some(model) = model {
+                        Self::spawn_session_hydration(model, request, cx);
+                    }
+                }
+                let has_events = !git_events.is_empty() || !updater_events.is_empty();
                 let _ = this.update(cx, |this, cx| {
+                    let mut changed = has_events;
                     this.model.update(cx, |state, cx| {
                         if state.apply_session_refreshes() {
+                            changed = true;
                             cx.notify();
                         }
                     });
@@ -156,7 +212,9 @@ impl WorkspaceView {
                             cx.notify();
                         });
                     }
-                    cx.notify();
+                    if changed {
+                        cx.notify();
+                    }
                 });
             })
             .detach();
@@ -172,19 +230,10 @@ impl WorkspaceView {
                 sidebar_collapsed: false,
                 right_panel_visible: false,
                 bottom_panel_visible: false,
-                environment_open: false,
                 command_palette_open: false,
-                command_palette_selected: 0,
-                command_palette_input,
-                command_palette_scroll_handle,
-                git_dialog_open: false,
-                git_include_unstaged: true,
-                git_busy: false,
-                git_message_pending: false,
-                generated_commit_message: None,
+                command_state,
                 git_status: None,
-                git_feedback: None,
-                git_message_input,
+                last_git_work_dir: None,
                 sidebar_resizable_state,
                 right_panel_resizable_state,
                 bottom_panel_resizable_state,
@@ -192,6 +241,10 @@ impl WorkspaceView {
                 updater_tx,
                 _subscriptions: vec![sub],
             }
+        });
+
+        view.update(cx, |view, cx| {
+            view.sync_git_status_with_active_project(cx);
         });
 
         let view_handle = view.downgrade();
@@ -216,9 +269,20 @@ impl WorkspaceView {
         view
     }
 
-    fn open_git_dialog(&mut self, cx: &mut Context<Self>) {
-        self.git_dialog_open = true;
-        self.git_feedback = None;
+    fn open_git_files(&mut self, cx: &mut Context<Self>) {
+        self.right_panel_visible = true;
+        self.right_panel.update(cx, |panel, cx| {
+            panel.open_files(cx);
+        });
+        self.refresh_git_status(cx);
+        cx.notify();
+    }
+
+    fn open_git_review(&mut self, cx: &mut Context<Self>) {
+        self.right_panel_visible = true;
+        self.right_panel.update(cx, |panel, cx| {
+            panel.open_review(cx);
+        });
         self.refresh_git_status(cx);
         cx.notify();
     }
@@ -259,10 +323,11 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         self.command_palette_open = !self.command_palette_open;
-        self.command_palette_selected = 0;
         if self.command_palette_open {
-            self.command_palette_input
-                .update(cx, |input, cx| input.focus(window, cx));
+            self.command_state.update(cx, |state, cx| {
+                state.set_query("", window, cx);
+                state.focus(window, cx);
+            });
         }
         cx.notify();
     }
@@ -295,7 +360,7 @@ impl WorkspaceView {
                 })
                 .detach();
             }
-            "git" => self.open_git_dialog(cx),
+            "git" => self.open_git_review(cx),
             "settings" => {
                 model.update(cx, |state, _cx| {
                     controller::dispatch(state, AppAction::OpenSettings);
@@ -324,817 +389,58 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    fn command_palette_key_down(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let key = event.keystroke.key.as_str();
-        if !self.command_palette_open {
+    fn sync_git_status_with_active_project(&mut self, cx: &App) {
+        let active_work_dir = self.model.read(cx).active_work_dir.clone();
+        if self.last_git_work_dir == active_work_dir {
             return;
         }
-        if key.eq_ignore_ascii_case("escape") {
-            self.command_palette_open = false;
-            cx.stop_propagation();
-            cx.notify();
-            return;
-        }
-        let query = self
-            .command_palette_input
-            .read(cx)
-            .value()
-            .trim()
-            .to_lowercase();
-        let commands = [
-            ("New Task", "Start a fresh session", "new"),
-            (
-                "Add Project",
-                "Attach a project folder to your workspace",
-                "attach",
-            ),
-            (
-                "Goal Planning (/goal)",
-                "Autonomous goal loop extension",
-                "goal",
-            ),
-            (
-                "Model Selection (/model)",
-                "Switch model or provider",
-                "model",
-            ),
-            (
-                "Compact History (/compact)",
-                "Compact context conversation",
-                "compact",
-            ),
-            (
-                "Git Review & Commit",
-                "Review changed files and commit",
-                "git",
-            ),
-            (
-                "Toggle Sidebar",
-                "Show or hide your projects and tasks",
-                "sidebar",
-            ),
-            (
-                "Toggle Right Panel",
-                "Show review / files / terminal",
-                "panel",
-            ),
-            ("Settings", "Configure API keys and providers", "settings"),
-        ];
-        let matching: Vec<_> = commands
-            .iter()
-            .filter(|(name, desc, _)| {
-                query.is_empty()
-                    || name.to_lowercase().contains(&query)
-                    || desc.to_lowercase().contains(&query)
-            })
-            .collect();
-        match key.to_ascii_lowercase().as_str() {
-            "arrowdown" | "down" => {
-                if !matching.is_empty() {
-                    self.command_palette_selected =
-                        (self.command_palette_selected + 1) % matching.len();
-                    self.command_palette_scroll_handle
-                        .scroll_to_item(self.command_palette_selected);
-                }
-                cx.stop_propagation();
-                cx.notify();
-            }
-            "arrowup" | "up" => {
-                if !matching.is_empty() {
-                    self.command_palette_selected = self
-                        .command_palette_selected
-                        .checked_sub(1)
-                        .unwrap_or(matching.len() - 1);
-                    self.command_palette_scroll_handle
-                        .scroll_to_item(self.command_palette_selected);
-                }
-                cx.stop_propagation();
-                cx.notify();
-            }
-            "enter" => {
-                if let Some((_, _, action_key)) = matching.get(self.command_palette_selected) {
-                    let action_key = *action_key;
-                    self.command_palette_open = false;
-                    self.command_palette_selected = 0;
-                    self.execute_palette_action(action_key, window, cx);
-                    cx.notify();
-                }
-                cx.stop_propagation();
-            }
-            _ => {}
+
+        self.last_git_work_dir = active_work_dir.clone();
+        self.git_status = None;
+
+        if let Some(work_dir) = active_work_dir {
+            self.spawn_git_status_refresh(work_dir);
         }
     }
 
     fn refresh_git_status(&mut self, cx: &App) {
         let Some(work_dir) = self.model.read(cx).active_work_dir.clone() else {
+            self.last_git_work_dir = None;
             self.git_status = None;
-            self.git_feedback = Some("Attach a project to use Git actions.".into());
             return;
         };
-        self.git_busy = true;
+
+        self.last_git_work_dir = Some(work_dir.clone());
+        self.git_status = None;
+        self.spawn_git_status_refresh(work_dir);
+    }
+
+    fn spawn_git_status_refresh(&self, work_dir: PathBuf) {
         let tx = self.git_event_tx.clone();
         std::thread::spawn(move || {
             let result = threadlane_git::inspect(&work_dir).map_err(|error| error.to_string());
-            let _ = tx.send(GitEvent::Loaded(result));
+            let _ = tx.send(GitEvent::Loaded { work_dir, result });
         });
-    }
-
-    fn generate_commit_message(&mut self, cx: &mut Context<Self>) {
-        if self.git_busy || self.git_message_pending {
-            return;
-        }
-        if !self.git_message_input.read(cx).value().trim().is_empty() {
-            self.git_feedback =
-                Some("Clear the current message before generating a new one.".into());
-            cx.notify();
-            return;
-        }
-        let Some(work_dir) = self.model.read(cx).active_work_dir.clone() else {
-            self.git_feedback = Some("Attach a project to generate a commit message.".into());
-            cx.notify();
-            return;
-        };
-        let model = self.model.read(cx).selected_model.clone();
-        if model.trim().is_empty() {
-            self.git_feedback = Some("Select a model before generating a commit message.".into());
-            cx.notify();
-            return;
-        }
-        let (api_key, account_id) = crate::state::provider_credentials(&model);
-        let tx = self.git_event_tx.clone();
-        let Ok(executor) = crate::services::chat::executor() else {
-            self.git_feedback = Some("Unable to start the model runtime.".into());
-            cx.notify();
-            return;
-        };
-
-        self.git_message_pending = true;
-        self.git_feedback = Some("Generating a commit message…".into());
-        executor.spawn(async move {
-            let result = async {
-                let diff = threadlane_git::commit_message_diff(&work_dir)
-                    .map_err(|error| error.to_string())?;
-                let diff = if diff.chars().count() > 24_000 {
-                    format!(
-                        "{}\n\n[Diff truncated for message generation]",
-                        diff.chars().take(24_000).collect::<String>()
-                    )
-                } else {
-                    diff
-                };
-                let raw = threadlane_provider::ProviderClient::new(api_key, account_id)
-                    .generate_commit_message(&model, &diff)
-                    .await?;
-                let message = normalize_generated_commit_message(&raw);
-                if message.is_empty() {
-                    Err("The model returned an empty commit message.".to_string())
-                } else {
-                    Ok(message)
-                }
-            }
-            .await;
-            let _ = tx.send(GitEvent::MessageGenerated(result));
-        });
-        cx.notify();
-    }
-
-    fn run_git_action(&mut self, action: GitAction, cx: &mut Context<Self>) {
-        let Some(work_dir) = self.model.read(cx).active_work_dir.clone() else {
-            self.git_feedback = Some("Attach a project to use Git actions.".into());
-            cx.notify();
-            return;
-        };
-        let message = self.git_message_input.read(cx).value().trim().to_string();
-        // A commit is needed whenever there is staged work, or unstaged work that the
-        // "Include unstaged" toggle will stage. This applies to Push too, so "Push only"
-        // stages + commits dirty work before pushing when the toggle asks for it.
-        let needs_commit = self.git_status.as_ref().is_some_and(|status| {
-            status.staged_changes || (self.git_include_unstaged && status.unstaged_changes)
-        });
-        if needs_commit && message.is_empty() {
-            self.git_feedback = Some("Enter a commit message first.".into());
-            cx.notify();
-            return;
-        }
-
-        self.git_busy = true;
-        self.git_feedback = Some(
-            match action {
-                GitAction::Commit => "Committing…",
-                GitAction::CommitAndPush => "Committing and pushing…",
-                GitAction::Push => "Pushing…",
-            }
-            .into(),
-        );
-        let include_unstaged = self.git_include_unstaged;
-        let tx = self.git_event_tx.clone();
-        std::thread::spawn(move || {
-            let result = (|| {
-                let mut status = threadlane_git::inspect(&work_dir).map_err(|e| e.to_string())?;
-                if include_unstaged {
-                    let mut staged_any = false;
-                    for file in status.files.iter().filter(|file| file.unstaged) {
-                        threadlane_git::stage_file(&work_dir, &file.path)
-                            .map_err(|e| e.to_string())?;
-                        staged_any = true;
-                    }
-                    status.unstaged_changes = false;
-                    status.staged_changes |= staged_any;
-                }
-                // Commit whenever there is staged work left to record. This makes "Push only"
-                // honor the include-unstaged toggle: dirty files are staged above and committed
-                // here before the push below.
-                if status.staged_changes {
-                    threadlane_git::commit_staged(&work_dir, &message)
-                        .map_err(|e| e.to_string())?;
-                }
-                if matches!(action, GitAction::CommitAndPush | GitAction::Push) {
-                    threadlane_git::push(&work_dir).map_err(|e| e.to_string())?;
-                }
-                threadlane_git::inspect(&work_dir).map_err(|e| e.to_string())
-            })();
-            let _ = tx.send(GitEvent::Finished(result));
-        });
-        cx.notify();
     }
 
     fn apply_git_event(&mut self, event: GitEvent, cx: &mut Context<Self>) {
-        self.git_busy = false;
-        match event {
-            GitEvent::Loaded(Ok(status)) => {
-                self.git_status = Some(status);
-            }
-            GitEvent::Loaded(Err(error)) => self.git_feedback = Some(error),
-            GitEvent::Finished(Ok(status)) => {
-                self.git_status = Some(status);
-                self.git_feedback = Some("Git action completed.".into());
-                self.right_panel
-                    .update(cx, |panel, cx| panel.open_review(cx));
-            }
-            GitEvent::Finished(Err(error)) => self.git_feedback = Some(error),
-            GitEvent::MessageGenerated(Ok(message)) => {
-                self.git_message_pending = false;
-                self.generated_commit_message = Some(message);
-                self.git_feedback = None;
-            }
-            GitEvent::MessageGenerated(Err(error)) => {
-                self.git_message_pending = false;
-                self.git_feedback = Some(error);
-            }
-        }
-    }
-
-    fn render_environment_popover(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().colors;
-        let status = self.git_status.as_ref();
-
-        let pr_info = status.and_then(|s| s.pr.clone());
-
-        div()
-            .id("environment-popover")
-            .absolute()
-            .on_mouse_down(MouseButton::Left, |_event, _window, _cx| {})
-            .top(px(48.0))
-            .right(px(44.0))
-            .w(px(290.0))
-            .rounded_xl()
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.popover)
-            .shadow_lg()
-            .p_2()
-            .flex()
-            .flex_col()
-            .gap_1()
-            // 1. Header: "Environment" + "+" Button
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px_3()
-                    .pt_2()
-                    .pb_1()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.muted_foreground)
-                            .child("Environment"),
-                    )
-                    .child(
-                        Button::new("env-new-branch-btn")
-                            .icon(IconName::Plus)
-                            .ghost()
-                            .xsmall()
-                            .tooltip("New branch or worktree")
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.environment_open = false;
-                                this.open_git_dialog(cx);
-                            })),
-                    ),
-            )
-            // 2. Commit or Push Row
-            .child(
-                div()
-                    .id("environment-commit")
-                    .h(px(38.0))
-                    .w_full()
-                    .px_3()
-                    .rounded_lg()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .cursor_pointer()
-                    .hover(|row| row.bg(theme.list_hover))
-                    .child(
-                        div()
-                            .size(px(18.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_color(theme.muted_foreground)
-                            .child(Icon::default().path("icons/git/commit.svg")),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child("Commit or push"),
-                    )
-                    .on_click(cx.listener(|this, _event, _window, cx| {
-                        this.environment_open = false;
-                        this.open_git_dialog(cx);
-                    })),
-            )
-            // 6. PR Card / Details (if PR detected)
-            .children(pr_info.map(|pr| {
-                let pr_url = pr.url.clone();
-                let pr_num = pr.number;
-                let pr_title = pr.title.clone();
-                let pr_title_display = if pr.title.is_empty() {
-                    format!("PR #{pr_num}")
-                } else {
-                    pr.title.clone()
-                };
-
-                let failing_checks = pr.failing_checks;
-                let pending_checks = pr.pending_checks;
-                let total_checks = pr.total_checks;
-                let comments_count = pr.comments_count;
-
-                let failing_check_names: Vec<String> = pr.checks.iter().filter(|c| {
-                    let concl = c.conclusion.as_deref().unwrap_or("").to_uppercase();
-                    matches!(concl.as_str(), "FAILURE" | "TIMED_OUT" | "ACTION_REQUIRED" | "CANCELLED" | "ERROR")
-                }).map(|c| c.name.clone()).collect();
-                let failed_summary = failing_check_names.join(", ");
-
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .pt_1()
-                    .child(div().h(px(1.0)).w_full().bg(theme.border).my_1())
-                    // PR Title Row
-                    .child(
-                        div()
-                            .id("environment-pr-title")
-                            .h(px(36.0))
-                            .w_full()
-                            .px_3()
-                            .rounded_lg()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .cursor_pointer()
-                            .hover(|row| row.bg(theme.list_hover))
-                            .child(
-                                div()
-                                    .size(px(18.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_color(theme.muted_foreground)
-                                    .child(Icon::default().path("icons/git/actions.svg")),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_sm()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(pr_title_display),
-                            )
-                            .child(
-                                div()
-                                    .size(px(14.0))
-                                    .text_color(theme.muted_foreground)
-                                    .child(IconName::ExternalLink),
-                            )
-                            .on_click({
-                                let target_url = pr_url.clone();
-                                move |_event, _window, cx| {
-                                    if !target_url.is_empty() {
-                                        cx.open_url(&target_url);
-                                    }
-                                }
-                            }),
-                    )
-                    // CI Checks Row
-                    .child(
-                        div()
-                            .id("environment-pr-ci")
-                            .h(px(36.0))
-                            .w_full()
-                            .px_3()
-                            .rounded_lg()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .size(px(18.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_color(if failing_checks > 0 {
-                                        theme.danger
-                                    } else if pending_checks > 0 {
-                                        theme.warning
-                                    } else {
-                                        theme.success
-                                    })
-                                    .child(if failing_checks > 0 {
-                                        IconName::Close
-                                    } else if pending_checks > 0 {
-                                        IconName::Asterisk
-                                    } else {
-                                        IconName::Check
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_xs()
-                                    .child(if failing_checks > 0 {
-                                        format!("{failing_checks} failing check{}", if failing_checks == 1 { "" } else { "s" })
-                                    } else if pending_checks > 0 {
-                                        format!("{pending_checks} in progress")
-                                    } else {
-                                        format!("All {} checks passed", total_checks.max(1))
-                                    }),
-                            )
-                            .child(if failing_checks > 0 {
-                                let fix_pr_num = pr_num;
-                                let fix_pr_title = pr_title.clone();
-                                let fix_failed_summary = failed_summary.clone();
-                                Button::new("fix-ci-btn")
-                                    .ghost()
-                                    .xsmall()
-                                    .label("Fix")
-                                    .tooltip("Ask AI to fix failing CI checks")
-                                    .on_click(cx.listener(move |this, _event, window, cx| {
-                                        this.environment_open = false;
-                                        let prompt = format!(
-                                            "Please inspect and fix the failing CI check on PR #{fix_pr_num} ({fix_pr_title}): {fix_failed_summary}"
-                                        );
-                                        this.chat_list.update(cx, |chat, cx| {
-                                            chat.set_composer_text(&prompt, window, cx);
-                                        });
-                                        cx.notify();
-                                    }))
-                                    .into_any_element()
-                            } else {
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(format!("{}/{}", pr.passing_checks, pr.total_checks))
-                                    .into_any_element()
-                            }),
-                    )
-                    // Comments Row
-                    .child(
-                        div()
-                            .id("environment-pr-comments")
-                            .h(px(36.0))
-                            .w_full()
-                            .px_3()
-                            .rounded_lg()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .cursor_pointer()
-                            .hover(|row| row.bg(theme.list_hover))
-                            .child(
-                                div()
-                                    .size(px(18.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_color(theme.muted_foreground)
-                                    .child(IconName::File),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_xs()
-                                    .child(format!("{comments_count} comment{}", if comments_count == 1 { "" } else { "s" })),
-                            )
-                            .on_click({
-                                let comments_pr_num = pr_num;
-                                let comments_pr_title = pr_title.clone();
-                                cx.listener(move |this, _event, window, cx| {
-                                    this.environment_open = false;
-                                    let prompt = format!(
-                                        "Please review and address comments and feedback on PR #{comments_pr_num} ({comments_pr_title})."
-                                    );
-                                    this.chat_list.update(cx, |chat, cx| {
-                                        chat.set_composer_text(&prompt, window, cx);
-                                    });
-                                    cx.notify();
-                                })
-                            }),
-                    )
-            }))
-    }
-
-    fn render_git_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().colors;
-        let status = self.git_status.as_ref();
-        let branch = status
-            .and_then(|status| status.branch.as_deref())
-            .unwrap_or("No branch");
-        let additions = status
-            .map(|status| status.files.iter().map(|file| file.additions).sum::<u32>())
-            .unwrap_or(0);
-        let deletions = status
-            .map(|status| status.files.iter().map(|file| file.deletions).sum::<u32>())
-            .unwrap_or(0);
-        let has_dirty = |status: &GitStatus| {
-            status.staged_changes || (self.git_include_unstaged && status.unstaged_changes)
+        let GitEvent::Loaded { work_dir, result } = event;
+        let Some(active_work_dir) = self.model.read(cx).active_work_dir.clone() else {
+            return;
         };
-        let can_commit =
-            !self.git_busy && !self.git_message_pending && status.is_some_and(has_dirty);
-        let can_push = !self.git_busy
-            && !self.git_message_pending
-            && status.is_some_and(|status| status.ahead > 0 || has_dirty(status));
-        let toggle_view = cx.entity().downgrade();
+        if !git_result_matches_active(&work_dir, &active_work_dir) {
+            return;
+        }
 
-        Dialog::new(cx)
-            .w(px(440.0))
-            .overlay(true)
-            .overlay_closable(false)
-            .close_button(false)
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        DialogHeader::new()
-                            .relative()
-                            .px_5()
-                            .pt_5()
-                            .pb_4()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .size(px(38.0))
-                                    .rounded_lg()
-                                    .bg(theme.muted)
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_color(theme.foreground)
-                                    .child(Icon::default().path("icons/git/actions.svg")),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .child(
-                                        DialogTitle::new()
-                                            .text_lg()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child("Commit changes"),
-                                    )
-                                    .child(
-                                        DialogDescription::new()
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground)
-                                            .child(format!("On branch {branch}")),
-                                    ),
-                            )
-                            .child(
-                                Button::new("git-dialog-close")
-                                    .absolute()
-                                    .top(px(16.0))
-                                    .right(px(16.0))
-                                    .icon(IconName::Close)
-                                    .tooltip("Close")
-                                    .ghost()
-                                    .xsmall()
-                                    .disabled(self.git_busy)
-                                    .on_click(cx.listener(|this, _event, _window, cx| {
-                                        if !this.git_busy {
-                                            this.git_dialog_open = false;
-                                            cx.notify();
-                                        }
-                                    })),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .mx_5()
-                            .mb_4()
-                            .rounded_lg()
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.muted)
-                            .px_3()
-                            .h(px(46.0))
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(Icon::default().path("icons/git/compare.svg"))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_sm()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(branch.to_string()),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .text_xs()
-                                    .child(
-                                        Tag::new()
-                                            .child(format!("+{additions}"))
-                                            .with_variant(TagVariant::Success)
-                                            .small(),
-                                    )
-                                    .child(
-                                        Tag::new()
-                                            .child(format!("−{deletions}"))
-                                            .with_variant(TagVariant::Danger)
-                                            .small(),
-                                    )
-                                    .child(div().text_color(theme.muted_foreground).child(
-                                        format!("{} files", status.map_or(0, |s| s.files.len())),
-                                    )),
-                            ),
-                    )
-                    .child(
-                        DialogContent::new()
-                            .px_5()
-                            .pb_5()
-                            .flex()
-                            .flex_col()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .child("Commit message"),
-                                    )
-                                    .child(
-                                        Button::new("git-generate-message")
-                                            .when(self.git_message_pending, |button| {
-                                                button
-                                                    .child(Spinner::new().xsmall())
-                                                    .label("Generating…")
-                                            })
-                                            .when(!self.git_message_pending, |button| {
-                                                button.label("Generate")
-                                            })
-                                            .ghost()
-                                            .xsmall()
-                                            .disabled(self.git_busy || self.git_message_pending)
-                                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                                this.generate_commit_message(cx);
-                                            })),
-                                    ),
-                            )
-                            .child(Input::new(&self.git_message_input))
-                            .child(
-                                div()
-                                    .rounded_lg()
-                                    .border_1()
-                                    .border_color(theme.border)
-                                    .px_3()
-                                    .py_3()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .gap_1()
-                                            .child(
-                                                div()
-                                                    .text_sm()
-                                                    .font_weight(FontWeight::MEDIUM)
-                                                    .child("Include unstaged changes"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(theme.muted_foreground)
-                                                    .child("Stage modified and untracked files"),
-                                            ),
-                                    )
-                                    .child(
-                                        Switch::new("git-include-unstaged")
-                                            .checked(self.git_include_unstaged)
-                                            .disabled(self.git_busy)
-                                            .on_click(move |checked, _window, cx| {
-                                                let checked = *checked;
-                                                let _ = toggle_view.update(cx, |this, cx| {
-                                                    this.git_include_unstaged = checked;
-                                                    cx.notify();
-                                                });
-                                            }),
-                                    ),
-                            )
-                            .children(self.git_feedback.as_ref().map(|feedback| {
-                                div()
-                                    .rounded_md()
-                                    .bg(theme.muted)
-                                    .px_3()
-                                    .py_2()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(feedback.clone())
-                            })),
-                    )
-                    .child(
-                        DialogFooter::new()
-                            .border_t_1()
-                            .border_color(theme.border)
-                            .bg(theme.title_bar)
-                            .px_5()
-                            .py_4()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                Button::new("git-push")
-                                    .label("Push only")
-                                    .ghost()
-                                    .disabled(!can_push)
-                                    .on_click(cx.listener(|this, _event, _window, cx| {
-                                        this.run_git_action(GitAction::Push, cx);
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        Button::new("git-commit")
-                                            .label("Commit")
-                                            .outline()
-                                            .disabled(!can_commit)
-                                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                                this.run_git_action(GitAction::Commit, cx);
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("git-commit-push")
-                                            .icon(Icon::default().path("icons/git/commit.svg"))
-                                            .label("Commit & push")
-                                            .disabled(!can_commit)
-                                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                                this.run_git_action(GitAction::CommitAndPush, cx);
-                                            })),
-                                    ),
-                            ),
-                    ),
-            )
+        if let Ok(status) = &result {
+            self.model.update(cx, |state, cx| {
+                state.git_statuses.insert(work_dir.clone(), status.clone());
+                cx.notify();
+            });
+        }
+
+        self.git_status = result.ok();
+        cx.notify();
     }
 
     fn render_update_notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1267,81 +573,137 @@ impl WorkspaceView {
 
     fn render_command_palette(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
-        let query = self
-            .command_palette_input
-            .read(cx)
-            .value()
-            .trim()
-            .to_lowercase();
         let model = self.model.clone();
         let state = model.read(cx);
 
-        let mut session_results = Vec::new();
-        for project in &state.projects {
-            for session in &project.sessions {
-                if query.is_empty()
-                    || session.title.to_lowercase().contains(&query)
-                    || project.name.to_lowercase().contains(&query)
-                {
-                    session_results.push((
-                        project.work_dir.clone(),
-                        session.id.clone(),
-                        session.title.clone(),
-                        project.name.clone(),
-                    ));
-                }
-            }
-        }
-
-        let commands = [
-            ("New Task", "Start a fresh session", "new"),
+        let commands: [(&str, &str, &str, IconName, &[&str]); 9] = [
+            (
+                "New Task",
+                "Start a fresh session",
+                "new",
+                IconName::Plus,
+                &["task", "fresh", "session", "new"],
+            ),
             (
                 "Add Project",
                 "Attach a project folder to your workspace",
                 "attach",
+                IconName::FolderOpen,
+                &["folder", "workspace", "attach", "open", "project"],
             ),
             (
                 "Goal Planning (/goal)",
                 "Autonomous goal loop extension",
                 "goal",
+                IconName::Bot,
+                &["goal", "planning", "loop", "agent", "autonomous"],
             ),
             (
                 "Model Selection (/model)",
                 "Switch model or provider",
                 "model",
+                IconName::Cpu,
+                &["model", "llm", "switch", "provider", "select"],
             ),
             (
                 "Compact History (/compact)",
                 "Compact context conversation",
                 "compact",
+                IconName::Minimize,
+                &["compact", "history", "context", "clean"],
             ),
             (
                 "Git Review & Commit",
                 "Review changed files and commit",
                 "git",
+                IconName::Github,
+                &["git", "diff", "review", "commit", "stage"],
             ),
             (
                 "Toggle Sidebar",
                 "Show or hide your projects and tasks",
                 "sidebar",
+                IconName::PanelLeft,
+                &["sidebar", "toggle", "hide", "show", "projects"],
             ),
             (
                 "Toggle Right Panel",
                 "Show review / files / terminal",
                 "panel",
+                IconName::PanelRight,
+                &["panel", "right", "terminal", "review", "toggle"],
             ),
-            ("Settings", "Configure API keys and providers", "settings"),
+            (
+                "Settings",
+                "Configure API keys and providers",
+                "settings",
+                IconName::Settings,
+                &["settings", "keys", "provider", "preferences", "config"],
+            ),
         ];
 
-        let matching_commands: Vec<_> = commands
-            .into_iter()
-            .filter(|(name, desc, _)| {
-                query.is_empty()
-                    || name.to_lowercase().contains(&query)
-                    || desc.to_lowercase().contains(&query)
-            })
-            .collect();
-        let index_offset = matching_commands.len();
+        let mut commands_group = CommandGroup::new().label("Commands & Actions");
+        for (name, desc, _action_key, icon, keywords) in &commands {
+            let name_str = name.to_string();
+            let desc_str = desc.to_string();
+            let item = CommandItem::new()
+                .label(*name)
+                .icon(icon.clone())
+                .keywords(keywords.iter().copied())
+                .child(move |_window, cx| {
+                    let colors = cx.theme().colors;
+                    v_flex()
+                        .gap_0p5()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(name_str.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.muted_foreground)
+                                .child(desc_str.clone()),
+                        )
+                });
+            commands_group = commands_group.item(item);
+        }
+
+        let mut session_entries = Vec::new();
+        let mut sessions_group = CommandGroup::new().label("Sessions");
+        for project in &state.projects {
+            for session in &project.sessions {
+                session_entries.push((project.work_dir.clone(), session.id.clone()));
+                let title = session.title.clone();
+                let project_name = project.name.clone();
+                let item = CommandItem::new()
+                    .label(title.clone())
+                    .icon(IconName::SquareTerminal)
+                    .keywords([project.name.clone(), session.id.clone()])
+                    .child(move |_window, cx| {
+                        let colors = cx.theme().colors;
+                        v_flex()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(colors.muted_foreground)
+                                    .child(project_name.clone()),
+                            )
+                    });
+                sessions_group = sessions_group.item(item);
+            }
+        }
+
+        let view = cx.weak_entity();
+        let view_cancel = cx.weak_entity();
 
         div()
             .id("command-palette-backdrop")
@@ -1363,174 +725,306 @@ impl WorkspaceView {
                 div()
                     .id("command-palette-modal")
                     .w(px(560.0))
-                    .max_h(px(480.0))
                     .rounded_xl()
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.title_bar)
                     .shadow_lg()
-                    .flex()
-                    .flex_col()
                     .overflow_hidden()
                     .on_mouse_down(MouseButton::Left, |_event, _window, _cx| {})
                     .child(
-                        div()
-                            .p_3()
-                            .border_b_1()
-                            .border_color(theme.border)
-                            .child(Input::new(&self.command_palette_input).appearance(false)),
-                    )
-                    .child(
-                        div()
-                            .px_3()
-                            .py_1()
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.muted_foreground)
-                            .child("Commands & Actions"),
-                    )
-                    .child(
-                        div()
-                            .id("command-palette-container")
-                            .relative()
-                            .w_full()
+                        Command::new(&self.command_state)
+                            .bordered(false)
+                            .placeholder("Type a command or search sessions…")
                             .max_h(px(420.0))
-                            .child(
-                                div()
-                                    .id("command-palette-results")
-                                    .size_full()
-                                    .max_h(px(420.0))
-                                    .track_scroll(&self.command_palette_scroll_handle)
-                                    .overflow_y_scroll()
-                                    .py_2()
-                                    .children(matching_commands.into_iter().enumerate().map(
-                                        |(index, (name, desc, action_key))| {
-                                            div()
-                                                .id(SharedString::from(format!("palette-cmd-{action_key}")))
-                                                .mx_2()
-                                                .my_0p5()
-                                                .px_3()
-                                                .py_2()
-                                                .rounded_lg()
-                                                .hover(|style| style.bg(theme.list_hover))
-                                                .when(index == self.command_palette_selected, |style| {
-                                                    style.bg(theme.list_active)
-                                                })
-                                                .child(
-                                                    div()
-                                                        .flex()
-                                                        .flex_col()
-                                                        .gap_0p5()
-                                                        .child(
-                                                            div()
-                                                                .text_sm()
-                                                                .font_weight(FontWeight::MEDIUM)
-                                                                .child(name),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .text_xs()
-                                                                .text_color(theme.muted_foreground)
-                                                                .child(desc),
-                                                        ),
-                                                )
-                                                .on_click(cx.listener(move |this, _event, window, cx| {
-                                                    this.command_palette_open = false;
-                                                    this.command_palette_selected = 0;
-                                                    this.execute_palette_action(action_key, window, cx);
-                                                }))
-                                        },
-                                    ))
-                                    .when(!session_results.is_empty(), |list| {
-                                        list.child(
-                                            div()
-                                                .mt_2()
-                                                .px_3()
-                                                .py_1()
-                                                .text_xs()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(theme.muted_foreground)
-                                                .child("Sessions"),
-                                        )
-                                        .children(
-                                            session_results.into_iter().enumerate().take(8).map(
-                                                |(session_idx, (work_dir, session_id, title, project))| {
-                                                    let model = self.model.clone();
-                                                    div()
-                                                        .id(SharedString::from(format!(
-                                                            "palette-session-{session_id}"
-                                                        )))
-                                                        .mx_2()
-                                                        .my_0p5()
-                                                        .px_3()
-                                                        .py_2()
-                                                        .rounded_lg()
-                                                        .hover(|style| style.bg(theme.list_hover))
-                                                        .when(
-                                                            index_offset + session_idx
-                                                                == self.command_palette_selected,
-                                                            |style| style.bg(theme.list_active),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .flex()
-                                                                .flex_col()
-                                                                .gap_0p5()
-                                                                .child(
-                                                                    div()
-                                                                        .text_sm()
-                                                                        .font_weight(FontWeight::MEDIUM)
-                                                                        .child(title),
-                                                                )
-                                                                .child(
-                                                                    div()
-                                                                        .text_xs()
-                                                                        .text_color(theme.muted_foreground)
-                                                                        .child(project),
-                                                                ),
-                                                        )
-                                                        .on_click(cx.listener(
-                                                            move |this, _event, _window, cx| {
-                                                                this.command_palette_open = false;
-                                                                let work_dir = work_dir.clone();
-                                                                let session_id = session_id.clone();
-                                                                model.update(cx, |state, _cx| {
-                                                                    controller::dispatch(
-                                                                        state,
-                                                                        AppAction::SelectSession {
-                                                                            work_dir,
-                                                                            session_id,
-                                                                        },
-                                                                    );
-                                                                });
-                                                                cx.notify();
-                                                            },
-                                                        ))
-                                                },
-                                            ),
-                                        )
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .absolute()
-                                    .inset_0()
-                                    .child(gpui_component::scroll::Scrollbar::vertical(
-                                        &self.command_palette_scroll_handle,
-                                    )),
-                            ),
-                    )
+                            .group(commands_group)
+                            .group(sessions_group)
+                            .on_cancel(move |_window, cx| {
+                                let _ = view_cancel.update(cx, |this, cx| {
+                                    this.command_palette_open = false;
+                                    cx.notify();
+                                });
+                            })
+                            .on_confirm(move |index, window, cx| {
+                                let _ = view.update(cx, |this, cx| {
+                                    this.command_palette_open = false;
+                                    if index.section == 0 {
+                                        if let Some((_, _, action_key, _, _)) = commands.get(index.row) {
+                                            this.execute_palette_action(action_key, window, cx);
+                                        }
+                                    } else if index.section == 1 {
+                                        if let Some((work_dir, session_id)) = session_entries.get(index.row) {
+                                            let work_dir = work_dir.clone();
+                                            let session_id = session_id.clone();
+                                            this.model.update(cx, |state, _cx| {
+                                                controller::dispatch(
+                                                    state,
+                                                    AppAction::SelectSession {
+                                                        work_dir,
+                                                        session_id,
+                                                    },
+                                                );
+                                            });
+                                        }
+                                    }
+                                    cx.notify();
+                                });
+                            }),
+                    ),
             )
             .into_any_element()
+    }
+
+    fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let state = self.model.read(cx);
+        let theme = cx.theme().colors;
+
+        let fallback_status = state
+            .active_work_dir
+            .as_ref()
+            .and_then(|wd| state.git_statuses.get(wd));
+        let git_status = self.git_status.as_ref().or(fallback_status);
+
+        let branch = git_status
+            .and_then(|s| s.branch.as_deref())
+            .unwrap_or("main");
+        let (additions, deletions) = git_status.map_or((0, 0), |s| {
+            s.files
+                .iter()
+                .fold((0, 0), |(a, d), f| (a + f.additions, d + f.deletions))
+        });
+        let dirty_count = git_status.map_or(0, |s| s.files.len());
+
+        let model_name = if state.selected_model.is_empty() {
+            "default"
+        } else {
+            &state.selected_model
+        };
+
+        let active_project = state
+            .active_work_dir
+            .as_ref()
+            .and_then(|wd| {
+                state
+                    .projects
+                    .iter()
+                    .find(|p| &p.work_dir == wd)
+                    .map(|p| p.name.clone())
+            })
+            .or_else(|| {
+                state
+                    .active_work_dir
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| "No Project".into());
+
+        let pr_badge = git_status.and_then(|s| s.pr.as_ref()).map(|pr| {
+            let pr_url = pr.url.clone();
+            let pr_num = pr.number;
+            let failing_checks = pr.failing_checks;
+            let pending_checks = pr.pending_checks;
+            let ci_icon = if failing_checks > 0 {
+                IconName::Close
+            } else if pending_checks > 0 {
+                IconName::Asterisk
+            } else {
+                IconName::Check
+            };
+            Button::new("status-pr-badge")
+                .icon(ci_icon)
+                .label(format!("PR #{pr_num}"))
+                .ghost()
+                .xsmall()
+                .tooltip(if failing_checks > 0 {
+                    format!("PR #{pr_num} ({failing_checks} failing checks) — Open in browser")
+                } else if pending_checks > 0 {
+                    format!("PR #{pr_num} (CI in progress) — Open in browser")
+                } else {
+                    format!("PR #{pr_num} (CI passed) — Open in browser")
+                })
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    if pr_url.is_empty() {
+                        this.open_git_review(cx);
+                    } else {
+                        cx.open_url(&pr_url);
+                    }
+                }))
+        });
+
+        StatusBar::new()
+            .left(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Button::new("status-git-branch")
+                            .icon(IconName::Github)
+                            .label(format!("{active_project} · {branch}"))
+                            .ghost()
+                            .xsmall()
+                            .tooltip("Browse project files")
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.open_git_files(cx);
+                            })),
+                    )
+                    .children((dirty_count > 0).then(|| {
+                        div()
+                            .id("status-git-changes")
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .text_xs()
+                            .cursor_pointer()
+                            .hover(|style| style.opacity(0.8))
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.open_git_review(cx);
+                            }))
+                            .children((additions > 0).then(|| {
+                                div()
+                                    .text_color(theme.success)
+                                    .child(format!("+{additions}"))
+                            }))
+                            .children((deletions > 0).then(|| {
+                                div()
+                                    .text_color(theme.danger)
+                                    .child(format!("−{deletions}"))
+                            }))
+                    }))
+                    .children(pr_badge),
+            )
+            .right(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Button::new("status-model-badge")
+                            .icon(IconName::Cpu)
+                            .label(model_name.to_string())
+                            .ghost()
+                            .xsmall()
+                            .tooltip("Switch model")
+                            .on_click(cx.listener(|this, _event, window, cx| {
+                                this.execute_palette_action("model", window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("status-terminal-toggle")
+                            .icon(if self.bottom_panel_visible {
+                                IconName::PanelBottomOpen
+                            } else {
+                                IconName::PanelBottom
+                            })
+                            .label("Terminal")
+                            .ghost()
+                            .selected(self.bottom_panel_visible)
+                            .xsmall()
+                            .tooltip(if self.bottom_panel_visible {
+                                "Hide terminal"
+                            } else {
+                                "Show terminal"
+                            })
+                            .on_click(cx.listener(|this, _event, window, cx| {
+                                this.bottom_panel_visible = !this.bottom_panel_visible;
+                                if this.bottom_panel_visible {
+                                    let focus = this.terminal.read(cx).focus_handle(cx);
+                                    focus.focus(window, cx);
+                                }
+                                cx.notify();
+                            })),
+                    ),
+            )
+    }
+
+    fn toggle_sidebar_action(
+        &mut self,
+        _: &ToggleSidebar,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidebar_collapsed = !self.sidebar_collapsed;
+        let inset = if self.sidebar_collapsed {
+            px(110.0)
+        } else {
+            px(14.0)
+        };
+        self.chat_list.update(cx, |chat, cx| {
+            chat.header_left_padding = inset;
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    fn toggle_right_panel_action(
+        &mut self,
+        _: &ToggleRightPanel,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.right_panel_visible = !self.right_panel_visible;
+        cx.notify();
+    }
+
+    fn toggle_terminal_action(
+        &mut self,
+        _: &ToggleTerminal,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.bottom_panel_visible = !self.bottom_panel_visible;
+        if self.bottom_panel_visible {
+            let focus = self.terminal.read(cx).focus_handle(cx);
+            focus.focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn begin_new_task_action(
+        &mut self,
+        _: &BeginNewTask,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.model.update(cx, |state, _cx| {
+            controller::dispatch(state, AppAction::BeginNewTask);
+        });
+        cx.notify();
+    }
+
+    fn open_settings_action(
+        &mut self,
+        _: &OpenSettings,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.model.update(cx, |state, _cx| {
+            controller::dispatch(state, AppAction::OpenSettings);
+        });
+        cx.notify();
+    }
+
+    fn cancel_active_generation_action(
+        &mut self,
+        _: &CancelActiveGeneration,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let is_generating = self.model.read(cx).is_generating;
+        if is_generating {
+            self.model.update(cx, |state, cx| {
+                controller::dispatch(state, AppAction::CancelGeneration);
+                cx.notify();
+            });
+        }
     }
 }
 
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some(message) = self.generated_commit_message.take() {
-            self.git_message_input
-                .update(cx, |input, cx| input.set_value(message, window, cx));
-        }
         let workspace_page = self.model.read(cx).workspace_page;
         let terminal_project = self.model.read(cx).active_work_dir.clone();
         let (terminal_tabs, active_terminal_tab, active_terminal) = if let Some(project) = &terminal_project {
@@ -1551,19 +1045,17 @@ impl Render for WorkspaceView {
         };
         let theme = cx.theme().colors;
         let sidebar_tooltip = if self.sidebar_collapsed {
-            "Show sidebar"
+            "Expand sidebar"
         } else {
             "Collapse sidebar"
         };
+        let theme = cx.theme().colors;
 
         let chat_page_content = {
             let upper_content = if self.right_panel_visible {
                 h_resizable("workspace-chat-right-split")
                     .with_state(&self.right_panel_resizable_state)
-                    .child(
-                        resizable_panel()
-                            .child(self.chat_list.clone()),
-                    )
+                    .child(resizable_panel().child(self.chat_list.clone()))
                     .child(
                         resizable_panel()
                             .size(px(300.0))
@@ -1652,10 +1144,7 @@ impl Render for WorkspaceView {
 
                 v_resizable("workspace-main-bottom-split")
                     .with_state(&self.bottom_panel_resizable_state)
-                    .child(
-                        resizable_panel()
-                            .child(upper_content),
-                    )
+                    .child(resizable_panel().child(upper_content))
                     .child(
                         resizable_panel()
                             .size(px(280.0))
@@ -1676,28 +1165,39 @@ impl Render for WorkspaceView {
                             .size_range(px(160.0)..px(500.0))
                             .child(self.sidebar.clone()),
                     )
-                    .child(
-                        resizable_panel()
-                            .child(main_content),
-                    )
+                    .child(resizable_panel().child(main_content))
                     .into_any_element()
             } else {
                 main_content
             }
         };
 
+        let page_content = match workspace_page {
+            WorkspacePage::Chat => chat_page_content.into_any_element(),
+            WorkspacePage::Settings => self.settings.clone().into_any_element(),
+        };
+
+        let view_with_status_bar = div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(div().flex_1().min_h_0().child(page_content))
+            .child(self.render_status_bar(cx));
+
         div()
             .relative()
             .flex()
             .w_full()
             .h_full()
-            .on_key_down(cx.listener(Self::command_palette_key_down))
             .on_action(cx.listener(Self::toggle_command_palette))
+            .on_action(cx.listener(Self::toggle_sidebar_action))
+            .on_action(cx.listener(Self::toggle_right_panel_action))
+            .on_action(cx.listener(Self::toggle_terminal_action))
+            .on_action(cx.listener(Self::begin_new_task_action))
+            .on_action(cx.listener(Self::open_settings_action))
+            .on_action(cx.listener(Self::cancel_active_generation_action))
             .bg(theme.background)
-            .child(match workspace_page {
-                WorkspacePage::Chat => chat_page_content,
-                WorkspacePage::Settings => self.settings.clone().into_any_element(),
-            })
+            .child(view_with_status_bar)
             .children((workspace_page == WorkspacePage::Chat).then(|| {
                 Button::new("command-palette-btn")
                     .icon(IconName::SquareTerminal)
@@ -1707,54 +1207,14 @@ impl Render for WorkspaceView {
                     .xsmall()
                     .absolute()
                     .top(px(9.0))
-                    .right(px(120.0))
+                    .right(px(48.0))
                     .on_click(cx.listener(|this, _event, window, cx| {
                         this.command_palette_open = !this.command_palette_open;
-                        this.command_palette_selected = 0;
                         if this.command_palette_open {
-                            this.command_palette_input
-                                .update(cx, |input, cx| input.focus(window, cx));
-                        }
-                        cx.notify();
-                    }))
-            }))
-            .children((workspace_page == WorkspacePage::Chat).then(|| {
-                Button::new("bottom-panel-toggle")
-                    .icon(if self.bottom_panel_visible {
-                        IconName::PanelBottomOpen
-                    } else {
-                        IconName::PanelBottom
-                    })
-                    .tooltip(if self.bottom_panel_visible {
-                        "Hide terminal"
-                    } else {
-                        "Show terminal"
-                    })
-                    .ghost()
-                    .selected(self.bottom_panel_visible)
-                    .xsmall()
-                    .absolute()
-                    .top(px(9.0))
-                    .right(px(84.0))
-                    .on_click(cx.listener(|this, _event, _window, cx| {
-                        this.bottom_panel_visible = !this.bottom_panel_visible;
-                        cx.notify();
-                    }))
-            }))
-            .children((workspace_page == WorkspacePage::Chat).then(|| {
-                Button::new("environment-menu")
-                    .icon(IconName::Info)
-                    .tooltip("Environment")
-                    .ghost()
-                    .selected(self.environment_open)
-                    .xsmall()
-                    .absolute()
-                    .top(px(9.0))
-                    .right(px(48.0))
-                    .on_click(cx.listener(|this, _event, _window, cx| {
-                        this.environment_open = !this.environment_open;
-                        if this.environment_open {
-                            this.refresh_git_status(cx);
+                            this.command_state.update(cx, |state, cx| {
+                                state.set_query("", window, cx);
+                                state.focus(window, cx);
+                            });
                         }
                         cx.notify();
                     }))
@@ -1801,29 +1261,28 @@ impl Render for WorkspaceView {
                     }))
             }))
             .children(
-                (workspace_page == WorkspacePage::Chat && self.environment_open).then(|| {
-                    div()
-                        .id("environment-backdrop")
-                        .absolute()
-                        .inset_0()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _event, _window, cx| {
-                                this.environment_open = false;
-                                cx.notify();
-                            }),
-                        )
-                }),
-            )
-            .children(
-                (workspace_page == WorkspacePage::Chat && self.environment_open)
-                    .then(|| self.render_environment_popover(cx)),
-            )
-            .children(self.git_dialog_open.then(|| self.render_git_dialog(cx)))
-            .children(
                 self.command_palette_open
                     .then(|| self.render_command_palette(cx)),
             )
             .children(self.render_update_notice(cx))
+            .children(Root::render_dialog_layer(window, cx))
+            .children(Root::render_notification_layer(window, cx))
+            .children(Root::render_sheet_layer(window, cx))
+    }
+
+}
+
+#[cfg(test)]
+mod tests {
+    use super::git_result_matches_active;
+    use std::path::Path;
+
+    #[test]
+    fn git_result_is_accepted_only_for_active_work_dir() {
+        let active = Path::new("/projects/current");
+        let stale = Path::new("/projects/previous");
+
+        assert!(git_result_matches_active(active, active));
+        assert!(!git_result_matches_active(stale, active));
     }
 }

@@ -3,17 +3,17 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use threadlane_agent::{
-    AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, SessionPlan, SessionTree,
-    TokenUsage,
+use threadlane_session::harness::{JsonlStore, SessionStore};
+use threadlane_session::{
+    AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, SessionPlan, TokenUsage,
 };
 
 use crate::adapters::agent_events::{adapt_agent_event, ChatAgentUpdate};
 use crate::persistence::load_project_registry;
-use crate::services::sessions::{SessionRuntime, SessionRuntimeStatus};
+use crate::services::sessions::{ExecutionMode, SessionRuntime, SessionRuntimeStatus};
 
 const CHAT_HISTORY_PAGE_SIZE: usize = 40;
-pub type AttachedProject = threadlane_coding_agent::ProjectRecord;
+pub type AttachedProject = threadlane_session::ProjectRecord;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionHealth {
@@ -45,7 +45,7 @@ pub enum MessageRole {
     User,
     Assistant,
     System,
-    Advisor(threadlane_agent::AdvisorSeverity),
+    Advisor(threadlane_session::AdvisorSeverity),
     Error,
 }
 
@@ -59,16 +59,39 @@ pub struct ToolActivityInfo {
     pub(crate) is_expanded: bool,
 }
 
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct TrajectoryDiagnostics {
+    pub(crate) status: Option<String>,
+    pub(crate) duration_ms: Option<u64>,
+    pub(crate) model_visible: bool,
+    pub(crate) source: Option<String>,
+    pub(crate) raw: Option<String>,
+    pub(crate) parent_id: Option<String>,
+    pub(crate) result_id: Option<String>,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) output_bytes: Option<u64>,
+    pub(crate) files_mutated: Vec<String>,
+    pub(crate) commands_executed: Vec<String>,
+    pub(crate) error_summary: Option<String>,
+    pub(crate) items_count: Option<usize>,
+    pub(crate) token_estimate: Option<u32>,
+    pub(crate) is_anomaly: bool,
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct TrajectoryEntry {
     pub(crate) seq: Option<u64>,
     pub(crate) run_id: Option<String>,
     pub(crate) turn: Option<u32>,
+    /// The user-facing request this entry belongs to, when it can be inferred
+    /// from the canonical transcript. Runtime records inherit the active request.
+    pub(crate) request: Option<u32>,
     pub(crate) category: String,
     pub(crate) summary: String,
     pub(crate) detail: String,
     pub(crate) lane: Option<String>,
     pub(crate) correlation_id: Option<String>,
+    pub(crate) diagnostics: TrajectoryDiagnostics,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -77,6 +100,41 @@ pub struct SessionMetricsInfo {
     pub(crate) tool_calls: usize,
     pub(crate) input_tokens: u64,
     pub(crate) output_tokens: u64,
+    pub(crate) cache_read_tokens: u64,
+    pub(crate) cache_write_tokens: u64,
+}
+
+impl SessionMetricsInfo {
+    pub(crate) fn billed_input_tokens(&self) -> u64 {
+        self.input_tokens
+            .saturating_add(self.cache_read_tokens)
+            .saturating_add(self.cache_write_tokens)
+    }
+
+    pub(crate) fn cache_hit_percent(&self) -> Option<u64> {
+        let billed_input = self.billed_input_tokens();
+        (billed_input > 0).then(|| {
+            self.cache_read_tokens
+                .saturating_mul(100)
+                .saturating_add(billed_input / 2)
+                / billed_input
+        })
+    }
+
+    fn accumulate_usage(&mut self, usage: &TokenUsage) {
+        self.input_tokens = self
+            .input_tokens
+            .saturating_add(u64::from(usage.input_tokens));
+        self.output_tokens = self
+            .output_tokens
+            .saturating_add(u64::from(usage.output_tokens));
+        self.cache_read_tokens = self
+            .cache_read_tokens
+            .saturating_add(u64::from(usage.cache_read_tokens));
+        self.cache_write_tokens = self
+            .cache_write_tokens
+            .saturating_add(u64::from(usage.cache_write_tokens));
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -123,13 +181,32 @@ pub enum WorkspacePage {
     Settings,
 }
 
+/// A session whose durable UI projections need to be computed off the UI thread.
+pub(crate) struct SessionHydrationRequest {
+    pub(crate) session_id: String,
+    pub(crate) session_file: PathBuf,
+}
+
+/// The complete durable UI projection built from one JSONL store parse.
+pub(crate) struct SessionProjectionResult {
+    pub(crate) messages: Vec<ChatMessageInfo>,
+    pub(crate) history_start: usize,
+    pub(crate) history_has_older: bool,
+    pub(crate) plan: SessionPlan,
+    pub(crate) trajectory: Vec<TrajectoryEntry>,
+    pub(crate) diagnostics: threadlane_session::harness::SessionDiagnostics,
+    pub(crate) metrics: SessionMetricsInfo,
+    pub(crate) token_usage: TokenUsage,
+}
+
 pub struct AppState {
     pub(crate) projects: Vec<ProjectInfo>,
     pub(crate) active_work_dir: Option<PathBuf>,
     pub(crate) active_session_id: Option<String>,
     pub(crate) is_new_task: bool,
     pub(crate) search_query: String,
-    pub(crate) messages: Vec<ChatMessageInfo>,
+    pub(crate) messages: Arc<Vec<ChatMessageInfo>>,
+    pub(crate) available_models: Vec<crate::model_catalog::ModelOption>,
     history_session_file: Option<PathBuf>,
     history_start: usize,
     history_has_older: bool,
@@ -140,20 +217,25 @@ pub struct AppState {
     pending_composer_messages: HashMap<String, String>,
     session_token_usage: HashMap<String, TokenUsage>,
     trajectory_by_session: HashMap<String, Vec<TrajectoryEntry>>,
+    diagnostics_by_session: HashMap<String, threadlane_session::harness::SessionDiagnostics>,
     session_metrics: HashMap<String, SessionMetricsInfo>,
     stashed_prompts: HashMap<String, String>,
-    pub(crate) pending_permissions: HashMap<String, threadlane_agent::PermissionRequest>,
+    pub(crate) pending_permissions: HashMap<String, threadlane_session::PermissionRequest>,
+    pub(crate) pending_hydrations: Vec<SessionHydrationRequest>,
+    pub(crate) git_statuses: HashMap<PathBuf, threadlane_git::GitStatus>,
 
     pub(crate) selected_model: String,
-    pub(crate) model_roles: threadlane_agent::ModelRoles,
+    pub(crate) model_roles: threadlane_session::ModelRoles,
     pub(crate) reasoning_effort: ReasoningEffort,
     pub(crate) workspace_page: WorkspacePage,
     pub(crate) openai_key: String,
     pub(crate) opencode_key: String,
+    pub(crate) needle_enabled: bool,
     pub(crate) auth_status_msg: Option<String>,
     pub(crate) update_status: threadlane_updater::UpdateStatus,
     pub(crate) update_notice_dismissed: bool,
     pub(crate) requested_editor_target: Option<RequestedEditorTarget>,
+    pub(crate) requested_composer_prompt: Option<String>,
     stream_tx: Sender<ChatStreamEvent>,
     stream_rx: Receiver<ChatStreamEvent>,
     pending_stream_event: Mutex<Option<ChatStreamEvent>>,
@@ -182,16 +264,16 @@ fn file_mtime(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-fn extract_session_title(tree: &SessionTree, fallback_id: &str) -> String {
-    if let Some(ref name) = tree.name {
+fn extract_session_title(store: &impl SessionStore, fallback_id: &str) -> String {
+    if let Some(name) = store.name() {
         if !name.trim().is_empty() {
-            return name.clone();
+            return name;
         }
     }
     let messages = {
-        let active = tree.get_active_branch_messages();
+        let active = store.active_branch_messages("main");
         if active.is_empty() {
-            tree.get_persisted_messages()
+            store.get_persisted_messages()
         } else {
             active
         }
@@ -262,9 +344,9 @@ fn discover_sessions_in_project_cached(
                     .file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "session".into());
-                let (title, health, updated_at) = match SessionTree::load_from_file(&path) {
-                    Ok(tree) => (
-                        extract_session_title(&tree, &id),
+                let (title, health, updated_at) = match JsonlStore::open_read_only(&path) {
+                    Ok(store) => (
+                        extract_session_title(&store, &id),
                         SessionHealth::Healthy,
                         file_mtime(&path),
                     ),
@@ -306,8 +388,8 @@ fn discover_sessions_in_project_cached(
 }
 
 pub fn load_session_plan(session_file: &Path) -> SessionPlan {
-    SessionTree::load_from_file(session_file)
-        .map(|tree| tree.plan().clone())
+    JsonlStore::open_read_only(session_file)
+        .map(|store| store.plan())
         .unwrap_or_default()
 }
 
@@ -318,22 +400,17 @@ pub fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
 fn load_session_projection(
     session_file: &Path,
 ) -> (SessionPlan, Vec<ChatMessageInfo>, usize, bool) {
-    let Ok(tree) = SessionTree::load_from_file(session_file) else {
+    let Ok(store) = JsonlStore::open_read_only(session_file) else {
         return (SessionPlan::default(), Vec::new(), 0, false);
     };
-    let agent_messages = {
-        let branch = tree.get_active_branch_messages();
-        if branch.is_empty() {
-            tree.get_persisted_messages()
-        } else {
-            branch
-        }
-    };
+    // UI history is the durable chronological transcript projection, distinct
+    // from the active model-context branch used for provider requests.
+    let agent_messages = store.transcript("main").messages();
     let projected = project_agent_messages(agent_messages);
     let end = projected.len();
     let start = end.saturating_sub(CHAT_HISTORY_PAGE_SIZE);
     (
-        tree.plan().clone(),
+        store.plan(),
         projected[start..end].to_vec(),
         start,
         start > 0,
@@ -344,21 +421,51 @@ fn load_session_message_page(
     session_file: &Path,
     end: usize,
 ) -> (Vec<ChatMessageInfo>, usize, bool) {
-    let Ok(tree) = SessionTree::load_from_file(session_file) else {
+    let Ok(store) = JsonlStore::open_read_only(session_file) else {
         return (Vec::new(), 0, false);
     };
-    let agent_messages = {
-        let branch = tree.get_active_branch_messages();
-        if branch.is_empty() {
-            tree.get_persisted_messages()
-        } else {
-            branch
-        }
-    };
+    project_message_page_from_store(&store, end)
+}
+
+fn project_message_page_from_store(
+    store: &JsonlStore,
+    end: usize,
+) -> (Vec<ChatMessageInfo>, usize, bool) {
+    let agent_messages = store.transcript("main").messages();
     let projected = project_agent_messages(agent_messages);
     let end = end.min(projected.len());
     let start = end.saturating_sub(CHAT_HISTORY_PAGE_SIZE);
     (projected[start..end].to_vec(), start, start > 0)
+}
+
+/// Computes an older transcript page from disk. Call this on GPUI's background executor.
+pub(crate) fn compute_older_message_page(
+    session_file: &Path,
+    end: usize,
+) -> (Vec<ChatMessageInfo>, usize, bool) {
+    load_session_message_page(session_file, end)
+}
+
+/// Opens a session JSONL once and builds every UI projection required after hydration.
+pub(crate) fn compute_full_session_projection(
+    session_file: &Path,
+) -> Result<SessionProjectionResult, String> {
+    let store = JsonlStore::open_read_only(session_file).map_err(|error| error.to_string())?;
+    let diagnostics = threadlane_session::harness::project_session_diagnostics(&store, "main")
+        .map_err(|error| error.to_string())?;
+    let (messages, history_start, history_has_older) =
+        project_message_page_from_store(&store, usize::MAX);
+    let (trajectory, metrics, token_usage) = AppState::project_trajectory_from_store(&store);
+    Ok(SessionProjectionResult {
+        messages,
+        history_start,
+        history_has_older,
+        plan: store.plan(),
+        trajectory,
+        diagnostics,
+        metrics,
+        token_usage,
+    })
 }
 
 fn tool_activity_summary(name: &str, arguments: &str) -> String {
@@ -366,212 +473,77 @@ fn tool_activity_summary(name: &str, arguments: &str) -> String {
     let Ok(arguments) = serde_json::from_str::<serde_json::Value>(arguments) else {
         return display_name;
     };
-    let context = ["path", "file_path", "regex", "query", "glob", "command"]
-        .iter()
-        .find_map(|key| arguments.get(key).and_then(|value| value.as_str()));
-    context
-        .filter(|value| !value.is_empty())
-        .map(|value| format!("{display_name} {value}"))
-        .unwrap_or(display_name)
+    let context = [
+        "path",
+        "file_path",
+        "FilePath",
+        "TargetFile",
+        "command",
+        "CommandLine",
+        "query",
+        "Query",
+        "regex",
+        "glob",
+        "pattern",
+        "Pattern",
+        "prompt",
+        "Prompt",
+        "description",
+        "Description",
+    ]
+    .iter()
+    .find_map(|key| arguments.get(key).and_then(|value| value.as_str()));
+
+    if let Some(value) = context {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            let first_line = trimmed.lines().next().unwrap_or(trimmed).trim();
+            let has_more_lines = trimmed.lines().nth(1).is_some();
+            let mut summary_ctx = first_line.to_string();
+            if has_more_lines && !summary_ctx.ends_with('…') && !summary_ctx.ends_with("...") {
+                summary_ctx.push_str(" …");
+            }
+            return format!("{display_name} {summary_ctx}");
+        }
+    }
+    display_name
 }
 
 fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageInfo> {
-    let mut result = Vec::new();
-    let mut msg_counter = 0;
-
-    for msg in agent_messages {
-        msg_counter += 1;
-        match msg {
-            AgentMessage::User { content } => {
-                let role = if content.starts_with("[ADVISOR NOTE (Aside)]") {
-                    MessageRole::Advisor(threadlane_agent::AdvisorSeverity::Aside)
-                } else if content.starts_with("[ADVISOR NOTE (Concern)]") {
-                    MessageRole::Advisor(threadlane_agent::AdvisorSeverity::Concern)
-                } else if content.starts_with("[ADVISOR NOTE (CRITICAL BLOCKER)]") {
-                    MessageRole::Advisor(threadlane_agent::AdvisorSeverity::Blocker)
-                } else {
-                    MessageRole::User
-                };
-                result.push(ChatMessageInfo {
-                    id: format!("msg_{msg_counter}"),
-                    role,
-                    content,
-                    tool_activities: Vec::new(),
-                    streaming: false,
-                    reasoning_content: None,
-                    reasoning_expanded: false,
-                });
-            }
-            AgentMessage::UserWithImages { content, .. } => {
-                result.push(ChatMessageInfo {
-                    id: format!("msg_{msg_counter}"),
-                    role: MessageRole::User,
-                    content,
-                    tool_activities: Vec::new(),
-                    streaming: false,
-                    reasoning_content: None,
-                    reasoning_expanded: false,
-                });
-            }
-            AgentMessage::Assistant {
-                content,
-                tool_calls,
-                ..
-            } => {
-                let mut tool_activities = Vec::new();
-                if let Some(calls) = tool_calls {
-                    for call in calls {
-                        let category = match call.function.name.as_str() {
-                            "write_file"
-                            | "replace_file_content"
-                            | "multi_replace_file_content" => "Edited".into(),
-                            "create_file" => "Created".into(),
-                            "run_command" | "execute" => "Ran".into(),
-                            "read_file" | "list_dir" => "Loaded".into(),
-                            _ => "Explored".into(),
-                        };
-                        let detail = call.function.arguments.clone();
-                        let title = call.function.name.clone();
-                        tool_activities.push(ToolActivityInfo {
-                            id: call.id.clone(),
-                            category,
-                            summary: tool_activity_summary(&title, &detail),
-                            title,
-                            detail,
-                            is_expanded: false,
-                        });
-                    }
+    threadlane_session::harness::project_chat_messages(&agent_messages)
+        .into_iter()
+        .map(|msg| ChatMessageInfo {
+            id: msg.id,
+            role: match msg.role {
+                threadlane_session::harness::UiMessageRole::User => MessageRole::User,
+                threadlane_session::harness::UiMessageRole::Assistant => MessageRole::Assistant,
+                threadlane_session::harness::UiMessageRole::System => MessageRole::System,
+                threadlane_session::harness::UiMessageRole::Advisor(sev) => {
+                    MessageRole::Advisor(sev)
                 }
-                let reasoning_content = result
-                    .last()
-                    .filter(|message| {
-                        message.role == MessageRole::Assistant
-                            && message.content.is_empty()
-                            && message.tool_activities.is_empty()
-                            && message.reasoning_content.is_some()
-                    })
-                    .and_then(|message| message.reasoning_content.clone());
-                if reasoning_content.is_some() {
-                    result.pop();
-                }
-                result.push(ChatMessageInfo {
-                    id: format!("msg_{msg_counter}"),
-                    role: MessageRole::Assistant,
-                    content: content.unwrap_or_default(),
-                    tool_activities,
-                    streaming: false,
-                    reasoning_content,
-                    reasoning_expanded: false,
-                });
-            }
-            AgentMessage::Tool {
-                tool_call_id,
-                name,
-                content,
-                is_error,
-                ..
-            } => {
-                let category = if is_error {
-                    "Error".into()
-                } else {
-                    "Result".into()
-                };
-                if let Some(activity) = result
-                    .iter_mut()
-                    .rev()
-                    .flat_map(|message| message.tool_activities.iter_mut().rev())
-                    .find(|activity| activity.id == tool_call_id)
-                {
-                    activity.category = category;
-                    activity.detail = content;
-                    continue;
-                }
-                let tool_info = ToolActivityInfo {
-                    id: tool_call_id,
-                    category,
-                    summary: tool_activity_summary(&name, ""),
-                    title: name,
-                    detail: content,
+                threadlane_session::harness::UiMessageRole::Error => MessageRole::Error,
+            },
+            content: msg.content,
+            tool_activities: msg
+                .tool_activities
+                .into_iter()
+                .map(|act| ToolActivityInfo {
+                    id: act.id,
+                    category: act.category,
+                    title: act.title,
+                    summary: act.summary,
+                    detail: act.detail,
                     is_expanded: false,
-                };
-                if let Some(last) = result.last_mut() {
-                    if last.role == MessageRole::Assistant {
-                        last.tool_activities.push(tool_info);
-                        continue;
-                    }
-                }
-                result.push(ChatMessageInfo {
-                    id: format!("msg_{msg_counter}"),
-                    role: MessageRole::Assistant,
-                    content: String::new(),
-                    tool_activities: vec![tool_info],
-                    streaming: false,
-                    reasoning_content: None,
-                    reasoning_expanded: false,
-                });
-            }
-            AgentMessage::System { content } => {
-                let role = if content.to_lowercase().contains("error")
-                    || content.to_lowercase().contains("failed")
-                {
-                    MessageRole::Error
-                } else {
-                    MessageRole::System
-                };
-                result.push(ChatMessageInfo {
-                    id: format!("msg_{msg_counter}"),
-                    role,
-                    content,
-                    tool_activities: Vec::new(),
-                    streaming: false,
-                    reasoning_content: None,
-                    reasoning_expanded: false,
-                });
-            }
-            AgentMessage::Custom {
-                custom_type,
-                payload,
-            } => {
-                let text = payload
-                    .get("text")
-                    .or_else(|| payload.get("error"))
-                    .and_then(|value| value.as_str())
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| payload.to_string());
-                if custom_type == "thinking" {
-                    result.push(ChatMessageInfo {
-                        id: format!("msg_{msg_counter}"),
-                        role: MessageRole::Assistant,
-                        content: String::new(),
-                        tool_activities: Vec::new(),
-                        streaming: false,
-                        reasoning_content: Some(text),
-                        reasoning_expanded: false,
-                    });
-                    continue;
-                }
-
-                let is_error_type = custom_type == "error" || custom_type == "agent_error";
-                result.push(ChatMessageInfo {
-                    id: format!("msg_{msg_counter}"),
-                    role: if is_error_type {
-                        MessageRole::Error
-                    } else {
-                        MessageRole::System
-                    },
-                    content: text,
-                    tool_activities: Vec::new(),
-                    streaming: false,
-                    reasoning_content: None,
-                    reasoning_expanded: false,
-                });
-            }
-        }
-    }
-    result
+                })
+                .collect(),
+            streaming: false,
+            reasoning_content: msg.reasoning_content,
+            reasoning_expanded: false,
+        })
+        .collect()
 }
 
-fn runtime_status_text(status: SessionRuntimeStatus) -> Option<String> {
+pub(crate) fn runtime_status_text(status: SessionRuntimeStatus) -> Option<String> {
     match status {
         SessionRuntimeStatus::Ready => None,
         SessionRuntimeStatus::Working => Some("Working…".into()),
@@ -614,13 +586,14 @@ fn coding_agent_options(
     work_dir: PathBuf,
     session_file: PathBuf,
     model: String,
-    model_roles: threadlane_agent::ModelRoles,
-) -> threadlane_coding_agent::CodingAgentOptions {
+    model_roles: threadlane_session::ModelRoles,
+) -> threadlane_session::CodingAgentOptions {
     let (api_key, account_id) = provider_credentials(&model);
-    let mut agent_config = threadlane_agent::AgentConfig::default();
+    let mut agent_config = threadlane_session::AgentConfig::default();
     agent_config.model_roles = model_roles;
+    agent_config.needle_enabled = crate::services::settings::load_needle_enabled();
 
-    threadlane_coding_agent::CodingAgentOptions {
+    threadlane_session::CodingAgentOptions {
         api_key,
         account_id,
         model,
@@ -643,12 +616,15 @@ impl AppState {
         Self::load_from_registry(load_project_registry())
     }
 
-    fn load_from_registry(mut registry_projects: Vec<AttachedProject>) -> Self {
+    fn load_from_registry(registry_projects: Vec<AttachedProject>) -> Self {
+        #[cfg(not(test))]
+        let mut registry_projects = registry_projects;
+        #[cfg(not(test))]
         if registry_projects.is_empty() {
             if let Ok(curr) = std::env::current_dir().and_then(std::fs::canonicalize) {
                 let project = AttachedProject::from_path(curr);
                 registry_projects.push(project.clone());
-                let _ = threadlane_coding_agent::save_project_registry(&registry_projects);
+                let _ = threadlane_session::save_project_registry(&registry_projects);
             }
         }
 
@@ -715,7 +691,7 @@ impl AppState {
             crate::model_catalog::default_model_for_project(active_work_dir.as_deref())
                 .unwrap_or_default();
 
-        let model_roles = threadlane_agent::ModelRoles::default();
+        let model_roles = threadlane_session::ModelRoles::default();
         let mut session_runtimes = HashMap::new();
         let mut session_status = None;
         let (active_plan, initial_messages, initial_history_start, initial_history_has_older) =
@@ -727,12 +703,15 @@ impl AppState {
         let history_has_older = initial_history_has_older;
         let messages = match (active_work_dir.as_ref(), active_session_file.as_ref()) {
             (Some(work_dir), Some(session_file)) => {
-                let runtime = SessionRuntime::new(coding_agent_options(
-                    work_dir.clone(),
-                    session_file.clone(),
-                    selected_model.clone(),
-                    model_roles.clone(),
-                ));
+                let runtime = SessionRuntime::new(
+                    coding_agent_options(
+                        work_dir.clone(),
+                        session_file.clone(),
+                        selected_model.clone(),
+                        model_roles.clone(),
+                    ),
+                    ExecutionMode::Interactive,
+                );
                 let messages = initial_messages.clone();
                 selected_model = runtime.selected_model.clone();
                 session_status = runtime_status_text(runtime.status());
@@ -742,13 +721,17 @@ impl AppState {
             _ => Vec::new(),
         };
 
+        let available_models =
+            crate::model_catalog::available_models_for_project(active_work_dir.as_deref());
+
         let mut state = Self {
             projects: project_infos,
             active_work_dir,
             is_new_task: active_session_id.is_none(),
             active_session_id,
             search_query: String::new(),
-            messages,
+            messages: Arc::new(messages),
+            available_models,
             history_session_file: active_session_file.clone(),
             history_start,
             history_has_older,
@@ -759,18 +742,21 @@ impl AppState {
             pending_composer_messages: HashMap::new(),
             session_token_usage: HashMap::new(),
             trajectory_by_session: HashMap::new(),
+            diagnostics_by_session: HashMap::new(),
             session_metrics: HashMap::new(),
             stashed_prompts: HashMap::new(),
             selected_model,
-            model_roles: threadlane_agent::ModelRoles::default(),
+            model_roles: threadlane_session::ModelRoles::default(),
             reasoning_effort: ReasoningEffort::default(),
             workspace_page: WorkspacePage::Chat,
             openai_key,
             opencode_key,
+            needle_enabled: crate::services::settings::load_needle_enabled(),
             auth_status_msg: None,
             update_status: threadlane_updater::UpdateStatus::Idle,
             update_notice_dismissed: false,
             requested_editor_target: None,
+            requested_composer_prompt: None,
             stream_tx,
             stream_rx,
             pending_stream_event: Mutex::new(None),
@@ -779,6 +765,8 @@ impl AppState {
             session_runtimes,
             deferred_stream_events: HashMap::new(),
             pending_permissions: HashMap::new(),
+            pending_hydrations: Vec::new(),
+            git_statuses: HashMap::new(),
         };
         if let (Some(session_id), Some(session_file)) = (
             state.active_session_id.clone(),
@@ -791,16 +779,41 @@ impl AppState {
                         seq: None,
                         run_id: None,
                         turn: None,
+                        request: None,
                         category: "Error".into(),
                         summary: "Could not load durable trajectory".into(),
                         detail: error,
                         lane: Some("main".into()),
                         correlation_id: None,
+                        diagnostics: TrajectoryDiagnostics::default(),
                     }],
                 );
             }
         }
         state
+    }
+
+    pub(crate) fn messages_mut(&mut self) -> &mut Vec<ChatMessageInfo> {
+        Arc::make_mut(&mut self.messages)
+    }
+
+    pub(crate) fn available_models(&self) -> &[crate::model_catalog::ModelOption] {
+        &self.available_models
+    }
+
+    pub(crate) fn refresh_available_models(&mut self) {
+        self.available_models = crate::model_catalog::available_models_for_project(
+            self.active_work_dir.as_deref(),
+        );
+    }
+
+    pub(crate) fn set_needle_enabled(&mut self, enabled: bool) -> Result<(), String> {
+        crate::services::settings::save_needle_enabled(enabled)?;
+        self.needle_enabled = enabled;
+        for runtime in self.session_runtimes.values() {
+            let _ = runtime.try_set_needle_enabled(enabled);
+        }
+        Ok(())
     }
 
     pub(crate) fn current_session_token_usage(&self) -> TokenUsage {
@@ -878,19 +891,26 @@ impl AppState {
     }
 
     pub(crate) fn reconcile_selected_model(&mut self) {
-        if !crate::model_catalog::is_available_for_project(
-            &self.selected_model,
-            self.active_work_dir.as_deref(),
-        ) {
-            self.selected_model =
-                crate::model_catalog::default_model_for_project(self.active_work_dir.as_deref())
-                    .unwrap_or_default();
-            self.invalidate_idle_runtimes();
+        self.refresh_available_models();
+        if !self
+            .available_models
+            .iter()
+            .any(|model| model.id == self.selected_model)
+        {
+            self.selected_model = self
+                .available_models
+                .first()
+                .map(|model| model.id.clone())
+                .unwrap_or_default();
         }
+        self.invalidate_idle_runtimes();
     }
 
     pub(crate) fn set_selected_model(&mut self, model: String) {
-        if !crate::model_catalog::is_available_for_project(&model, self.active_work_dir.as_deref())
+        if !self
+            .available_models
+            .iter()
+            .any(|m| m.id == model)
         {
             return;
         }
@@ -970,7 +990,7 @@ impl AppState {
         self.workspace_page = WorkspacePage::Chat;
         self.active_session_id = None;
         self.is_new_task = true;
-        self.messages.clear();
+        self.messages = Arc::new(Vec::new());
         self.history_session_file = None;
         self.history_start = 0;
         self.history_has_older = false;
@@ -986,8 +1006,8 @@ impl AppState {
     }
 
     fn persist_project_selection(&self, work_dir: &Path, session_id: Option<&str>) {
-        if let Err(error) = threadlane_coding_agent::select_project(work_dir, session_id) {
-            log::warn!("Failed to persist selected project: {error}");
+        if let Err(error) = threadlane_session::select_project(work_dir, session_id) {
+            tracing::warn!("Failed to persist selected project: {error}");
         }
     }
 
@@ -1000,7 +1020,7 @@ impl AppState {
             self.active_work_dir = Some(work_dir.clone());
             self.active_session_id = None;
             self.is_new_task = true;
-            self.messages.clear();
+            self.messages = Arc::new(Vec::new());
             self.history_session_file = None;
             self.history_start = 0;
             self.history_has_older = false;
@@ -1008,13 +1028,14 @@ impl AppState {
             self.is_generating = false;
             self.session_status = None;
             self.persist_project_selection(&work_dir, None);
+            self.refresh_available_models();
             self.request_session_refresh(&work_dir);
         }
     }
 
     fn replace_visible_history(&mut self, session_file: &Path) {
         let (messages, start, has_older) = load_session_message_page(session_file, usize::MAX);
-        self.messages = messages;
+        self.messages = Arc::new(messages);
         self.history_session_file = Some(session_file.to_path_buf());
         self.history_start = start;
         self.history_has_older = has_older;
@@ -1023,23 +1044,10 @@ impl AppState {
         self.history_has_older
     }
 
-    pub(crate) fn load_older_messages(&mut self) -> usize {
-        if !self.history_has_older {
-            return 0;
-        }
-        let Some(session_file) = self.history_session_file.as_deref() else {
-            return 0;
-        };
-        let (older, start, has_older) = load_session_message_page(session_file, self.history_start);
-        let added = older.len();
-        if added > 0 {
-            self.messages.splice(0..0, older);
-            self.history_start = start;
-            self.history_has_older = has_older;
-        } else {
-            self.history_has_older = false;
-        }
-        added
+    pub(crate) fn history_page_request(&self) -> Option<(PathBuf, usize)> {
+        self.history_has_older
+            .then(|| self.history_session_file.clone().map(|file| (file, self.history_start)))
+            .flatten()
     }
 
     pub(crate) fn request_open_file(&mut self, relative_path: String) {
@@ -1059,58 +1067,50 @@ impl AppState {
         });
     }
 
-    pub(crate) fn select_session(&mut self, work_dir: PathBuf, session_id: String) {
+    pub(crate) fn request_composer_prompt(&mut self, prompt: String) {
+        self.requested_composer_prompt = Some(prompt);
+    }
+
+    pub(crate) fn select_session(
+        &mut self,
+        work_dir: PathBuf,
+        session_id: String,
+    ) -> SessionHydrationRequest {
         self.workspace_page = WorkspacePage::Chat;
         self.active_work_dir = Some(work_dir.clone());
         self.active_session_id = Some(session_id.clone());
         self.is_new_task = false;
         self.persist_project_selection(&work_dir, Some(&session_id));
+        self.refresh_available_models();
 
         let session_file = self.session_file(&work_dir, &session_id);
-        let completed_while_away =
-            self.deferred_stream_events
-                .get(&session_id)
-                .is_some_and(|events| {
-                    events
-                        .iter()
-                        .any(|event| matches!(event, ChatStreamEvent::Finished { .. }))
-                });
-        let completed_events = completed_while_away
-            .then(|| self.deferred_stream_events.remove(&session_id))
-            .flatten()
+        let completed_events = self
+            .deferred_stream_events
+            .remove(&session_id)
             .unwrap_or_default();
         let runtime = self.ensure_session_runtime(work_dir, session_file.clone());
-        if !self.trajectory_by_session.contains_key(&session_id) {
-            if let Err(error) = self.hydrate_session_projection(&session_id, &session_file) {
-                self.trajectory_by_session.insert(
-                    session_id.clone(),
-                    vec![TrajectoryEntry {
-                        seq: None,
-                        run_id: None,
-                        turn: None,
-                        category: "Error".into(),
-                        summary: "Could not load durable trajectory".into(),
-                        detail: error,
-                        lane: Some("main".into()),
-                        correlation_id: None,
-                    }],
-                );
-            }
-        }
         for event in completed_events {
             if let ChatStreamEvent::Agent { event, .. } = event {
                 self.record_trajectory(&session_id, &event);
             }
         }
-        let (messages, start, has_older) = load_session_message_page(&session_file, usize::MAX);
-        self.messages = messages;
+        self.messages = Arc::new(Vec::new());
         self.history_session_file = Some(session_file.clone());
-        self.history_start = start;
-        self.history_has_older = has_older;
-        self.active_plan = load_session_plan(&session_file);
+        self.history_start = 0;
+        self.history_has_older = false;
+        self.active_plan = SessionPlan::default();
         self.is_generating = runtime.is_generating();
         self.selected_model = runtime.selected_model.clone();
-        self.session_status = runtime_status_text(runtime.status());
+        self.session_status = Some("Loading session…".into());
+        let request = SessionHydrationRequest {
+            session_id,
+            session_file,
+        };
+        self.pending_hydrations.push(SessionHydrationRequest {
+            session_id: request.session_id.clone(),
+            session_file: request.session_file.clone(),
+        });
+        request
     }
 
     pub(crate) fn settle_session(
@@ -1155,7 +1155,8 @@ impl AppState {
         Ok(())
     }
 
-    pub(crate) fn update_model_roles(&mut self, roles: threadlane_agent::ModelRoles) {
+    #[allow(dead_code)]
+    pub(crate) fn update_model_roles(&mut self, roles: threadlane_session::ModelRoles) {
         self.model_roles = roles.clone();
         for runtime in self.session_runtimes.values() {
             let runtime = runtime.clone();
@@ -1174,12 +1175,15 @@ impl AppState {
         if let Some(runtime) = self.session_runtimes.get(&session_file) {
             return runtime.clone();
         }
-        let runtime = SessionRuntime::new(coding_agent_options(
-            work_dir,
-            session_file.clone(),
-            self.selected_model.clone(),
-            self.model_roles.clone(),
-        ));
+        let runtime = SessionRuntime::new(
+            coding_agent_options(
+                work_dir,
+                session_file.clone(),
+                self.selected_model.clone(),
+                self.model_roles.clone(),
+            ),
+            ExecutionMode::Interactive,
+        );
         self.session_runtimes.insert(session_file, runtime.clone());
         runtime
     }
@@ -1187,7 +1191,7 @@ impl AppState {
     pub(crate) fn resolve_active_permission(
         &mut self,
         request_id: &str,
-        decision: threadlane_coding_agent::PermissionDecision,
+        decision: threadlane_session::PermissionDecision,
     ) -> bool {
         let Some(session_id) = self.active_session_id.clone() else {
             return false;
@@ -1244,7 +1248,7 @@ impl AppState {
 
         self.active_session_id = None;
         self.is_new_task = true;
-        self.messages.clear();
+        self.messages = Arc::new(Vec::new());
         self.active_plan = SessionPlan::default();
         self.is_generating = false;
         self.session_status = None;
@@ -1255,7 +1259,7 @@ impl AppState {
             .next()
             .map(|session| (session.work_dir.clone(), session.id.clone()));
         if let Some((next_work_dir, next_session_id)) = next_session {
-            self.select_session(next_work_dir, next_session_id);
+            let _ = self.select_session(next_work_dir, next_session_id);
         }
     }
 
@@ -1271,26 +1275,9 @@ impl AppState {
         }
     }
 
-    pub(crate) fn accept_edit_proposal(&mut self, proposal_id: &str) -> Result<(), String> {
-        let work_dir = self
-            .active_work_dir
-            .as_deref()
-            .ok_or_else(|| "Select a project before accepting an edit proposal".to_string())?;
-        let response = threadlane_tools::execute_tool_in_workspace(
-            "accept_edit",
-            &serde_json::json!({ "proposal_id": proposal_id }).to_string(),
-            work_dir,
-        );
-        if response.starts_with("Error:") {
-            return Err(response);
-        }
-        self.session_status = Some(response);
-        Ok(())
-    }
-
     pub(crate) fn toggle_tool_activity(&mut self, tool_call_id: &str) {
         if let Some(activity) = self
-            .messages
+            .messages_mut()
             .iter_mut()
             .flat_map(|message| message.tool_activities.iter_mut())
             .find(|activity| activity.id == tool_call_id)
@@ -1305,7 +1292,7 @@ impl AppState {
             return Err("Selected path is not a directory".into());
         }
 
-        let record = threadlane_coding_agent::register_project(&canonical)?;
+        let record = threadlane_session::register_project(&canonical)?;
 
         if !self
             .projects
@@ -1322,10 +1309,11 @@ impl AppState {
         self.active_work_dir = Some(canonical);
         self.active_session_id = None;
         self.is_new_task = true;
-        self.messages.clear();
+        self.messages = Arc::new(Vec::new());
         self.active_plan = SessionPlan::default();
         self.is_generating = false;
         self.session_status = None;
+        self.refresh_available_models();
         Ok(())
     }
 
@@ -1343,9 +1331,7 @@ impl AppState {
         let session_id = format!("session_{now_nanos}");
         let session_file = sessions_dir.join(format!("{session_id}.jsonl"));
 
-        let mut tree = SessionTree::new(&session_id);
-        tree.file_path = Some(session_file.clone());
-        let _ = tree.append_passive_branch(None, Vec::new());
+        let _ = std::fs::File::create(&session_file);
 
         if let Some(project) = self
             .projects
@@ -1354,25 +1340,32 @@ impl AppState {
         {
             project.sessions = discover_sessions_in_project(&work_dir);
         }
-        self.select_session(work_dir, session_id.clone());
+        let _ = self.select_session(work_dir, session_id.clone());
         self.is_new_task = false;
         Ok(session_id)
     }
 
     /// Hydrates trajectory, token usage, and metrics projections from durable harness records.
-    ///
-    /// Architecture Invariant:
-    /// - The trajectory timeline is an auditable session-wide / run-level projection over the
-    ///   complete chronological harness records (operations, tool executions, provider calls, and permissions).
-    /// - The chat message view reflects conversational turns on the active session branch.
-    /// - Streaming checkpoints and trace observations are non-replayable and observational.
     fn hydrate_session_projection(
         &mut self,
         session_id: &str,
         session_file: &Path,
     ) -> Result<(), String> {
-        let store = threadlane_agent::harness::JsonlStore::open_read_only(session_file)
-            .map_err(|error| error.to_string())?;
+        let result = compute_full_session_projection(session_file)?;
+        self.diagnostics_by_session
+            .insert(session_id.to_owned(), result.diagnostics);
+        self.trajectory_by_session
+            .insert(session_id.into(), result.trajectory);
+        self.session_metrics.insert(session_id.into(), result.metrics);
+        self.session_token_usage
+            .insert(session_id.into(), result.token_usage);
+        Ok(())
+    }
+
+    /// Projects trajectory entries, token usage, and metrics from an already-open store.
+    fn project_trajectory_from_store(
+        store: &JsonlStore,
+    ) -> (Vec<TrajectoryEntry>, SessionMetricsInfo, TokenUsage) {
         let mut trajectory: Vec<TrajectoryEntry> = Vec::new();
         let mut metrics = SessionMetricsInfo::default();
         let mut durable_usage = TokenUsage::default();
@@ -1384,17 +1377,18 @@ impl AppState {
             .records()
             .iter()
             .filter_map(|record| match record {
-                threadlane_agent::harness::Record::Usage {
+                threadlane_session::harness::Record::Usage {
                     run_id: Some(run_id),
                     attempt: Some(attempt),
-                    cause: threadlane_agent::harness::UsageCause::Provider,
+                    cause: threadlane_session::harness::UsageCause::Provider,
                     ..
                 } => Some((run_id.clone(), *attempt)),
                 _ => None,
             })
             .collect::<HashSet<_>>();
+
         for record in store.records() {
-            use threadlane_agent::harness::Record;
+            use threadlane_session::harness::Record;
             let entry = match record {
                 Record::OperationStarted {
                     seq,
@@ -1406,11 +1400,13 @@ impl AppState {
                     seq: Some(*seq),
                     run_id: Some(id.clone()),
                     turn: None,
+                    request: None,
                     category: "Operation".into(),
                     summary: format!("{intent:?} started"),
                     detail: String::new(),
                     lane: Some(lane.clone()),
                     correlation_id: None,
+                    diagnostics: TrajectoryDiagnostics::default(),
                 }),
                 Record::OperationFinished {
                     seq,
@@ -1423,18 +1419,34 @@ impl AppState {
                     seq: Some(*seq),
                     run_id: Some(run_id.clone()),
                     turn: None,
+                    request: None,
                     category: "Operation".into(),
                     summary: format!("Operation {outcome:?}"),
                     detail: error.clone().unwrap_or_default(),
                     lane: Some(lane.clone()),
                     correlation_id: None,
+                    diagnostics: TrajectoryDiagnostics::default(),
                 }),
-                Record::StepAttempt { .. } => {
-                    // A StepAttempt is an outer run/retry attempt, not one
-                    // provider/tool-loop turn. Count it, but do not project a
-                    // misleading row that live TurnStart/TurnEnd cannot rebuild.
+                Record::StepAttempt {
+                    seq,
+                    lane,
+                    run_id,
+                    attempt,
+                    ..
+                } => {
                     metrics.turns = metrics.turns.saturating_add(1);
-                    None
+                    Some(TrajectoryEntry {
+                        seq: Some(*seq),
+                        run_id: Some(run_id.clone()),
+                        turn: Some(*attempt),
+                        request: None,
+                        category: "Step".into(),
+                        summary: format!("Step {attempt} started"),
+                        detail: format!("lane {}", lane.as_str()),
+                        lane: Some(lane.clone()),
+                        correlation_id: None,
+                        diagnostics: TrajectoryDiagnostics::default(),
+                    })
                 }
                 Record::RetryScheduled {
                     seq,
@@ -1447,11 +1459,378 @@ impl AppState {
                     seq: Some(*seq),
                     run_id: Some(run_id.clone()),
                     turn: Some(*attempt),
+                    request: None,
                     category: "Retry".into(),
                     summary: format!("Retry {attempt} scheduled"),
                     detail: reason.clone(),
                     lane: Some(lane.clone()),
                     correlation_id: None,
+                    diagnostics: TrajectoryDiagnostics::default(),
+                }),
+                Record::RetryConsumed {
+                    seq,
+                    lane,
+                    run_id,
+                    attempt,
+                    ..
+                } => Some(TrajectoryEntry {
+                    seq: Some(*seq),
+                    run_id: Some(run_id.clone()),
+                    turn: Some(*attempt),
+                    request: None,
+                    category: "Retry".into(),
+                    summary: format!("Retry {attempt} consumed"),
+                    detail: String::new(),
+                    lane: Some(lane.clone()),
+                    correlation_id: None,
+                    diagnostics: TrajectoryDiagnostics::default(),
+                }),
+                Record::LaneMoved {
+                    seq,
+                    lane,
+                    run_id,
+                    target_leaf_id,
+                    ..
+                } => Some(TrajectoryEntry {
+                    seq: Some(*seq),
+                    run_id: Some(run_id.clone()),
+                    turn: None,
+                    request: None,
+                    category: "Lane".into(),
+                    summary: format!("Lane moved to {target_leaf_id}"),
+                    detail: format!("target: {target_leaf_id}"),
+                    lane: Some(lane.clone()),
+                    correlation_id: None,
+                    diagnostics: TrajectoryDiagnostics::default(),
+                }),
+                Record::Usage {
+                    seq,
+                    lane,
+                    run_id,
+                    attempt,
+                    cause,
+                    usage,
+                    ..
+                } => {
+                    if *cause == threadlane_session::harness::UsageCause::Provider {
+                        metrics.accumulate_usage(usage);
+                        durable_usage.accumulate(usage);
+                    }
+                    Some(TrajectoryEntry {
+                        seq: Some(*seq),
+                        run_id: run_id.clone(),
+                        turn: *attempt,
+                        request: None,
+                        category: "Usage".into(),
+                        summary: format!("Usage: {} total tokens ({cause:?})", usage.total_tokens),
+                        detail: format!(
+                            "input: {}, output: {}, cache read: {}, cache write: {}",
+                            usage.input_tokens, usage.output_tokens, usage.cache_read_tokens, usage.cache_write_tokens
+                        ),
+                        lane: Some(lane.clone()),
+                        correlation_id: None,
+                        diagnostics: TrajectoryDiagnostics::default(),
+                    })
+                }
+                Record::RunContextCaptured {
+                    seq,
+                    lane,
+                    run_id,
+                    model,
+                    provider,
+                    reasoning_effort,
+                    prompt_cache_enabled,
+                    work_dir,
+                    system_prompt,
+                    tool_schema_sha256,
+                    enabled_tool_names,
+                    ..
+                } => {
+                    let prompt_text = match system_prompt {
+                        threadlane_session::harness::PromptSnapshot::Full { sha256, content } => {
+                            format!("### System Prompt (SHA256 `{}`)\n\n```markdown\n{}\n```", sha256.as_str(), content.as_str())
+                        }
+                        threadlane_session::harness::PromptSnapshot::Redacted {
+                            sha256,
+                            byte_len,
+                            reason,
+                        } => format!(
+                            "### System Prompt (Redacted)\n\n- Size: {byte_len} bytes\n- SHA256: `{}`\n- Reason: {}",
+                            sha256.as_str(),
+                            reason.as_str()
+                        ),
+                    };
+                    let tools_list = if enabled_tool_names.is_empty() {
+                        "None".to_string()
+                    } else {
+                        enabled_tool_names
+                            .iter()
+                            .map(|t| format!("`{}`", t.as_str()))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    };
+                    let detail = format!(
+                        "**Model**: `{}`\n\n**Provider**: `{}`\n\n**Reasoning Effort**: `{:?}`\n\n**Prompt Cache**: `{}`\n\n**Work Dir**: `{}`\n\n**Enabled Tools ({})**:\n{}\n\n**Tool Schema SHA256**: `{}`\n\n{}",
+                        model.as_str(),
+                        provider.as_str(),
+                        reasoning_effort,
+                        prompt_cache_enabled,
+                        work_dir.as_str(),
+                        enabled_tool_names.len(),
+                        tools_list,
+                        tool_schema_sha256.as_str(),
+                        prompt_text
+                    );
+                    Some(TrajectoryEntry {
+                        seq: Some(*seq),
+                        run_id: Some(run_id.clone()),
+                        turn: None,
+                        request: None,
+                        category: "Context".into(),
+                        summary: format!(
+                            "{} via {} ({reasoning_effort:?})",
+                            model.as_str(),
+                            provider.as_str()
+                        ),
+                        detail,
+                        lane: Some(lane.clone()),
+                        correlation_id: None,
+                        diagnostics: TrajectoryDiagnostics {
+                            model_visible: true,
+                            source: Some("Run context captured".into()),
+                            ..Default::default()
+                        },
+                    })
+                }
+                Record::ContextManifestCaptured {
+                    seq,
+                    lane,
+                    run_id,
+                    attempt,
+                    request_id,
+                    total_estimated_tokens,
+                    items,
+                    ..
+                } => {
+                    let items_summary = items
+                        .iter()
+                        .map(|item| {
+                            let digest_prefix = if item.digest_sha256.as_str().len() >= 8 {
+                                &item.digest_sha256.as_str()[..8]
+                            } else {
+                                item.digest_sha256.as_str()
+                            };
+                            format!(
+                                "- [{:?}] `{}` (~{} tokens, sha256: `{}`)",
+                                item.source,
+                                item.role.as_str(),
+                                item.token_estimate,
+                                digest_prefix,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    Some(TrajectoryEntry {
+                        seq: Some(*seq),
+                        run_id: Some(run_id.clone()),
+                        turn: Some(*attempt),
+                        request: None,
+                        category: "Context Manifest".into(),
+                        summary: format!(
+                            "Context manifest ({} items, ~{} tokens)",
+                            items.len(),
+                            total_estimated_tokens.unwrap_or(0)
+                        ),
+                        detail: format!(
+                            "**Request ID**: `{}`\n\n**Turn / Attempt**: `{}`\n\n**Context Items ({} total)**:\n{}",
+                            request_id.as_str(),
+                            attempt,
+                            items.len(),
+                            items_summary
+                        ),
+                        lane: Some(lane.clone()),
+                        correlation_id: Some(request_id.as_str().to_owned()),
+                        diagnostics: TrajectoryDiagnostics {
+                            source: Some("Context manifest captured".into()),
+                            raw: Some(format!(
+                                "items={}; total_tokens={:?}; request_id={}",
+                                items.len(),
+                                total_estimated_tokens,
+                                request_id.as_str()
+                            )),
+                            items_count: Some(items.len()),
+                            token_estimate: *total_estimated_tokens,
+                            model_visible: true,
+                            ..Default::default()
+                        },
+                    })
+                }
+                Record::ProviderRequestStarted {
+                    seq,
+                    lane,
+                    run_id,
+                    attempt,
+                    provider,
+                    model,
+                    request_id,
+                    ..
+                } => Some(TrajectoryEntry {
+                    seq: Some(*seq),
+                    run_id: Some(run_id.clone()),
+                    turn: Some(*attempt),
+                    request: None,
+                    category: "Provider".into(),
+                    summary: format!("{} request started", provider.as_str()),
+                    detail: format!(
+                        "**Provider**: `{}`\n\n**Model**: `{}`\n\n**Turn / Attempt**: `{}`\n\n**Request ID**: `{}`",
+                        provider.as_str(),
+                        model.as_str(),
+                        attempt,
+                        request_id.as_ref().map(|r| r.as_str()).unwrap_or("none")
+                    ),
+                    lane: Some(lane.clone()),
+                    correlation_id: request_id.as_ref().map(|id| id.as_str().to_owned()),
+                    diagnostics: TrajectoryDiagnostics {
+                        status: Some("started".into()),
+                        source: Some("Provider request lifecycle".into()),
+                        raw: Some(format!(
+                            "provider={} model={} request_id={}",
+                            provider.as_str(),
+                            model.as_str(),
+                            request_id.as_ref().map(|id| id.as_str()).unwrap_or("none")
+                        )),
+                        ..Default::default()
+                    },
+                }),
+                Record::ProviderRequestFinished {
+                    seq,
+                    lane,
+                    run_id,
+                    attempt,
+                    request_id,
+                    outcome,
+                    error,
+                    duration_ms,
+                    usage,
+                    ..
+                } => {
+                    if !provider_usage_keys.contains(&(run_id.clone(), *attempt)) {
+                        if let Some(usage) = usage {
+                            metrics.accumulate_usage(usage);
+                            durable_usage.accumulate(usage);
+                        }
+                    }
+                    let mut detail_lines = Vec::new();
+                    detail_lines.push(format!("**Outcome**: `{:?}`", outcome));
+                    if let Some(duration) = duration_ms {
+                        detail_lines.push(format!("**Duration**: {duration} ms"));
+                    }
+                    if let Some(req_id) = request_id {
+                        detail_lines.push(format!("**Request ID**: `{}`", req_id.as_str()));
+                    }
+                    if let Some(usage) = usage {
+                        detail_lines.push(format!(
+                            "**Tokens**: input={}, output={}, total={}",
+                            usage.input_tokens, usage.output_tokens, usage.total_tokens
+                        ));
+                    }
+                    if let Some(err) = error.as_ref() {
+                        detail_lines.push(format!("**Category**: `{:?}`", err.category));
+                        detail_lines.push(format!("**Retryable**: `{}`", err.retryable));
+                        if let Some(code) = err.code.as_ref() {
+                            detail_lines.push(format!("**Error Details**:\n```\n{}\n```", code.as_str()));
+                        }
+                    }
+                    Some(TrajectoryEntry {
+                        seq: Some(*seq),
+                        run_id: Some(run_id.clone()),
+                        turn: Some(*attempt),
+                        request: None,
+                        category: "Provider".into(),
+                        summary: format!("Provider request {outcome:?}"),
+                        detail: detail_lines.join("\n\n"),
+                        lane: Some(lane.clone()),
+                        correlation_id: request_id.as_ref().map(|id| id.as_str().to_owned()),
+                        diagnostics: TrajectoryDiagnostics {
+                            status: Some(format!("{outcome:?}")),
+                            duration_ms: *duration_ms,
+                            source: Some("Provider request lifecycle".into()),
+                            raw: Some(format!("outcome={outcome:?}; request_id={}", request_id.as_ref().map(|id| id.as_str()).unwrap_or("none"))),
+                            ..Default::default()
+                        },
+                    })
+                }
+                Record::ProviderResponseAttached {
+                    seq,
+                    lane,
+                    run_id,
+                    attempt,
+                    request_id,
+                    entry_id,
+                    reasoning_entry_id,
+                    ..
+                } => Some(TrajectoryEntry {
+                    seq: Some(*seq),
+                    run_id: Some(run_id.clone()),
+                    turn: Some(*attempt),
+                    request: None,
+                    category: "Provider".into(),
+                    summary: "Provider response attached".into(),
+                    detail: format!(
+                        "entry {}{}",
+                        entry_id,
+                        reasoning_entry_id
+                            .as_deref()
+                            .map(|id| format!(", thinking {id}"))
+                            .unwrap_or_default()
+                    ),
+                    lane: Some(lane.clone()),
+                    correlation_id: request_id.as_ref().map(|id| id.as_str().to_owned()),
+                    diagnostics: TrajectoryDiagnostics::default(),
+                }),
+                Record::PermissionRequested {
+                    seq,
+                    lane,
+                    run_id,
+                    attempt,
+                    request_id,
+                    capability,
+                    scopes,
+                    detail_sha256,
+                    ..
+                } => Some(TrajectoryEntry {
+                    seq: Some(*seq),
+                    run_id: run_id.clone(),
+                    turn: *attempt,
+                    request: None,
+                    category: "Permission".into(),
+                    summary: format!("{} permission requested", capability.as_str()),
+                    detail: format!("scopes {scopes:?}; detail sha256 {}", detail_sha256.as_str()),
+                    lane: Some(lane.clone()),
+                    correlation_id: Some(request_id.as_str().to_owned()),
+                    diagnostics: TrajectoryDiagnostics::default(),
+                }),
+                Record::PermissionResolved {
+                    seq,
+                    lane,
+                    run_id,
+                    attempt,
+                    request_id,
+                    decision,
+                    source,
+                    remembered,
+                    ..
+                } => Some(TrajectoryEntry {
+                    seq: Some(*seq),
+                    run_id: run_id.clone(),
+                    turn: *attempt,
+                    request: None,
+                    category: "Permission".into(),
+                    summary: format!("Permission {decision:?}"),
+                    detail: format!("source {source:?}; remembered {remembered}"),
+                    lane: Some(lane.clone()),
+                    correlation_id: Some(request_id.as_str().to_owned()),
+                    diagnostics: TrajectoryDiagnostics::default(),
                 }),
                 Record::ToolStarted {
                     lane,
@@ -1486,194 +1865,6 @@ impl AppState {
                     );
                     None
                 }
-                Record::Usage { cause, usage, .. } => {
-                    if matches!(cause, threadlane_agent::harness::UsageCause::Provider) {
-                        metrics.input_tokens = metrics
-                            .input_tokens
-                            .saturating_add(u64::from(usage.input_tokens));
-                        metrics.output_tokens = metrics
-                            .output_tokens
-                            .saturating_add(u64::from(usage.output_tokens));
-                        durable_usage.accumulate(usage);
-                    }
-                    None
-                }
-                Record::RunContextCaptured {
-                    seq,
-                    lane,
-                    run_id,
-                    model,
-                    provider,
-                    reasoning_effort,
-                    system_prompt,
-                    tool_schema_sha256,
-                    enabled_tool_names,
-                    ..
-                } => {
-                    let prompt_detail = match system_prompt {
-                        threadlane_agent::harness::PromptSnapshot::Full { sha256, .. } => {
-                            format!("System prompt captured (sha256 {})", sha256.as_str())
-                        }
-                        threadlane_agent::harness::PromptSnapshot::Redacted {
-                            sha256,
-                            byte_len,
-                            reason,
-                        } => format!(
-                            "System prompt redacted: {byte_len} bytes, sha256 {}, reason {}",
-                            sha256.as_str(),
-                            reason.as_str()
-                        ),
-                    };
-                    Some(TrajectoryEntry {
-                        seq: Some(*seq),
-                        run_id: Some(run_id.clone()),
-                        turn: None,
-                        category: "Context".into(),
-                        summary: format!(
-                            "{} via {} ({reasoning_effort:?})",
-                            model.as_str(),
-                            provider.as_str()
-                        ),
-                        detail: format!(
-                            "{prompt_detail}; {} tools; tool schema sha256 {}",
-                            enabled_tool_names.len(),
-                            tool_schema_sha256.as_str()
-                        ),
-                        lane: Some(lane.clone()),
-                        correlation_id: None,
-                    })
-                }
-                Record::ProviderRequestStarted {
-                    seq,
-                    lane,
-                    run_id,
-                    attempt,
-                    provider,
-                    model,
-                    request_id,
-                    ..
-                } => Some(TrajectoryEntry {
-                    seq: Some(*seq),
-                    run_id: Some(run_id.clone()),
-                    turn: Some(*attempt),
-                    category: "Provider".into(),
-                    summary: format!("{} request started", provider.as_str()),
-                    detail: format!("model {}", model.as_str()),
-                    lane: Some(lane.clone()),
-                    correlation_id: request_id.as_ref().map(|id| id.as_str().to_owned()),
-                }),
-                Record::ProviderRequestFinished {
-                    seq,
-                    lane,
-                    run_id,
-                    attempt,
-                    request_id,
-                    outcome,
-                    error,
-                    duration_ms,
-                    usage,
-                    ..
-                } => {
-                    if !provider_usage_keys.contains(&(run_id.clone(), *attempt)) {
-                        if let Some(usage) = usage {
-                            metrics.input_tokens = metrics
-                                .input_tokens
-                                .saturating_add(u64::from(usage.input_tokens));
-                            metrics.output_tokens = metrics
-                                .output_tokens
-                                .saturating_add(u64::from(usage.output_tokens));
-                            durable_usage.accumulate(usage);
-                        }
-                    }
-                    Some(TrajectoryEntry {
-                        seq: Some(*seq),
-                        run_id: Some(run_id.clone()),
-                        turn: Some(*attempt),
-                        category: "Provider".into(),
-                        summary: format!("Provider request {outcome:?}"),
-                        detail: format!(
-                            "{}{}",
-                            duration_ms
-                                .map(|duration| format!("{duration} ms"))
-                                .unwrap_or_default(),
-                            error
-                                .as_ref()
-                                .map(|error| format!(
-                                    "; {:?}, retryable {}",
-                                    error.category, error.retryable
-                                ))
-                                .unwrap_or_default()
-                        ),
-                        lane: Some(lane.clone()),
-                        correlation_id: request_id.as_ref().map(|id| id.as_str().to_owned()),
-                    })
-                }
-                Record::ProviderResponseAttached {
-                    seq,
-                    lane,
-                    run_id,
-                    attempt,
-                    request_id,
-                    entry_id,
-                    reasoning_entry_id,
-                    ..
-                } => Some(TrajectoryEntry {
-                    seq: Some(*seq),
-                    run_id: Some(run_id.clone()),
-                    turn: Some(*attempt),
-                    category: "Provider".into(),
-                    summary: "Provider response attached".into(),
-                    detail: format!(
-                        "entry {}{}",
-                        entry_id,
-                        reasoning_entry_id
-                            .as_deref()
-                            .map(|id| format!(", thinking {id}"))
-                            .unwrap_or_default()
-                    ),
-                    lane: Some(lane.clone()),
-                    correlation_id: request_id.as_ref().map(|id| id.as_str().to_owned()),
-                }),
-                Record::PermissionRequested {
-                    seq,
-                    lane,
-                    run_id,
-                    attempt,
-                    request_id,
-                    capability,
-                    scopes,
-                    detail_sha256,
-                    ..
-                } => Some(TrajectoryEntry {
-                    seq: Some(*seq),
-                    run_id: run_id.clone(),
-                    turn: *attempt,
-                    category: "Permission".into(),
-                    summary: format!("{} permission requested", capability.as_str()),
-                    detail: format!("scopes {scopes:?}; detail sha256 {}", detail_sha256.as_str()),
-                    lane: Some(lane.clone()),
-                    correlation_id: Some(request_id.as_str().to_owned()),
-                }),
-                Record::PermissionResolved {
-                    seq,
-                    lane,
-                    run_id,
-                    attempt,
-                    request_id,
-                    decision,
-                    source,
-                    remembered,
-                    ..
-                } => Some(TrajectoryEntry {
-                    seq: Some(*seq),
-                    run_id: run_id.clone(),
-                    turn: *attempt,
-                    category: "Permission".into(),
-                    summary: format!("Permission {decision:?}"),
-                    detail: format!("source {source:?}; remembered {remembered}"),
-                    lane: Some(lane.clone()),
-                    correlation_id: Some(request_id.as_str().to_owned()),
-                }),
                 Record::ToolExecutionObserved {
                     seq,
                     lane,
@@ -1686,11 +1877,14 @@ impl AppState {
                     duration_ms,
                     outcome,
                     cancelled,
+                    exit_code,
+                    output_bytes,
                     ..
                 } => Some(TrajectoryEntry {
                     seq: Some(*seq),
                     run_id: Some(run_id.clone()),
                     turn: *attempt,
+                    request: None,
                     category: "Tool runtime".into(),
                     summary: format!("{} {phase:?}", tool_name.as_str()),
                     detail: format!(
@@ -1699,6 +1893,18 @@ impl AppState {
                     ),
                     lane: Some(lane.clone()),
                     correlation_id: Some(tool_call_id.as_str().to_owned()),
+                    diagnostics: TrajectoryDiagnostics {
+                        duration_ms: *duration_ms,
+                        status: outcome.as_ref().map(|o| format!("{o:?}")).or_else(|| Some(format!("{phase:?}"))),
+                        exit_code: *exit_code,
+                        output_bytes: *output_bytes,
+                        source: Some(format!("Tool Executor ({})", executor_kind.as_str())),
+                        raw: Some(format!(
+                            "tool={}; phase={:?}; outcome={:?}; duration={:?}ms; exit_code={:?}; output_bytes={:?}",
+                            tool_name.as_str(), phase, outcome, duration_ms, exit_code, output_bytes
+                        )),
+                        ..Default::default()
+                    },
                 }),
                 Record::AbortObserved {
                     seq,
@@ -1714,11 +1920,13 @@ impl AppState {
                     seq: Some(*seq),
                     run_id: Some(run_id.clone()),
                     turn: *attempt,
+                    request: None,
                     category: "Cancellation".into(),
                     summary: format!("{observation:?} for {target:?}"),
                     detail: format!("initiator {initiator:?}; acknowledged {acknowledged}"),
                     lane: Some(lane.clone()),
                     correlation_id: None,
+                    diagnostics: TrajectoryDiagnostics::default(),
                 }),
                 Record::SubagentLifecycle {
                     seq,
@@ -1735,6 +1943,7 @@ impl AppState {
                     seq: Some(*seq),
                     run_id: run_id.clone(),
                     turn: *attempt,
+                    request: None,
                     category: "Subagent".into(),
                     summary: format!("{} {phase:?}", agent_id.as_str()),
                     detail: format!(
@@ -1748,6 +1957,7 @@ impl AppState {
                     ),
                     lane: Some(lane.clone()),
                     correlation_id: Some(child_run_id.as_str().to_owned()),
+                    diagnostics: TrajectoryDiagnostics::default(),
                 }),
                 Record::StreamCheckpoint {
                     seq,
@@ -1765,6 +1975,7 @@ impl AppState {
                     seq: Some(*seq),
                     run_id: Some(run_id.clone()),
                     turn: *attempt,
+                    request: None,
                     category: "Incomplete stream".into(),
                     summary: format!("Incomplete stream checkpoint {checkpoint_index}"),
                     detail: format!(
@@ -1777,6 +1988,7 @@ impl AppState {
                     ),
                     lane: Some(lane.clone()),
                     correlation_id: Some(request_id.as_str().to_owned()),
+                    diagnostics: TrajectoryDiagnostics::default(),
                 }),
                 _ => None,
             };
@@ -1784,7 +1996,16 @@ impl AppState {
                 trajectory.push(entry);
             }
         }
+
+        let mut request_number = 0u32;
         for entry in store.entries() {
+            if matches!(
+                &entry.message,
+                AgentMessage::User { .. } | AgentMessage::UserWithImages { .. }
+            ) {
+                request_number = request_number.saturating_add(1);
+            }
+            let request = (request_number > 0).then_some(request_number);
             if let AgentMessage::Assistant {
                 tool_calls: Some(calls),
                 ..
@@ -1807,11 +2028,17 @@ impl AppState {
                         seq: Some(entry.seq),
                         run_id,
                         turn: None,
+                        request,
                         category: "Tool".into(),
                         summary: format!("{name} running"),
                         detail,
                         lane: Some(lane),
                         correlation_id: Some(call.id.clone()),
+                        diagnostics: TrajectoryDiagnostics {
+                            model_visible: true,
+                            source: Some("Assistant tool call".into()),
+                            ..Default::default()
+                        },
                     });
                 }
             }
@@ -1828,6 +2055,7 @@ impl AppState {
                     seq: Some(entry.seq),
                     run_id: durable.map(|(run_id, _, _)| run_id.clone()),
                     turn: None,
+                    request,
                     category: "Tool".into(),
                     summary: format!("{name} {}", if *is_error { "failed" } else { "finished" }),
                     detail: content.clone(),
@@ -1841,24 +2069,58 @@ impl AppState {
                             .map(|(_, _, call_id)| call_id.clone())
                             .unwrap_or_else(|| tool_call_id.clone()),
                     ),
+                    diagnostics: TrajectoryDiagnostics {
+                        model_visible: true,
+                        source: Some("Tool result".into()),
+                        error_summary: if *is_error { Some("Tool failed".into()) } else { None },
+                        ..Default::default()
+                    },
                 });
                 continue;
             }
             let projected = match &entry.message {
                 AgentMessage::User { content } | AgentMessage::UserWithImages { content, .. } => {
-                    Some(("Input", "User input", content.clone()))
+                    Some((
+                        "Input".to_string(),
+                        "User input".to_string(),
+                        content.clone(),
+                    ))
                 }
                 AgentMessage::Assistant {
                     content: Some(content),
                     ..
-                } if !content.trim().is_empty() => {
-                    Some(("Assistant", "Assistant response", content.clone()))
-                }
+                } if !content.trim().is_empty() => Some((
+                    "Assistant".to_string(),
+                    "Assistant response".to_string(),
+                    content.clone(),
+                )),
                 AgentMessage::Custom {
                     custom_type,
                     payload,
-                } if matches!(custom_type.as_str(), "thinking" | "goal_round") => {
-                    Some(("Context", custom_type.as_str(), payload.to_string()))
+                } if matches!(
+                    custom_type.as_str(),
+                    "thinking" | "goal_round" | "agent_error"
+                ) =>
+                {
+                    let (category, summary, detail) = if custom_type == "agent_error" {
+                        let err_msg = payload
+                            .get("error")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("agent error");
+                        (
+                            "Error".to_string(),
+                            "Agent Error".to_string(),
+                            format!("### Error Details\n\n```\n{}\n```", err_msg),
+                        )
+                    } else {
+                        (
+                            "Context".to_string(),
+                            custom_type.to_string(),
+                            serde_json::to_string_pretty(payload)
+                                .unwrap_or_else(|_| payload.to_string()),
+                        )
+                    };
+                    Some((category, summary, detail))
                 }
                 _ => None,
             };
@@ -1867,21 +2129,106 @@ impl AppState {
                     seq: Some(entry.seq),
                     run_id: None,
                     turn: None,
+                    request,
                     category: category.into(),
                     summary: summary.into(),
                     detail,
                     lane: Some(entry.lane.clone()),
                     correlation_id: None,
+                    diagnostics: TrajectoryDiagnostics {
+                        model_visible: true,
+                        ..Default::default()
+                    },
                 });
             }
         }
+
+        // Anomaly items from typed trajectory pass
+        let typed_traj = threadlane_session::harness::project_trajectory(store);
+        for anomaly in typed_traj.anomalies {
+            trajectory.push(TrajectoryEntry {
+                seq: anomaly.related_refs.first().map(|r| r.seq),
+                run_id: None,
+                turn: None,
+                request: None,
+                category: "Anomaly".into(),
+                summary: anomaly.summary.clone(),
+                detail: anomaly.description.clone(),
+                lane: Some("main".into()),
+                correlation_id: None,
+                diagnostics: TrajectoryDiagnostics {
+                    status: Some("Warning".into()),
+                    model_visible: false,
+                    source: Some("Diagnostic Engine".into()),
+                    is_anomaly: true,
+                    ..Default::default()
+                },
+            });
+        }
+
         trajectory.sort_by_key(|entry| entry.seq.unwrap_or(u64::MAX));
+
+        if request_number > 0 {
+            for entry in &mut trajectory {
+                if entry.request.is_none() && entry.seq.is_some() {
+                    entry.request = Some(1);
+                }
+            }
+        }
+
+        (trajectory, metrics, durable_usage)
+    }
+
+    /// Applies a completed background projection if its session remains active.
+    pub(crate) fn session_status_for_file(&self, session_file: &Path) -> Option<String> {
+        self.session_runtimes
+            .get(session_file)
+            .and_then(|runtime| runtime_status_text(runtime.status()))
+    }
+
+    pub(crate) fn apply_session_hydration(
+        &mut self,
+        session_id: &str,
+        session_file: &Path,
+        result: SessionProjectionResult,
+    ) {
+        if self.active_session_id.as_deref() != Some(session_id) {
+            return;
+        }
+        self.messages = Arc::new(result.messages);
+        self.history_session_file = Some(session_file.to_path_buf());
+        self.history_start = result.history_start;
+        self.history_has_older = result.history_has_older;
+        self.active_plan = result.plan;
         self.trajectory_by_session
-            .insert(session_id.into(), trajectory);
-        self.session_metrics.insert(session_id.into(), metrics);
+            .insert(session_id.to_owned(), result.trajectory);
+        self.diagnostics_by_session
+            .insert(session_id.to_owned(), result.diagnostics);
+        self.session_metrics.insert(session_id.to_owned(), result.metrics);
         self.session_token_usage
-            .insert(session_id.into(), durable_usage);
-        Ok(())
+            .insert(session_id.to_owned(), result.token_usage);
+    }
+
+    /// Applies an older page that was computed off the UI thread.
+    pub(crate) fn apply_older_message_page(
+        &mut self,
+        session_file: &Path,
+        older: Vec<ChatMessageInfo>,
+        start: usize,
+        has_older: bool,
+    ) -> usize {
+        if self.history_session_file.as_deref() != Some(session_file) {
+            return 0;
+        }
+        let added = older.len();
+        if added > 0 {
+            self.messages_mut().splice(0..0, older);
+            self.history_start = start;
+            self.history_has_older = has_older;
+        } else {
+            self.history_has_older = false;
+        }
+        added
     }
 
     fn record_trajectory(&mut self, session_id: &str, event: &AgentEvent) {
@@ -1975,6 +2322,7 @@ impl AppState {
                     seq: None,
                     run_id: lane.clone(),
                     turn: None,
+                    request: None,
                     category: category.into(),
                     summary,
                     detail,
@@ -1986,8 +2334,110 @@ impl AppState {
                         }
                         _ => None,
                     },
+                    diagnostics: TrajectoryDiagnostics::default(),
                 });
         }
+    }
+
+    pub(crate) fn active_model_context_diagnostics(&self) -> Vec<TrajectoryEntry> {
+        let Some(projection) = self
+            .active_session_id
+            .as_ref()
+            .and_then(|id| self.diagnostics_by_session.get(id))
+        else {
+            return Vec::new();
+        };
+        projection
+            .model_context
+            .iter()
+            .map(|entry| {
+                let json_text = serde_json::to_string_pretty(&entry.message)
+                    .unwrap_or_else(|_| format!("{:?}", entry.message));
+                TrajectoryEntry {
+                    seq: Some(entry.seq),
+                    run_id: None,
+                    turn: None,
+                    request: None,
+                    category: "Model Context".into(),
+                    summary: format!("{} · {}", entry.id, entry.message.role_str()),
+                    detail: format!(
+                        "**Entry ID**: `{}`\n**Role**: `{}`\n**Lane**: `{}`\n\n```json\n{}\n```",
+                        entry.id,
+                        entry.message.role_str(),
+                        entry.lane,
+                        json_text
+                    ),
+                    lane: Some(entry.lane.clone()),
+                    correlation_id: Some(entry.id.clone()),
+                    diagnostics: TrajectoryDiagnostics {
+                        model_visible: true,
+                        source: Some("Model context projection".into()),
+                        raw: Some(json_text),
+                        ..Default::default()
+                    },
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn active_durable_event_diagnostics(&self) -> Vec<TrajectoryEntry> {
+        let Some(projection) = self
+            .active_session_id
+            .as_ref()
+            .and_then(|id| self.diagnostics_by_session.get(id))
+        else {
+            return Vec::new();
+        };
+        projection
+            .durable_events
+            .iter()
+            .map(|event| {
+                let (category, summary, detail) = match &event.kind {
+                    threadlane_session::harness::DurableEventKind::Entry { role, parent_id } => (
+                        "Entry",
+                        format!("{} · {role}", event.id),
+                        format!("parent={parent_id:?}"),
+                    ),
+                    threadlane_session::harness::DurableEventKind::Record => (
+                        "Record",
+                        format!("{} · durable record", event.id),
+                        format!(
+                            "seq={} lane={} run={}",
+                            event.seq,
+                            event.lane,
+                            event.run_id.as_deref().unwrap_or("—")
+                        ),
+                    ),
+                };
+                TrajectoryEntry {
+                    seq: Some(event.seq),
+                    run_id: event.run_id.clone(),
+                    turn: event.turn,
+                    request: None,
+                    category: category.into(),
+                    summary,
+                    detail: detail.clone(),
+                    lane: Some(event.lane.clone()),
+                    correlation_id: Some(event.id.clone()),
+                    diagnostics: TrajectoryDiagnostics {
+                        source: Some("Canonical durable event".into()),
+                        raw: Some(detail.clone()),
+                        ..Default::default()
+                    },
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn active_recovery_diagnostics(&self) -> Vec<TrajectoryEntry> {
+        let Some(projection) = self
+            .active_session_id
+            .as_ref()
+            .and_then(|id| self.diagnostics_by_session.get(id))
+        else {
+            return Vec::new();
+        };
+        project_recovery_diagnostics(&projection.recovery)
     }
 
     pub(crate) fn active_trajectory(&self) -> &[TrajectoryEntry] {
@@ -2021,36 +2471,46 @@ impl AppState {
             *pending = self.stream_rx.try_recv().ok();
         }
         pending.is_some()
+            || self
+                .active_session_id
+                .as_ref()
+                .and_then(|id| self.deferred_stream_events.get(id))
+                .is_some_and(|events| !events.is_empty())
     }
 
     pub(crate) fn drain_chat_stream(&mut self) -> bool {
+        const MAX_EVENTS_PER_DRAIN: usize = 128;
         let first = self
             .pending_stream_event
             .lock()
             .ok()
             .and_then(|mut pending| pending.take());
-        let deferred = self
-            .active_session_id
+        let active_session_id = self.active_session_id.clone();
+        let mut deferred = active_session_id
             .as_ref()
             .and_then(|session_id| self.deferred_stream_events.remove(session_id))
-            .unwrap_or_default();
-        let events = deferred
-            .into_iter()
-            .chain(first)
-            .chain(self.stream_rx.try_iter())
-            .collect::<Vec<_>>();
-        if events.is_empty() {
-            return false;
-        }
+            .unwrap_or_default()
+            .into_iter();
+        let mut first = first;
+        let mut processed = 0usize;
+        let mut active_changed = false;
 
-        for event in events {
+        while processed < MAX_EVENTS_PER_DRAIN {
+            let event = deferred
+                .next()
+                .or_else(|| first.take())
+                .or_else(|| self.stream_rx.try_recv().ok());
+            let Some(event) = event else {
+                break;
+            };
+            processed = processed.saturating_add(1);
             match event {
                 ChatStreamEvent::Agent { session_id, event }
                     if self.active_session_id.as_deref() == Some(&session_id) =>
                 {
                     if matches!(&event, AgentEvent::TurnStart { .. }) {
                         if let Some(message) = self
-                            .messages
+                            .messages_mut()
                             .last_mut()
                             .filter(|message| message.role == MessageRole::Assistant)
                         {
@@ -2064,28 +2524,23 @@ impl AppState {
                         AgentEvent::ToolExecutionStart { .. } => {
                             metrics.tool_calls = metrics.tool_calls.saturating_add(1)
                         }
-                        AgentEvent::AgentEnd { usage } => {
-                            metrics.input_tokens = metrics
-                                .input_tokens
-                                .saturating_add(u64::from(usage.input_tokens));
-                            metrics.output_tokens = metrics
-                                .output_tokens
-                                .saturating_add(u64::from(usage.output_tokens));
-                        }
+                        AgentEvent::AgentEnd { usage } => metrics.accumulate_usage(usage),
                         _ => {}
                     }
                     match adapt_agent_event(event) {
                         ChatAgentUpdate::TextDelta(delta) => {
+                            active_changed = true;
                             let stream_prefix = format!("streaming-{session_id}-");
-                            if let Some(message) = self.messages.last_mut().filter(|message| {
+                            if let Some(message) = self.messages_mut().last_mut().filter(|message| {
                                 message.role == MessageRole::Assistant
                                     && message.id.starts_with(&stream_prefix)
                                     && message.tool_activities.is_empty()
                             }) {
                                 message.content.push_str(&delta);
                             } else {
-                                self.messages.push(ChatMessageInfo {
-                                    id: format!("streaming-{session_id}-{}", self.messages.len()),
+                                let new_len = self.messages.len();
+                                self.messages_mut().push(ChatMessageInfo {
+                                    id: format!("streaming-{session_id}-{new_len}"),
                                     role: MessageRole::Assistant,
                                     content: delta,
                                     tool_activities: Vec::new(),
@@ -2096,8 +2551,9 @@ impl AppState {
                             }
                         }
                         ChatAgentUpdate::ReasoningDelta(delta) => {
+                            active_changed = true;
                             if let Some(message) = self
-                                .messages
+                                .messages_mut()
                                 .last_mut()
                                 .filter(|m| m.role == MessageRole::Assistant && m.streaming)
                             {
@@ -2107,7 +2563,7 @@ impl AppState {
                                 }
                             } else {
                                 let segment = self.messages.len();
-                                self.messages.push(ChatMessageInfo {
+                                self.messages_mut().push(ChatMessageInfo {
                                     id: format!("streaming-{session_id}-{segment}"),
                                     role: MessageRole::Assistant,
                                     content: String::new(),
@@ -2123,6 +2579,7 @@ impl AppState {
                             name,
                             arguments,
                         } => {
+                            active_changed = true;
                             let activity = ToolActivityInfo {
                                 id: tool_call_id,
                                 category: "Working".into(),
@@ -2131,13 +2588,14 @@ impl AppState {
                                 detail: arguments,
                                 is_expanded: false,
                             };
-                            if let Some(message) = self.messages.last_mut().filter(|message| {
+                            if let Some(message) = self.messages_mut().last_mut().filter(|message| {
                                 message.role == MessageRole::Assistant && message.content.is_empty()
                             }) {
                                 message.tool_activities.push(activity);
                             } else {
-                                self.messages.push(ChatMessageInfo {
-                                    id: format!("streaming-{session_id}-{}", self.messages.len()),
+                                let new_len = self.messages.len();
+                                self.messages_mut().push(ChatMessageInfo {
+                                    id: format!("streaming-{session_id}-{new_len}"),
                                     role: MessageRole::Assistant,
                                     content: String::new(),
                                     tool_activities: vec![activity],
@@ -2151,8 +2609,9 @@ impl AppState {
                             tool_call_id,
                             partial_result,
                         } => {
+                            active_changed = true;
                             if let Some(activity) = self
-                                .messages
+                                .messages_mut()
                                 .iter_mut()
                                 .rev()
                                 .flat_map(|message| message.tool_activities.iter_mut().rev())
@@ -2166,8 +2625,9 @@ impl AppState {
                             content,
                             is_error,
                         } => {
+                            active_changed = true;
                             if let Some(activity) = self
-                                .messages
+                                .messages_mut()
                                 .iter_mut()
                                 .rev()
                                 .flat_map(|message| message.tool_activities.iter_mut().rev())
@@ -2182,12 +2642,14 @@ impl AppState {
                             }
                         }
                         ChatAgentUpdate::PlanUpdated(plan) => {
+                            active_changed = true;
                             self.active_plan = plan;
                         }
                         ChatAgentUpdate::AdvisorNote(note) => {
+                            active_changed = true;
                             let note_id =
                                 format!("advisor-note-{session_id}-{}", self.messages.len());
-                            self.messages.push(ChatMessageInfo {
+                            self.messages_mut().push(ChatMessageInfo {
                                 id: note_id,
                                 role: MessageRole::Advisor(note.severity),
                                 content: format!("**{}**\n\n{}", note.summary, note.details),
@@ -2198,6 +2660,7 @@ impl AppState {
                             });
                         }
                         ChatAgentUpdate::ModelRolesUpdated(roles) => {
+                            active_changed = true;
                             self.model_roles = roles;
                         }
                         ChatAgentUpdate::Usage(usage) => {
@@ -2208,10 +2671,12 @@ impl AppState {
                             entry.accumulate(&usage);
                         }
                         ChatAgentUpdate::PermissionRequested(request) => {
+                            active_changed = true;
                             self.pending_permissions.insert(session_id.clone(), request);
                         }
                         ChatAgentUpdate::Error(error) => {
-                            self.messages.push(ChatMessageInfo {
+                            active_changed = true;
+                            self.messages_mut().push(ChatMessageInfo {
                                 id: format!("stream-error-{session_id}"),
                                 role: MessageRole::Error,
                                 content: error.clone(),
@@ -2240,21 +2705,14 @@ impl AppState {
                             });
                         continue;
                     }
-                    if self.active_session_id.as_deref() == Some(&session_id) {
-                        self.pending_permissions.remove(&session_id);
-                        self.replace_visible_history(&session_file);
-                        if let Err(error) =
-                            self.hydrate_session_projection(&session_id, &session_file)
-                        {
-                            log::warn!("Failed to reconcile completed session trajectory: {error}");
-                        }
-                        self.active_plan = load_session_plan(&session_file);
-                        self.is_generating = false;
-                        self.session_status = self
-                            .session_runtimes
-                            .get(&session_file)
-                            .and_then(|runtime| runtime_status_text(runtime.status()));
-                    }
+                    active_changed = true;
+                    self.pending_permissions.remove(&session_id);
+                    self.is_generating = false;
+                    self.session_status = Some("Reconciling session…".into());
+                    self.pending_hydrations.push(SessionHydrationRequest {
+                        session_id: session_id.clone(),
+                        session_file: session_file.clone(),
+                    });
                     let runtime_is_stale =
                         self.session_runtimes
                             .get(&session_file)
@@ -2285,6 +2743,7 @@ impl AppState {
                         self.request_session_refresh(work_dir);
                     }
                     if self.active_session_id.as_deref() == Some(&session_id) {
+                        active_changed = true;
                         self.refresh_active_session();
                     }
                 }
@@ -2296,7 +2755,13 @@ impl AppState {
                 }
             }
         }
-        true
+        if let Some(session_id) = active_session_id {
+            let remaining = deferred.collect::<Vec<_>>();
+            if !remaining.is_empty() {
+                self.deferred_stream_events.insert(session_id, remaining);
+            }
+        }
+        active_changed
     }
 
     pub(crate) fn active_pending_composer_message(&self) -> Option<&str> {
@@ -2377,8 +2842,9 @@ impl AppState {
 
     fn push_optimistic_follow_up(&mut self, session_id: &str, text: String) {
         if self.active_session_id.as_deref() == Some(session_id) {
-            self.messages.push(ChatMessageInfo {
-                id: format!("queued-user-{session_id}-{}", self.messages.len()),
+            let new_len = self.messages.len();
+            self.messages_mut().push(ChatMessageInfo {
+                id: format!("queued-user-{session_id}-{new_len}"),
                 role: MessageRole::User,
                 content: text,
                 tool_activities: Vec::new(),
@@ -2429,7 +2895,7 @@ impl AppState {
         let (api_key, account_id) = provider_credentials(&model);
 
         if api_key.is_empty() {
-            self.messages.push(ChatMessageInfo {
+            self.messages_mut().push(ChatMessageInfo {
                 id: format!("credential-error-{session_id}"),
                 role: MessageRole::Error,
                 content: format!(
@@ -2466,14 +2932,16 @@ impl AppState {
                 seq: None,
                 run_id: None,
                 turn: None,
+                request: None,
                 category: "Input".into(),
                 summary: "User input".into(),
                 detail: prompt_detail.clone(),
                 lane: Some("main".into()),
                 correlation_id: None,
+                diagnostics: TrajectoryDiagnostics::default(),
             });
         if !threadlane_provider::router::is_antigravity_model(&model) {
-            crate::services::chat::spawn_session_title(
+            crate::services::chat::maybe_generate_session_title(
                 session_file,
                 session_id.clone(),
                 text.clone(),
@@ -2485,9 +2953,10 @@ impl AppState {
         }
 
         // Present the accepted prompt immediately. CodingAgent owns durable
-        // persistence; writing it through SessionTree here would duplicate it.
-        self.messages.push(ChatMessageInfo {
-            id: format!("pending-user-{session_id}-{}", self.messages.len()),
+        // persistence; writing it directly here would duplicate it.
+        let new_len = self.messages.len();
+        self.messages_mut().push(ChatMessageInfo {
+            id: format!("pending-user-{session_id}-{new_len}"),
             role: MessageRole::User,
             content: prompt_detail,
             tool_activities: Vec::new(),
@@ -2525,10 +2994,86 @@ impl AppState {
     }
 }
 
+fn project_recovery_diagnostics(
+    lanes: &[threadlane_session::harness::LaneRecoveryDiagnostic],
+) -> Vec<TrajectoryEntry> {
+    let mut rows = Vec::new();
+    for lane in lanes {
+        let decision = match lane.decision {
+            threadlane_session::harness::RecoveryDecision::None => "No recovery required",
+            threadlane_session::harness::RecoveryDecision::ResumeFromLeaf => {
+                "Resume interrupted operation from durable leaf"
+            }
+            threadlane_session::harness::RecoveryDecision::ReplaySafeToolsThenResume => {
+                "Replay safe interrupted tools, then resume"
+            }
+            threadlane_session::harness::RecoveryDecision::AbortUnsafeTool => {
+                "Abort interrupted run; unsafe tool cannot be replayed"
+            }
+            threadlane_session::harness::RecoveryDecision::WaitForDeferredResult => {
+                "Wait for deferred provider result"
+            }
+            threadlane_session::harness::RecoveryDecision::ExplicitRetryRequired => {
+                "Keep failed; require explicit retry"
+            }
+        };
+        rows.push(TrajectoryEntry {
+            seq: None,
+            run_id: lane.open_operation.clone(),
+            turn: None,
+            request: None,
+            category: "Decision".into(),
+            summary: format!("{} · {decision}", lane.lane),
+            detail: format!(
+                "status={:?} attempts={} abort_requested={} leaf={}",
+                lane.status,
+                lane.attempts,
+                lane.abort_requested,
+                lane.leaf_id.as_deref().unwrap_or("—")
+            ),
+            lane: Some(lane.lane.clone()),
+            correlation_id: lane.open_operation.clone(),
+            diagnostics: TrajectoryDiagnostics::default(),
+        });
+        for tool in &lane.interrupted_tools {
+            rows.push(TrajectoryEntry {
+                seq: None,
+                run_id: Some(tool.run_id.clone()),
+                turn: None,
+                request: None,
+                category: "Interrupted Tool".into(),
+                summary: format!("{} · replay {:?}", tool.name, tool.replay),
+                detail: format!(
+                    "call={} result_entry={}",
+                    tool.call_id, tool.result_entry_id
+                ),
+                lane: Some(lane.lane.clone()),
+                correlation_id: Some(tool.call_id.clone()),
+                diagnostics: TrajectoryDiagnostics::default(),
+            });
+        }
+        for queued in &lane.queued_work {
+            rows.push(TrajectoryEntry {
+                seq: None,
+                run_id: lane.open_operation.clone(),
+                turn: None,
+                request: None,
+                category: "Queued Work".into(),
+                summary: format!("{:?} · {}", queued.queue, queued.entry_id),
+                detail: String::new(),
+                lane: Some(lane.lane.clone()),
+                correlation_id: Some(queued.entry_id.clone()),
+                diagnostics: TrajectoryDiagnostics::default(),
+            });
+        }
+    }
+    rows
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use threadlane_agent::harness::{
+    use threadlane_session::harness::{
         OperationIntent, OperationOutcome, ProviderOutcome, Record, SessionStore, TraceString,
     };
 
@@ -2577,9 +3122,20 @@ mod tests {
         std::fs::create_dir_all(&first_project).unwrap();
         let session_file = recent_project.join(".threadlane/sessions/recent-session.jsonl");
         std::fs::create_dir_all(session_file.parent().unwrap()).unwrap();
-        let mut tree = SessionTree::new("recent-session");
-        tree.file_path = Some(session_file);
-        tree.add_message(AgentMessage::user("recent prompt", Vec::new()));
+        let mut store = threadlane_session::harness::JsonlStore::open(&session_file).unwrap();
+        store
+            .append_entry(threadlane_session::harness::Entry {
+                id: "node_1".into(),
+                parent_id: None,
+                lane: "main".into(),
+                seq: 1,
+                timestamp: 1,
+                message: AgentMessage::user("recent prompt", Vec::new()),
+                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
+        drop(store);
 
         let state = AppState::load_from_registry(vec![
             AttachedProject {
@@ -2621,11 +3177,11 @@ mod tests {
 
     #[test]
     fn app_state_startup_hydrates_complete_initial_session_history() {
-        use threadlane_agent::harness::{
+        use threadlane_provider::openai::{ToolCall, ToolCallFunction};
+        use threadlane_session::harness::{
             CapabilitySnapshot, OperationIntent, PromptSnapshot, ProviderOutcome, Record,
             SessionStore, TraceString, UsageCause,
         };
-        use threadlane_provider::openai::{ToolCall, ToolCallFunction};
 
         let unique = std::time::SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2638,36 +3194,6 @@ mod tests {
         let session_file = work_dir.join(".threadlane/sessions/hydration-test.jsonl");
         std::fs::create_dir_all(session_file.parent().unwrap()).unwrap();
 
-        let mut tree = SessionTree::new("hydration-test");
-        tree.file_path = Some(session_file.clone());
-        tree.add_message(AgentMessage::User {
-            content: "Inspect the project".into(),
-        });
-        tree.add_message(AgentMessage::Custom {
-            custom_type: "thinking".into(),
-            payload: serde_json::json!({"text": "Reading the relevant files"}),
-        });
-        tree.add_message(AgentMessage::Assistant {
-            content: Some("The issue is fixed.".into()),
-            tool_calls: Some(vec![ToolCall {
-                id: "call-read".into(),
-                r#type: "function".into(),
-                function: ToolCallFunction {
-                    name: "read_file".into(),
-                    arguments: r#"{"path":"src/main.rs"}"#.into(),
-                },
-                thought_signature: None,
-            }]),
-            stop_reason: None,
-            deferred_handle: None,
-        });
-        tree.add_message(AgentMessage::Tool {
-            tool_call_id: "call-read".into(),
-            name: "read_file".into(),
-            content: "file contents".into(),
-            is_error: false,
-            terminate: false,
-        });
         let usage = TokenUsage {
             input_tokens: 17,
             output_tokens: 9,
@@ -2675,7 +3201,79 @@ mod tests {
             cache_write_tokens: 2,
             total_tokens: 32,
         };
-        let mut store = threadlane_agent::harness::JsonlStore::open(&session_file).unwrap();
+        let mut store = threadlane_session::harness::JsonlStore::open(&session_file).unwrap();
+        store
+            .append_entry(threadlane_session::harness::Entry {
+                id: "node_1".into(),
+                parent_id: None,
+                lane: "main".into(),
+                seq: 1,
+                timestamp: 1,
+                message: AgentMessage::User {
+                    content: "Inspect the project".into(),
+                },
+                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
+        store
+            .append_entry(threadlane_session::harness::Entry {
+                id: "node_2".into(),
+                parent_id: Some("node_1".into()),
+                lane: "main".into(),
+                seq: 2,
+                timestamp: 2,
+                message: AgentMessage::Custom {
+                    custom_type: "thinking".into(),
+                    payload: serde_json::json!({"text": "Reading the relevant files"}),
+                },
+                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
+        store
+            .append_entry(threadlane_session::harness::Entry {
+                id: "assistant-1".into(),
+                parent_id: Some("node_2".into()),
+                lane: "main".into(),
+                seq: 3,
+                timestamp: 3,
+                message: AgentMessage::Assistant {
+                    content: Some("The issue is fixed.".into()),
+                    tool_calls: Some(vec![ToolCall {
+                        id: "call-read".into(),
+                        r#type: "function".into(),
+                        function: ToolCallFunction {
+                            name: "read_file".into(),
+                            arguments: r#"{"path":"src/main.rs"}"#.into(),
+                        },
+                        thought_signature: None,
+                    }]),
+                    stop_reason: None,
+                    deferred_handle: None,
+                },
+                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
+        store
+            .append_entry(threadlane_session::harness::Entry {
+                id: "node_4".into(),
+                parent_id: Some("assistant-1".into()),
+                lane: "main".into(),
+                seq: 4,
+                timestamp: 4,
+                message: AgentMessage::Tool {
+                    tool_call_id: "call-read".into(),
+                    name: "read_file".into(),
+                    content: "file contents".into(),
+                    is_error: false,
+                    terminate: false,
+                },
+                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
         store
             .append_record(Record::OperationStarted {
                 id: "run-1".into(),
@@ -2715,6 +3313,8 @@ mod tests {
         store
             .append_record(Record::RunContextCaptured {
                 id: "context-1".into(),
+                context_window_limit: None,
+                route_defaults: None,
                 seq: 102,
                 lane: "main".into(),
                 timestamp: 102,
@@ -2818,8 +3418,13 @@ mod tests {
         );
         assert_eq!(state.session_metrics["hydration-test"].turns, 1);
         assert_eq!(state.session_metrics["hydration-test"].tool_calls, 1);
-        assert_eq!(state.session_metrics["hydration-test"].input_tokens, 17);
-        assert_eq!(state.session_metrics["hydration-test"].output_tokens, 9);
+        let metrics = &state.session_metrics["hydration-test"];
+        assert_eq!(metrics.input_tokens, 17);
+        assert_eq!(metrics.output_tokens, 9);
+        assert_eq!(metrics.cache_read_tokens, 4);
+        assert_eq!(metrics.cache_write_tokens, 2);
+        assert_eq!(metrics.billed_input_tokens(), 23);
+        assert_eq!(metrics.cache_hit_percent(), Some(17));
         assert_eq!(state.current_session_token_usage(), usage);
 
         drop(state);
@@ -2828,16 +3433,16 @@ mod tests {
 
     #[test]
     fn durable_projection_restores_ordered_tool_lifecycle_and_exact_usage() {
-        use threadlane_agent::harness::{
+        use threadlane_provider::openai::{ToolCall, ToolCallFunction};
+        use threadlane_session::harness::{
             Entry, OperationIntent, OperationOutcome, Record, SessionStore, ToolReplaySafety,
             UsageCause,
         };
-        use threadlane_provider::openai::{ToolCall, ToolCallFunction};
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
         std::fs::write(&path, "").unwrap();
-        let mut store = threadlane_agent::harness::JsonlStore::open(&path).unwrap();
+        let mut store = threadlane_session::harness::JsonlStore::open(&path).unwrap();
         store
             .append_record(Record::OperationStarted {
                 id: "run-1".into(),
@@ -2856,6 +3461,7 @@ mod tests {
                 seq: 2,
                 timestamp: 2,
                 message: AgentMessage::user("inspect", vec![]),
+                surface_op: threadlane_session::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
@@ -2892,6 +3498,7 @@ mod tests {
                     stop_reason: None,
                     deferred_handle: None,
                 },
+                surface_op: threadlane_session::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
@@ -2925,6 +3532,7 @@ mod tests {
                     is_error: false,
                     terminate: false,
                 },
+                surface_op: threadlane_session::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
@@ -3015,6 +3623,7 @@ mod tests {
                     stop_reason: None,
                     deferred_handle: None,
                 },
+                surface_op: threadlane_session::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
@@ -3048,6 +3657,7 @@ mod tests {
                     is_error: false,
                     terminate: false,
                 },
+                surface_op: threadlane_session::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
@@ -3080,6 +3690,25 @@ mod tests {
         state.hydrate_session_projection("session", &path).unwrap();
 
         assert_eq!(state.session_token_usage["session"], usage);
+        let diagnostics = &state.diagnostics_by_session["session"];
+        assert!(!diagnostics.model_context.is_empty());
+        assert_eq!(
+            diagnostics
+                .durable_events
+                .iter()
+                .map(|event| event.seq)
+                .collect::<Vec<_>>(),
+            {
+                let mut seqs = diagnostics
+                    .durable_events
+                    .iter()
+                    .map(|event| event.seq)
+                    .collect::<Vec<_>>();
+                seqs.sort_unstable();
+                seqs
+            }
+        );
+        assert_eq!(diagnostics.recovery.len(), 1);
         let tool_rows = state.trajectory_by_session["session"]
             .iter()
             .filter(|entry| entry.correlation_id.as_deref() == Some("call-1"))
@@ -3109,29 +3738,50 @@ mod tests {
             .join(format!("{session_id}.jsonl"));
         std::fs::create_dir_all(session_file.parent().unwrap()).unwrap();
         std::fs::write(&session_file, "").unwrap();
-        let mut durable_tree = threadlane_agent::SessionTree::new(&session_id);
-        durable_tree.file_path = Some(session_file.clone());
-        durable_tree.add_message(AgentMessage::Assistant {
-            content: None,
-            tool_calls: Some(vec![threadlane_provider::openai::ToolCall {
-                id: "call-1".into(),
-                r#type: "function".into(),
-                function: threadlane_provider::openai::ToolCallFunction {
-                    name: "read_file".into(),
-                    arguments: r#"{"path":"src/lib.rs"}"#.into(),
+        let mut store = threadlane_session::harness::JsonlStore::open(&session_file).unwrap();
+        store
+            .append_entry(threadlane_session::harness::Entry {
+                id: "call-1-assistant".into(),
+                parent_id: None,
+                lane: "main".into(),
+                seq: 1,
+                timestamp: 1,
+                message: AgentMessage::Assistant {
+                    content: None,
+                    tool_calls: Some(vec![threadlane_provider::openai::ToolCall {
+                        id: "call-1".into(),
+                        r#type: "function".into(),
+                        function: threadlane_provider::openai::ToolCallFunction {
+                            name: "read_file".into(),
+                            arguments: r#"{"path":"src/lib.rs"}"#.into(),
+                        },
+                        thought_signature: None,
+                    }]),
+                    stop_reason: None,
+                    deferred_handle: None,
                 },
-                thought_signature: None,
-            }]),
-            stop_reason: None,
-            deferred_handle: None,
-        });
-        durable_tree.add_message(AgentMessage::Tool {
-            tool_call_id: "call-1".into(),
-            name: "read_file".into(),
-            content: "file contents".into(),
-            is_error: false,
-            terminate: false,
-        });
+                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
+        store
+            .append_entry(threadlane_session::harness::Entry {
+                id: "call-1-tool".into(),
+                parent_id: Some("call-1-assistant".into()),
+                lane: "main".into(),
+                seq: 2,
+                timestamp: 2,
+                message: AgentMessage::Tool {
+                    tool_call_id: "call-1".into(),
+                    name: "read_file".into(),
+                    content: "file contents".into(),
+                    is_error: false,
+                    terminate: false,
+                },
+                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
 
         let mut state = AppState::load_from_registry(Vec::new());
         state.projects.push(ProjectInfo {
@@ -3154,21 +3804,25 @@ mod tests {
                     seq: None,
                     run_id: None,
                     turn: None,
+                    request: None,
                     category: "Tool".into(),
                     summary: "read_file running".into(),
                     detail: r#"{"path":"src/lib.rs"}"#.into(),
                     lane: Some("main".into()),
                     correlation_id: Some("call-1".into()),
+                    diagnostics: TrajectoryDiagnostics::default(),
                 },
                 TrajectoryEntry {
                     seq: None,
                     run_id: None,
                     turn: None,
+                    request: None,
                     category: "Tool".into(),
                     summary: "read_file finished".into(),
                     detail: "file contents".into(),
                     lane: Some("main".into()),
                     correlation_id: Some("call-1".into()),
+                    diagnostics: TrajectoryDiagnostics::default(),
                 },
             ],
         );
@@ -3199,13 +3853,13 @@ mod tests {
 
     #[test]
     fn durable_trajectory_hydrates_after_session_switch() {
-        use threadlane_agent::harness::SessionStore;
+        use threadlane_session::harness::SessionStore;
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
         std::fs::write(&path, "").unwrap();
-        let store = threadlane_agent::harness::JsonlStore::open(&path).unwrap();
-        let mut harness = threadlane_agent::harness::AgentHarness::new(store);
+        let store = threadlane_session::harness::JsonlStore::open(&path).unwrap();
+        let mut harness = threadlane_session::harness::AgentHarness::new(store);
         harness
             .accept_prompt("run-1", AgentMessage::user("old prompt", vec![]))
             .unwrap();
@@ -3214,7 +3868,7 @@ mod tests {
         let seq = harness.store().next_sequence();
         harness
             .store_mut()
-            .append_entry(threadlane_agent::harness::Entry {
+            .append_entry(threadlane_session::harness::Entry {
                 id: "legacy-tool-result".into(),
                 parent_id: Some(parent_id),
                 lane: "main".into(),
@@ -3227,6 +3881,7 @@ mod tests {
                     is_error: false,
                     terminate: false,
                 },
+                surface_op: threadlane_session::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
@@ -3242,7 +3897,7 @@ mod tests {
         assert!(trajectory
             .iter()
             .any(|entry| { entry.category == "Input" && entry.detail == "old prompt" }));
-        assert!(!trajectory.iter().any(|entry| entry.category == "Step"));
+        assert!(trajectory.iter().any(|entry| entry.category == "Step"));
         assert!(trajectory.iter().any(|entry| {
             entry.category == "Tool"
                 && entry.correlation_id.as_deref() == Some("legacy-call")
@@ -3290,52 +3945,9 @@ mod tests {
     }
 
     #[test]
-    fn accepting_a_staged_edit_proposal_updates_the_active_project_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let work_dir = dir.path().to_path_buf();
-        let file = work_dir.join("note.txt");
-        std::fs::write(&file, "before\n").unwrap();
-        let proposal = threadlane_tools::execute_tool_in_workspace(
-            "edit_file_hashline",
-            &serde_json::json!({
-                "path": "note.txt",
-                "interactive": true,
-                "edits": [{"start_anchor":"1:f3e", "end_anchor":"1:f3e", "action":"replace", "new_content":"after"}]
-            }).to_string(),
-            &work_dir,
-        );
-        assert!(proposal.starts_with("Proposed edit"), "{proposal}");
-        let proposal_id = proposal
-            .split('\'')
-            .nth(1)
-            .expect("interactive edit returns proposal id");
-        let mut state = AppState::load_from_registry(Vec::new());
-        state.active_work_dir = Some(work_dir);
-        state.accept_edit_proposal(proposal_id).unwrap();
-        assert_eq!(std::fs::read_to_string(file).unwrap(), "after\n");
-        assert!(state
-            .session_status
-            .as_deref()
-            .unwrap_or_default()
-            .contains("Accepted"));
-    }
-
-    #[test]
-    fn accepting_an_unknown_edit_proposal_does_not_mutate_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let work_dir = dir.path().to_path_buf();
-        let file = work_dir.join("note.txt");
-        std::fs::write(&file, "unchanged\n").unwrap();
-        let mut state = AppState::load_from_registry(Vec::new());
-        state.active_work_dir = Some(work_dir);
-        assert!(state.accept_edit_proposal("missing-proposal").is_err());
-        assert_eq!(std::fs::read_to_string(file).unwrap(), "unchanged\n");
-    }
-
-    #[test]
     fn inactive_session_stream_events_replay_after_switching_back() {
         let mut state = AppState::load_from_registry(Vec::new());
-        state.messages.clear();
+        state.messages_mut().clear();
         state.active_session_id = Some("foreground-session".into());
         state.is_new_task = false;
 
@@ -3369,7 +3981,7 @@ mod tests {
                 .unwrap();
         }
 
-        assert!(state.drain_chat_stream());
+        assert!(!state.drain_chat_stream());
         assert!(state.messages.is_empty());
         assert_eq!(state.deferred_stream_events.len(), 1);
 
@@ -3391,6 +4003,35 @@ mod tests {
         assert!(state.deferred_stream_events.is_empty());
     }
     #[test]
+    fn stream_drain_preserves_events_beyond_one_frame_budget() {
+        let mut state = AppState::load_from_registry(Vec::new());
+        state.messages_mut().clear();
+        state.active_session_id = Some("session".into());
+        state.is_new_task = false;
+
+        for index in 0..130 {
+            state
+                .stream_tx
+                .send(ChatStreamEvent::Agent {
+                    session_id: "session".into(),
+                    event: AgentEvent::MessageUpdate {
+                        text_delta: Some(format!("{index},")),
+                        reasoning_delta: None,
+                        tool_call_name: None,
+                    },
+                })
+                .unwrap();
+        }
+
+        assert!(state.drain_chat_stream());
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].content.matches(',').count(), 128);
+        assert!(state.chat_stream_pending());
+        assert!(state.drain_chat_stream());
+        assert_eq!(state.messages[0].content.matches(',').count(), 130);
+    }
+
+    #[test]
     fn session_message_page_returns_newest_window_and_older_cursor() {
         let unique = std::time::SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -3402,13 +4043,27 @@ mod tests {
         ));
         let path = root.join("session.jsonl");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let mut tree = SessionTree::new("paged");
-        tree.file_path = Some(path.clone());
+        let mut store = threadlane_session::harness::JsonlStore::open(&path).unwrap();
+        let mut parent_id = None;
         for index in 0..45 {
-            tree.add_message(AgentMessage::User {
-                content: format!("message-{index}"),
-            });
+            let id = format!("node_{index}");
+            store
+                .append_entry(threadlane_session::harness::Entry {
+                    id: id.clone(),
+                    parent_id,
+                    lane: "main".into(),
+                    seq: (index + 1) as u64,
+                    timestamp: (index + 1) as u64,
+                    message: AgentMessage::User {
+                        content: format!("message-{index}"),
+                    },
+                    surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                    terminate: false,
+                })
+                .unwrap();
+            parent_id = Some(id);
         }
+        drop(store);
 
         let (messages, start, has_older) = load_session_message_page(&path, usize::MAX);
         assert_eq!(messages.len(), CHAT_HISTORY_PAGE_SIZE);
@@ -3440,19 +4095,38 @@ mod tests {
         std::fs::create_dir_all(&sessions_dir).unwrap();
 
         let session_file = sessions_dir.join("session_1001.jsonl");
-        let mut tree = SessionTree::new("Startup Project");
-        tree.file_path = Some(session_file.clone());
-        tree.add_message(AgentMessage::User {
-            content: "Hello on startup".into(),
-        });
-        tree.add_message(AgentMessage::Assistant {
-            content: Some("I am ready".into()),
-            tool_calls: None,
-            stop_reason: None,
-            deferred_handle: None,
-        });
-
-        let mut store = threadlane_agent::harness::JsonlStore::open(&session_file).unwrap();
+        let mut store = threadlane_session::harness::JsonlStore::open(&session_file).unwrap();
+        store
+            .append_entry(threadlane_session::harness::Entry {
+                id: "node_1".into(),
+                parent_id: None,
+                lane: "main".into(),
+                seq: 1,
+                timestamp: 1,
+                message: AgentMessage::User {
+                    content: "Hello on startup".into(),
+                },
+                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
+        store
+            .append_entry(threadlane_session::harness::Entry {
+                id: "node_2".into(),
+                parent_id: Some("node_1".into()),
+                lane: "main".into(),
+                seq: 2,
+                timestamp: 2,
+                message: AgentMessage::Assistant {
+                    content: Some("I am ready".into()),
+                    tool_calls: None,
+                    stop_reason: None,
+                    deferred_handle: None,
+                },
+                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
         store
             .append_record(Record::OperationStarted {
                 id: "run-start-1".into(),
@@ -3476,13 +4150,15 @@ mod tests {
                 error: None,
                 duration_ms: Some(100),
                 usage: Some(TokenUsage {
-                    total_tokens: 42,
-                    input_tokens: 30,
+                    total_tokens: 50,
+                    input_tokens: 20,
                     output_tokens: 12,
-                    ..Default::default()
+                    cache_read_tokens: 15,
+                    cache_write_tokens: 3,
                 }),
             })
             .unwrap();
+        drop(store);
 
         let mut attached_project = AttachedProject::from_path(project_root.clone());
         attached_project.last_opened_at = 1_000_000;
@@ -3506,14 +4182,18 @@ mod tests {
             .session_token_usage
             .get("session_1001")
             .expect("token usage must be hydrated on startup");
-        assert_eq!(usage.total_tokens, 42);
+        assert_eq!(usage.total_tokens, 50);
 
         let metrics = state
             .session_metrics
             .get("session_1001")
             .expect("session metrics must be hydrated on startup");
-        assert_eq!(metrics.input_tokens, 30);
+        assert_eq!(metrics.input_tokens, 20);
         assert_eq!(metrics.output_tokens, 12);
+        assert_eq!(metrics.cache_read_tokens, 15);
+        assert_eq!(metrics.cache_write_tokens, 3);
+        assert_eq!(metrics.billed_input_tokens(), 38);
+        assert_eq!(metrics.cache_hit_percent(), Some(39));
 
         let _ = std::fs::remove_dir_all(project_root);
     }
@@ -3531,27 +4211,55 @@ mod tests {
         let path = root.join("session.jsonl");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
 
-        let mut tree = SessionTree::new("Branch Test");
-        tree.file_path = Some(path.clone());
-        let root_msg = tree.add_message(AgentMessage::User {
-            content: "Root question".into(),
-        });
-        let _branch_a = tree.add_message(AgentMessage::Assistant {
-            content: Some("Branch A answer".into()),
-            tool_calls: None,
-            stop_reason: None,
-            deferred_handle: None,
-        });
-
-        tree.switch_active_node(&root_msg);
-        let _branch_b = tree.add_message(AgentMessage::Assistant {
-            content: Some("Branch B alternative answer".into()),
-            tool_calls: None,
-            stop_reason: None,
-            deferred_handle: None,
-        });
-
-        let mut store = threadlane_agent::harness::JsonlStore::open(&path).unwrap();
+        let mut store = threadlane_session::harness::JsonlStore::open(&path).unwrap();
+        store
+            .append_entry(threadlane_session::harness::Entry {
+                id: "msg-root".into(),
+                parent_id: None,
+                lane: "main".into(),
+                seq: 1,
+                timestamp: 1,
+                message: AgentMessage::User {
+                    content: "Root question".into(),
+                },
+                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
+        store
+            .append_entry(threadlane_session::harness::Entry {
+                id: "msg-branch-a".into(),
+                parent_id: Some("msg-root".into()),
+                lane: "main".into(),
+                seq: 2,
+                timestamp: 2,
+                message: AgentMessage::Assistant {
+                    content: Some("Branch A answer".into()),
+                    tool_calls: None,
+                    stop_reason: None,
+                    deferred_handle: None,
+                },
+                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
+        store
+            .append_entry(threadlane_session::harness::Entry {
+                id: "msg-branch-b".into(),
+                parent_id: Some("msg-root".into()),
+                lane: "main".into(),
+                seq: 3,
+                timestamp: 3,
+                message: AgentMessage::Assistant {
+                    content: Some("Branch B alternative answer".into()),
+                    tool_calls: None,
+                    stop_reason: None,
+                    deferred_handle: None,
+                },
+                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
         store
             .append_record(Record::OperationStarted {
                 id: "run-branch-a".into(),
@@ -3600,7 +4308,7 @@ mod tests {
             .hydrate_session_projection("branch-session", &path)
             .unwrap();
 
-        let branch_messages = tree.get_active_branch_messages();
+        let branch_messages = store.active_branch_messages("main");
         assert_eq!(branch_messages.len(), 2);
         assert!(matches!(
             &branch_messages[0],

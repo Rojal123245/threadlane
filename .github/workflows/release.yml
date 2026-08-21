@@ -34,61 +34,61 @@ env:
   RELEASE_TAG: ${{ inputs.release_tag || inputs.tag || github.ref_name }}
 
 jobs:
-  linux:
-    name: Linux ${{ matrix.arch }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            arch: x86_64
-          - runner: ubuntu-24.04-arm
-            arch: aarch64
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.RELEASE_TAG }}
-
-      - name: Verify release tag
-        shell: bash
-        run: |
-          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "threadlane-gpui") | .version')
-          if [[ "$RELEASE_TAG" != "v$version" ]]; then
-            echo "::error::Tag $RELEASE_TAG does not match threadlane-gpui version v$version"
-            exit 1
-          fi
-
-      - uses: dtolnay/rust-toolchain@1.95.0
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: gpui-release-${{ matrix.arch }}
-
-      - name: Install Linux dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes \
-            clang \
-            cmake \
-            libasound2-dev \
-            libfontconfig-dev \
-            libssl-dev \
-            libvulkan1 \
-            libwayland-dev \
-            libx11-xcb-dev \
-            libxkbcommon-x11-dev \
-            pkg-config \
-            xdg-desktop-portal
-
-      - name: Bundle
-        run: ./scripts/bundle-gpui-linux.sh
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux-${{ matrix.arch }}
-          path: target/release/threadlane-*.tar.gz
-          if-no-files-found: error
+#  linux:
+#    name: Linux ${{ matrix.arch }}
+#    strategy:
+#      fail-fast: false
+#      matrix:
+#        include:
+#          - runner: ubuntu-24.04
+#            arch: x86_64
+#          - runner: ubuntu-24.04-arm
+#            arch: aarch64
+#    runs-on: ${{ matrix.runner }}
+#    timeout-minutes: 90
+#    steps:
+#      - uses: actions/checkout@v4
+#        with:
+#          ref: ${{ env.RELEASE_TAG }}
+#
+#      - name: Verify release tag
+#        shell: bash
+#        run: |
+#          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "threadlane-gpui") | .version')
+#          if [[ "$RELEASE_TAG" != "v$version" ]]; then
+#            echo "::error::Tag $RELEASE_TAG does not match threadlane-gpui version v$version"
+#            exit 1
+#          fi
+#
+#      - uses: dtolnay/rust-toolchain@1.95.0
+#      - uses: Swatinem/rust-cache@v2
+#        with:
+#          key: gpui-release-${{ matrix.arch }}
+#
+#      - name: Install Linux dependencies
+#        run: |
+#          sudo apt-get update
+#          sudo apt-get install --yes \
+#            clang \
+#            cmake \
+#            libasound2-dev \
+#            libfontconfig-dev \
+#            libssl-dev \
+#            libvulkan1 \
+#            libwayland-dev \
+#            libx11-xcb-dev \
+#            libxkbcommon-x11-dev \
+#            pkg-config \
+#            xdg-desktop-portal
+#
+#      - name: Bundle
+#        run: ./scripts/bundle-gpui-linux.sh
+#
+#      - uses: actions/upload-artifact@v4
+#        with:
+#          name: linux-${{ matrix.arch }}
+#          path: target/release/threadlane-*.tar.gz
+#          if-no-files-found: error
 
   macos:
     name: macOS Apple Silicon

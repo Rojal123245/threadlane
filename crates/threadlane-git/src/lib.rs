@@ -13,6 +13,7 @@ pub struct GitHubPrInfo {
     pub title: String,
     pub url: String,
     pub state: String,
+    pub is_draft: bool,
     pub head_ref: String,
     pub base_ref: String,
     pub comments_count: usize,
@@ -330,6 +331,7 @@ pub fn parse_gh_pr_json(json_str: &str) -> Result<GitHubPrInfo, String> {
     let title = val["title"].as_str().unwrap_or("").to_string();
     let url = val["url"].as_str().unwrap_or("").to_string();
     let state = val["state"].as_str().unwrap_or("").to_string();
+    let is_draft = val["isDraft"].as_bool().unwrap_or(false);
     let head_ref = val["headRefName"].as_str().unwrap_or("").to_string();
     let base_ref = val["baseRefName"].as_str().unwrap_or("").to_string();
 
@@ -385,9 +387,16 @@ pub fn parse_gh_pr_json(json_str: &str) -> Result<GitHubPrInfo, String> {
             let conclusion_upper = conclusion.as_deref().unwrap_or("").to_uppercase();
             let status_upper = status.to_uppercase();
 
-            if matches!(conclusion_upper.as_str(), "FAILURE" | "TIMED_OUT" | "ACTION_REQUIRED" | "CANCELLED" | "ERROR") {
+            if matches!(
+                conclusion_upper.as_str(),
+                "FAILURE" | "TIMED_OUT" | "ACTION_REQUIRED" | "CANCELLED" | "ERROR"
+            ) {
                 failing_checks += 1;
-            } else if matches!(status_upper.as_str(), "IN_PROGRESS" | "QUEUED" | "PENDING" | "EXPECTED") || conclusion.is_none() {
+            } else if matches!(
+                status_upper.as_str(),
+                "IN_PROGRESS" | "QUEUED" | "PENDING" | "EXPECTED"
+            ) || conclusion.is_none()
+            {
                 pending_checks += 1;
             } else if matches!(conclusion_upper.as_str(), "SUCCESS" | "NEUTRAL" | "SKIPPED") {
                 passing_checks += 1;
@@ -409,6 +418,7 @@ pub fn parse_gh_pr_json(json_str: &str) -> Result<GitHubPrInfo, String> {
         title,
         url,
         state,
+        is_draft,
         head_ref,
         base_ref,
         comments_count,
@@ -427,7 +437,7 @@ pub fn inspect_pr(work_dir: &Path) -> Result<Option<GitHubPrInfo>, GitError> {
             "pr",
             "view",
             "--json",
-            "number,title,url,state,comments,statusCheckRollup,headRefName,baseRefName",
+            "number,title,url,state,isDraft,comments,statusCheckRollup,headRefName,baseRefName",
         ])
         .current_dir(work_dir)
         .output();
@@ -459,31 +469,6 @@ pub fn create_branch(work_dir: &Path, name: &str) -> Result<(), GitError> {
 pub fn checkout(work_dir: &Path, name: &str) -> Result<(), GitError> {
     let name = validate_branch_name(work_dir, name)?;
     command(work_dir, &["switch", &name])?;
-    Ok(())
-}
-
-fn create_worktree(work_dir: &Path, path: &Path, branch: &str) -> Result<(), GitError> {
-    let branch = validate_branch_name(work_dir, branch)?;
-    if !path.is_absolute() {
-        return Err(GitError {
-            work_dir: work_dir.to_path_buf(),
-            message: "worktree path must be absolute".to_owned(),
-        });
-    }
-    if path == work_dir {
-        return Err(GitError {
-            work_dir: work_dir.to_path_buf(),
-            message: "worktree path must differ from the current checkout".to_owned(),
-        });
-    }
-    if path.exists() {
-        return Err(GitError {
-            work_dir: work_dir.to_path_buf(),
-            message: "worktree path already exists".to_owned(),
-        });
-    }
-    let path = path.to_string_lossy().into_owned();
-    command(work_dir, &["worktree", "add", &path, &branch])?;
     Ok(())
 }
 
@@ -620,10 +605,14 @@ fn validate_diff_path(work_dir: &Path, path: &str) -> Result<(), GitError> {
             return Err(invalid());
         }
     }
-    if !existing.canonicalize().map_err(|error| GitError {
-        work_dir: work_dir.to_path_buf(),
-        message: format!("could not resolve path: {error}"),
-    })?.starts_with(&root) {
+    if !existing
+        .canonicalize()
+        .map_err(|error| GitError {
+            work_dir: work_dir.to_path_buf(),
+            message: format!("could not resolve path: {error}"),
+        })?
+        .starts_with(&root)
+    {
         return Err(invalid());
     }
     Ok(())
@@ -666,7 +655,14 @@ pub fn diff_file(work_dir: &Path, path: &str) -> Result<String, GitError> {
     if command(work_dir, &["ls-files", "--error-unmatch", "--", path]).is_err() {
         let null_source = if cfg!(windows) { "NUL" } else { "/dev/null" };
         if let Ok(output) = Command::new("git")
-            .args(["diff", "--no-ext-diff", "--no-index", "--", null_source, path])
+            .args([
+                "diff",
+                "--no-ext-diff",
+                "--no-index",
+                "--",
+                null_source,
+                path,
+            ])
             .current_dir(work_dir)
             .output()
         {
@@ -755,30 +751,6 @@ fn default_branch(work_dir: &Path) -> Option<String> {
         }
     }
     Some("main".to_owned())
-}
-
-fn github_repository(remote: &str) -> Option<(String, String)> {
-    let normalized = remote.trim().trim_end_matches('/').trim_end_matches(".git");
-    let path = normalized
-        .strip_prefix("https://github.com/")
-        .or_else(|| normalized.strip_prefix("http://github.com/"))
-        .or_else(|| normalized.strip_prefix("git@github.com:"))
-        .or_else(|| normalized.strip_prefix("ssh://git@github.com/"))?;
-    let mut parts = path.split('/');
-    let owner = parts.next()?.trim();
-    let repository = parts.next()?.trim();
-    if owner.is_empty() || repository.is_empty() || parts.next().is_some() {
-        return None;
-    }
-    Some((owner.to_owned(), repository.to_owned()))
-}
-
-fn github_compare_url(remote: &str, head: &str, base: Option<&str>) -> Option<String> {
-    let (owner, repo) = github_repository(remote)?;
-    let base = base.unwrap_or("main");
-    Some(format!(
-        "https://github.com/{owner}/{repo}/compare/{base}...{head}?expand=1"
-    ))
 }
 
 fn validate_branch_name(work_dir: &Path, name: &str) -> Result<String, GitError> {
@@ -916,13 +888,6 @@ mod tests {
     }
 
     #[test]
-    fn worktree_creation_rejects_relative_and_current_paths() {
-        let repo = Path::new("/tmp/project");
-        assert!(create_worktree(repo, Path::new("relative"), "main").is_err());
-        assert!(create_worktree(repo, repo, "main").is_err());
-    }
-
-    #[test]
     fn normalizes_renamed_paths() {
         let status = parse_status(
             Path::new("/tmp/project"),
@@ -951,26 +916,6 @@ mod tests {
             "## feature/demo\0??  leading.txt \0",
         );
         assert_eq!(status.files[0].path, " leading.txt ");
-    }
-
-    #[test]
-    fn parses_github_remotes() {
-        assert_eq!(
-            github_repository("git@github.com:owner/repo.git"),
-            Some(("owner".to_owned(), "repo".to_owned()))
-        );
-        assert_eq!(
-            github_repository("https://github.com/owner/repo"),
-            Some(("owner".to_owned(), "repo".to_owned()))
-        );
-        assert_eq!(
-            github_compare_url(
-                "git@github.com:owner/repo.git",
-                "enhancements",
-                Some("main")
-            ),
-            Some("https://github.com/owner/repo/compare/main...enhancements?expand=1".to_owned())
-        );
     }
 
     #[test]
@@ -1100,6 +1045,7 @@ mod tests {
         assert_eq!(pr.title, "Center editor panel");
         assert_eq!(pr.head_ref, "center_editor_panel");
         assert_eq!(pr.base_ref, "main");
+        assert!(!pr.is_draft);
         assert_eq!(pr.comments_count, 3);
         assert_eq!(pr.review_comments.len(), 3);
         assert_eq!(pr.review_comments[0].author, "reviewer1");
@@ -1107,5 +1053,35 @@ mod tests {
         assert_eq!(pr.failing_checks, 1);
         assert_eq!(pr.passing_checks, 1);
         assert_eq!(pr.pending_checks, 1);
+
+        let draft_sample = r#"{
+            "number": 43,
+            "title": "WIP Feature",
+            "url": "https://github.com/threadlane/threadlane/pull/43",
+            "state": "OPEN",
+            "isDraft": true,
+            "headRefName": "wip-feature",
+            "baseRefName": "main",
+            "comments": [],
+            "statusCheckRollup": []
+        }"#;
+        let draft_pr = parse_gh_pr_json(draft_sample).unwrap();
+        assert!(draft_pr.is_draft);
+        assert_eq!(draft_pr.state, "OPEN");
+
+        let merged_sample = r#"{
+            "number": 44,
+            "title": "Merged Feature",
+            "url": "https://github.com/threadlane/threadlane/pull/44",
+            "state": "MERGED",
+            "isDraft": false,
+            "headRefName": "merged-feature",
+            "baseRefName": "main",
+            "comments": [],
+            "statusCheckRollup": []
+        }"#;
+        let merged_pr = parse_gh_pr_json(merged_sample).unwrap();
+        assert!(!merged_pr.is_draft);
+        assert_eq!(merged_pr.state, "MERGED");
     }
 }
