@@ -24,14 +24,15 @@ impl ToolExecutor for BuiltinToolExecutor {
         "threadlane.builtin_tools"
     }
 
-    fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
+    fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
         let mut seen = std::collections::HashSet::new();
         get_available_tools()
             .into_iter()
             .chain(get_codex_tools())
             .filter_map(|schema| AgentToolDefinition::from_provider_schema(&schema).ok())
             .filter(|definition| seen.insert(definition.name.clone()))
-            .collect()
+            .collect::<Vec<_>>()
+            .into()
     }
 
     async fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {
@@ -63,11 +64,12 @@ pub trait ToolExecutor: Send + Sync {
     }
 
     /// Provider-neutral definitions for tools handled by this executor.
-    fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
+    fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
         self.get_tool_schemas()
             .iter()
             .filter_map(|schema| AgentToolDefinition::from_provider_schema(schema).ok())
-            .collect()
+            .collect::<Vec<_>>()
+            .into()
     }
 
     /// Legacy Chat Completions schemas. Prefer `tool_definitions` for new executors.

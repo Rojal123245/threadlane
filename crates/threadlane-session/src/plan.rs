@@ -204,7 +204,7 @@ impl ToolExecutor for UpdatePlanToolExecutor {
         "threadlane.host.update_plan"
     }
 
-    fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
+    fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
         vec![AgentToolDefinition::new(
             UPDATE_PLAN_TOOL_NAME,
             "Replace the current session plan. Use this tool at the start of multi-step work and after every meaningful milestone: mark the current step in_progress, mark it completed immediately when it succeeds, and set the next step in_progress. Use an empty plan to clear it.",
@@ -240,6 +240,7 @@ impl ToolExecutor for UpdatePlanToolExecutor {
                 "additionalProperties": false
             }),
         )]
+        .into()
     }
 
     async fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {
@@ -302,7 +303,7 @@ impl ToolExecutor for GeneratePlanToolExecutor {
         "threadlane.host.generate_plan"
     }
 
-    fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
+    fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
         vec![AgentToolDefinition::new(
             GENERATE_PLAN_TOOL_NAME,
             "Hand off planning to the dedicated Plan Model. Generates a structured multi-step plan from an objective, replaces the session plan, and returns the steps so you can begin executing.",
@@ -318,6 +319,7 @@ impl ToolExecutor for GeneratePlanToolExecutor {
                 "additionalProperties": false
             }),
         )]
+        .into()
     }
 
     async fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {

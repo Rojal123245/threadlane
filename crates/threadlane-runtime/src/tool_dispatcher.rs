@@ -121,9 +121,14 @@ impl ToolDispatcher {
 
         let mut known_names = HashSet::new();
         for registered in self.ordered_tool_executors() {
-            known_names.extend(registered.tool_definitions().into_iter().map(|d| d.name));
+            known_names.extend(
+                registered
+                    .tool_definitions()
+                    .iter()
+                    .map(|definition| definition.name.clone()),
+            );
         }
-        for definition in executor.tool_definitions() {
+        for definition in executor.tool_definitions().iter() {
             if definition.name.trim().is_empty() {
                 return Err(AgentError::ToolRegistration(format!(
                     "Tool executor '{executor_id}' provided an empty tool name"
@@ -596,9 +601,9 @@ impl ToolDispatcher {
                 executor: executor.clone(),
                 tool_names: executor
                     .tool_definitions()
-                    .into_iter()
+                    .iter()
                     .filter_map(|definition| {
-                        (!definition.name.trim().is_empty()).then_some(definition.name)
+                        (!definition.name.trim().is_empty()).then(|| definition.name.clone())
                     })
                     .filter(|name| claimed_names.insert(name.clone()))
                     .collect(),
@@ -615,12 +620,11 @@ fn collect_tool_definitions(
     let mut seen = HashSet::new();
     let mut definitions = Vec::new();
 
-    for definition in registered_executors
-        .iter()
-        .flat_map(|executor| executor.tool_definitions())
-    {
-        if seen.insert(definition.name.clone()) {
-            definitions.push(definition);
+    for executor in registered_executors {
+        for definition in executor.tool_definitions().iter() {
+            if seen.insert(definition.name.clone()) {
+                definitions.push(definition.clone());
+            }
         }
     }
 
@@ -681,8 +685,8 @@ mod tests {
             &self.id
         }
 
-        fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
-            self.tools.clone()
+        fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
+            self.tools.clone().into()
         }
 
         async fn execute_tool(&self, _name: &str, _args: &str) -> Option<Result<String, String>> {

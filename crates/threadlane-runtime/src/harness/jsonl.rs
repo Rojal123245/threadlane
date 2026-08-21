@@ -640,13 +640,6 @@ impl Record {
     }
 }
 
-pub(crate) fn append_session_json_line<T: serde::Serialize>(
-    path: &Path,
-    value: &T,
-) -> io::Result<()> {
-    append_session_json_line_with_policy(path, value, SyncPolicy::All)
-}
-
 fn append_session_json_line_with_policy<T: serde::Serialize>(
     path: &Path,
     value: &T,

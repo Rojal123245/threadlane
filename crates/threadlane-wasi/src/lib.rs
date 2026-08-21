@@ -475,6 +475,7 @@ type PendingExtensionEvents = HashMap<Option<String>, HashMap<String, Vec<WasiEx
 #[derive(Default)]
 pub struct WasiExtensionManager {
     extensions: RwLock<HashMap<String, Arc<WasiExtension>>>,
+    tool_definitions: RwLock<Arc<[threadlane_runtime::AgentToolDefinition]>>,
     states: Mutex<HashMap<String, Value>>,
     host_state: Mutex<HashMap<String, Value>>,
     subscriptions: Mutex<HashMap<String, HashSet<String>>>,
@@ -520,11 +521,13 @@ impl WasiExtensionManager {
     }
 
     pub fn register_extension(&self, extension: WasiExtension) -> Result<(), String> {
-        self.extensions
-            .write()
-            .map_err(|_| "Extension registry lock poisoned".to_string())?
-            .insert(extension.manifest.name.clone(), Arc::new(extension));
-        Ok(())
+        {
+            self.extensions
+                .write()
+                .map_err(|_| "Extension registry lock poisoned".to_string())?
+                .insert(extension.manifest.name.clone(), Arc::new(extension));
+        }
+        self.rebuild_tool_definitions()
     }
 
     pub fn reload_from_roots(
@@ -600,6 +603,8 @@ impl WasiExtensionManager {
             }
         }
         *extensions = loaded;
+        drop(extensions);
+        self.rebuild_tool_definitions()?;
         Ok(loaded_count)
     }
 
@@ -1135,9 +1140,9 @@ fn persist_json_state(path: &Path, state: &Value) -> Result<(), String> {
 }
 
 impl WasiExtensionManager {
-    pub fn tool_definitions(&self) -> Vec<threadlane_runtime::AgentToolDefinition> {
+    fn rebuild_tool_definitions(&self) -> Result<(), String> {
         let Ok(extensions) = self.extensions.read() else {
-            return Vec::new();
+            return Err("Extension registry lock poisoned".to_string());
         };
         let mut tools: Vec<_> = extensions
             .values()
@@ -1151,7 +1156,18 @@ impl WasiExtensionManager {
             })
             .collect();
         tools.sort_by(|left, right| left.name.cmp(&right.name));
-        tools
+        *self
+            .tool_definitions
+            .write()
+            .map_err(|_| "Extension tool definitions lock poisoned".to_string())? = tools.into();
+        Ok(())
+    }
+
+    pub fn tool_definitions(&self) -> Arc<[threadlane_runtime::AgentToolDefinition]> {
+        self.tool_definitions
+            .read()
+            .map(|tools| tools.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -1159,6 +1175,23 @@ impl WasiExtensionManager {
 mod reload_tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn tool_definition_slice_is_reused() {
+        let manager = WasiExtensionManager::new();
+        let mut extension = WasiExtension::load_from_bytes(b"\0asm\x01\0\0\0".to_vec()).unwrap();
+        extension.manifest.tools.push(WasiToolDefinition {
+            name: "echo".into(),
+            description: "echo".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        });
+        manager.register_extension(extension).unwrap();
+
+        let first = manager.tool_definitions();
+        let second = manager.tool_definitions();
+
+        assert!(Arc::ptr_eq(&first, &second));
+    }
 
     #[test]
     fn invocation_selection_owns_extensions_without_holding_registry_read_lock() {

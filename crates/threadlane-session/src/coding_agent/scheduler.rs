@@ -154,13 +154,14 @@ impl ToolExecutor for DeterministicSubagentToolExecutor {
         "threadlane.test.subagent_tool"
     }
 
-    fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
+    fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
         vec![AgentToolDefinition {
             name: "test_child_tool".into(),
             description: None,
             parameters: serde_json::json!({"type": "object"}),
             strict: None,
         }]
+        .into()
     }
 
     async fn execute_tool(&self, name: &str, _args: &str) -> Option<Result<String, String>> {

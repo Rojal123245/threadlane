@@ -471,8 +471,8 @@ impl ToolExecutor for LoadSkillToolExecutor {
         "threadlane.host.load_skill"
     }
 
-    fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
-        vec![load_skill_tool_definition()]
+    fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
+        vec![load_skill_tool_definition()].into()
     }
 
     async fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {

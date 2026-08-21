@@ -285,7 +285,7 @@ pub struct McpManager {
     global_dir: Option<PathBuf>,
     project_root: Option<PathBuf>,
     servers: TokioMutex<Vec<McpServerRecord>>,
-    cached_tool_defs: RwLock<Vec<AgentToolDefinition>>,
+    cached_tool_defs: RwLock<Arc<[AgentToolDefinition]>>,
     /// Live sessions keyed by server id, reused across tool calls.
     ///
     /// Each session carries its own lock so a call to one server never blocks a
@@ -300,7 +300,7 @@ impl McpManager {
             global_dir,
             project_root,
             servers: TokioMutex::new(Vec::new()),
-            cached_tool_defs: RwLock::new(Vec::new()),
+            cached_tool_defs: RwLock::new(Arc::from([])),
             sessions: TokioMutex::new(HashMap::new()),
         }
     }
@@ -384,7 +384,7 @@ impl McpManager {
         }))
         .await;
 
-        let tool_defs = records
+        let tool_defs: Vec<_> = records
             .iter()
             .flat_map(|record| record.tools.iter().map(|tool| tool.definition.clone()))
             .collect();
@@ -392,7 +392,7 @@ impl McpManager {
         let mut guard = self.servers.lock().await;
         *guard = records.clone();
         if let Ok(mut cached) = self.cached_tool_defs.write() {
-            *cached = tool_defs;
+            *cached = tool_defs.into();
         }
         records
     }
@@ -457,7 +457,7 @@ impl McpManager {
         mcp_tools
     }
 
-    pub fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
+    pub fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
         self.cached_tool_defs
             .read()
             .map(|defs| defs.clone())
@@ -561,7 +561,7 @@ impl ToolExecutor for McpManager {
         "threadlane.mcp_tools"
     }
 
-    fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
+    fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
         McpManager::tool_definitions(self)
     }
 
@@ -588,7 +588,7 @@ impl ToolExecutor for McpToolExecutor {
         "threadlane.mcp_tools.adapter"
     }
 
-    fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
+    fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
         self.manager.tool_definitions()
     }
 
@@ -600,6 +600,22 @@ impl ToolExecutor for McpToolExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_definition_slice_is_reused() {
+        let manager = McpManager::new(None, None);
+        *manager.cached_tool_defs.write().unwrap() = vec![AgentToolDefinition::new(
+            "mcp__stub__echo",
+            "echo",
+            serde_json::json!({"type": "object"}),
+        )]
+        .into();
+
+        let first = manager.tool_definitions();
+        let second = manager.tool_definitions();
+
+        assert!(Arc::ptr_eq(&first, &second));
+    }
 
     #[test]
     fn test_mcp_server_config_serialization() {
