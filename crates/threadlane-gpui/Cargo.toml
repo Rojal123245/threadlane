@@ -30,6 +30,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 portable-pty = "0.9"
 vt100 = "0.15"
+notify = "7.0"
 
 [dev-dependencies]
 tempfile = "3.8"

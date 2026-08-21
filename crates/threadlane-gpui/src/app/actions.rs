@@ -30,7 +30,6 @@ pub enum AppAction {
     SteerPendingMessage,
     DismissPendingMessage,
     ToggleToolActivity(String),
-    AcceptEditProposal(String),
     CancelGeneration,
     SelectModel(String),
     SelectReasoningEffort(ReasoningEffort),

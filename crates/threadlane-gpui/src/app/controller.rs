@@ -53,11 +53,6 @@ pub(crate) fn dispatch(
         }
         AppAction::DismissPendingMessage => state.dismiss_pending_message(),
         AppAction::ToggleToolActivity(tool_call_id) => state.toggle_tool_activity(&tool_call_id),
-        AppAction::AcceptEditProposal(proposal_id) => {
-            if let Err(error) = state.accept_edit_proposal(&proposal_id) {
-                state.session_status = Some(error);
-            }
-        }
         AppAction::CancelGeneration => {
             let _ = state.cancel_generation();
         }

@@ -1275,23 +1275,6 @@ impl AppState {
         }
     }
 
-    pub(crate) fn accept_edit_proposal(&mut self, proposal_id: &str) -> Result<(), String> {
-        let work_dir = self
-            .active_work_dir
-            .as_deref()
-            .ok_or_else(|| "Select a project before accepting an edit proposal".to_string())?;
-        let response = threadlane_tools::execute_tool_in_workspace(
-            "accept_edit",
-            &serde_json::json!({ "proposal_id": proposal_id }).to_string(),
-            work_dir,
-        );
-        if response.starts_with("Error:") {
-            return Err(response);
-        }
-        self.session_status = Some(response);
-        Ok(())
-    }
-
     pub(crate) fn toggle_tool_activity(&mut self, tool_call_id: &str) {
         if let Some(activity) = self
             .messages_mut()
@@ -3945,18 +3928,6 @@ mod tests {
         );
         state.record_trajectory("session-a", &AgentEvent::TurnStart { turn_number: 12 });
         assert_eq!(state.trajectory_by_session["session-a"].len(), 1);
-    }
-
-    #[test]
-    fn accepting_an_unknown_edit_proposal_does_not_mutate_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let work_dir = dir.path().to_path_buf();
-        let file = work_dir.join("note.txt");
-        std::fs::write(&file, "unchanged\n").unwrap();
-        let mut state = AppState::load_from_registry(Vec::new());
-        state.active_work_dir = Some(work_dir);
-        assert!(state.accept_edit_proposal("missing-proposal").is_err());
-        assert_eq!(std::fs::read_to_string(file).unwrap(), "unchanged\n");
     }
 
     #[test]

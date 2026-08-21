@@ -4,3 +4,4 @@ pub mod provider_auth;
 pub mod sessions;
 pub mod settings;
 pub mod updater;
+pub mod watcher;

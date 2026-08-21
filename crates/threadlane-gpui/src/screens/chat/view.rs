@@ -613,13 +613,6 @@ impl ChatListView {
         let tool_call_id = activity.id.clone();
         let has_detail = !activity.detail.trim().is_empty();
         let row_id = SharedString::from(activity.id.clone());
-        let proposal_id = activity
-            .detail
-            .split("proposal_id=")
-            .nth(1)
-            .and_then(|value| value.split_whitespace().next())
-            .map(str::to_owned);
-
         let display_summary = {
             let first_line = activity
                 .summary
@@ -701,32 +694,6 @@ impl ChatListView {
                             .text_color(theme.muted_foreground)
                             .child(display_summary),
                     )
-                    .children(proposal_id.as_ref().map(|proposal_id| {
-                        let model = self.model.clone();
-                        let proposal_id = proposal_id.clone();
-                        div()
-                            .id(SharedString::from(format!("accept-edit-{proposal_id}")))
-                            .px_2()
-                            .py_1()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .bg(theme.primary)
-                            .text_xs()
-                            .text_color(theme.primary_foreground)
-                            .child("Accept")
-                            .on_click(move |_event, _window, cx| {
-                                // The accept control is inside the clickable tool row. Prevent
-                                // this click from bubbling up and toggling the row details.
-                                cx.stop_propagation();
-                                model.update(cx, |state, cx| {
-                                    controller::dispatch(
-                                        state,
-                                        AppAction::AcceptEditProposal(proposal_id.clone()),
-                                    );
-                                    cx.notify();
-                                });
-                            })
-                    }))
                     .children(has_detail.then(|| {
                         Icon::new(if activity.is_expanded {
                             IconName::ChevronDown
@@ -1001,7 +968,7 @@ impl ChatListView {
             };
             let view = cx.entity().clone();
             let (badge_bg, badge_fg, badge_label): (Hsla, Hsla, SharedString) = match entry.category.as_str() {
-                "Tool" | "Tool runtime" => (theme.accent.opacity(0.18), theme.accent, "TOOL".into()),
+                "Tool" | "Tool runtime" => (theme.warning.opacity(0.18), theme.warning, "TOOL".into()),
                 "Provider" => (theme.primary.opacity(0.18), theme.primary, "PROVIDER".into()),
                 "Context Manifest" | "Manifest" => (theme.accent.opacity(0.14), theme.muted_foreground, "MANIFEST".into()),
                 "Request" => (theme.primary.opacity(0.16), theme.accent, "REQUEST".into()),
@@ -1023,7 +990,7 @@ impl ChatListView {
             {
                 theme.danger
             } else if entry.category == "Tool" || entry.category == "Tool runtime" {
-                theme.accent
+                theme.warning
             } else if entry.category == "Request" {
                 theme.primary
             } else {
@@ -1167,7 +1134,7 @@ impl ChatListView {
             }
             let metadata = metadata_items.into_iter().flatten();
             let (header_bg, header_fg, header_tag): (Hsla, Hsla, SharedString) = match entry.category.as_str() {
-                "Tool" | "Tool runtime" => (theme.accent.opacity(0.18), theme.accent, "TOOL".into()),
+                "Tool" | "Tool runtime" => (theme.warning.opacity(0.18), theme.warning, "TOOL".into()),
                 "Provider" => (theme.primary.opacity(0.18), theme.primary, "PROVIDER".into()),
                 "Context Manifest" | "Manifest" => (theme.accent.opacity(0.14), theme.muted_foreground, "MANIFEST".into()),
                 "Request" => (theme.primary.opacity(0.16), theme.accent, "REQUEST".into()),

@@ -20,6 +20,7 @@ use gpui_component::tree::{Tree, TreeEvent, TreeItem, TreeState};
 use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable, WindowExt};
 use threadlane_git::{GitFile, GitStatus};
 
+use crate::services::watcher::WorkspaceWatcher;
 use crate::state::AppState;
 
 fn normalize_generated_commit_message(raw: &str) -> String {
@@ -132,6 +133,11 @@ enum PanelEvent {
         files: Vec<GitFile>,
         error: Option<String>,
     },
+    WorkspaceChanged {
+        project: PathBuf,
+        git_dirty: bool,
+        files_dirty: bool,
+    },
     MessageGenerated(Result<String, String>),
     ActionFinished(Result<GitStatus, String>),
 }
@@ -160,6 +166,7 @@ pub struct RightPanelView {
     is_dirty: bool,
     pending_document: Option<(String, String)>,
     event_tx: mpsc::Sender<PanelEvent>,
+    _watcher: Option<WorkspaceWatcher>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -192,7 +199,10 @@ impl RightPanelView {
         })
         .detach();
 
-        let observe_model = cx.observe(&model, |_this, _model, cx| cx.notify());
+        let observe_model = cx.observe(&model, |this, _model, cx| {
+            this.sync_project(cx);
+            cx.notify();
+        });
         let tree_subscription = cx.subscribe(&tree_state, |this, _tree, event: &TreeEvent, _cx| {
             match event {
                 TreeEvent::Expanded(id) => {
@@ -204,7 +214,7 @@ impl RightPanelView {
             }
         });
 
-        Self {
+        let mut panel = Self {
             model,
             active_surface: None,
             project: None,
@@ -228,8 +238,11 @@ impl RightPanelView {
             is_dirty: false,
             pending_document: None,
             event_tx,
+            _watcher: None,
             _subscriptions: vec![observe_model, tree_subscription],
-        }
+        };
+        panel.sync_project(cx);
+        panel
     }
 
     fn sync_project(&mut self, cx: &mut Context<Self>) {
@@ -237,7 +250,7 @@ impl RightPanelView {
         if self.project == project {
             return;
         }
-        self.project = project;
+        self.project = project.clone();
         self.tree_state.update(cx, |state, cx| state.set_items(Vec::new(), cx));
         self.expanded_paths.clear();
         self.review_files.clear();
@@ -246,6 +259,26 @@ impl RightPanelView {
         self.document_title = None;
         self.document_state
             .update(cx, |state, cx| state.set_text("", cx));
+
+        if let Some(work_dir) = project {
+            let tx = self.event_tx.clone();
+            let proj = work_dir.clone();
+            self._watcher = WorkspaceWatcher::start(
+                work_dir,
+                Duration::from_millis(200),
+                move |change| {
+                    let _ = tx.send(PanelEvent::WorkspaceChanged {
+                        project: proj.clone(),
+                        git_dirty: change.git_dirty,
+                        files_dirty: change.files_dirty,
+                    });
+                },
+            )
+            .ok();
+        } else {
+            self._watcher = None;
+        }
+
         self.refresh_active_surface();
     }
 
@@ -374,6 +407,18 @@ impl RightPanelView {
 
     fn apply_event(&mut self, event: PanelEvent, cx: &mut Context<Self>) {
         match event {
+            PanelEvent::WorkspaceChanged {
+                project,
+                git_dirty,
+                files_dirty,
+            } if self.project.as_ref() == Some(&project) => {
+                if git_dirty {
+                    self.refresh_surface(Surface::Review);
+                }
+                if files_dirty {
+                    self.refresh_surface(Surface::Files);
+                }
+            }
             PanelEvent::FilesLoaded { project, nodes }
                 if self.project.as_ref() == Some(&project) =>
             {
@@ -390,6 +435,12 @@ impl RightPanelView {
                 files,
                 error,
             } if self.project.as_ref() == Some(&project) => {
+                if let Some(status_ref) = &status {
+                    self.model.update(cx, |state, cx| {
+                        state.git_statuses.insert(project.clone(), status_ref.clone());
+                        cx.notify();
+                    });
+                }
                 self.git_status = status;
                 let current_set: HashSet<String> = files.iter().map(|f| f.path.clone()).collect();
                 if self.selected_files.is_empty() {
@@ -426,6 +477,12 @@ impl RightPanelView {
                 self.git_busy = false;
                 match result {
                     Ok(status) => {
+                        if let Some(project) = &self.project {
+                            self.model.update(cx, |state, cx| {
+                                state.git_statuses.insert(project.clone(), status.clone());
+                                cx.notify();
+                            });
+                        }
                         self.git_status = Some(status.clone());
                         self.selected_files = status.files.iter().map(|f| f.path.clone()).collect();
                         self.review_files = status.files;

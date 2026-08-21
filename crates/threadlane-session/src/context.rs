@@ -137,9 +137,9 @@ mod tests {
     fn test_scope_instructions_compacts_large_subsystems() {
         let mut large = String::from("# AGENTS.md\n\n## Repository Map\n- crates/core: core crate\n\n## Rust Conventions\n- Keep edits surgical.\n\n");
         large.push_str("## External ACP Agents\n");
-        large.push_str(&"ACP protocol details line.\n".repeat(80));
+        large.push_str(&"ACP protocol details line.\n".repeat(150));
         large.push_str("\n## WASI Extensions\n");
-        large.push_str(&"WASI details line.\n".repeat(80));
+        large.push_str(&"WASI details line.\n".repeat(150));
 
         let scoped = scope_instructions(&large);
         assert!(scoped.contains("## Repository Map"));

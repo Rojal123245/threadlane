@@ -696,17 +696,21 @@ impl WorkspaceView {
         let state = self.model.read(cx);
         let theme = cx.theme().colors;
 
-        let branch = self
-            .git_status
+        let fallback_status = state
+            .active_work_dir
             .as_ref()
+            .and_then(|wd| state.git_statuses.get(wd));
+        let git_status = self.git_status.as_ref().or(fallback_status);
+
+        let branch = git_status
             .and_then(|s| s.branch.as_deref())
             .unwrap_or("main");
-        let (additions, deletions) = self.git_status.as_ref().map_or((0, 0), |s| {
+        let (additions, deletions) = git_status.map_or((0, 0), |s| {
             s.files
                 .iter()
                 .fold((0, 0), |(a, d), f| (a + f.additions, d + f.deletions))
         });
-        let dirty_count = self.git_status.as_ref().map_or(0, |s| s.files.len());
+        let dirty_count = git_status.map_or(0, |s| s.files.len());
 
         let model_name = if state.selected_model.is_empty() {
             "default"
@@ -734,7 +738,7 @@ impl WorkspaceView {
             })
             .unwrap_or_else(|| "No Project".into());
 
-        let pr_badge = self.git_status.as_ref().and_then(|s| s.pr.as_ref()).map(|pr| {
+        let pr_badge = git_status.and_then(|s| s.pr.as_ref()).map(|pr| {
             let pr_num = pr.number;
             let failing_checks = pr.failing_checks;
             let pending_checks = pr.pending_checks;
