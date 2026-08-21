@@ -16,9 +16,7 @@ pub fn grep_search(root: &Path, pattern: &str, glob: Option<&str>) -> Result<Str
     let mut output_bytes: usize = 0;
     let mut truncated = false;
     'files: for path in files {
-        if fs::metadata(&path)
-            .is_ok_and(|metadata| metadata.len() > MAX_FILE_BYTES as u64)
-        {
+        if fs::metadata(&path).is_ok_and(|metadata| metadata.len() > MAX_FILE_BYTES as u64) {
             continue;
         }
         let Ok(bytes) = fs::read(&path) else {

@@ -1284,11 +1284,11 @@ fn extract_deferred_text(value: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        api_error_details, clamp_prompt_cache_key, continuation_payload, parse_chat_usage,
-        parse_responses_text_delta, parse_responses_usage, title_payload, title_response_text,
-        title_stream_text, CodexWsState, Continuation, OpenAIClient, ProviderUsage,
-        ResponseAccumulator, StreamEvent, ModelCacheEntry, MODEL_CACHE_TTL,
-        OPENAI_PROMPT_CACHE_KEY_MAX_CHARS, fresh_models,
+        api_error_details, clamp_prompt_cache_key, continuation_payload, fresh_models,
+        parse_chat_usage, parse_responses_text_delta, parse_responses_usage, title_payload,
+        title_response_text, title_stream_text, CodexWsState, Continuation, ModelCacheEntry,
+        OpenAIClient, ProviderUsage, ResponseAccumulator, StreamEvent, MODEL_CACHE_TTL,
+        OPENAI_PROMPT_CACHE_KEY_MAX_CHARS,
     };
     use serde_json::json;
     use std::time::{Duration, Instant};
