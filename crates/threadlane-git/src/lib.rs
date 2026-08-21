@@ -64,6 +64,18 @@ pub struct GitStashInfo {
     pub files: Vec<GitFile>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GitCommitInfo {
+    pub sha: String,
+    pub short_sha: String,
+    pub summary: String,
+    pub body: String,
+    pub author_name: String,
+    pub author_email: String,
+    pub relative_time: String,
+    pub timestamp: i64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GitStatus {
     pub branch: Option<String>,
@@ -84,6 +96,7 @@ pub struct GitStatus {
     pub last_fetched_at: Option<String>,
     pub stashes: Vec<GitStashInfo>,
     pub current_stash: Option<GitStashInfo>,
+    pub recent_commits: Vec<GitCommitInfo>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -434,6 +447,7 @@ pub fn inspect(work_dir: &Path) -> Result<GitStatus, GitError> {
         .cloned();
     status.stashes = stashes;
     status.current_stash = current_stash;
+    status.recent_commits = list_commits(work_dir, 50).unwrap_or_default();
     Ok(status)
 }
 
@@ -562,6 +576,87 @@ pub fn drop_stash(work_dir: &Path, stash_index: Option<usize>) -> Result<(), Git
         command(work_dir, &["stash", "drop"])?;
     }
     Ok(())
+}
+
+pub fn list_commits(work_dir: &Path, max_count: usize) -> Result<Vec<GitCommitInfo>, GitError> {
+    let count_arg = format!("-n{max_count}");
+    let output = match command(
+        work_dir,
+        &["log", &count_arg, "--format=%H|%h|%an|%ae|%cr|%ct|%s"],
+    ) {
+        Ok(out) => out,
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    let mut commits = Vec::new();
+    for line in output.lines() {
+        let parts: Vec<&str> = line.splitn(7, '|').collect();
+        if parts.len() >= 7 {
+            let sha = parts[0].trim().to_string();
+            let short_sha = parts[1].trim().to_string();
+            let author_name = parts[2].trim().to_string();
+            let author_email = parts[3].trim().to_string();
+            let relative_time = parts[4].trim().to_string();
+            let timestamp = parts[5].trim().parse::<i64>().unwrap_or(0);
+            let summary = parts[6].trim().to_string();
+
+            commits.push(GitCommitInfo {
+                sha,
+                short_sha,
+                summary,
+                body: String::new(),
+                author_name,
+                author_email,
+                relative_time,
+                timestamp,
+            });
+        }
+    }
+    Ok(commits)
+}
+
+pub fn inspect_commit_files(work_dir: &Path, sha: &str) -> Vec<GitFile> {
+    let numstat_output = command(work_dir, &["show", "--numstat", "--format=", sha]).unwrap_or_default();
+    let name_status_output = command(work_dir, &["show", "--name-status", "--format=", sha]).unwrap_or_default();
+
+    let mut status_map = std::collections::HashMap::new();
+    for line in name_status_output.lines() {
+        let mut parts = line.split_whitespace();
+        if let (Some(code), Some(path)) = (parts.next(), parts.next()) {
+            status_map.insert(path.trim().to_string(), code.trim().chars().next().unwrap_or('M'));
+        }
+    }
+
+    let mut files = Vec::new();
+    for line in numstat_output.lines() {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() >= 3 {
+            let additions = parts[0].trim().parse::<u32>().unwrap_or(0);
+            let deletions = parts[1].trim().parse::<u32>().unwrap_or(0);
+            let path = parts[2].trim().to_string();
+            let char_status = *status_map.get(&path).unwrap_or(&'M');
+            files.push(GitFile {
+                path: path.clone(),
+                status: char_status.to_string(),
+                index_status: char_status,
+                worktree_status: ' ',
+                staged: false,
+                unstaged: false,
+                additions,
+                deletions,
+            });
+        }
+    }
+    files
+}
+
+pub fn diff_commit_file(work_dir: &Path, sha: &str, file_path: &str) -> Result<String, GitError> {
+    if let Ok(diff) = command(work_dir, &["diff", &format!("{sha}^..{sha}"), "--", file_path]) {
+        if !diff.trim().is_empty() {
+            return Ok(diff);
+        }
+    }
+    command(work_dir, &["show", sha, "--", file_path])
 }
 
 pub fn discard_file_changes(work_dir: &Path, relative_path: &str) -> Result<(), GitError> {
@@ -878,16 +973,25 @@ pub fn checkout_with_stash(work_dir: &Path, name: &str) -> Result<(), GitError> 
 
 pub fn checkout_carrying_changes(work_dir: &Path, name: &str) -> Result<(), GitError> {
     let clean = normalize_branch_for_checkout(name);
-    let name = validate_branch_name(work_dir, clean)?;
-    // Try switching directly first; if that works, changes are automatically kept
-    if command(work_dir, &["switch", &name]).is_ok() || command(work_dir, &["checkout", &name]).is_ok() {
+    let valid_name = validate_branch_name(work_dir, clean)?;
+
+    // 1. Try git switch -m (native three-way merge to bring local changes)
+    if command(work_dir, &["switch", "-m", &valid_name]).is_ok() {
         return Ok(());
     }
-    // If direct switch failed due to untracked/modified conflict, stash and pop
-    let stash_msg = format!("Carrying changes to {name}");
+    // 2. Try git checkout -m
+    if command(work_dir, &["checkout", "-m", &valid_name]).is_ok() {
+        return Ok(());
+    }
+    // 3. Try plain switch / checkout (if working tree has no conflicts)
+    if command(work_dir, &["switch", &valid_name]).is_ok() || command(work_dir, &["checkout", &valid_name]).is_ok() {
+        return Ok(());
+    }
+    // 4. Fallback: stash, switch, and pop
+    let stash_msg = format!("Carrying changes to {valid_name}");
     let _ = command(work_dir, &["stash", "push", "-u", "-m", &stash_msg]);
-    if let Err(_err) = command(work_dir, &["switch", &name]) {
-        if let Err(err2) = command(work_dir, &["checkout", &name]) {
+    if command(work_dir, &["switch", &valid_name]).is_err() {
+        if let Err(err2) = command(work_dir, &["checkout", &valid_name]) {
             let _ = command(work_dir, &["stash", "pop"]);
             return Err(err2);
         }
@@ -1660,5 +1764,33 @@ mod tests {
         ignore_extension(dir.path(), "log").unwrap();
         let gitignore2 = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
         assert!(gitignore2.contains("*.log"));
+    }
+
+    #[test]
+    fn commit_history_inspection() {
+        let dir = tempdir().unwrap();
+        run_git(dir.path(), &["init", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "dev@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Dev"]);
+        fs::write(dir.path().join("a.txt"), "hello world\n").unwrap();
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-qm", "feat: initial commit"]);
+
+        fs::write(dir.path().join("b.txt"), "second file\n").unwrap();
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-qm", "feat: second commit"]);
+
+        let commits = list_commits(dir.path(), 10).unwrap();
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].summary, "feat: second commit");
+        assert_eq!(commits[0].author_name, "Dev");
+        assert_eq!(commits[1].summary, "feat: initial commit");
+
+        let files = inspect_commit_files(dir.path(), &commits[0].sha);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "b.txt");
+
+        let diff = diff_commit_file(dir.path(), &commits[0].sha, "b.txt").unwrap();
+        assert!(diff.contains("second file"));
     }
 }

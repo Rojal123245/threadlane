@@ -18,7 +18,7 @@ use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::tree::{Tree, TreeEvent, TreeItem, TreeState};
 use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable, WindowExt};
-use threadlane_git::{GitBranchInfo, GitFile, GitStatus};
+use threadlane_git::{GitBranchInfo, GitCommitInfo, GitFile, GitStatus};
 
 use crate::services::watcher::WorkspaceWatcher;
 use crate::state::AppState;
@@ -80,8 +80,15 @@ fn detect_language(path_str: &str) -> &'static str {
         },
     }
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Surface {
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum ReviewTab {
+    #[default]
+    Changes,
+    History,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Surface {
     Review,
     Files,
 }
@@ -147,6 +154,10 @@ enum PanelEvent {
     },
     MessageGenerated(Result<String, String>),
     ActionFinished(Result<GitStatus, String>),
+    CommitFilesLoaded {
+        sha: String,
+        files: Vec<GitFile>,
+    },
 }
 
 pub struct RightPanelView {
@@ -155,6 +166,11 @@ pub struct RightPanelView {
     project: Option<PathBuf>,
     tree_state: Entity<TreeState>,
     expanded_paths: HashSet<String>,
+    review_tab: ReviewTab,
+    history_filter_input: Entity<InputState>,
+    selected_commit_sha: Option<String>,
+    selected_commit_files: Vec<GitFile>,
+    loading_commit_sha: Option<String>,
     review_files: Vec<GitFile>,
     selected_files: HashSet<String>,
     git_status: Option<GitStatus>,
@@ -205,6 +221,8 @@ impl RightPanelView {
             cx.new(|cx| InputState::new(window, cx).placeholder("e.g. feature/new-workflow"));
         let merge_filter_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Filter branches to merge…"));
+        let history_filter_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Filter commits…"));
         let (event_tx, event_rx) = mpsc::channel();
 
         cx.spawn(async move |this, cx| loop {
@@ -245,6 +263,11 @@ impl RightPanelView {
             project: None,
             tree_state,
             expanded_paths: HashSet::new(),
+            review_tab: ReviewTab::Changes,
+            history_filter_input,
+            selected_commit_sha: None,
+            selected_commit_files: Vec::new(),
+            loading_commit_sha: None,
             review_files: Vec::new(),
             selected_files: HashSet::new(),
             git_status: None,
@@ -565,6 +588,13 @@ impl RightPanelView {
                         self.git_feedback = Some(error);
                     }
                 }
+            }
+            PanelEvent::CommitFilesLoaded { sha, files } => {
+                if self.loading_commit_sha.as_deref() == Some(&sha) {
+                    self.loading_commit_sha = None;
+                }
+                self.selected_commit_sha = Some(sha);
+                self.selected_commit_files = files;
             }
             _ => {}
         }
@@ -2182,8 +2212,114 @@ impl RightPanelView {
                 )
         });
 
+        let changes_active = self.review_tab == ReviewTab::Changes;
+        let history_active = self.review_tab == ReviewTab::History;
+        let total_changes = self.review_files.len();
+
+        let review_sub_tabs = div()
+            .flex()
+            .items_center()
+            .border_b_1()
+            .border_color(theme.border)
+            .bg(theme.title_bar)
+            .child(
+                div()
+                    .id("review-tab-changes")
+                    .flex_1()
+                    .py_2()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_1p5()
+                    .cursor_pointer()
+                    .border_b_2()
+                    .border_color(if changes_active {
+                        theme.primary
+                    } else {
+                        gpui::transparent_black()
+                    })
+                    .hover(|s| s.bg(theme.muted.opacity(0.4)))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.review_tab = ReviewTab::Changes;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(if changes_active {
+                                FontWeight::BOLD
+                            } else {
+                                FontWeight::NORMAL
+                            })
+                            .text_color(if changes_active {
+                                theme.foreground
+                            } else {
+                                theme.muted_foreground
+                            })
+                            .child("Changes"),
+                    )
+                    .children((total_changes > 0).then(|| {
+                        div()
+                            .px_1p5()
+                            .py_0p5()
+                            .rounded_full()
+                            .bg(if changes_active {
+                                theme.muted
+                            } else {
+                                theme.muted.opacity(0.5)
+                            })
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(if changes_active {
+                                theme.foreground
+                            } else {
+                                theme.muted_foreground
+                            })
+                            .child(format!("{total_changes}"))
+                    })),
+            )
+            .child(
+                div()
+                    .id("review-tab-history")
+                    .flex_1()
+                    .py_2()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_1p5()
+                    .cursor_pointer()
+                    .border_b_2()
+                    .border_color(if history_active {
+                        theme.primary
+                    } else {
+                        gpui::transparent_black()
+                    })
+                    .hover(|s| s.bg(theme.muted.opacity(0.4)))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.review_tab = ReviewTab::History;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(if history_active {
+                                FontWeight::BOLD
+                            } else {
+                                FontWeight::NORMAL
+                            })
+                            .text_color(if history_active {
+                                theme.foreground
+                            } else {
+                                theme.muted_foreground
+                            })
+                            .child("History"),
+                    ),
+            );
+
         let review_body = if self.branch_popover_open {
             self.render_branch_manager(cx).into_any_element()
+        } else if self.review_tab == ReviewTab::History {
+            self.render_history(cx).into_any_element()
         } else {
             div()
                 .flex_1()
@@ -2205,8 +2341,364 @@ impl RightPanelView {
             .flex()
             .flex_col()
             .child(branch_header)
+            .children((!self.branch_popover_open).then(|| review_sub_tabs))
             .child(review_body)
             .into_any_element()
+    }
+
+    fn render_history(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().colors;
+        let filter_text = self.history_filter_input.read(cx).value().trim().to_lowercase();
+        let commits = self.git_status.as_ref().map(|s| &s.recent_commits);
+
+        let filtered_commits: Vec<&GitCommitInfo> = if let Some(commits) = commits {
+            if filter_text.is_empty() {
+                commits.iter().collect()
+            } else {
+                commits
+                    .iter()
+                    .filter(|c| {
+                        c.summary.to_lowercase().contains(&filter_text)
+                            || c.author_name.to_lowercase().contains(&filter_text)
+                            || c.short_sha.to_lowercase().contains(&filter_text)
+                    })
+                    .collect()
+            }
+        } else {
+            Vec::new()
+        };
+
+        let commit_list = if filtered_commits.is_empty() {
+            div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .p_4()
+                .text_center()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.foreground)
+                        .child("No commits found"),
+                )
+                .child(
+                    div()
+                        .mt_1()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(if filter_text.is_empty() {
+                            "This branch has no recent commits."
+                        } else {
+                            "No commits match your filter."
+                        }),
+                )
+                .into_any_element()
+        } else {
+            let project = self.project.clone();
+            let selected_sha = self.selected_commit_sha.clone();
+            let selected_files = self.selected_commit_files.clone();
+            let loading_sha = self.loading_commit_sha.clone();
+            let model = self.model.clone();
+            let event_tx = self.event_tx.clone();
+
+            div()
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scrollbar()
+                .py_1()
+                .children(filtered_commits.into_iter().map(|commit| {
+                    let sha = commit.sha.clone();
+                    let short_sha = commit.short_sha.clone();
+                    let summary = commit.summary.clone();
+                    let author = commit.author_name.clone();
+                    let rel_time = commit.relative_time.clone();
+                    let is_expanded = selected_sha.as_deref() == Some(&sha);
+                    let is_loading = loading_sha.as_deref() == Some(&sha);
+                    let click_sha = sha.clone();
+                    let click_tx = event_tx.clone();
+                    let click_project = project.clone();
+
+                    div()
+                        .id(SharedString::from(format!("commit-{sha}")))
+                        .flex()
+                        .flex_col()
+                        .mx_2()
+                        .my_0p5()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(if is_expanded {
+                            theme.primary.opacity(0.6)
+                        } else {
+                            theme.border.opacity(0.3)
+                        })
+                        .bg(if is_expanded {
+                            theme.muted.opacity(0.4)
+                        } else {
+                            theme.title_bar.opacity(0.5)
+                        })
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("commit-header-{sha}")))
+                                .p_2p5()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .cursor_pointer()
+                                .hover(|row| row.bg(theme.muted.opacity(0.6)))
+                                .on_click(cx.listener(move |this, _event, _window, cx| {
+                                    if this.selected_commit_sha.as_deref() == Some(&click_sha) {
+                                        this.selected_commit_sha = None;
+                                        this.selected_commit_files.clear();
+                                    } else {
+                                        this.selected_commit_sha = Some(click_sha.clone());
+                                        this.loading_commit_sha = Some(click_sha.clone());
+                                        this.selected_commit_files.clear();
+                                        if let Some(proj) = click_project.clone() {
+                                            let tx = click_tx.clone();
+                                            let fetch_sha = click_sha.clone();
+                                            std::thread::spawn(move || {
+                                                let files = threadlane_git::inspect_commit_files(&proj, &fetch_sha);
+                                                let _ = tx.send(PanelEvent::CommitFilesLoaded {
+                                                    sha: fetch_sha,
+                                                    files,
+                                                });
+                                            });
+                                        }
+                                    }
+                                    cx.notify();
+                                }))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_start()
+                                        .justify_between()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .truncate()
+                                                .text_xs()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(theme.foreground)
+                                                .child(summary),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .flex_shrink_0()
+                                                .px_1p5()
+                                                .py_0p5()
+                                                .rounded_sm()
+                                                .bg(theme.muted)
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .child(short_sha.clone()),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1p5()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(
+                                            div()
+                                                .size(px(12.0))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .child(IconName::User),
+                                        )
+                                        .child(format!("{author} • {rel_time}")),
+                                ),
+                        )
+                        .children(is_expanded.then(|| {
+                            let commit_files = selected_files.clone();
+                            let commit_sha = sha.clone();
+                            let short_sha_disp = short_sha.clone();
+                            let proj_for_diff = project.clone();
+                            let model_ref = model.clone();
+
+                            div()
+                                .border_t_1()
+                                .border_color(theme.border)
+                                .bg(theme.background)
+                                .p_2()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .children(is_loading.then(|| {
+                                    div()
+                                        .p_2()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(Spinner::new().xsmall())
+                                        .child("Loading changed files…")
+                                }))
+                                .children((!is_loading && commit_files.is_empty()).then(|| {
+                                    div()
+                                        .p_2()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child("No files changed in this commit.")
+                                }))
+                                .children(commit_files.into_iter().map(|file| {
+                                    let path = file.path.clone();
+                                    let status = file.status_char().to_string();
+                                    let status_color = match file.status_char() {
+                                        'A' | '?' => theme.success,
+                                        'D' => theme.danger,
+                                        _ => theme.warning,
+                                    };
+                                    let target_path = path.clone();
+                                    let diff_sha = commit_sha.clone();
+                                    let disp_sha = short_sha_disp.clone();
+                                    let diff_proj = proj_for_diff.clone();
+                                    let m = model_ref.clone();
+
+                                    div()
+                                        .id(SharedString::from(format!("commit-file-{commit_sha}-{path}")))
+                                        .h(px(26.0))
+                                        .px_2()
+                                        .rounded_md()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap_2()
+                                        .cursor_pointer()
+                                        .hover(|row| row.bg(theme.muted))
+                                        .on_click(cx.listener(move |_this, _event, _window, cx| {
+                                            let Some(proj) = diff_proj.clone() else {
+                                                return;
+                                            };
+                                            let p = proj.clone();
+                                            let target = target_path.clone();
+                                            let sha_str = diff_sha.clone();
+                                            let label = format!("{target} @ {disp_sha}");
+                                            let state_model = m.clone();
+                                            cx.spawn(async move |_this, cx| {
+                                                let content = cx
+                                                    .background_executor()
+                                                    .spawn(async move {
+                                                        threadlane_git::diff_commit_file(&p, &sha_str, &target)
+                                                            .unwrap_or_else(|e| e.to_string())
+                                                    })
+                                                    .await;
+                                                let _ = state_model.update(cx, |state, cx| {
+                                                    state.request_open_diff(proj, label, content);
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .detach();
+                                        }))
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .flex()
+                                                .items_center()
+                                                .gap_1p5()
+                                                .child(
+                                                    div()
+                                                        .size(px(12.0))
+                                                        .text_color(theme.muted_foreground)
+                                                        .child(IconName::File),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .truncate()
+                                                        .text_xs()
+                                                        .text_color(theme.foreground)
+                                                        .child(path),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_1p5()
+                                                .when(file.additions > 0, |r| {
+                                                    r.child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(theme.success)
+                                                            .child(format!("+{}", file.additions)),
+                                                    )
+                                                })
+                                                .when(file.deletions > 0, |r| {
+                                                    r.child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(theme.danger)
+                                                            .child(format!("-{}", file.deletions)),
+                                                    )
+                                                })
+                                                .child(
+                                                    div()
+                                                        .size(px(14.0))
+                                                        .rounded_sm()
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .text_xs()
+                                                        .font_weight(FontWeight::BOLD)
+                                                        .text_color(status_color)
+                                                        .child(status),
+                                                ),
+                                        )
+                                }))
+                        }))
+                }))
+                .into_any_element()
+        };
+
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .bg(theme.title_bar.opacity(0.3))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.background)
+                            .child(
+                                div()
+                                    .size(px(14.0))
+                                    .text_color(theme.muted_foreground)
+                                    .child(IconName::Search),
+                            )
+                            .child(
+                                div().flex_1().child(
+                                    Input::new(&self.history_filter_input)
+                                        .appearance(false)
+                                        .bordered(false),
+                                ),
+                            ),
+                    ),
+            )
+            .child(commit_list)
     }
 
     fn render_branch_manager(&self, cx: &mut Context<Self>) -> impl IntoElement {
