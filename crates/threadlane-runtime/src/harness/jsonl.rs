@@ -386,7 +386,7 @@ impl SessionStore for JsonlStore {
         // matching what a fresh full reduce would read from the store.
         entry.seq = self.next_seq();
         self.reduction.entry_guard(&entry)?;
-        append_json_line(&self.path, &entry)?;
+        append_json_line(&self.path, &entry, SyncPolicy::All)?;
         self.session_file_len =
             file_len(&self.path).map_err(|error| ReduceError::Storage(error.to_string()))?;
         if entry.lane == "main" {
@@ -431,7 +431,7 @@ impl SessionStore for JsonlStore {
         }
         record = record.with_seq(self.next_seq());
         self.reduction.record_guard(&record)?;
-        append_json_line(&self.path, &record)?;
+        append_json_line(&self.path, &record, record.sync_policy())?;
         self.session_file_len =
             file_len(&self.path).map_err(|error| ReduceError::Storage(error.to_string()))?;
         self.reduction.commit_record(&record);
@@ -599,9 +599,58 @@ impl JsonlStore {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncPolicy {
+    All,
+    Data,
+}
+
+impl Record {
+    fn sync_policy(&self) -> SyncPolicy {
+        match self {
+            Self::ContextManifestCaptured { .. }
+            | Self::RunContextCaptured { .. }
+            | Self::ProviderRequestStarted { .. }
+            | Self::ProviderRequestFinished { .. }
+            | Self::ProviderResponseAttached { .. }
+            | Self::StreamCheckpoint { .. } => SyncPolicy::Data,
+            Self::OperationStarted { .. }
+            | Self::AbortRequested { .. }
+            | Self::OperationFinished { .. }
+            | Self::LaneMoved { .. }
+            | Self::StepAttempt { .. }
+            | Self::RetryScheduled { .. }
+            | Self::RetryConsumed { .. }
+            | Self::ToolStarted { .. }
+            | Self::ToolFinished { .. }
+            | Self::QueueEnqueued { .. }
+            | Self::QueueCancelled { .. }
+            | Self::QueueConsumed { .. }
+            | Self::WriteDeferred { .. }
+            | Self::WriteApplied { .. }
+            | Self::FactSet { .. }
+            | Self::HookResumeData { .. }
+            | Self::Usage { .. }
+            | Self::PermissionRequested { .. }
+            | Self::PermissionResolved { .. }
+            | Self::ToolExecutionObserved { .. }
+            | Self::AbortObserved { .. }
+            | Self::SubagentLifecycle { .. } => SyncPolicy::All,
+        }
+    }
+}
+
 pub(crate) fn append_session_json_line<T: serde::Serialize>(
     path: &Path,
     value: &T,
+) -> io::Result<()> {
+    append_session_json_line_with_policy(path, value, SyncPolicy::All)
+}
+
+fn append_session_json_line_with_policy<T: serde::Serialize>(
+    path: &Path,
+    value: &T,
+    sync_policy: SyncPolicy,
 ) -> io::Result<()> {
     // Process-wide append lock; the session writer lease handles cross-process writers.
     static APPEND_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -614,7 +663,11 @@ pub(crate) fn append_session_json_line<T: serde::Serialize>(
         .append(true)
         .open(path)?;
     serde_json::to_writer(&mut file, value).map_err(io::Error::other)?;
-    file.write_all(b"\n").and_then(|_| file.sync_all())
+    file.write_all(b"\n")?;
+    match sync_policy {
+        SyncPolicy::All => file.sync_all(),
+        SyncPolicy::Data => file.sync_data(),
+    }
 }
 
 fn file_len(path: &Path) -> io::Result<u64> {
@@ -625,8 +678,13 @@ fn file_len(path: &Path) -> io::Result<u64> {
     }
 }
 
-fn append_json_line<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), ReduceError> {
-    append_session_json_line(path, value).map_err(|error| ReduceError::Storage(error.to_string()))
+fn append_json_line<T: serde::Serialize>(
+    path: &Path,
+    value: &T,
+    sync_policy: SyncPolicy,
+) -> Result<(), ReduceError> {
+    append_session_json_line_with_policy(path, value, sync_policy)
+        .map_err(|error| ReduceError::Storage(error.to_string()))
 }
 
 /// Typed classification entry point retained for focused compatibility tests.
@@ -812,7 +870,7 @@ fn invalid_line(path: &Path, line: usize, error: impl std::fmt::Display) -> io::
 
 #[cfg(test)]
 mod tests {
-    use super::read_entries;
+    use super::{read_entries, SyncPolicy};
     use crate::harness::{
         AgentHarness, ContextItemSource, ContextItemStatus, ContextManifestItem, HarnessEventHub,
         JsonlStore, Record, Reducer, SessionStore, TraceString,
@@ -831,6 +889,51 @@ mod tests {
             },
             false,
         )
+    }
+
+    #[test]
+    fn observational_records_use_data_sync_but_intents_use_full_sync() {
+        let checkpoint = Record::StreamCheckpoint {
+            id: "checkpoint".into(),
+            seq: 1,
+            lane: "main".into(),
+            timestamp: 1,
+            run_id: "run".into(),
+            attempt: Some(1),
+            request_id: TraceString::new("request").unwrap(),
+            assistant_entry_id: None,
+            text: None,
+            reasoning: None,
+            checkpoint_index: 1,
+            byte_count: 10,
+            fingerprint: TraceString::new("digest").unwrap(),
+        };
+        let operation = Record::OperationStarted {
+            id: "run".into(),
+            seq: 2,
+            lane: "main".into(),
+            timestamp: 1,
+            source_leaf_id: None,
+            intent: crate::harness::OperationIntent::Run,
+        };
+        let tool = Record::ToolStarted {
+            id: "tool".into(),
+            seq: 3,
+            lane: "main".into(),
+            timestamp: 1,
+            run_id: "run".into(),
+            assistant_entry_id: "assistant".into(),
+            tool_index: 0,
+            tool_call_id: "call".into(),
+            tool_name: "read_file".into(),
+            effective_args: serde_json::json!({}),
+            result_entry_id: "result".into(),
+            replay: crate::harness::ToolReplaySafety::Safe,
+        };
+
+        assert_eq!(checkpoint.sync_policy(), SyncPolicy::Data);
+        assert_eq!(operation.sync_policy(), SyncPolicy::All);
+        assert_eq!(tool.sync_policy(), SyncPolicy::All);
     }
 
     #[test]
