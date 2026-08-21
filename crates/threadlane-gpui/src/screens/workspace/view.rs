@@ -90,6 +90,13 @@ fn git_result_matches_active(requested: &Path, active: &Path) -> bool {
     requested == active
 }
 
+fn active_project_git_status<'a>(
+    active_work_dir: Option<&Path>,
+    statuses: &'a HashMap<PathBuf, GitStatus>,
+) -> Option<&'a GitStatus> {
+    active_work_dir.and_then(|work_dir| statuses.get(work_dir))
+}
+
 pub struct WorkspaceView {
     model: Entity<AppState>,
     sidebar: Entity<SidebarView>,
@@ -103,7 +110,6 @@ pub struct WorkspaceView {
     bottom_panel_visible: bool,
     command_palette_open: bool,
     command_state: Entity<CommandState>,
-    git_status: Option<GitStatus>,
     last_git_work_dir: Option<PathBuf>,
     sidebar_resizable_state: Entity<ResizableState>,
     right_panel_resizable_state: Entity<ResizableState>,
@@ -235,7 +241,6 @@ impl WorkspaceView {
                 bottom_panel_visible: false,
                 command_palette_open: false,
                 command_state,
-                git_status: None,
                 last_git_work_dir: None,
                 sidebar_resizable_state,
                 right_panel_resizable_state,
@@ -424,6 +429,12 @@ impl WorkspaceView {
             "git_branch" => self.open_git_branches(cx),
             "git_new_branch" => self.open_git_new_branch(cx),
             "git_merge" => self.open_git_merge(cx),
+            "git_stash_pop" => {
+                self.open_git_review(cx);
+                self.right_panel.update(cx, |panel, cx| {
+                    panel.run_git_action(crate::screens::right_panel::GitAction::PopStash(None), window, cx);
+                });
+            }
             "git_pull" => {
                 self.open_git_review(cx);
                 self.right_panel.update(cx, |panel, cx| {
@@ -465,7 +476,6 @@ impl WorkspaceView {
         }
 
         self.last_git_work_dir = active_work_dir.clone();
-        self.git_status = None;
 
         if let Some(work_dir) = active_work_dir {
             self.spawn_git_status_refresh(work_dir);
@@ -475,12 +485,10 @@ impl WorkspaceView {
     fn refresh_git_status(&mut self, cx: &App) {
         let Some(work_dir) = self.model.read(cx).active_work_dir.clone() else {
             self.last_git_work_dir = None;
-            self.git_status = None;
             return;
         };
 
         self.last_git_work_dir = Some(work_dir.clone());
-        self.git_status = None;
         self.spawn_git_status_refresh(work_dir);
     }
 
@@ -511,7 +519,6 @@ impl WorkspaceView {
             });
         }
 
-        self.git_status = result.ok();
         cx.notify();
     }
 
@@ -648,7 +655,7 @@ impl WorkspaceView {
         let model = self.model.clone();
         let state = model.read(cx);
 
-        let commands: [(&str, &str, &str, IconName, &[&str]); 13] = [
+        let commands: [(&str, &str, &str, IconName, &[&str]); 14] = [
             (
                 "New Task",
                 "Start a fresh session",
@@ -711,6 +718,13 @@ impl WorkspaceView {
                 "git_merge",
                 IconName::Redo,
                 &["git", "merge", "branch", "integrate"],
+            ),
+            (
+                "Git: Restore Stashed Changes",
+                "Restore changes previously stashed on this branch",
+                "git_stash_pop",
+                IconName::Undo2,
+                &["git", "stash", "pop", "restore", "unstash"],
             ),
             (
                 "Git: Pull Origin",
@@ -879,11 +893,8 @@ impl WorkspaceView {
         let state = self.model.read(cx);
         let theme = cx.theme().colors;
 
-        let fallback_status = state
-            .active_work_dir
-            .as_ref()
-            .and_then(|wd| state.git_statuses.get(wd));
-        let git_status = self.git_status.as_ref().or(fallback_status);
+        let git_status =
+            active_project_git_status(state.active_work_dir.as_deref(), &state.git_statuses);
 
         let branch = git_status
             .and_then(|s| s.branch.as_deref())
@@ -1523,8 +1534,29 @@ impl Render for WorkspaceView {
 
 #[cfg(test)]
 mod tests {
-    use super::git_result_matches_active;
-    use std::path::Path;
+    use super::{active_project_git_status, git_result_matches_active};
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use threadlane_git::GitStatus;
+
+    #[test]
+    fn status_bar_uses_shared_status_for_active_project() {
+        let active = PathBuf::from("/projects/current");
+        let mut statuses = HashMap::new();
+        statuses.insert(
+            active.clone(),
+            GitStatus {
+                branch: Some("fresh".into()),
+                ..GitStatus::default()
+            },
+        );
+
+        assert_eq!(
+            active_project_git_status(Some(active.as_path()), &statuses)
+                .and_then(|status| status.branch.as_deref()),
+            Some("fresh")
+        );
+    }
 
     #[test]
     fn git_result_is_accepted_only_for_active_work_dir() {

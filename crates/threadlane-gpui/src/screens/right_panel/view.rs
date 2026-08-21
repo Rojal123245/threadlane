@@ -114,6 +114,8 @@ pub enum GitAction {
     CheckoutCarry(String),
     CreateBranch(String),
     Merge(String),
+    PopStash(Option<usize>),
+    DropStash(Option<usize>),
 }
 
 #[derive(Clone, Debug)]
@@ -170,6 +172,7 @@ pub struct RightPanelView {
     switch_dialog_open: bool,
     switch_target_branch: Option<String>,
     switch_stash_mode: bool,
+    stash_expanded: bool,
     last_fetched_time: Option<std::time::Instant>,
     document_title: Option<String>,
     document_state: Entity<TextViewState>,
@@ -259,6 +262,7 @@ impl RightPanelView {
             switch_dialog_open: false,
             switch_target_branch: None,
             switch_stash_mode: true,
+            stash_expanded: false,
             last_fetched_time: None,
             document_title: None,
             document_state,
@@ -686,6 +690,8 @@ impl RightPanelView {
             GitAction::CheckoutCarry(b) => format!("Switching to {b} with changes…"),
             GitAction::CreateBranch(b) => format!("Creating branch {b}…"),
             GitAction::Merge(b) => format!("Merging {b}…"),
+            GitAction::PopStash(_) => "Restoring stashed changes…".to_string(),
+            GitAction::DropStash(_) => "Discarding stash…".to_string(),
         };
         self.git_feedback = Some(feedback.clone());
         window.push_notification(Notification::info(feedback), cx);
@@ -734,6 +740,12 @@ impl RightPanelView {
                     }
                     GitAction::Merge(branch) => {
                         threadlane_git::merge(&work_dir, branch).map_err(|e| e.to_string())?;
+                    }
+                    GitAction::PopStash(idx) => {
+                        threadlane_git::pop_stash(&work_dir, *idx).map_err(|e| e.to_string())?;
+                    }
+                    GitAction::DropStash(idx) => {
+                        threadlane_git::drop_stash(&work_dir, *idx).map_err(|e| e.to_string())?;
                     }
                 }
                 threadlane_git::inspect(&work_dir).map_err(|e| e.to_string())
@@ -1813,6 +1825,220 @@ impl RightPanelView {
                     }),
             );
 
+        let stash_banner = self.git_status.as_ref().and_then(|s| s.current_stash.as_ref()).map(|stash| {
+            let stash_msg = if stash.message.is_empty() {
+                "Stashed changes on this branch".to_string()
+            } else {
+                stash.message.clone()
+            };
+            let time_str = if stash.relative_time.is_empty() {
+                String::new()
+            } else {
+                format!(" • {}", stash.relative_time)
+            };
+            let file_count = stash.files.len();
+            let count_label = if file_count == 1 {
+                "1 file".to_string()
+            } else {
+                format!("{file_count} files")
+            };
+            let idx = stash.index;
+            let is_expanded = self.stash_expanded;
+            let files_clone = stash.files.clone();
+            let project = self.project.clone();
+            let model = self.model.clone();
+
+            div()
+                .id("stash-banner")
+                .mx_3()
+                .my_2()
+                .p_2p5()
+                .rounded_lg()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.muted.opacity(0.5))
+                .flex()
+                .flex_col()
+                .gap_1p5()
+                .child(
+                    div()
+                        .id("stash-header-toggle")
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _event, _window, cx| {
+                            this.stash_expanded = !this.stash_expanded;
+                            cx.notify();
+                        }))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1p5()
+                                .min_w_0()
+                                .flex_1()
+                                .child(
+                                    div()
+                                        .size(px(14.0))
+                                        .text_color(theme.primary)
+                                        .child(if is_expanded { IconName::ChevronDown } else { IconName::ChevronRight }),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(theme.foreground)
+                                        .child("Stashed Changes"),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(format!("({count_label}{time_str})")),
+                                ),
+                        ),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(stash_msg),
+                )
+                .children(is_expanded.then(|| {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .my_1()
+                        .p_1p5()
+                        .rounded_md()
+                        .bg(theme.background)
+                        .border_1()
+                        .border_color(theme.border)
+                        .children(files_clone.into_iter().map(|file| {
+                            let path = file.path.clone();
+                            let status = file.status_char().to_string();
+                            let status_color = match file.status_char() {
+                                'A' | '?' => theme.success,
+                                'D' => theme.danger,
+                                _ => theme.warning,
+                            };
+                            let adds = file.additions;
+                            let dels = file.deletions;
+                            let file_path_for_click = path.clone();
+                            let project_for_click = project.clone();
+                            let model_for_click = model.clone();
+
+                            div()
+                                .id(SharedString::from(format!("stash-file-{path}")))
+                                .h(px(26.0))
+                                .px_2()
+                                .rounded_sm()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .cursor_pointer()
+                                .hover(|row| row.bg(theme.muted))
+                                .on_click(cx.listener(move |_this, _event, _window, cx| {
+                                    let Some(proj) = project_for_click.clone() else { return; };
+                                    let target_path = file_path_for_click.clone();
+                                    let diff_project = proj.clone();
+                                    let m = model_for_click.clone();
+                                    cx.spawn(async move |_this, cx| {
+                                        let diff_target = target_path.clone();
+                                        let content = cx
+                                            .background_executor()
+                                            .spawn(async move {
+                                                threadlane_git::diff_stash_file(
+                                                    &diff_project,
+                                                    idx,
+                                                    &diff_target,
+                                                )
+                                                .unwrap_or_else(|err| err.to_string())
+                                            })
+                                            .await;
+                                        let _ = m.update(cx, |state, cx| {
+                                            state.request_open_diff(proj, target_path, content);
+                                            cx.notify();
+                                        });
+                                    })
+                                    .detach();
+                                }))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1p5()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(FontWeight::BOLD)
+                                                .text_color(status_color)
+                                                .child(status),
+                                        )
+                                        .child(
+                                            div()
+                                                .truncate()
+                                                .text_xs()
+                                                .text_color(theme.foreground)
+                                                .child(path),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .text_xs()
+                                        .child(
+                                            div()
+                                                .text_color(theme.success)
+                                                .child(format!("+{adds}")),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_color(theme.danger)
+                                                .child(format!("-{dels}")),
+                                        ),
+                                )
+                        }))
+                }))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .gap_2()
+                        .pt_1()
+                        .child(
+                            Button::new("discard-stash-btn")
+                                .label("Discard")
+                                .ghost()
+                                .xsmall()
+                                .disabled(self.git_busy)
+                                .on_click(cx.listener(move |this, _event, window, cx| {
+                                    this.run_git_action(GitAction::DropStash(Some(idx)), window, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("restore-stash-btn")
+                                .label("Restore Stash")
+                                .primary()
+                                .xsmall()
+                                .disabled(self.git_busy)
+                                .on_click(cx.listener(move |this, _event, window, cx| {
+                                    this.run_git_action(GitAction::PopStash(Some(idx)), window, cx);
+                                })),
+                        ),
+                )
+        });
+
         let review_body = if self.branch_popover_open {
             self.render_branch_manager(cx).into_any_element()
         } else {
@@ -1821,6 +2047,7 @@ impl RightPanelView {
                 .min_h_0()
                 .flex()
                 .flex_col()
+                .children(stash_banner)
                 .children(pr_card)
                 .children(selection_bar)
                 .child(file_list_content)
