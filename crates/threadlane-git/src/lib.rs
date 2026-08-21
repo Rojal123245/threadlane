@@ -113,6 +113,7 @@ fn command(work_dir: &Path, args: &[&str]) -> Result<String, GitError> {
         let output = Command::new("git")
             .args(args)
             .current_dir(work_dir)
+            .env("GIT_TERMINAL_PROMPT", "0")
             .output()
             .map_err(|error| GitError {
                 work_dir: work_dir.to_path_buf(),

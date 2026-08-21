@@ -192,17 +192,24 @@ impl TerminalView {
         self.scroll_accumulator += lines;
         let whole_lines = self.scroll_accumulator.trunc() as isize;
         if whole_lines != 0 {
+            let previous_offset = self.scrollback_offset;
             self.scroll_accumulator -= whole_lines as f32;
             let current = self.scrollback_offset as isize;
             let new_offset = (current + whole_lines).max(0) as usize;
             self.set_scrollback(new_offset);
             self.scrollback_offset = self.parser.screen().scrollback();
+            if self.scrollback_offset != previous_offset {
+                self.clear_selection();
+            }
             cx.notify();
         }
     }
 
     /// Resets scrollback to the bottom (live / auto-scroll mode).
     pub fn scroll_to_bottom(&mut self, cx: &mut Context<Self>) {
+        if self.scrollback_offset != 0 {
+            self.clear_selection();
+        }
         self.scrollback_offset = 0;
         self.scroll_accumulator = 0.0;
         self.set_scrollback(0);
@@ -211,9 +218,13 @@ impl TerminalView {
 
     /// Scrolls all the way to the top of available scrollback history.
     pub fn scroll_to_top(&mut self, cx: &mut Context<Self>) {
+        let previous_offset = self.scrollback_offset;
         self.scroll_accumulator = 0.0;
         self.set_scrollback(SCROLLBACK_ROWS);
         self.scrollback_offset = self.parser.screen().scrollback();
+        if self.scrollback_offset != previous_offset {
+            self.clear_selection();
+        }
         cx.notify();
     }
 
@@ -227,8 +238,7 @@ impl TerminalView {
         }
         self.rows = rows;
         self.cols = cols;
-        self.selection_anchor = None;
-        self.selection_head = None;
+        self.clear_selection();
         self.parser.set_size(rows, cols);
         self.set_scrollback(self.scrollback_offset);
         self.scrollback_offset = self.parser.screen().scrollback();
@@ -328,22 +338,6 @@ impl TerminalView {
                 }
                 "down" => {
                     self.scroll_by(-1.0, cx);
-                    cx.stop_propagation();
-                    return;
-                }
-                _ => {}
-            }
-        }
-
-        if !modifiers.platform && !modifiers.control && !self.parser.screen().alternate_screen() {
-            match key {
-                "pageup" => {
-                    self.scroll_by((self.rows / 2).max(1) as f32, cx);
-                    cx.stop_propagation();
-                    return;
-                }
-                "pagedown" => {
-                    self.scroll_by(-((self.rows / 2).max(1) as f32), cx);
                     cx.stop_propagation();
                     return;
                 }
@@ -478,6 +472,11 @@ impl TerminalView {
         )
     }
 
+    fn clear_selection(&mut self) {
+        self.selection_anchor = None;
+        self.selection_head = None;
+    }
+
     fn begin_selection(
         &mut self,
         event: &MouseDownEvent,
@@ -583,9 +582,10 @@ fn ansi_index_to_hsla(idx: u8) -> Hsla {
         // 216 Color cube: 16..=231
         16..=231 => {
             let n = idx - 16;
-            let b = (n % 6) * 51;
-            let g = ((n / 6) % 6) * 51;
-            let r = (n / 36) * 51;
+            let levels = [0, 95, 135, 175, 215, 255];
+            let b = levels[(n % 6) as usize];
+            let g = levels[((n / 6) % 6) as usize];
+            let r = levels[(n / 36) as usize];
             rgb_to_hsla(r, g, b)
         }
         // 24 Grayscale ramp: 232..=255
@@ -613,8 +613,6 @@ impl Focusable for TerminalView {
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
-        let terminal_text = self.screen_text();
-        let selected_text = self.selected_text();
         let terminal_resize = cx.entity().clone();
         let terminal_actions = cx.entity().clone();
         let is_focused = self.focus_handle.is_focused(window);
@@ -847,11 +845,12 @@ impl Render for TerminalView {
                     .children(status_banner)
                     .children(autoscroll_pill)
                     .context_menu({
-                        let text = terminal_text.clone();
-                        let selection = selected_text.clone();
                         let terminal = terminal_actions.clone();
-                        move |menu, _window, _cx| {
-                            let output = text.clone();
+                        move |menu, _window, cx| {
+                            let (output, selection) = {
+                                let terminal = terminal.read(cx);
+                                (terminal.screen_text(), terminal.selected_text())
+                            };
                             let mut menu = menu;
                             if let Some(selection) = &selection {
                                 let selection = selection.clone();
@@ -962,7 +961,13 @@ fn spawn_shell(
 
 #[cfg(test)]
 mod tests {
-    use super::{selection_bounds, should_paint_cursor};
+    use super::{ansi_index_to_hsla, rgb_to_hsla, selection_bounds, should_paint_cursor};
+
+    #[test]
+    fn xterm_color_cube_uses_standard_channel_levels() {
+        assert_eq!(ansi_index_to_hsla(17), rgb_to_hsla(0, 0, 95));
+        assert_eq!(ansi_index_to_hsla(67), rgb_to_hsla(95, 135, 175));
+    }
 
     #[test]
     fn backward_selection_includes_its_anchor_cell() {
