@@ -10,6 +10,11 @@ use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+thread_local! {
+    static COMMAND_SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 const REPOSITORY_METADATA_TTL: Duration = Duration::from_secs(60);
 const PR_INSPECTION_TTL: Duration = Duration::from_secs(30);
 
@@ -137,6 +142,8 @@ fn command(work_dir: &Path, args: &[&str]) -> Result<String, GitError> {
     let mut attempts = 0;
     loop {
         attempts += 1;
+        #[cfg(test)]
+        COMMAND_SPAWNS.set(COMMAND_SPAWNS.get() + 1);
         let output = Command::new("git")
             .args(args)
             .current_dir(work_dir)
@@ -757,7 +764,8 @@ pub fn diff_file(work_dir: &Path, path: &str) -> Result<String, GitError> {
     }
 
     // 3. If untracked or new file, show whole file as additions via git diff --no-index
-    if command(work_dir, &["ls-files", "--error-unmatch", "--", path]).is_err() {
+    let is_untracked = command(work_dir, &["ls-files", "--error-unmatch", "--", path]).is_err();
+    if is_untracked {
         let null_source = if cfg!(windows) { "NUL" } else { "/dev/null" };
         if let Ok(output) = Command::new("git")
             .args([
@@ -779,7 +787,7 @@ pub fn diff_file(work_dir: &Path, path: &str) -> Result<String, GitError> {
     }
 
     // 4. Fallback: if file exists on disk and is untracked, synthesize additions
-    if command(work_dir, &["ls-files", "--error-unmatch", "--", path]).is_err() {
+    if is_untracked {
         let full_path = work_dir.join(path);
         if full_path.is_file() {
             if let Ok(content) = std::fs::read_to_string(&full_path) {
@@ -808,20 +816,11 @@ pub fn commit_message_diff(work_dir: &Path) -> Result<String, GitError> {
         return Ok(staged);
     }
 
-    let mut diff = command(work_dir, &["diff", "--"])?;
-    let untracked = command(
-        work_dir,
-        &["ls-files", "--others", "--exclude-standard", "-z"],
-    )?;
-    for path in untracked.split('\0').filter(|path| !path.is_empty()) {
-        let file_diff = diff_file(work_dir, path)?;
-        if !file_diff.trim().is_empty() {
-            if !diff.is_empty() {
-                diff.push('\n');
-            }
-            diff.push_str(&file_diff);
-        }
-    }
+    command(work_dir, &["add", "--intent-to-add", "--", "."])?;
+    let diff = command(work_dir, &["diff", "--no-ext-diff", "--"]);
+    let reset = command(work_dir, &["reset", "--quiet", "--", "."]);
+    reset?;
+    let diff = diff?;
     if diff.trim().is_empty() {
         return Err(GitError {
             work_dir: work_dir.to_path_buf(),
@@ -1112,6 +1111,40 @@ mod tests {
         assert!(working_tree.contains("+unstaged"));
         assert!(working_tree.contains("new.txt"));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn commit_message_diff_process_count_is_constant_for_untracked_files() {
+        let dir = tempdir().unwrap();
+        run_git(dir.path(), &["init", "-q"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Threadlane"]);
+        fs::write(dir.path().join("tracked.txt"), "initial\n").unwrap();
+        run_git(dir.path(), &["add", "tracked.txt"]);
+        run_git(dir.path(), &["commit", "-qm", "initial"]);
+        for index in 0..8 {
+            fs::write(dir.path().join(format!("new-{index}.txt")), "new\n").unwrap();
+        }
+
+        COMMAND_SPAWNS.set(0);
+        let diff = commit_message_diff(dir.path()).unwrap();
+        let spawn_count = COMMAND_SPAWNS.get();
+
+        assert!(diff.contains("new-0.txt"));
+        assert!(diff.contains("new-7.txt"));
+        assert_eq!(spawn_count, 4);
+    }
+
+    #[test]
+    fn commit_message_diff_includes_untracked_files_before_first_commit() {
+        let dir = tempdir().unwrap();
+        run_git(dir.path(), &["init", "-q"]);
+        fs::write(dir.path().join("new.txt"), "new\n").unwrap();
+
+        let diff = commit_message_diff(dir.path()).unwrap();
+
+        assert!(diff.contains("new.txt"));
+        assert!(diff.contains("+new"));
     }
 
     #[test]
