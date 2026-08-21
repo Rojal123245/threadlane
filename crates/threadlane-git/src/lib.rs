@@ -316,8 +316,13 @@ pub fn fetch(work_dir: &Path) -> Result<(), GitError> {
     sync_remote(work_dir)
 }
 
-pub fn list_branches_detailed(work_dir: &Path) -> Result<Vec<GitBranchInfo>, GitError> {
-    let def_branch = default_branch(work_dir);
+pub fn list_branches_detailed(
+    work_dir: &Path,
+    provided_default_branch: Option<&str>,
+) -> Result<Vec<GitBranchInfo>, GitError> {
+    let def_branch = provided_default_branch
+        .map(str::to_owned)
+        .or_else(|| default_branch(work_dir));
     let output = command(
         work_dir,
         &[
@@ -404,7 +409,7 @@ pub fn inspect(work_dir: &Path) -> Result<GitStatus, GitError> {
         }
     }
     status.default_branch = default_branch(work_dir);
-    status.branch_details = list_branches_detailed(work_dir).unwrap_or_else(|_| {
+    status.branch_details = list_branches_detailed(work_dir, status.default_branch.as_deref()).unwrap_or_else(|_| {
         status
             .branches
             .iter()
@@ -1345,6 +1350,8 @@ mod tests {
         let output = Command::new("git")
             .args(args)
             .current_dir(work_dir)
+            .env("GIT_CONFIG_GLOBAL", work_dir.join("git-test-global-config"))
+            .env("GIT_CONFIG_SYSTEM", work_dir.join("git-test-system-config"))
             .output()
             .unwrap();
         assert!(
@@ -1675,7 +1682,7 @@ mod tests {
         run_git(dir.path(), &["commit", "-qm", "add feature"]);
 
         // Detailed branches
-        let branches = list_branches_detailed(dir.path()).unwrap();
+        let branches = list_branches_detailed(dir.path(), None).unwrap();
         assert!(branches.iter().any(|b| b.name == "feature-1" && b.is_current));
         assert!(branches.iter().any(|b| b.name == "main"));
 
@@ -1705,18 +1712,18 @@ mod tests {
         // Switch to branch-a and create uncommitted change
         checkout(dir.path(), "branch-a").unwrap();
         fs::write(dir.path().join("dirty.txt"), "dirty work\n").unwrap();
-        assert!(inspect(dir.path()).unwrap().files.len() > 0);
+        assert!(!inspect(dir.path()).unwrap().files.is_empty());
 
         // Stash and switch to branch-b
         checkout_with_stash(dir.path(), "branch-b").unwrap();
         let status_b = inspect(dir.path()).unwrap();
         assert_eq!(status_b.branch.as_deref(), Some("branch-b"));
         // Dirty file should have been stashed
-        assert_eq!(status_b.files.len(), 0);
+        assert!(status_b.files.is_empty());
 
         // Switch carrying changes test
         fs::write(dir.path().join("carry.txt"), "carry me\n").unwrap();
-        assert!(inspect(dir.path()).unwrap().files.len() > 0);
+        assert!(!inspect(dir.path()).unwrap().files.is_empty());
         checkout_carrying_changes(dir.path(), "main").unwrap();
         let status_main = inspect(dir.path()).unwrap();
         assert_eq!(status_main.branch.as_deref(), Some("main"));
@@ -1752,11 +1759,22 @@ mod tests {
         let diff = diff_stash_file(dir.path(), 0, "work.txt").unwrap();
         assert!(diff.contains("in-progress work"));
 
-        // Pop stash
-        pop_stash(dir.path(), None).unwrap();
+        fs::write(dir.path().join("second.txt"), "second stash\n").unwrap();
+        run_git(dir.path(), &["stash", "push", "-u", "-m", "second stash"]);
+        assert_eq!(list_stashes(dir.path()).unwrap().len(), 2);
+        drop_stash(dir.path(), Some(0)).unwrap();
+        assert_eq!(list_stashes(dir.path()).unwrap().len(), 1);
+
+        pop_stash(dir.path(), Some(0)).unwrap();
         assert!(dir.path().join("work.txt").exists());
         let status_after_pop = inspect(dir.path()).unwrap();
         assert_eq!(status_after_pop.stashes.len(), 0);
+
+        fs::write(dir.path().join("third.txt"), "third stash\n").unwrap();
+        run_git(dir.path(), &["stash", "push", "-u", "-m", "third stash"]);
+        pop_stash(dir.path(), None).unwrap();
+        assert!(dir.path().join("third.txt").exists());
+        assert!(inspect(dir.path()).unwrap().stashes.is_empty());
     }
 
     #[test]
@@ -1790,7 +1808,7 @@ mod tests {
         run_git(dir.path(), &["branch", "topic|branch"]);
 
         let commits = list_commits(dir.path(), 1).unwrap();
-        let branches = list_branches_detailed(dir.path()).unwrap();
+        let branches = list_branches_detailed(dir.path(), None).unwrap();
 
         assert_eq!(commits[0].author_name, "Test | Author");
         assert_eq!(commits[0].summary, "subject | detail");
