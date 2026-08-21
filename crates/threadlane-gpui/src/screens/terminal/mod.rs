@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
@@ -12,6 +12,7 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 const DEFAULT_ROWS: u16 = 30;
 const DEFAULT_COLS: u16 = 120;
 const SCROLLBACK_ROWS: usize = 10_000;
+const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
 struct PtySession {
     master: Box<dyn MasterPty + Send>,
@@ -52,6 +53,31 @@ enum PtyEvent {
     Error(String),
 }
 
+fn selection_bounds(
+    anchor: (u16, u16),
+    head: (u16, u16),
+    cols: u16,
+) -> Option<((u16, u16), (u16, u16))> {
+    if anchor == head {
+        return None;
+    }
+    if head < anchor {
+        Some((
+            head,
+            (
+                anchor.0,
+                anchor.1.saturating_add(1).min(cols.saturating_sub(1)),
+            ),
+        ))
+    } else {
+        Some((anchor, head))
+    }
+}
+
+fn should_paint_cursor(is_focused: bool, terminal_hides_cursor: bool, blink_visible: bool) -> bool {
+    is_focused && !terminal_hides_cursor && blink_visible
+}
+
 /// A persistent, focusable project shell backed by a real pseudo-terminal.
 ///
 /// Construct it with `cx.new(|cx| TerminalView::new(project, cx))` and
@@ -68,6 +94,8 @@ pub struct TerminalView {
     screen_bounds: Option<Bounds<Pixels>>,
     selection_anchor: Option<(u16, u16)>,
     selection_head: Option<(u16, u16)>,
+    cell_width: f32,
+    cursor_visible: bool,
     scrollback_offset: usize,
     scroll_accumulator: f32,
 }
@@ -75,20 +103,38 @@ pub struct TerminalView {
 impl TerminalView {
     pub(crate) fn new(project: PathBuf, cx: &mut Context<Self>) -> Self {
         let (event_tx, event_rx) = mpsc::channel();
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(16))
-                .await;
-            let events = event_rx.try_iter().collect::<Vec<_>>();
-            if events.is_empty() {
-                continue;
-            }
-            let _ = this.update(cx, |this, cx| {
-                for event in events {
-                    this.apply_event(event);
+        cx.spawn(async move |this, cx| {
+            let mut last_cursor_blink = Instant::now();
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(16))
+                    .await;
+                let events = event_rx.try_iter().collect::<Vec<_>>();
+                let blink_due = last_cursor_blink.elapsed() >= CURSOR_BLINK_INTERVAL;
+                if events.is_empty() && !blink_due {
+                    continue;
                 }
-                cx.notify();
-            });
+                let has_events = !events.is_empty();
+                if has_events || blink_due {
+                    last_cursor_blink = Instant::now();
+                }
+                if this
+                    .update(cx, |this, cx| {
+                        for event in events {
+                            this.apply_event(event);
+                        }
+                        if has_events {
+                            this.cursor_visible = true;
+                        } else {
+                            this.cursor_visible = !this.cursor_visible;
+                        }
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
         })
         .detach();
 
@@ -104,6 +150,8 @@ impl TerminalView {
             screen_bounds: None,
             selection_anchor: None,
             selection_head: None,
+            cell_width: 7.8,
+            cursor_visible: true,
             scrollback_offset: 0,
             scroll_accumulator: 0.0,
         };
@@ -318,7 +366,12 @@ impl TerminalView {
                     .and_then(|item| item.text())
                     .map(|text| {
                         if self.parser.screen().bracketed_paste() {
-                            [b"\x1b[200~".as_slice(), text.as_bytes(), b"\x1b[201~".as_slice()].concat()
+                            [
+                                b"\x1b[200~".as_slice(),
+                                text.as_bytes(),
+                                b"\x1b[201~".as_slice(),
+                            ]
+                            .concat()
                         } else {
                             text.into_bytes()
                         }
@@ -356,18 +409,14 @@ impl TerminalView {
                 "f11" => Some(b"\x1b[23~".to_vec()),
                 "f12" => Some(b"\x1b[24~".to_vec()),
                 "escape" => Some(vec![0x1b]),
-                _ if !modifiers.platform => event
-                    .keystroke
-                    .key_char
-                    .as_ref()
-                    .map(|text| {
-                        let mut bytes = Vec::with_capacity(text.len() + usize::from(modifiers.alt));
-                        if modifiers.alt {
-                            bytes.push(0x1b);
-                        }
-                        bytes.extend_from_slice(text.as_bytes());
-                        bytes
-                    }),
+                _ if !modifiers.platform => event.keystroke.key_char.as_ref().map(|text| {
+                    let mut bytes = Vec::with_capacity(text.len() + usize::from(modifiers.alt));
+                    if modifiers.alt {
+                        bytes.push(0x1b);
+                    }
+                    bytes.extend_from_slice(text.as_bytes());
+                    bytes
+                }),
                 _ => None,
             }
         };
@@ -379,7 +428,9 @@ impl TerminalView {
     }
 
     fn cursor_key(&self, key: u8, modifiers: Modifiers) -> Vec<u8> {
-        let modifier = 1 + u8::from(modifiers.shift) + 2 * u8::from(modifiers.alt)
+        let modifier = 1
+            + u8::from(modifiers.shift)
+            + 2 * u8::from(modifiers.alt)
             + 4 * u8::from(modifiers.control);
         if modifier == 1 {
             if self.parser.screen().application_cursor() {
@@ -405,38 +456,58 @@ impl TerminalView {
 
     fn cell_at(&self, position: Point<Pixels>) -> Option<(u16, u16)> {
         let bounds = self.screen_bounds?;
-        let x = ((position.x - bounds.left()).as_f32() - 12.0) / 7.8;
+        let x = ((position.x - bounds.left()).as_f32() - 12.0) / self.cell_width;
         let y = ((position.y - bounds.top()).as_f32() - 12.0) / 17.55;
         Some((
-            y.floor().max(0.0).min(f32::from(self.rows.saturating_sub(1))) as u16,
-            x.floor().max(0.0).min(f32::from(self.cols.saturating_sub(1))) as u16,
+            y.floor()
+                .max(0.0)
+                .min(f32::from(self.rows.saturating_sub(1))) as u16,
+            x.floor()
+                .max(0.0)
+                .min(f32::from(self.cols.saturating_sub(1))) as u16,
         ))
     }
 
     fn selected_text(&self) -> Option<String> {
         let (anchor, head) = (self.selection_anchor?, self.selection_head?);
-        if anchor == head {
-            return None;
-        }
-        let (start, end) = if anchor <= head { (anchor, head) } else { (head, anchor) };
-        Some(self.parser.screen().contents_between(start.0, start.1, end.0, end.1))
+        let (start, end) = selection_bounds(anchor, head, self.cols)?;
+        Some(
+            self.parser
+                .screen()
+                .contents_between(start.0, start.1, end.0, end.1),
+        )
     }
 
-    fn begin_selection(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn begin_selection(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.selection_anchor = self.cell_at(event.position);
         self.selection_head = self.selection_anchor;
         self.focus_handle.focus(window, cx);
         cx.notify();
     }
 
-    fn extend_selection(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn extend_selection(
+        &mut self,
+        event: &MouseMoveEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if event.dragging() && self.selection_anchor.is_some() {
             self.selection_head = self.cell_at(event.position);
             cx.notify();
         }
     }
 
-    fn end_selection(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn end_selection(
+        &mut self,
+        event: &MouseUpEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.selection_head = self.cell_at(event.position).or(self.selection_head);
         cx.notify();
     }
@@ -444,10 +515,9 @@ impl TerminalView {
         let (Some(anchor), Some(head)) = (self.selection_anchor, self.selection_head) else {
             return false;
         };
-        if anchor == head {
+        let Some((start, end)) = selection_bounds(anchor, head, self.cols) else {
             return false;
-        }
-        let (start, end) = if anchor <= head { (anchor, head) } else { (head, anchor) };
+        };
         let pos = (row, col);
         pos >= start && pos <= end
     }
@@ -476,7 +546,11 @@ fn rgb_to_hsla(r: u8, g: u8, b: u8) -> Hsla {
         return hsla(0.0, 0.0, l, 1.0);
     }
     let d = max - min;
-    let s = if l > 0.5 { d / (2.0 - max - min) } else { d / (max + min) };
+    let s = if l > 0.5 {
+        d / (2.0 - max - min)
+    } else {
+        d / (max + min)
+    };
     let h = if (max - r).abs() < 1e-4 {
         ((g - b) / d + if g < b { 6.0 } else { 0.0 }) / 6.0
     } else if (max - g).abs() < 1e-4 {
@@ -490,22 +564,22 @@ fn rgb_to_hsla(r: u8, g: u8, b: u8) -> Hsla {
 fn ansi_index_to_hsla(idx: u8) -> Hsla {
     match idx {
         // Standard 16 ANSI colors
-        0 => hsla(0.0, 0.0, 0.15, 1.0),      // Black
-        1 => hsla(0.0, 0.75, 0.60, 1.0),     // Red
-        2 => hsla(0.35, 0.65, 0.55, 1.0),    // Green
-        3 => hsla(0.12, 0.80, 0.60, 1.0),    // Yellow
-        4 => hsla(0.60, 0.75, 0.65, 1.0),    // Blue
-        5 => hsla(0.82, 0.65, 0.65, 1.0),    // Magenta
-        6 => hsla(0.50, 0.75, 0.60, 1.0),    // Cyan
-        7 => hsla(0.0, 0.0, 0.85, 1.0),      // White (Dim)
-        8 => hsla(0.0, 0.0, 0.45, 1.0),      // Bright Black (Gray)
-        9 => hsla(0.0, 0.85, 0.70, 1.0),     // Bright Red
-        10 => hsla(0.35, 0.75, 0.65, 1.0),   // Bright Green
-        11 => hsla(0.12, 0.90, 0.70, 1.0),   // Bright Yellow
-        12 => hsla(0.60, 0.85, 0.75, 1.0),   // Bright Blue
-        13 => hsla(0.82, 0.75, 0.75, 1.0),   // Bright Magenta
-        14 => hsla(0.50, 0.85, 0.70, 1.0),   // Bright Cyan
-        15 => hsla(0.0, 0.0, 0.98, 1.0),     // Bright White
+        0 => hsla(0.0, 0.0, 0.15, 1.0),    // Black
+        1 => hsla(0.0, 0.75, 0.60, 1.0),   // Red
+        2 => hsla(0.35, 0.65, 0.55, 1.0),  // Green
+        3 => hsla(0.12, 0.80, 0.60, 1.0),  // Yellow
+        4 => hsla(0.60, 0.75, 0.65, 1.0),  // Blue
+        5 => hsla(0.82, 0.65, 0.65, 1.0),  // Magenta
+        6 => hsla(0.50, 0.75, 0.60, 1.0),  // Cyan
+        7 => hsla(0.0, 0.0, 0.85, 1.0),    // White (Dim)
+        8 => hsla(0.0, 0.0, 0.45, 1.0),    // Bright Black (Gray)
+        9 => hsla(0.0, 0.85, 0.70, 1.0),   // Bright Red
+        10 => hsla(0.35, 0.75, 0.65, 1.0), // Bright Green
+        11 => hsla(0.12, 0.90, 0.70, 1.0), // Bright Yellow
+        12 => hsla(0.60, 0.85, 0.75, 1.0), // Bright Blue
+        13 => hsla(0.82, 0.75, 0.75, 1.0), // Bright Magenta
+        14 => hsla(0.50, 0.85, 0.70, 1.0), // Bright Cyan
+        15 => hsla(0.0, 0.0, 0.98, 1.0),   // Bright White
         // 216 Color cube: 16..=231
         16..=231 => {
             let n = idx - 16;
@@ -544,6 +618,15 @@ impl Render for TerminalView {
         let terminal_resize = cx.entity().clone();
         let terminal_actions = cx.entity().clone();
         let is_focused = self.focus_handle.is_focused(window);
+        let font_id = window.text_system().resolve_font(&font(".ZedMono"));
+        let measured_cell_width = window
+            .text_system()
+            .layout_width(font_id, px(13.0), '0')
+            .as_f32();
+        if measured_cell_width > 0.0 {
+            self.cell_width = measured_cell_width;
+        }
+        let cell_width = self.cell_width;
 
         let screen = self.parser.screen();
         let (cursor_row, cursor_col) = screen.cursor_position();
@@ -560,7 +643,9 @@ impl Render for TerminalView {
             for col in (0..self.cols).rev() {
                 if let Some(cell) = screen.cell(row, col) {
                     let contents = cell.contents();
-                    if (!contents.is_empty() && contents != " ") || (row == cursor_row && col == cursor_col) {
+                    if (!contents.is_empty() && contents != " ")
+                        || (row == cursor_row && col == cursor_col)
+                    {
                         max_col = col + 1;
                         break;
                     }
@@ -568,7 +653,9 @@ impl Render for TerminalView {
             }
 
             for col in 0..max_col {
-                let is_cursor = is_focused && !hide_cursor && row == cursor_row && col == cursor_col;
+                let is_cursor = should_paint_cursor(is_focused, hide_cursor, self.cursor_visible)
+                    && row == cursor_row
+                    && col == cursor_col;
                 let is_selected = self.is_cell_selected(row, col);
 
                 if let Some(cell) = screen.cell(row, col) {
@@ -576,10 +663,14 @@ impl Render for TerminalView {
                         continue;
                     }
                     let cell_content = cell.contents();
-                    let char_str = if cell_content.is_empty() { " " } else { cell_content.as_str() };
+                    let char_str = if cell_content.is_empty() {
+                        " "
+                    } else {
+                        cell_content.as_str()
+                    };
 
                     let fg = if is_selected {
-                        Some(theme.background)
+                        Some(theme.accent_foreground)
                     } else if is_cursor {
                         Some(theme.background)
                     } else {
@@ -673,7 +764,12 @@ impl Render for TerminalView {
                         .items_center()
                         .gap_2()
                         .child(Icon::new(IconName::Info).xsmall().text_color(theme.warning))
-                        .child(div().text_xs().text_color(theme.foreground).child(status_text.clone())),
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.foreground)
+                                .child(status_text.clone()),
+                        ),
                 )
                 .child(
                     Button::new("terminal-restart-banner-btn")
@@ -690,19 +786,18 @@ impl Render for TerminalView {
         let autoscroll_pill = if self.scrollback_offset > 0 {
             let scroll_to_bottom_handle = terminal_actions.clone();
             Some(
-                div()
-                    .absolute()
-                    .bottom(px(14.0))
-                    .right(px(24.0))
-                    .child(
-                        Button::new("terminal-autoscroll-pill")
-                            .label(format!("↓ Scroll to Bottom ({} lines up)", self.scrollback_offset))
-                            .icon(IconName::ChevronDown)
-                            .xsmall()
-                            .on_click(move |_event, _window, cx| {
-                                scroll_to_bottom_handle.update(cx, |t, cx| t.scroll_to_bottom(cx));
-                            }),
-                    ),
+                div().absolute().bottom(px(14.0)).right(px(24.0)).child(
+                    Button::new("terminal-autoscroll-pill")
+                        .label(format!(
+                            "↓ Scroll to Bottom ({} lines up)",
+                            self.scrollback_offset
+                        ))
+                        .icon(IconName::ChevronDown)
+                        .xsmall()
+                        .on_click(move |_event, _window, cx| {
+                            scroll_to_bottom_handle.update(cx, |t, cx| t.scroll_to_bottom(cx));
+                        }),
+                ),
             )
         } else {
             None
@@ -738,7 +833,8 @@ impl Render for TerminalView {
                     }))
                     .on_prepaint(move |bounds, _, cx| {
                         let rows = ((bounds.size.height.as_f32() - 24.0) / 17.55).floor() as u16;
-                        let cols = ((bounds.size.width.as_f32() - 24.0) / 7.8).floor() as u16;
+                        let cols =
+                            ((bounds.size.width.as_f32() - 24.0) / cell_width).floor() as u16;
                         terminal_resize.update(cx, |terminal, cx| {
                             terminal.screen_bounds = Some(bounds);
                             terminal.resize(rows, cols, cx);
@@ -761,7 +857,9 @@ impl Render for TerminalView {
                                 let selection = selection.clone();
                                 menu = menu.item(PopupMenuItem::new("Copy Selection").on_click(
                                     move |_event, _window, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(selection.clone()));
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            selection.clone(),
+                                        ));
                                     },
                                 ));
                             }
@@ -771,12 +869,16 @@ impl Render for TerminalView {
                             let t_restart = terminal.clone();
                             menu.item(PopupMenuItem::new("Copy Terminal Output").on_click(
                                 move |_event, _window, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(output.clone()));
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        output.clone(),
+                                    ));
                                 },
                             ))
                             .item(PopupMenuItem::new("Paste").on_click(
                                 move |_event, _window, cx| {
-                                    t_paste.update(cx, |terminal, cx| terminal.paste_from_clipboard(cx));
+                                    t_paste.update(cx, |terminal, cx| {
+                                        terminal.paste_from_clipboard(cx)
+                                    });
                                 },
                             ))
                             .item(PopupMenuItem::new("Select All").on_click(
@@ -789,11 +891,13 @@ impl Render for TerminalView {
                                     t_clear.update(cx, |terminal, cx| terminal.clear(cx));
                                 },
                             ))
-                            .item(PopupMenuItem::new("Restart Terminal").on_click(
-                                move |_event, _window, cx| {
-                                    t_restart.update(cx, |terminal, cx| terminal.restart(cx));
-                                },
-                            ))
+                            .item(
+                                PopupMenuItem::new("Restart Terminal").on_click(
+                                    move |_event, _window, cx| {
+                                        t_restart.update(cx, |terminal, cx| terminal.restart(cx));
+                                    },
+                                ),
+                            )
                         }
                     }),
             )
@@ -854,4 +958,23 @@ fn spawn_shell(
         writer,
         child,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{selection_bounds, should_paint_cursor};
+
+    #[test]
+    fn backward_selection_includes_its_anchor_cell() {
+        assert_eq!(selection_bounds((0, 8), (0, 0), 20), Some(((0, 0), (0, 9))));
+        assert_eq!(selection_bounds((0, 0), (0, 8), 20), Some(((0, 0), (0, 8))));
+    }
+
+    #[test]
+    fn cursor_blink_only_controls_a_focused_visible_cursor() {
+        assert!(should_paint_cursor(true, false, true));
+        assert!(!should_paint_cursor(true, false, false));
+        assert!(!should_paint_cursor(false, false, true));
+        assert!(!should_paint_cursor(true, true, true));
+    }
 }
