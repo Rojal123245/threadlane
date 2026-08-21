@@ -1,5 +1,4 @@
 use std::sync::mpsc::Sender;
-use std::sync::OnceLock;
 
 #[derive(Clone, Debug)]
 pub enum ProviderAuthEvent {
@@ -9,17 +8,7 @@ pub enum ProviderAuthEvent {
 }
 
 fn executor() -> Result<&'static tokio::runtime::Runtime, String> {
-    static EXECUTOR: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
-    EXECUTOR
-        .get_or_init(|| {
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .thread_name("threadlane-gpui-auth")
-                .build()
-                .map_err(|error| format!("Failed to start authentication runtime: {error}"))
-        })
-        .as_ref()
-        .map_err(Clone::clone)
+    Ok(threadlane_runtime::get_runtime())
 }
 
 pub(crate) fn start_chatgpt_login(tx: Sender<ProviderAuthEvent>) -> Result<(), String> {

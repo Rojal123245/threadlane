@@ -1,8 +1,6 @@
-//! Async chat execution boundary for GPUI.
-
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use threadlane_provider::ProviderClient;
 use threadlane_session::harness::{JsonlStore, SessionStore};
@@ -12,17 +10,7 @@ use crate::services::sessions::SessionRuntime;
 use crate::state::ChatStreamEvent;
 
 pub(crate) fn executor() -> Result<&'static tokio::runtime::Runtime, String> {
-    static EXECUTOR: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
-    EXECUTOR
-        .get_or_init(|| {
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .thread_name("threadlane-gpui-agent")
-                .build()
-                .map_err(|error| format!("Failed to start agent runtime: {error}"))
-        })
-        .as_ref()
-        .map_err(Clone::clone)
+    Ok(threadlane_runtime::get_runtime())
 }
 
 struct RunCleanup {

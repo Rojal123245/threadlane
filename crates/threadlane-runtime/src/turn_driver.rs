@@ -366,10 +366,26 @@ impl<'a> TurnDriver<'a> {
             let mut monitor = StreamRuleMonitor::new(self.stream_rules.clone(), &self.config);
             let mut stream_rule_matched = false;
 
-            while let Some(evt) = stream_rx.recv().await {
+            let mut pending_evt = None;
+            while let Some(evt) = match pending_evt.take() {
+                Some(evt) => Some(evt),
+                None => stream_rx.recv().await,
+            } {
                 let _ = provider_step.push(&evt);
                 match evt {
-                    StreamEvent::ContentToken(token) => {
+                    StreamEvent::ContentToken(mut token) => {
+                        while let Ok(next_evt) = stream_rx.try_recv() {
+                            let _ = provider_step.push(&next_evt);
+                            match next_evt {
+                                StreamEvent::ContentToken(next_token) => {
+                                    token.push_str(&next_token);
+                                }
+                                other => {
+                                    pending_evt = Some(other);
+                                    break;
+                                }
+                            }
+                        }
                         current_text.push_str(&token);
                         if current_text.len().saturating_sub(checkpointed_bytes)
                             >= STREAM_CHECKPOINT_BYTES
@@ -449,7 +465,19 @@ impl<'a> TurnDriver<'a> {
                             tool_call_name: None,
                         });
                     }
-                    StreamEvent::ReasoningToken(token) => {
+                    StreamEvent::ReasoningToken(mut token) => {
+                        while let Ok(next_evt) = stream_rx.try_recv() {
+                            let _ = provider_step.push(&next_evt);
+                            match next_evt {
+                                StreamEvent::ReasoningToken(next_token) => {
+                                    token.push_str(&next_token);
+                                }
+                                other => {
+                                    pending_evt = Some(other);
+                                    break;
+                                }
+                            }
+                        }
                         current_reasoning.push_str(&token);
                         self.emit_event(AgentEvent::MessageUpdate {
                             text_delta: None,

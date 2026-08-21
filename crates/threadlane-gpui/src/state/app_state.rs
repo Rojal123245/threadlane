@@ -2471,6 +2471,11 @@ impl AppState {
             *pending = self.stream_rx.try_recv().ok();
         }
         pending.is_some()
+            || self
+                .active_session_id
+                .as_ref()
+                .and_then(|id| self.deferred_stream_events.get(id))
+                .is_some_and(|events| !events.is_empty())
     }
 
     pub(crate) fn drain_chat_stream(&mut self) -> bool {
@@ -2488,7 +2493,7 @@ impl AppState {
             .into_iter();
         let mut first = first;
         let mut processed = 0usize;
-        let mut has_events = false;
+        let mut active_changed = false;
 
         while processed < MAX_EVENTS_PER_DRAIN {
             let event = deferred
@@ -2498,7 +2503,6 @@ impl AppState {
             let Some(event) = event else {
                 break;
             };
-            has_events = true;
             processed = processed.saturating_add(1);
             match event {
                 ChatStreamEvent::Agent { session_id, event }
@@ -2525,6 +2529,7 @@ impl AppState {
                     }
                     match adapt_agent_event(event) {
                         ChatAgentUpdate::TextDelta(delta) => {
+                            active_changed = true;
                             let stream_prefix = format!("streaming-{session_id}-");
                             if let Some(message) = self.messages_mut().last_mut().filter(|message| {
                                 message.role == MessageRole::Assistant
@@ -2546,6 +2551,7 @@ impl AppState {
                             }
                         }
                         ChatAgentUpdate::ReasoningDelta(delta) => {
+                            active_changed = true;
                             if let Some(message) = self
                                 .messages_mut()
                                 .last_mut()
@@ -2573,6 +2579,7 @@ impl AppState {
                             name,
                             arguments,
                         } => {
+                            active_changed = true;
                             let activity = ToolActivityInfo {
                                 id: tool_call_id,
                                 category: "Working".into(),
@@ -2602,6 +2609,7 @@ impl AppState {
                             tool_call_id,
                             partial_result,
                         } => {
+                            active_changed = true;
                             if let Some(activity) = self
                                 .messages_mut()
                                 .iter_mut()
@@ -2617,6 +2625,7 @@ impl AppState {
                             content,
                             is_error,
                         } => {
+                            active_changed = true;
                             if let Some(activity) = self
                                 .messages_mut()
                                 .iter_mut()
@@ -2633,9 +2642,11 @@ impl AppState {
                             }
                         }
                         ChatAgentUpdate::PlanUpdated(plan) => {
+                            active_changed = true;
                             self.active_plan = plan;
                         }
                         ChatAgentUpdate::AdvisorNote(note) => {
+                            active_changed = true;
                             let note_id =
                                 format!("advisor-note-{session_id}-{}", self.messages.len());
                             self.messages_mut().push(ChatMessageInfo {
@@ -2649,6 +2660,7 @@ impl AppState {
                             });
                         }
                         ChatAgentUpdate::ModelRolesUpdated(roles) => {
+                            active_changed = true;
                             self.model_roles = roles;
                         }
                         ChatAgentUpdate::Usage(usage) => {
@@ -2659,9 +2671,11 @@ impl AppState {
                             entry.accumulate(&usage);
                         }
                         ChatAgentUpdate::PermissionRequested(request) => {
+                            active_changed = true;
                             self.pending_permissions.insert(session_id.clone(), request);
                         }
                         ChatAgentUpdate::Error(error) => {
+                            active_changed = true;
                             self.messages_mut().push(ChatMessageInfo {
                                 id: format!("stream-error-{session_id}"),
                                 role: MessageRole::Error,
@@ -2691,15 +2705,14 @@ impl AppState {
                             });
                         continue;
                     }
-                    if self.active_session_id.as_deref() == Some(&session_id) {
-                        self.pending_permissions.remove(&session_id);
-                        self.is_generating = false;
-                        self.session_status = Some("Reconciling session…".into());
-                        self.pending_hydrations.push(SessionHydrationRequest {
-                            session_id: session_id.clone(),
-                            session_file: session_file.clone(),
-                        });
-                    }
+                    active_changed = true;
+                    self.pending_permissions.remove(&session_id);
+                    self.is_generating = false;
+                    self.session_status = Some("Reconciling session…".into());
+                    self.pending_hydrations.push(SessionHydrationRequest {
+                        session_id: session_id.clone(),
+                        session_file: session_file.clone(),
+                    });
                     let runtime_is_stale =
                         self.session_runtimes
                             .get(&session_file)
@@ -2730,6 +2743,7 @@ impl AppState {
                         self.request_session_refresh(work_dir);
                     }
                     if self.active_session_id.as_deref() == Some(&session_id) {
+                        active_changed = true;
                         self.refresh_active_session();
                     }
                 }
@@ -2747,7 +2761,7 @@ impl AppState {
                 self.deferred_stream_events.insert(session_id, remaining);
             }
         }
-        has_events
+        active_changed
     }
 
     pub(crate) fn active_pending_composer_message(&self) -> Option<&str> {
@@ -3967,7 +3981,7 @@ mod tests {
                 .unwrap();
         }
 
-        assert!(state.drain_chat_stream());
+        assert!(!state.drain_chat_stream());
         assert!(state.messages.is_empty());
         assert_eq!(state.deferred_stream_events.len(), 1);
 

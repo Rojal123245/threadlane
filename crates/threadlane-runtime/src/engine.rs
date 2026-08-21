@@ -7,6 +7,7 @@ pub fn get_runtime() -> &'static Runtime {
     RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
+            .thread_name("threadlane-runtime")
             .build()
             .expect("Failed to create Tokio runtime")
     })

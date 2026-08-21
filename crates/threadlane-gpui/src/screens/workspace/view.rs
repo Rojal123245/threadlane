@@ -224,7 +224,16 @@ impl WorkspaceView {
         view
     }
 
-    fn open_git_dialog(&mut self, cx: &mut Context<Self>) {
+    fn open_git_files(&mut self, cx: &mut Context<Self>) {
+        self.right_panel_visible = true;
+        self.right_panel.update(cx, |panel, cx| {
+            panel.open_files(cx);
+        });
+        self.refresh_git_status(cx);
+        cx.notify();
+    }
+
+    fn open_git_review(&mut self, cx: &mut Context<Self>) {
         self.right_panel_visible = true;
         self.right_panel.update(cx, |panel, cx| {
             panel.open_review(cx);
@@ -277,7 +286,7 @@ impl WorkspaceView {
                 })
                 .detach();
             }
-            "git" => self.open_git_dialog(cx),
+            "git" => self.open_git_review(cx),
             "settings" => {
                 model.update(cx, |state, _cx| {
                     controller::dispatch(state, AppAction::OpenSettings);
@@ -739,6 +748,7 @@ impl WorkspaceView {
             .unwrap_or_else(|| "No Project".into());
 
         let pr_badge = git_status.and_then(|s| s.pr.as_ref()).map(|pr| {
+            let pr_url = pr.url.clone();
             let pr_num = pr.number;
             let failing_checks = pr.failing_checks;
             let pending_checks = pr.pending_checks;
@@ -755,14 +765,18 @@ impl WorkspaceView {
                 .ghost()
                 .xsmall()
                 .tooltip(if failing_checks > 0 {
-                    format!("PR #{pr_num} ({failing_checks} failing checks) — Click to review")
+                    format!("PR #{pr_num} ({failing_checks} failing checks) — Open in browser")
                 } else if pending_checks > 0 {
-                    format!("PR #{pr_num} (CI in progress) — Click to review")
+                    format!("PR #{pr_num} (CI in progress) — Open in browser")
                 } else {
-                    format!("PR #{pr_num} (CI passed) — Click to review")
+                    format!("PR #{pr_num} (CI passed) — Open in browser")
                 })
-                .on_click(cx.listener(|this, _event, _window, cx| {
-                    this.open_git_dialog(cx);
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    if pr_url.is_empty() {
+                        this.open_git_review(cx);
+                    } else {
+                        cx.open_url(&pr_url);
+                    }
                 }))
         });
 
@@ -778,17 +792,23 @@ impl WorkspaceView {
                             .label(format!("{active_project} · {branch}"))
                             .ghost()
                             .xsmall()
-                            .tooltip("Git Review & Commit")
+                            .tooltip("Browse project files")
                             .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.open_git_dialog(cx);
+                                this.open_git_files(cx);
                             })),
                     )
                     .children((dirty_count > 0).then(|| {
                         div()
+                            .id("status-git-changes")
                             .flex()
                             .items_center()
                             .gap_1()
                             .text_xs()
+                            .cursor_pointer()
+                            .hover(|style| style.opacity(0.8))
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.open_git_review(cx);
+                            }))
                             .children((additions > 0).then(|| {
                                 div()
                                     .text_color(theme.success)

@@ -77,7 +77,7 @@ pub struct ChatListView {
     scroll_handle: ScrollHandle,
     trajectory_scroll_handle: ScrollHandle,
     expanded_activity_groups: HashSet<String>,
-    markdown_states: HashMap<String, (String, Entity<TextViewState>)>,
+    markdown_states: HashMap<String, (String, Entity<TextViewState>, std::time::Instant)>,
     pasted_images: Vec<ImageAttachment>,
     last_session_key: Option<(std::path::PathBuf, String)>,
     initial_scroll_frames: u8,
@@ -200,7 +200,7 @@ impl ChatListView {
                 // Event-driven pacing: check quickly when generating,
                 // slow down when idle.
                 let interval = if settle_frames > 0 {
-                    Duration::from_millis(16) // ~60fps for animation frames
+                    Duration::from_millis(30) // ~33fps for smooth streaming without UI thread starvation
                 } else {
                     Duration::from_millis(100)
                 };
@@ -1705,7 +1705,7 @@ impl ChatListView {
         messages: &[ChatMessageInfo],
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let mut rows = Vec::new();
+        let mut rows = Vec::with_capacity(messages.len().saturating_add(1));
         let mut index = 0;
         while index < messages.len() {
             let message = &messages[index];
@@ -1839,18 +1839,24 @@ impl ChatListView {
             });
 
         let detail = is_expanded.then(|| {
+            let now = std::time::Instant::now();
             let entry = self
                 .markdown_states
                 .entry(format!("reasoning-{}", msg.id))
                 .or_insert_with(|| {
                     let state = cx.new(|cx| TextViewState::markdown(reasoning, cx));
-                    (reasoning.to_string(), state)
+                    (reasoning.to_string(), state, now)
                 });
             if entry.0 != reasoning {
-                entry.0 = reasoning.to_string();
-                entry.1.update(cx, |state, cx| {
-                    state.set_text(reasoning, cx);
-                });
+                let should_update = !msg.streaming
+                    || now.duration_since(entry.2) >= Duration::from_millis(120);
+                if should_update {
+                    entry.0 = reasoning.to_string();
+                    entry.2 = now;
+                    entry.1.update(cx, |state, cx| {
+                        state.set_text(reasoning, cx);
+                    });
+                }
             }
             div()
                 .ml(px(26.0))
@@ -1896,6 +1902,7 @@ impl ChatListView {
                         .text_sm()
                         .text_color(theme.secondary_foreground)
                         .child({
+                            let now = std::time::Instant::now();
                             let entry =
                                 self.markdown_states
                                     .entry(msg.id.clone())
@@ -1903,10 +1910,11 @@ impl ChatListView {
                                         let content = msg.content.clone();
                                         let state =
                                             cx.new(|cx| TextViewState::markdown(&content, cx));
-                                        (content, state)
+                                        (content, state, now)
                                     });
                             if entry.0 != msg.content {
                                 entry.0 = msg.content.clone();
+                                entry.2 = now;
                                 entry.1.update(cx, |state, cx| {
                                     state.set_text(&msg.content, cx);
                                 });
@@ -1961,6 +1969,7 @@ impl ChatListView {
                                     .text_sm()
                                     .text_color(theme.foreground)
                                     .child({
+                                        let now = std::time::Instant::now();
                                         let entry = self
                                             .markdown_states
                                             .entry(msg.id.clone())
@@ -1969,13 +1978,18 @@ impl ChatListView {
                                                 let state = cx.new(|cx| {
                                                     TextViewState::markdown(&content, cx)
                                                 });
-                                                (content, state)
+                                                (content, state, now)
                                             });
                                         if entry.0 != msg.content {
-                                            entry.0 = msg.content.clone();
-                                            entry.1.update(cx, |state, cx| {
-                                                state.set_text(&msg.content, cx);
-                                            });
+                                            let should_update = !msg.streaming
+                                                || now.duration_since(entry.2) >= Duration::from_millis(120);
+                                            if should_update {
+                                                entry.0 = msg.content.clone();
+                                                entry.2 = now;
+                                                entry.1.update(cx, |state, cx| {
+                                                    state.set_text(&msg.content, cx);
+                                                });
+                                            }
                                         }
                                         TextView::new(&entry.1).selectable(true)
                                     });

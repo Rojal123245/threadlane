@@ -286,6 +286,10 @@ impl RightPanelView {
         self.open_surface(Surface::Review, cx);
     }
 
+    pub(crate) fn open_files(&mut self, cx: &mut Context<Self>) {
+        self.open_surface(Surface::Files, cx);
+    }
+
     fn open_surface(&mut self, surface: Surface, cx: &mut Context<Self>) {
         if self.active_surface != Some(surface) {
             self.document_title = None;
