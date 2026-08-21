@@ -26,6 +26,15 @@ use threadlane_runtime::{
 
 use threadlane_runtime::harness::{EventError, HarnessEvent, OperationIntent, Subscription};
 
+#[cfg(test)]
+static LAST_PATH_OPERATION_THREAD: std::sync::Mutex<Option<std::thread::ThreadId>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn last_path_operation_thread() -> Option<std::thread::ThreadId> {
+    *LAST_PATH_OPERATION_THREAD.lock().ok()?
+}
+
 pub struct HarnessWatch {
     pub(crate) hub: HarnessEventHub,
     pub(crate) subscription: Subscription,
@@ -149,6 +158,10 @@ impl CodingSessionHarness {
         path: &Path,
         operation: impl FnOnce(&mut Self) -> Result<T, String>,
     ) -> Result<T, String> {
+        #[cfg(test)]
+        if let Ok(mut thread) = LAST_PATH_OPERATION_THREAD.lock() {
+            *thread = Some(std::thread::current().id());
+        }
         let mut journal = Self::open(path)?;
         operation(&mut journal)
     }
@@ -639,7 +652,16 @@ impl CodingSessionHarness {
         run_id: &str,
         result: &AgentToolResult,
     ) -> Result<(), String> {
-        Self::with_path(path, |journal| journal.finish_tool_result(run_id, result))
+        let path = path.to_path_buf();
+        let run_id = run_id.to_owned();
+        let result = result.clone();
+        tokio::task::spawn_blocking(move || {
+            Self::with_path(&path, |journal| {
+                journal.finish_tool_result(&run_id, &result)
+            })
+        })
+        .await
+        .map_err(|error| error.to_string())?
     }
 
     pub(crate) fn record_tool_result(
@@ -2700,6 +2722,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
         (dir, path)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn path_scoped_async_helper_uses_blocking_worker() {
+        let (_dir, path) = temp_session();
+        let caller = std::thread::current().id();
+        let result = AgentToolResult::external("missing", "read_file", "result", false);
+
+        let _ = CodingSessionHarness::record_tool_result_to_path(&path, "run", &result).await;
+
+        assert_ne!(last_path_operation_thread().unwrap(), caller);
     }
 
     #[tokio::test]

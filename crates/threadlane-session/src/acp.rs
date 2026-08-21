@@ -36,6 +36,14 @@ const ACP_SETTINGS_FILE: &str = "acp.json";
 const MAX_CAPTURED_STDERR_BYTES: usize = 16 * 1024;
 const ACP_PROJECT_SETTINGS_RELATIVE_PATH: &str = ".threadlane/acp.json";
 const MAX_ACP_SETTINGS_BYTES: usize = 512 * 1024;
+
+#[cfg(test)]
+static LAST_SETTINGS_LOAD_THREAD: Mutex<Option<std::thread::ThreadId>> = Mutex::new(None);
+
+#[cfg(test)]
+fn last_settings_load_thread() -> Option<std::thread::ThreadId> {
+    *LAST_SETTINGS_LOAD_THREAD.lock().ok()?
+}
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 // ---------------------------------------------------------------------------
@@ -150,6 +158,10 @@ impl AcpSettings {
     }
 
     fn load_file(path: &Path, scope: AcpScope) -> Vec<AcpAgentConfig> {
+        #[cfg(test)]
+        if let Ok(mut thread) = LAST_SETTINGS_LOAD_THREAD.lock() {
+            *thread = Some(std::thread::current().id());
+        }
         let bytes = match fs::read(path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == ErrorKind::NotFound => return Vec::new(),
@@ -1344,6 +1356,13 @@ impl AcpManager {
         let global = AcpSettings::load_global(self.global_dir.as_deref());
         let project = AcpSettings::load_project(self.project_root.as_deref());
 
+        Self::merge_configs(global, project)
+    }
+
+    fn merge_configs(
+        global: Vec<AcpAgentConfig>,
+        project: Vec<AcpAgentConfig>,
+    ) -> Vec<AcpAgentConfig> {
         let mut merged = Vec::new();
         let mut seen = BTreeSet::new();
         for config in project.into_iter().chain(global) {
@@ -1357,8 +1376,18 @@ impl AcpManager {
     /// Probes every enabled agent by completing an ACP handshake and then
     /// terminating the process. Disabled agents are reported without spawning.
     pub async fn discover_and_connect(&self) -> Vec<AcpAgentRecord> {
+        let global_dir = self.global_dir.clone();
+        let project_root = self.project_root.clone();
+        let configs = tokio::task::spawn_blocking(move || {
+            Self::merge_configs(
+                AcpSettings::load_global(global_dir.as_deref()),
+                AcpSettings::load_project(project_root.as_deref()),
+            )
+        })
+        .await
+        .unwrap_or_default();
         let mut records = Vec::new();
-        for config in self.configs() {
+        for config in configs {
             let status = if config.enabled {
                 Self::probe(&config, self.project_root.as_deref()).await
             } else {
@@ -1583,6 +1612,30 @@ mod tests {
         let shared = configs.iter().find(|c| c.id == "shared").unwrap();
         assert_eq!(shared.command, "project-cmd");
         assert_eq!(shared.scope, AcpScope::Project);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn discovery_loads_settings_off_async_worker() {
+        let global = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let mut global_agent =
+            AcpAgentConfig::from_command_line("Global", "global", AcpScope::Global).unwrap();
+        global_agent.enabled = false;
+        let mut project_agent =
+            AcpAgentConfig::from_command_line("Project", "project", AcpScope::Project).unwrap();
+        project_agent.enabled = false;
+        AcpSettings::save_global(global.path(), &[global_agent]).unwrap();
+        AcpSettings::save_project(project.path(), &[project_agent]).unwrap();
+        let caller = std::thread::current().id();
+        let manager = AcpManager::new(
+            Some(global.path().to_path_buf()),
+            Some(project.path().to_path_buf()),
+        );
+
+        let records = manager.discover_and_connect().await;
+
+        assert_eq!(records.len(), 2);
+        assert_ne!(last_settings_load_thread().unwrap(), caller);
     }
 
     #[test]
