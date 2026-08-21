@@ -45,8 +45,8 @@ impl HarnessWatch {
         &self.subscription.snapshot
     }
 
-    pub(crate) fn poll(&mut self) -> Result<Vec<HarnessEvent>, EventError> {
-        self.hub.poll(&mut self.subscription)
+    pub(crate) async fn wait(&mut self) -> Result<Vec<HarnessEvent>, EventError> {
+        self.hub.wait(&mut self.subscription).await
     }
 }
 

@@ -22,7 +22,6 @@ use threadlane_runtime::harness::{
 use threadlane_runtime::{AgentEvent, AgentMessage, TokenUsage};
 use threadlane_wasi::packages::ExtensionScope;
 use tokio::sync::broadcast;
-use tokio::time::{interval, MissedTickBehavior};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskStatus {
@@ -748,11 +747,8 @@ impl HarnessSupervisor {
         // so background task subagent operations update chat activities in real time.
         if let Some(mut watch) = harness_watch {
             tokio::spawn(async move {
-                let mut tick = interval(Duration::from_millis(50));
-                tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
                 loop {
-                    tick.tick().await;
-                    match watch.poll() {
+                    match watch.wait().await {
                         Ok(events) => {
                             for event in events {
                                 let _ = harness_event_tx.send(TaskAgentEvent {
