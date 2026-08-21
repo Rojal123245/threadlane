@@ -3044,7 +3044,9 @@ impl RightPanelView {
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .on_mouse_down(MouseButton::Left, |_event, _window, _cx| {})
+                    .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+                        cx.stop_propagation()
+                    })
                     .child(
                         div()
                             .flex()
@@ -3196,7 +3198,9 @@ impl RightPanelView {
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .on_mouse_down(MouseButton::Left, |_event, _window, _cx| {})
+                    .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+                        cx.stop_propagation()
+                    })
                     .child(
                         div()
                             .flex()
@@ -3398,7 +3402,9 @@ impl RightPanelView {
                     .flex()
                     .flex_col()
                     .gap_3p5()
-                    .on_mouse_down(MouseButton::Left, |_event, _window, _cx| {})
+                    .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+                        cx.stop_propagation()
+                    })
                     .child(
                         div()
                             .flex()
