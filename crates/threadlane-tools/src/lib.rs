@@ -11,9 +11,11 @@ fn read_virtual_agent(root: &Path, name: &str) -> String {
 }
 
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 
 fn tool_definitions() -> Vec<Value> {
     vec![
@@ -188,13 +190,30 @@ pub fn get_codex_tools() -> Vec<Value> {
 ///
 /// Accepts absolute and relative inputs, and tolerates paths that do not exist
 /// yet so callers can validate a write destination before creating it.
+fn canonical_workspace_root(workspace_root: &Path) -> Result<PathBuf, String> {
+    static ROOTS: OnceLock<Mutex<HashMap<PathBuf, PathBuf>>> = OnceLock::new();
+    let roots = ROOTS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(canonical) = roots
+        .lock()
+        .ok()
+        .and_then(|roots| roots.get(workspace_root).cloned())
+    {
+        return Ok(canonical);
+    }
+    let canonical = workspace_root
+        .canonicalize()
+        .map_err(|e| format!("Invalid workspace root '{}': {e}", workspace_root.display()))?;
+    if let Ok(mut roots) = roots.lock() {
+        roots.insert(workspace_root.to_path_buf(), canonical.clone());
+    }
+    Ok(canonical)
+}
+
 pub fn validate_path_in_workspace(
     path_input: &str,
     workspace_root: &Path,
 ) -> Result<PathBuf, String> {
-    let canonical_root = workspace_root
-        .canonicalize()
-        .map_err(|e| format!("Invalid workspace root '{}': {e}", workspace_root.display()))?;
+    let canonical_root = canonical_workspace_root(workspace_root)?;
 
     let p = Path::new(path_input);
     let absolute_path = if p.is_absolute() {
@@ -280,9 +299,11 @@ fn validate_cwd_in_workspace(
     cwd_input: Option<&str>,
     workspace_root: &Path,
 ) -> Result<PathBuf, String> {
-    let canonical_root = workspace_root
-        .canonicalize()
-        .map_err(|e| format!("Invalid workspace root '{}': {e}", workspace_root.display()))?;
+    let canonical_root = canonical_workspace_root(workspace_root)?;
+
+    if cwd_input.is_none() {
+        return Ok(canonical_root);
+    }
 
     let target_dir = match cwd_input {
         Some(dir) => {
@@ -293,7 +314,7 @@ fn validate_cwd_in_workspace(
                 canonical_root.join(p)
             }
         }
-        None => canonical_root.clone(),
+        None => unreachable!("handled above"),
     };
 
     let canonical_target = target_dir
@@ -927,6 +948,16 @@ fn run_post_edit_diagnostics(workspace_root: &Path, raw_path: &str) -> String {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn canonical_workspace_root_reuses_successful_resolution() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let expected = root.canonicalize().unwrap();
+        assert_eq!(canonical_workspace_root(&root).unwrap(), expected);
+        std::fs::remove_dir(&root).unwrap();
+        assert_eq!(canonical_workspace_root(&root).unwrap(), expected);
+    }
 
     #[test]
     fn validate_path_allows_a_new_absolute_destination_under_a_symlinked_root() {

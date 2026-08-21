@@ -1,6 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_MATCHES: usize = 1_000;
+const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+
 pub fn grep_search(root: &Path, pattern: &str, glob: Option<&str>) -> Result<String, String> {
     if pattern.is_empty() {
         return Err("search pattern must not be empty".into());
@@ -9,16 +13,41 @@ pub fn grep_search(root: &Path, pattern: &str, glob: Option<&str>) -> Result<Str
     collect_files(root, root, glob, &mut files)?;
     files.sort();
     let mut output = Vec::new();
-    for path in files {
-        let Ok(content) = fs::read_to_string(&path) else {
+    let mut output_bytes: usize = 0;
+    let mut truncated = false;
+    'files: for path in files {
+        if fs::metadata(&path)
+            .is_ok_and(|metadata| metadata.len() > MAX_FILE_BYTES as u64)
+        {
+            continue;
+        }
+        let Ok(bytes) = fs::read(&path) else {
+            continue;
+        };
+        if bytes.contains(&0) {
+            continue;
+        }
+        let Ok(content) = std::str::from_utf8(&bytes) else {
             continue;
         };
         for (index, line) in content.lines().enumerate() {
             if line.contains(pattern) {
                 let relative = path.strip_prefix(root).unwrap_or(&path).display();
-                output.push(format!("{}:{}:{}", relative, index + 1, line));
+                let formatted = format!("{}:{}:{}", relative, index + 1, line);
+                let added_bytes = formatted.len() + usize::from(!output.is_empty());
+                if output.len() == MAX_MATCHES
+                    || output_bytes.saturating_add(added_bytes) > MAX_OUTPUT_BYTES
+                {
+                    truncated = true;
+                    break 'files;
+                }
+                output_bytes += added_bytes;
+                output.push(formatted);
             }
         }
+    }
+    if truncated {
+        output.push("Search results truncated.".into());
     }
     Ok(if output.is_empty() {
         "No matches found.".into()
@@ -72,7 +101,7 @@ fn simple_glob(pattern: &str, value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::grep_search;
+    use super::{grep_search, MAX_FILE_BYTES, MAX_MATCHES};
     use std::fs;
     use std::process::Command;
     use std::time::{Duration, Instant};
@@ -126,6 +155,42 @@ mod tests {
         fs::write(dir.path().join("two.txt"), "needle\n").unwrap();
         let result = grep_search(dir.path(), "needle", Some("*.rs")).unwrap();
         assert_eq!(result, "one.rs:1:needle");
+    }
+
+    #[test]
+    fn grep_skips_binary_and_oversized_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("binary.bin"), b"needle\0hidden").unwrap();
+        let mut large = b"needle\n".to_vec();
+        large.resize(MAX_FILE_BYTES + 1, b'x');
+        fs::write(dir.path().join("large.txt"), large).unwrap();
+        fs::write(dir.path().join("small.txt"), b"needle\n").unwrap();
+
+        assert_eq!(
+            grep_search(dir.path(), "needle", None).unwrap(),
+            "small.txt:1:needle"
+        );
+    }
+
+    #[test]
+    fn grep_caps_match_count() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("many.txt"),
+            "needle\n".repeat(MAX_MATCHES + 1),
+        )
+        .unwrap();
+
+        let result = grep_search(dir.path(), "needle", None).unwrap();
+
+        assert_eq!(
+            result
+                .lines()
+                .filter(|line| line.contains(":needle"))
+                .count(),
+            MAX_MATCHES
+        );
+        assert!(result.lines().last().unwrap().contains("truncated"));
     }
 
     #[test]
