@@ -20,7 +20,6 @@ impl LocalToolRouter {
         let selected: HashSet<String> = selected_names.into_iter().collect();
         filter_tool_definitions(&selected, definitions, self.max_tools)
     }
-
 }
 
 #[cfg(feature = "needle")]
@@ -34,7 +33,8 @@ pub async fn shortlist_from_environment(
     }
     tracing::debug!(target: "threadlane_runtime::needle", "local Needle routing enabled");
     use std::sync::OnceLock;
-    static ENGINE: OnceLock<Option<std::sync::Arc<needle_infer::v2_engine::V2Engine>>> = OnceLock::new();
+    static ENGINE: OnceLock<Option<std::sync::Arc<needle_infer::v2_engine::V2Engine>>> =
+        OnceLock::new();
     static IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     let Some(engine) = ENGINE
         .get_or_init(|| {

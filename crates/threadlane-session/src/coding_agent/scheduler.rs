@@ -89,7 +89,11 @@ impl AgentWorkScheduler {
         }
     }
 
-    pub(crate) async fn run_executor(&self, agent: &mut AgentRuntime, session_file: Option<&Path>) -> bool {
+    pub(crate) async fn run_executor(
+        &self,
+        agent: &mut AgentRuntime,
+        session_file: Option<&Path>,
+    ) -> bool {
         let pending = self.drain();
         if pending.is_empty() {
             return false;

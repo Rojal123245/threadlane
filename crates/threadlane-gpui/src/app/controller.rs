@@ -5,10 +5,7 @@ use crate::state::{AppState, SessionHydrationRequest};
 ///
 /// The controller is intentionally small for now. Keeping actions in one place
 /// gives us a stable seam for moving backend work out of `AppState` incrementally.
-pub(crate) fn dispatch(
-    state: &mut AppState,
-    action: AppAction,
-) -> Option<SessionHydrationRequest> {
+pub(crate) fn dispatch(state: &mut AppState, action: AppAction) -> Option<SessionHydrationRequest> {
     match action {
         AppAction::AttachProject(path) => {
             if let Err(error) = state.attach_project(path) {

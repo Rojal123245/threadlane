@@ -9,9 +9,7 @@ use super::capabilities::{
     build_broker_dispatcher, render_agent_catalog, restored_tool_policy, McpCapability,
     PlanCapability, SkillCapability, SubagentCapability, WasiCapability,
 };
-use super::harness::{
-    CodingSessionHarness, HarnessWatch, InterruptedSubagentRecoveryState,
-};
+use super::harness::{CodingSessionHarness, HarnessWatch, InterruptedSubagentRecoveryState};
 use crate::commands::{execute_slash_command, parse_slash_command, CommandAction};
 use crate::context::ProjectContext;
 use crate::extension_broker::CapabilityDispatcher;
@@ -25,12 +23,9 @@ use std::sync::Arc;
 use threadlane_mcp::McpManager;
 use threadlane_provider::openai::fetch_available_models;
 use threadlane_provider::router::ProviderClient;
-use threadlane_runtime::harness::{
-    OperationOutcome, QueueKind, Reducer, SessionStore, Snapshot,
-};
+use threadlane_runtime::harness::{OperationOutcome, QueueKind, Reducer, SessionStore, Snapshot};
 use threadlane_runtime::{
-    AgentEvent, AgentMessage, AgentRuntime, ImageAttachment,
-    ReasoningEffort, TokenUsage,
+    AgentEvent, AgentMessage, AgentRuntime, ImageAttachment, ReasoningEffort, TokenUsage,
 };
 use threadlane_skills::{SkillManager, SkillRegistry};
 use threadlane_wasi::packages::default_global_threadlane_dir;
@@ -328,7 +323,10 @@ impl CodingAgent {
                 &effective_model,
                 runtime_harness,
                 agent_config.clone(),
-                Arc::new(ProviderClient::new(&options.api_key, options.account_id.clone())),
+                Arc::new(ProviderClient::new(
+                    &options.api_key,
+                    options.account_id.clone(),
+                )),
             )
         } else {
             AgentRuntime::new_with_provider(
@@ -337,7 +335,10 @@ impl CodingAgent {
                 &effective_model,
                 options.session_file.as_deref(),
                 agent_config.clone(),
-                Arc::new(ProviderClient::new(&options.api_key, options.account_id.clone())),
+                Arc::new(ProviderClient::new(
+                    &options.api_key,
+                    options.account_id.clone(),
+                )),
             )
             .unwrap_or_else(|error| {
                 panic!("Failed to create agent runtime: {error}");
@@ -351,10 +352,8 @@ impl CodingAgent {
 
         agent.set_prompt_cache_key(Some(session_id.clone()));
 
-        let wasi_extensions = WasiExtensionManager::for_project_session(
-            &options.work_dir,
-            session_id.clone(),
-        );
+        let wasi_extensions =
+            WasiExtensionManager::for_project_session(&options.work_dir, session_id.clone());
         let global_threadlane_dir = default_global_threadlane_dir();
         let loaded_ext_count = wasi_extensions
             .reload_from_roots(global_threadlane_dir.as_deref(), Some(&options.work_dir))

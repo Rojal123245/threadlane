@@ -175,7 +175,9 @@ impl AgentRuntime {
 
         let harness_event_hub = HarnessEventHub::new(config.event_channel_capacity);
         let _harness = AgentHarness::with_events(store, harness_event_hub);
-        Err(AgentError::Session("AgentRuntime requires an injected ProviderPort; use new_with_provider".into()))
+        Err(AgentError::Session(
+            "AgentRuntime requires an injected ProviderPort; use new_with_provider".into(),
+        ))
     }
 
     pub fn new_with_provider(
@@ -187,16 +189,31 @@ impl AgentRuntime {
         provider_client: Arc<dyn ProviderPort>,
     ) -> Result<Self, AgentError> {
         let store = if let Some(path) = session_file {
-            if let Some(parent) = path.parent() { std::fs::create_dir_all(parent).ok(); }
-            if !path.exists() { std::fs::File::create(path).map_err(|e| AgentError::Session(format!("create session file: {e}")))?; }
-            JsonlStore::open(path).map_err(|e| AgentError::Session(format!("open session journal: {e}")))?
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            if !path.exists() {
+                std::fs::File::create(path)
+                    .map_err(|e| AgentError::Session(format!("create session file: {e}")))?;
+            }
+            JsonlStore::open(path)
+                .map_err(|e| AgentError::Session(format!("open session journal: {e}")))?
         } else {
-            let tmp = std::env::temp_dir().join(format!("threadlane-ephemeral-{}", std::process::id()));
-            JsonlStore::open(&tmp).map_err(|e| AgentError::Session(format!("open ephemeral journal: {e}")))?
+            let tmp =
+                std::env::temp_dir().join(format!("threadlane-ephemeral-{}", std::process::id()));
+            JsonlStore::open(&tmp)
+                .map_err(|e| AgentError::Session(format!("open ephemeral journal: {e}")))?
         };
         let harness_event_hub = HarnessEventHub::new(config.event_channel_capacity);
         let harness = AgentHarness::with_events(store, harness_event_hub);
-        Ok(Self::from_harness_with_provider(api_key, account_id, model, harness, config, provider_client))
+        Ok(Self::from_harness_with_provider(
+            api_key,
+            account_id,
+            model,
+            harness,
+            config,
+            provider_client,
+        ))
     }
 
     // ── Model context ─────────────────────────────────────────────────

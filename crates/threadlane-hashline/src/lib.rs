@@ -176,9 +176,7 @@ pub fn apply_hashline_edits_detailed(
         };
 
         let old_lines = match edit.action {
-            HashlineAction::Replace | HashlineAction::Delete => {
-                lines[start_idx..=end_idx].to_vec()
-            }
+            HashlineAction::Replace | HashlineAction::Delete => lines[start_idx..=end_idx].to_vec(),
             HashlineAction::InsertAfter => Vec::new(),
         };
 

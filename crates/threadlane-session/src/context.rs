@@ -26,31 +26,39 @@ pub fn scope_instructions(content: &str) -> String {
     let mut current_heading = String::new();
     let mut current_block = Vec::new();
 
-    let flush_block = |heading: &str, block: &[&str], core: &mut Vec<String>, subs: &mut Vec<String>| {
-        let block_str = block.join("\n").trim().to_string();
-        if block_str.is_empty() {
-            return;
-        }
-        let heading_lower = heading.to_lowercase();
-        let is_subsystem = heading_lower.contains("external acp")
-            || heading_lower.contains("wasi extension")
-            || heading_lower.contains("background task")
-            || heading_lower.contains("model provider")
-            || heading_lower.contains("updater")
-            || heading_lower.contains("release automation")
-            || heading_lower.contains("performance");
+    let flush_block =
+        |heading: &str, block: &[&str], core: &mut Vec<String>, subs: &mut Vec<String>| {
+            let block_str = block.join("\n").trim().to_string();
+            if block_str.is_empty() {
+                return;
+            }
+            let heading_lower = heading.to_lowercase();
+            let is_subsystem = heading_lower.contains("external acp")
+                || heading_lower.contains("wasi extension")
+                || heading_lower.contains("background task")
+                || heading_lower.contains("model provider")
+                || heading_lower.contains("updater")
+                || heading_lower.contains("release automation")
+                || heading_lower.contains("performance");
 
-        if is_subsystem && block_str.len() > 1000 {
-            subs.push(format!("- `{heading}`: Detailed protocol and implementation specifications."));
-        } else {
-            core.push(block_str);
-        }
-    };
+            if is_subsystem && block_str.len() > 1000 {
+                subs.push(format!(
+                    "- `{heading}`: Detailed protocol and implementation specifications."
+                ));
+            } else {
+                core.push(block_str);
+            }
+        };
 
     for line in content.lines() {
         if line.starts_with("## ") || line.starts_with("# ") {
             if !current_block.is_empty() {
-                flush_block(&current_heading, &current_block, &mut core_sections, &mut subsystem_headings);
+                flush_block(
+                    &current_heading,
+                    &current_block,
+                    &mut core_sections,
+                    &mut subsystem_headings,
+                );
                 current_block.clear();
             }
             current_heading = line.trim_start_matches('#').trim().to_string();
@@ -58,7 +66,12 @@ pub fn scope_instructions(content: &str) -> String {
         current_block.push(line);
     }
     if !current_block.is_empty() {
-        flush_block(&current_heading, &current_block, &mut core_sections, &mut subsystem_headings);
+        flush_block(
+            &current_heading,
+            &current_block,
+            &mut core_sections,
+            &mut subsystem_headings,
+        );
     }
 
     if subsystem_headings.is_empty() {
@@ -67,7 +80,9 @@ pub fn scope_instructions(content: &str) -> String {
 
     let mut result = core_sections.join("\n\n");
     result.push_str("\n\n## Subsystem Deep Dive References\n");
-    result.push_str("For detailed protocols and subsystem specs, refer to the full instruction file:\n");
+    result.push_str(
+        "For detailed protocols and subsystem specs, refer to the full instruction file:\n",
+    );
     result.push_str(&subsystem_headings.join("\n"));
     result
 }

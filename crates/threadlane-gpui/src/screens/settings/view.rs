@@ -59,9 +59,8 @@ impl ProvidersStatusSnapshot {
                 .collect(),
             active_codex_account_id: threadlane_auth::openai_auth::get_active_codex_account()
                 .map(|account| account.id),
-            antigravity_connected: threadlane_provider::antigravity_auth
-                ::load_antigravity_credentials()
-                .is_some(),
+            antigravity_connected:
+                threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some(),
         }
     }
 }
@@ -772,9 +771,24 @@ impl SettingsView {
                                         div()
                                             .flex()
                                             .gap_1_5()
-                                            .child(div().size(px(8.0)).rounded_full().bg(hsla(0.0, 0.7, 0.6, 1.0)))
-                                            .child(div().size(px(8.0)).rounded_full().bg(hsla(0.12, 0.7, 0.6, 1.0)))
-                                            .child(div().size(px(8.0)).rounded_full().bg(hsla(0.35, 0.7, 0.6, 1.0))),
+                                            .child(
+                                                div()
+                                                    .size(px(8.0))
+                                                    .rounded_full()
+                                                    .bg(hsla(0.0, 0.7, 0.6, 1.0)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .size(px(8.0))
+                                                    .rounded_full()
+                                                    .bg(hsla(0.12, 0.7, 0.6, 1.0)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .size(px(8.0))
+                                                    .rounded_full()
+                                                    .bg(hsla(0.35, 0.7, 0.6, 1.0)),
+                                            ),
                                     )
                                     .child(
                                         div()
@@ -819,7 +833,11 @@ impl SettingsView {
                             .p_4()
                             .rounded_xl()
                             .border_2()
-                            .border_color(if is_light { theme.primary } else { theme.border })
+                            .border_color(if is_light {
+                                theme.primary
+                            } else {
+                                theme.border
+                            })
                             .bg(theme.title_bar)
                             .cursor_pointer()
                             .on_click(|_event, _window, cx| {
@@ -843,9 +861,24 @@ impl SettingsView {
                                         div()
                                             .flex()
                                             .gap_1_5()
-                                            .child(div().size(px(8.0)).rounded_full().bg(hsla(0.0, 0.7, 0.6, 1.0)))
-                                            .child(div().size(px(8.0)).rounded_full().bg(hsla(0.12, 0.7, 0.6, 1.0)))
-                                            .child(div().size(px(8.0)).rounded_full().bg(hsla(0.35, 0.7, 0.6, 1.0))),
+                                            .child(
+                                                div()
+                                                    .size(px(8.0))
+                                                    .rounded_full()
+                                                    .bg(hsla(0.0, 0.7, 0.6, 1.0)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .size(px(8.0))
+                                                    .rounded_full()
+                                                    .bg(hsla(0.12, 0.7, 0.6, 1.0)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .size(px(8.0))
+                                                    .rounded_full()
+                                                    .bg(hsla(0.35, 0.7, 0.6, 1.0)),
+                                            ),
                                     )
                                     .child(
                                         div()
@@ -892,29 +925,38 @@ impl SettingsView {
         let theme = cx.theme().colors;
 
         let shortcuts = [
-            ("Global", vec![
-                ("⌘ ,", "Open Settings"),
-                ("⌘ B", "Toggle Left Sidebar"),
-                ("⌘ R", "Toggle Right Panel"),
-                ("⌘ J", "Toggle Terminal Panel"),
-                ("⌘ E", "Toggle Code/Diff Editor"),
-                ("⌘ N", "New Session"),
-                ("⌘ P", "Open Project File Finder"),
-                ("⌘ ⇧ O", "Attach Local Project"),
-            ]),
-            ("Composer & Chat", vec![
-                ("Enter", "Submit prompt to agent"),
-                ("⇧ Enter", "Insert newline in composer"),
-                ("Escape", "Cancel active agent turn"),
-                ("/ (in empty composer)", "Open Slash Commands palette"),
-                ("@ (in composer)", "Reference file or context in prompt"),
-            ]),
-            ("Editor & Diff", vec![
-                ("⌘ S", "Save active file"),
-                ("⌘ Z", "Undo edit"),
-                ("⌘ ⇧ Z", "Redo edit"),
-                ("⌘ F", "Find in active editor buffer"),
-            ]),
+            (
+                "Global",
+                vec![
+                    ("⌘ ,", "Open Settings"),
+                    ("⌘ B", "Toggle Left Sidebar"),
+                    ("⌘ R", "Toggle Right Panel"),
+                    ("⌘ J", "Toggle Terminal Panel"),
+                    ("⌘ E", "Toggle Code/Diff Editor"),
+                    ("⌘ N", "New Session"),
+                    ("⌘ P", "Open Project File Finder"),
+                    ("⌘ ⇧ O", "Attach Local Project"),
+                ],
+            ),
+            (
+                "Composer & Chat",
+                vec![
+                    ("Enter", "Submit prompt to agent"),
+                    ("⇧ Enter", "Insert newline in composer"),
+                    ("Escape", "Cancel active agent turn"),
+                    ("/ (in empty composer)", "Open Slash Commands palette"),
+                    ("@ (in composer)", "Reference file or context in prompt"),
+                ],
+            ),
+            (
+                "Editor & Diff",
+                vec![
+                    ("⌘ S", "Save active file"),
+                    ("⌘ Z", "Undo edit"),
+                    ("⌘ ⇧ Z", "Redo edit"),
+                    ("⌘ F", "Find in active editor buffer"),
+                ],
+            ),
         ];
 
         let mut list = div().mt_5().flex().flex_col().gap_6();
@@ -967,7 +1009,6 @@ impl SettingsView {
 
         list.into_any_element()
     }
-
 
     fn render_provider_connection(
         &self,
@@ -1359,19 +1400,19 @@ impl SettingsView {
                     .label("Disconnect")
                     .disabled(!connected)
                     .ghost()
-                     .on_click(move |_event, _window, cx| {
-                         let _ = view.update(cx, |this, cx| {
-                             if connected {
-                                 let result = provider_auth::disconnect_gitlab();
-                                 this.auth_message = Some(match result {
-                                     Ok(()) => "Disconnected GitLab.".to_string(),
-                                     Err(err) => format!("Failed to disconnect GitLab: {err}"),
-                                 });
-                                 this.refresh_providers_snapshot();
-                             }
-                             cx.notify();
-                         });
-                     }),
+                    .on_click(move |_event, _window, cx| {
+                        let _ = view.update(cx, |this, cx| {
+                            if connected {
+                                let result = provider_auth::disconnect_gitlab();
+                                this.auth_message = Some(match result {
+                                    Ok(()) => "Disconnected GitLab.".to_string(),
+                                    Err(err) => format!("Failed to disconnect GitLab: {err}"),
+                                });
+                                this.refresh_providers_snapshot();
+                            }
+                            cx.notify();
+                        });
+                    }),
             )
     }
 
@@ -1729,9 +1770,15 @@ impl SettingsView {
                             .on_click(move |_event, _window, cx| {
                                 let key = input.read(cx).value().to_string();
                                 if is_openai {
-                                    let _ = provider_auth::test_openai_connection(Some(key), auth_tx.clone());
+                                    let _ = provider_auth::test_openai_connection(
+                                        Some(key),
+                                        auth_tx.clone(),
+                                    );
                                 } else {
-                                    let _ = provider_auth::test_opencode_connection(&key, auth_tx.clone());
+                                    let _ = provider_auth::test_opencode_connection(
+                                        &key,
+                                        auth_tx.clone(),
+                                    );
                                 }
                             })
                     })

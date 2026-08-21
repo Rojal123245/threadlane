@@ -198,7 +198,6 @@ impl CodingAgentCancellation {
 pub fn cancel_open_subagent_operations(session_file: &Path) -> Result<(), String> {
     if session_file.exists() {
         let mut journal = CodingSessionHarness::open(session_file)?;
-        journal.refresh()?;
         let open_runs = Reducer::reduce(&journal.store)
             .map_err(|error| error.to_string())?
             .lanes

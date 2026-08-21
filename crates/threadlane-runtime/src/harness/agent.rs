@@ -31,11 +31,7 @@ impl<S: SessionStore> AgentHarness<S> {
         }
     }
 
-    pub fn with_events_and_hooks(
-        store: S,
-        events: HarnessEventHub,
-        hooks: HookRegistry,
-    ) -> Self {
+    pub fn with_events_and_hooks(store: S, events: HarnessEventHub, hooks: HookRegistry) -> Self {
         Self {
             store,
             effects: GatedEffects::new(),
@@ -846,7 +842,10 @@ impl<S: SessionStore> AgentHarness<S> {
     pub fn drive_to_completion(&mut self) -> Result<(), EffectsError> {
         self.effects
             .run_to_completion_with_events(&mut self.store, &mut self.events)?;
-        self.store.refresh().map_err(EffectsError::Store)
+        if self.effects.has_executor() {
+            self.store.refresh().map_err(EffectsError::Store)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn drive_to_completion_on_lane(&mut self, lane: &str) -> Result<(), EffectsError> {
@@ -855,7 +854,10 @@ impl<S: SessionStore> AgentHarness<S> {
             &mut self.events,
             lane,
         )?;
-        self.store.refresh().map_err(EffectsError::Store)
+        if self.effects.has_executor() {
+            self.store.refresh().map_err(EffectsError::Store)?;
+        }
+        Ok(())
     }
 
     pub fn snapshot(&self) -> Result<Snapshot, ReduceError> {
@@ -895,6 +897,18 @@ impl<S: SessionStore> AgentHarness<S> {
 impl<S: SessionStore> SessionStore for AgentHarness<S> {
     fn session_id(&self) -> &str {
         self.store.session_id()
+    }
+
+    fn reduced_state(&self) -> Option<super::ReducedState> {
+        self.store.reduced_state()
+    }
+
+    fn next_sequence(&self) -> u64 {
+        self.store.next_sequence()
+    }
+
+    fn refresh(&mut self) -> Result<(), super::ReduceError> {
+        self.store.refresh()
     }
 
     fn facts(&self) -> std::collections::BTreeMap<String, String> {

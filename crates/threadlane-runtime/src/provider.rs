@@ -17,7 +17,10 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PayloadFormat { ChatCompletions, Codex }
+pub enum PayloadFormat {
+    ChatCompletions,
+    Codex,
+}
 
 /// Opaque provider-specific message representation.
 ///

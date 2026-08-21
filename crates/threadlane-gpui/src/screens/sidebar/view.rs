@@ -955,9 +955,11 @@ impl SidebarView {
             (DateGroup::ThisWeek, Vec::new()),
             (DateGroup::Older, Vec::new()),
         ];
-        for session in state.projects.iter().flat_map(|project| {
-            project.sessions.iter()
-        }) {
+        for session in state
+            .projects
+            .iter()
+            .flat_map(|project| project.sessions.iter())
+        {
             if !query.is_empty()
                 && !session.title.to_lowercase().contains(&query)
                 && !session.id.to_lowercase().contains(&query)

@@ -35,7 +35,9 @@ static CLIENT_SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 type CodexSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-pub use threadlane_protocol::{RuntimeToolCall as ToolCall, RuntimeToolCallFunction as ToolCallFunction};
+pub use threadlane_protocol::{
+    RuntimeToolCall as ToolCall, RuntimeToolCallFunction as ToolCallFunction,
+};
 
 pub(crate) const OPENAI_PROMPT_CACHE_KEY_MAX_CHARS: usize = 64;
 

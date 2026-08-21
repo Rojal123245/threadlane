@@ -12,11 +12,10 @@ use crate::permission::PermissionTraceEvent;
 pub use threadlane_runtime::harness::Record as HarnessRecord;
 use threadlane_runtime::harness::{
     AbortInitiator, AbortObservation, AbortTarget, AgentHarness, BoundedText, CapabilitySnapshot,
-    DeferredResolution, EffectAction, Entry as HarnessEntry, ErrorCategory, EventPayload,
-    HarnessEventHub, HookContext, HookKind, HookRegistry, JsonlStore, OperationOutcome,
-    PromptSnapshot, ProviderErrorSummary, ProviderOutcome, ProvisionedEntry, QueueKind,
-    ReduceError, Reducer, RetryPolicy, SessionIdGenerator, SessionStore, Snapshot,
-    SubagentLifecyclePhase, ToolExecutionOutcome, ToolExecutionPhase,
+    DeferredResolution, Entry as HarnessEntry, ErrorCategory, HarnessEventHub, HookContext,
+    HookKind, HookRegistry, JsonlStore, OperationOutcome, PromptSnapshot, ProviderErrorSummary,
+    ProviderOutcome, ProvisionedEntry, QueueKind, Reducer, RetryPolicy, SessionIdGenerator,
+    SessionStore, Snapshot, SubagentLifecyclePhase, ToolExecutionOutcome, ToolExecutionPhase,
     ToolReplaySafety as HarnessToolReplaySafety, ToolResult as HarnessToolResult, ToolSpec,
     TraceString,
 };
@@ -128,42 +127,9 @@ impl CodingSessionHarness {
         }
         let events = harness_event_hub(path);
         let hooks = harness_hook_registry(path);
-        let persist_path = path.to_path_buf();
-        let persist_events = events.clone();
-        let executor = move |action: EffectAction| {
-            let mut store = JsonlStore::open(&persist_path)
-                .map_err(|error| ReduceError::Storage(error.to_string()))?;
-            if let Err(error) = action.apply(&mut store) {
-                persist_events.publish(EventPayload::Fault(error.to_string()));
-                return Err(error);
-            }
-            let (payload, lane, run_id, turn) = match &action {
-                EffectAction::AppendEntry { entry } => (
-                    EventPayload::EntryCommitted(entry.clone()),
-                    Some(entry.lane.clone()),
-                    None,
-                    None,
-                ),
-                EffectAction::AppendRecord { record, .. } => (
-                    EventPayload::RecordCommitted(record.clone()),
-                    Some(record.lane().to_owned()),
-                    record.run_id().map(str::to_owned),
-                    record.turn(),
-                ),
-            };
-            persist_events.publish_identified_with_turn(payload, lane, run_id, turn, None);
-            Ok(())
-        };
         let cancellation = harness_cancellation_state(path);
         let store = JsonlStore::open(path)
-            .map(|store| {
-                AgentHarness::with_executor_and_hooks(
-                    store,
-                    events.clone(),
-                    executor,
-                    hooks.clone(),
-                )
-            })
+            .map(|store| AgentHarness::with_events_and_hooks(store, events.clone(), hooks.clone()))
             .map_err(|error| error.to_string())?;
         Ok(Self {
             store,
@@ -175,13 +141,25 @@ impl CodingSessionHarness {
         })
     }
 
+    /// Opens a short-lived journal for one path-scoped operation. `open`
+    /// already parses and reduces the full history once; downstream appends
+    /// re-validate freshness under the writer gate via `is_fresh`, so no
+    /// second eager reload happens here.
     fn with_path<T>(
         path: &Path,
         operation: impl FnOnce(&mut Self) -> Result<T, String>,
     ) -> Result<T, String> {
         let mut journal = Self::open(path)?;
-        journal.refresh()?;
         operation(&mut journal)
+    }
+
+    /// Reloads the durable store only when another writer has appended
+    /// (cheap file-length probe), instead of unconditionally reparsing.
+    pub(crate) fn ensure_fresh(&mut self) -> Result<(), String> {
+        self.store
+            .store_mut()
+            .ensure_fresh()
+            .map_err(|error| error.to_string())
     }
 
     fn append_record_to_path(path: &Path, record: HarnessRecord) -> Result<(), String> {
@@ -218,7 +196,7 @@ impl CodingSessionHarness {
         prompt_template_ids: Vec<String>,
         git_head: Option<String>,
     ) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let trace = |value: String| TraceString::new(value);
         let record = HarnessRecord::RunContextCaptured {
             id: format!("run-context-{run_id}"),
@@ -283,8 +261,15 @@ impl CodingSessionHarness {
         run_id: &str,
         event: ProviderTraceEvent,
     ) -> Result<(), String> {
-        let mut journal = Self::open(path)?;
-        journal.refresh()?;
+        Self::with_path(path, |journal| journal.record_provider_trace(run_id, event))
+    }
+
+    pub(crate) fn record_provider_trace(
+        &mut self,
+        run_id: &str,
+        event: ProviderTraceEvent,
+    ) -> Result<(), String> {
+        let journal = self;
         let event = match event {
             ProviderTraceEvent::AssistantReady {
                 attempt,
@@ -436,7 +421,16 @@ impl CodingSessionHarness {
                 usage,
             },
         };
-        Self::append_record_to_path(path, record)
+        // Append through the journal already open above instead of reopening
+        // the file; gated append re-checks freshness under the writer gate.
+        journal
+            .store
+            .append_record_gated(record)
+            .map_err(|error| error.to_string())?;
+        journal
+            .store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())
     }
 
     pub(crate) fn record_permission_trace_to_path(
@@ -444,8 +438,17 @@ impl CodingSessionHarness {
         run_id: Option<&str>,
         event: PermissionTraceEvent,
     ) -> Result<(), String> {
-        let mut journal = Self::open(path)?;
-        journal.refresh()?;
+        Self::with_path(path, |journal| {
+            journal.record_permission_trace(run_id, event)
+        })
+    }
+
+    pub(crate) fn record_permission_trace(
+        &mut self,
+        run_id: Option<&str>,
+        event: PermissionTraceEvent,
+    ) -> Result<(), String> {
+        let journal = self;
         let state = Reducer::reduce(journal.store.store()).map_err(|error| error.to_string())?;
         let attempt = run_id.and_then(|_| state.lane("main").map(|lane| lane.attempts));
         let seq = harness_next_seq(journal.store.store());
@@ -489,7 +492,15 @@ impl CodingSessionHarness {
                 remembered,
             },
         };
-        Self::append_record_to_path(path, record)
+        // Append through the already-open journal; see record_provider_trace_to_path.
+        journal
+            .store
+            .append_record_gated(record)
+            .map_err(|error| error.to_string())?;
+        journal
+            .store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())
     }
 
     pub(crate) async fn record_tool_execution_to_path(
@@ -498,7 +509,15 @@ impl CodingSessionHarness {
         event: ToolExecutionTraceEvent,
     ) -> Result<(), String> {
         let mut journal = Self::open(path)?;
-        journal.refresh()?;
+        journal.record_tool_execution(run_id, event).await
+    }
+
+    pub(crate) async fn record_tool_execution(
+        &mut self,
+        run_id: &str,
+        event: ToolExecutionTraceEvent,
+    ) -> Result<(), String> {
+        let journal = self;
         if let ToolExecutionTraceEvent::Started {
             tool_call_id,
             tool_name,
@@ -522,7 +541,6 @@ impl CodingSessionHarness {
                 journal
                     .append_tool_intent_after_hook(run_id, tool_call_id, tool_name, effective_args)
                     .await?;
-                journal.refresh()?;
             }
         }
         let state = Reducer::reduce(journal.store.store()).map_err(|error| error.to_string())?;
@@ -592,7 +610,15 @@ impl CodingSessionHarness {
                 output_bytes: Some(output_bytes),
             },
         };
-        Self::append_record_to_path(path, record)
+        // Append through the already-open journal; see record_provider_trace_to_path.
+        journal
+            .store
+            .append_record_gated(record)
+            .map_err(|error| error.to_string())?;
+        journal
+            .store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())
     }
 
     pub(crate) async fn append_tool_intent_to_path(
@@ -614,6 +640,14 @@ impl CodingSessionHarness {
         result: &AgentToolResult,
     ) -> Result<(), String> {
         Self::with_path(path, |journal| journal.finish_tool_result(run_id, result))
+    }
+
+    pub(crate) fn record_tool_result(
+        &mut self,
+        run_id: &str,
+        result: &AgentToolResult,
+    ) -> Result<(), String> {
+        self.finish_tool_result(run_id, result)
     }
 
     pub(crate) fn start_subagent_lane(
@@ -638,7 +672,7 @@ impl CodingSessionHarness {
             })?;
         let mut attempt_idx = 0;
         let identity = loop {
-            self.refresh().map_err(|error| SubagentStartError {
+            self.ensure_fresh().map_err(|error| SubagentStartError {
                 identity: None,
                 error: error.to_string(),
             })?;
@@ -827,7 +861,7 @@ impl CodingSessionHarness {
         outcome: OperationOutcome,
         error: Option<String>,
     ) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let is_open = Reducer::reduce(self.store.store()).ok().map(|state| {
             state
                 .lanes
@@ -895,7 +929,9 @@ impl CodingSessionHarness {
         let phase = match outcome {
             OperationOutcome::Completed => SubagentLifecyclePhase::Completed,
             OperationOutcome::Failed => SubagentLifecyclePhase::Failed,
-            OperationOutcome::Aborted | OperationOutcome::Declined => SubagentLifecyclePhase::Cancelled,
+            OperationOutcome::Aborted | OperationOutcome::Declined => {
+                SubagentLifecyclePhase::Cancelled
+            }
         };
         let seq = harness_next_seq(self.store.store());
         self.store
@@ -930,7 +966,7 @@ impl CodingSessionHarness {
         if messages.is_empty() {
             return Ok(());
         }
-        self.refresh()?;
+        self.ensure_fresh()?;
         for message in messages {
             self.append_message_to_lane(lane, run_id, message.clone())?;
         }
@@ -948,7 +984,7 @@ impl CodingSessionHarness {
         run_id: &str,
         prompt: AgentMessage,
     ) -> Result<AcceptedRun, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         self.store
             .accept_prompt_and_drive_on_lane(&self.main_lane_name, run_id, prompt)
             .map_err(|error| error.to_string())
@@ -971,7 +1007,7 @@ impl CodingSessionHarness {
         content: String,
         images: Vec<ImageAttachment>,
     ) -> Result<String, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let id = format!(
             "entry-queue-{}",
             SystemTime::now()
@@ -996,7 +1032,7 @@ impl CodingSessionHarness {
         target: ProvisionedEntry,
         priority: Option<threadlane_runtime::SteerPriority>,
     ) -> Result<String, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let id = target.id.clone();
         if let Some(priority) = priority {
             let underlying = self.store.store();
@@ -1039,7 +1075,7 @@ impl CodingSessionHarness {
     }
 
     pub(crate) fn consume_first_unbound_queue(&mut self, queue: QueueKind) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let state = Reducer::reduce(self.store.store())
             .map_err(|error| format!("reduce failed: {error:?}"))?;
         let entry_id = state
@@ -1067,7 +1103,7 @@ impl CodingSessionHarness {
         queue: QueueKind,
         entry_id: &str,
     ) -> Result<Option<AgentMessage>, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let state = Reducer::reduce(self.store.store())
             .map_err(|error| format!("reduce failed: {error:?}"))?;
         let lane = state
@@ -1092,7 +1128,7 @@ impl CodingSessionHarness {
     }
 
     pub(crate) fn cancel_queued_unbound(&mut self, entry_id: &str) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         self.store
             .cancel_unbound(entry_id)
             .map_err(|error| error.to_string())?;
@@ -1116,7 +1152,7 @@ impl CodingSessionHarness {
         tool_name: &str,
         effective_args: Value,
     ) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         if self.store.records().iter().any(|record| {
             matches!(record, HarnessRecord::ToolStarted {
                 run_id: record_run_id,
@@ -1173,7 +1209,7 @@ impl CodingSessionHarness {
         run_id: &str,
         prompt: Option<AgentMessage>,
     ) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         self.store
             .start_operation(run_id, None, OperationIntent::Run)
             .map_err(|error| error.to_string())?;
@@ -1214,7 +1250,7 @@ impl CodingSessionHarness {
 
     /// Generate a unique run identifier scoped to this session.
     pub(crate) fn unique_run_id(&mut self, prefix: &str) -> Result<String, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let used_ids = self
             .store
             .entries()
@@ -1236,7 +1272,7 @@ impl CodingSessionHarness {
     /// if any.
     pub(crate) fn request_abort(&mut self) -> Result<Option<String>, String> {
         self.cancellation.store(true, Ordering::SeqCst);
-        self.refresh()?;
+        self.ensure_fresh()?;
         let state = Reducer::reduce(&self.store).map_err(|error| error.to_string())?;
         let open_lanes: Vec<(String, String)> = state
             .lanes
@@ -1268,7 +1304,7 @@ impl CodingSessionHarness {
         run_id: &str,
         acknowledged: bool,
     ) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let state = Reducer::reduce(&self.store).map_err(|error| error.to_string())?;
         let attempt = state.lane("main").map(|lane| lane.attempts);
         let unfinished_requests = self
@@ -1348,7 +1384,7 @@ impl CodingSessionHarness {
     /// finish with `Aborted` outcome.  Returns `true` if recovery produced
     /// a terminal state.
     pub(crate) fn recover_abort(&mut self) -> Result<bool, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let state = Reducer::reduce(&self.store).map_err(|error| error.to_string())?;
         let Some(lane) = state.lane("main") else {
             return Ok(false);
@@ -1475,7 +1511,7 @@ impl CodingSessionHarness {
         message: AgentMessage,
         deduplicate_last_entry: bool,
     ) -> Result<String, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         if deduplicate_last_entry {
             if let Some(entry) = self.store.entries().last() {
                 if entry.message == message {
@@ -1548,9 +1584,12 @@ impl CodingSessionHarness {
         // Tool completions are recorded both by the execution lifecycle and
         // by the model-visible transcript.  They may be separated by other
         // journal records, so checking only the last entry is insufficient.
-        if self.store.entries().iter().any(|entry| {
-            entry.id == id && entry.message == message
-        }) {
+        if self
+            .store
+            .entries()
+            .iter()
+            .any(|entry| entry.id == id && entry.message == message)
+        {
             return Ok(id);
         }
         self.store
@@ -1578,7 +1617,7 @@ impl CodingSessionHarness {
         run_id: &str,
         message: AgentMessage,
     ) -> Result<String, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let prefix = format!("subagent-entry-{run_id}-");
         if matches!(
             message,
@@ -1685,7 +1724,7 @@ impl CodingSessionHarness {
     /// Prepare an assistant attempt record for the given run.  Returns
     /// the result entry id that the assistant message should carry.
     pub(crate) fn prepare_assistant_attempt(&mut self, run_id: &str) -> Result<String, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let state = Reducer::reduce(&self.store).map_err(|error| error.to_string())?;
         let lane = state
             .lane("main")
@@ -1740,7 +1779,7 @@ impl CodingSessionHarness {
         run_id: &str,
         usage: TokenUsage,
     ) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let start_seq = self
             .store
             .records()
@@ -1778,7 +1817,7 @@ impl CodingSessionHarness {
         tool_name: &str,
         effective_args: Value,
     ) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         if self.store.records().iter().any(|record| {
             matches!(record, HarnessRecord::ToolStarted {
                 run_id: record_run_id,
@@ -1845,7 +1884,7 @@ impl CodingSessionHarness {
         tool_name: &str,
         effective_args: Value,
     ) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         if self.store.records().iter().any(|record| {
             matches!(record, HarnessRecord::ToolStarted {
                 run_id: record_run_id,
@@ -1931,7 +1970,7 @@ impl CodingSessionHarness {
         else {
             return Ok(());
         };
-        self.refresh()?;
+        self.ensure_fresh()?;
         self.store
             .finish_existing_tool(
                 run_id,
@@ -1955,7 +1994,7 @@ impl CodingSessionHarness {
         run_id: &str,
         result: &AgentToolResult,
     ) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         self.store
             .finish_tool(
                 run_id,
@@ -1979,7 +2018,7 @@ impl CodingSessionHarness {
         run_id: &str,
         result: &AgentToolResult,
     ) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         self.store
             .finish_existing_tool(
                 run_id,
@@ -2003,7 +2042,7 @@ impl CodingSessionHarness {
         run_id: &str,
         termination: &HashMap<String, bool>,
     ) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let start_seq = self
             .store
             .records()
@@ -2133,7 +2172,7 @@ impl CodingSessionHarness {
         run_id: &str,
         usage: TokenUsage,
     ) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         self.store
             .record_provider_usage(run_id, usage)
             .map_err(|error| error.to_string())?;
@@ -2148,7 +2187,7 @@ impl CodingSessionHarness {
         run_id: &str,
         usage: TokenUsage,
     ) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         self.store
             .record_discarded_usage(run_id, usage)
             .map_err(|error| error.to_string())?;
@@ -2161,7 +2200,7 @@ impl CodingSessionHarness {
 
     /// Schedule a retry for a failed run.
     pub(crate) fn schedule_retry(&mut self, run_id: &str, reason: &str) -> Result<u32, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let attempt = self
             .store
             .schedule_retry(
@@ -2182,7 +2221,7 @@ impl CodingSessionHarness {
 
     /// Begin a previously scheduled retry attempt.
     pub(crate) fn begin_retry(&mut self, run_id: &str) -> Result<u32, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let attempt = self
             .store
             .begin_retry(run_id)
@@ -2201,7 +2240,7 @@ impl CodingSessionHarness {
         run_id: &str,
         resolution: DeferredResolution,
     ) -> Result<bool, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let terminal = self
             .store
             .redeem_deferred(run_id, resolution)
@@ -2219,7 +2258,7 @@ impl CodingSessionHarness {
 
     /// Accept a compaction summary.
     pub(crate) fn accept_compaction(&mut self, run_id: &str, summary: &str) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         self.store
             .accept_compaction(run_id, summary)
             .map_err(|error| error.to_string())?;
@@ -2232,7 +2271,7 @@ impl CodingSessionHarness {
 
     /// Set a session-level fact.
     pub(crate) fn set_fact(&mut self, lane: &str, key: &str, value: String) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         self.store
             .set_fact(lane, key, value, None)
             .map_err(|error| error.to_string())?;
@@ -2369,7 +2408,7 @@ impl CodingSessionHarness {
         &mut self,
         branch_ids: &[String],
     ) -> Result<Option<String>, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let mut harness_target_id = None;
         for legacy_id in branch_ids {
             let entry = self
@@ -2393,13 +2432,13 @@ impl CodingSessionHarness {
 
     /// Take a point-in-time snapshot of the session.
     pub(crate) fn snapshot(&mut self) -> Result<Snapshot, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         self.store.snapshot().map_err(|error| error.to_string())
     }
 
     /// Subscribe to session-scoped events.
     pub(crate) fn watch(&mut self) -> Result<HarnessWatch, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let subscription = self
             .store
             .watch_session()
@@ -2421,64 +2460,11 @@ impl CodingSessionHarness {
 
     /// Re-read the store from disk to pick up external writes.
     pub(crate) fn refresh(&mut self) -> Result<(), String> {
-        let path = self.store.store().path().to_path_buf();
-        let hooks = std::mem::take(self.store.hooks_mut());
-        let events = self.events.clone();
-        let cancellation = self.cancellation.clone();
-        match JsonlStore::open(&path) {
-            Ok(store) => {
-                let persist_path = path.clone();
-                let persist_events = events.clone();
-                let executor = move |action: EffectAction| {
-                    let mut store = JsonlStore::open(&persist_path)
-                        .map_err(|error| ReduceError::Storage(error.to_string()))?;
-                    if let Err(error) = action.apply(&mut store) {
-                        persist_events.publish(EventPayload::Fault(error.to_string()));
-                        return Err(error);
-                    }
-                    let (payload, lane, run_id, turn) = match &action {
-                        EffectAction::AppendEntry { entry } => (
-                            EventPayload::EntryCommitted(entry.clone()),
-                            Some(entry.lane.clone()),
-                            None,
-                            None,
-                        ),
-                        EffectAction::AppendRecord { record, .. } => (
-                            EventPayload::RecordCommitted(record.clone()),
-                            Some(record.lane().to_owned()),
-                            record.run_id().map(str::to_owned),
-                            record.turn(),
-                        ),
-                    };
-                    persist_events.publish_identified_with_turn(payload, lane, run_id, turn, None);
-                    Ok(())
-                };
-                *self.store.hooks_mut() = hooks;
-                self.store = AgentHarness::with_executor_and_hooks(
-                    store,
-                    events,
-                    executor,
-                    self.store.hooks().clone(),
-                );
-                let _ = cancellation;
-                Ok(())
-            }
-            Err(error) => {
-                *self.store.hooks_mut() = hooks;
-                Err(error.to_string())
-            }
-        }
+        self.ensure_fresh()
     }
 
     fn next_seq(&self) -> u64 {
-        self.store
-            .entries()
-            .iter()
-            .map(|entry| entry.seq)
-            .chain(self.store.records().iter().map(HarnessRecord::seq))
-            .max()
-            .unwrap_or(0)
-            + 1
+        self.store.store().next_sequence()
     }
 
     /// Legacy test/repair helper for journal-free or recovery-only callers.
@@ -2488,7 +2474,7 @@ impl CodingSessionHarness {
     /// complete mutable provider transcript after the fact.
     #[cfg(test)]
     pub(crate) fn sync_messages(&mut self, messages: &[AgentMessage]) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         // The provider gives us the complete conversation, not stable entry
         // IDs.  Track occurrences rather than using a set: two turns can
         // legitimately produce byte-for-byte identical assistant messages,
@@ -2518,7 +2504,7 @@ impl CodingSessionHarness {
                 }
             }
             if let AgentMessage::Tool { tool_call_id, .. } = msg {
-                self.refresh()?;
+                self.ensure_fresh()?;
                 let unfinished_tool = Reducer::reduce(self.store.store()).ok().and_then(|state| {
                     let lane = state.lane("main")?;
                     let run_id = lane.open_operation.as_deref()?;
@@ -2550,7 +2536,7 @@ impl CodingSessionHarness {
         Ok(())
     }
     pub(crate) fn assert_model_visible(&mut self, messages: &[AgentMessage]) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let logged = self
             .store
             .model_context("main")
@@ -2673,7 +2659,7 @@ impl CodingSessionHarness {
         &mut self,
         lane: &str,
     ) -> Result<threadlane_runtime::harness::RecoveryPlan, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let agent = threadlane_runtime::harness::SessionAgent::new(AgentHarness::new(
             self.store.store().clone(),
         ));
@@ -2705,14 +2691,7 @@ fn timestamp() -> u64 {
 }
 
 fn harness_next_seq(store: &JsonlStore) -> u64 {
-    store
-        .entries()
-        .iter()
-        .map(|entry| entry.seq)
-        .chain(store.records().iter().map(HarnessRecord::seq))
-        .max()
-        .unwrap_or(0)
-        + 1
+    store.next_sequence()
 }
 #[cfg(test)]
 mod tests {
@@ -2839,18 +2818,30 @@ mod tests {
         let left_path = path.clone();
         let right_path = path.clone();
         let left = tokio::spawn(async move {
-            CodingSessionHarness::record_tool_execution_to_path(&left_path, "run-1", started("call-1"))
-                .await
+            CodingSessionHarness::record_tool_execution_to_path(
+                &left_path,
+                "run-1",
+                started("call-1"),
+            )
+            .await
         });
         let right = tokio::spawn(async move {
-            CodingSessionHarness::record_tool_execution_to_path(&right_path, "run-1", started("call-2"))
-                .await
+            CodingSessionHarness::record_tool_execution_to_path(
+                &right_path,
+                "run-1",
+                started("call-2"),
+            )
+            .await
         });
         left.await.unwrap().unwrap();
         right.await.unwrap().unwrap();
 
         let store = JsonlStore::open(&path).unwrap();
-        let sequences = store.records().iter().map(HarnessRecord::seq).collect::<Vec<_>>();
+        let sequences = store
+            .records()
+            .iter()
+            .map(HarnessRecord::seq)
+            .collect::<Vec<_>>();
         assert!(sequences.windows(2).all(|pair| pair[0] < pair[1]));
     }
 

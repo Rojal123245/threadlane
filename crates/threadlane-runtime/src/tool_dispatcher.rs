@@ -609,11 +609,16 @@ impl ToolDispatcher {
 
 // ── Free functions ───────────────────────────────────────────────────
 
-fn collect_tool_definitions(registered_executors: &[Arc<dyn ToolExecutor>]) -> Vec<AgentToolDefinition> {
+fn collect_tool_definitions(
+    registered_executors: &[Arc<dyn ToolExecutor>],
+) -> Vec<AgentToolDefinition> {
     let mut seen = HashSet::new();
     let mut definitions = Vec::new();
 
-    for definition in registered_executors.iter().flat_map(|executor| executor.tool_definitions()) {
+    for definition in registered_executors
+        .iter()
+        .flat_map(|executor| executor.tool_definitions())
+    {
         if seen.insert(definition.name.clone()) {
             definitions.push(definition);
         }
@@ -878,6 +883,8 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert!(results[0].is_error);
-        assert!(results[0].content.contains("No registered executor handles tool"));
+        assert!(results[0]
+            .content
+            .contains("No registered executor handles tool"));
     }
 }

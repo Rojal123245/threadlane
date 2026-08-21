@@ -425,7 +425,11 @@ impl McpManager {
             .unwrap_or_default()
     }
 
-    pub async fn execute_tool(&self, full_name: &str, args: &str) -> Option<Result<String, String>> {
+    pub async fn execute_tool(
+        &self,
+        full_name: &str,
+        args: &str,
+    ) -> Option<Result<String, String>> {
         let target = {
             let servers = self.servers.lock().await;
             servers.iter().find_map(|server| {

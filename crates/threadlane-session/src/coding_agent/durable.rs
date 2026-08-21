@@ -1,6 +1,8 @@
 use super::cancellation::{recover_v2_subagent_records, AgentRunTask};
 use super::capabilities::dispatch_hook_requests;
-use super::harness::{CodingSessionHarness, InterruptedSubagentRecoveryState, SubagentLaneIdentity};
+use super::harness::{
+    CodingSessionHarness, InterruptedSubagentRecoveryState, SubagentLaneIdentity,
+};
 use super::runtime::CodingAgent;
 use super::subagents::{
     run_subagent_task, SubagentLaneStatus, SubagentRunContext, NEXT_SUBAGENT_UI_RUN_ID,
@@ -18,9 +20,7 @@ use threadlane_runtime::harness::{
     HookContext, HookKind, JsonlStore, OperationOutcome, PromptSnapshot, Record as HarnessRecord,
     Reducer, SessionStore,
 };
-use threadlane_runtime::{
-    AgentEvent, AgentMessage, AgentToolResult, SubagentRecoveryStatus,
-};
+use threadlane_runtime::{AgentEvent, AgentMessage, AgentToolResult, SubagentRecoveryStatus};
 use tokio::sync::broadcast;
 
 pub(crate) const MAX_PERSISTED_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
@@ -110,73 +110,79 @@ pub(crate) fn compaction_retained_tail(messages: &[AgentMessage]) -> Vec<AgentMe
 }
 
 impl CodingAgent {
-    pub(crate) fn install_run_trace_recorders(&mut self, path: PathBuf, run_id: String) {
-        let provider_path = path.clone();
+    pub(crate) fn install_run_trace_recorders(
+        &mut self,
+        path: PathBuf,
+        run_id: String,
+    ) -> Result<(), String> {
+        let trace_harness = Arc::new(tokio::sync::Mutex::new(CodingSessionHarness::open(&path)?));
+        let provider_harness = trace_harness.clone();
         let provider_run_id = run_id.clone();
         self.agent
             .set_provider_trace_recorder(Some(Arc::new(move |event| {
-                let path = provider_path.clone();
+                let harness = provider_harness.clone();
                 let run_id = provider_run_id.clone();
-                Box::pin(async move {
-                    CodingSessionHarness::record_provider_trace_to_path(&path, &run_id, event)
-                })
+                Box::pin(async move { harness.lock().await.record_provider_trace(&run_id, event) })
             })));
-        let message_path = path.clone();
+        let message_harness = trace_harness.clone();
         self.agent
             .set_message_recorder(Some(Arc::new(move |message| {
-                let path = message_path.clone();
-                Box::pin(
-                    async move { CodingSessionHarness::append_message_to_path(&path, message) },
-                )
+                let harness = message_harness.clone();
+                Box::pin(async move { harness.lock().await.append_message(message).map(|_| ()) })
             })));
-        let intent_path = path.clone();
+        let intent_harness = trace_harness.clone();
         let intent_run_id = run_id.clone();
-        self.agent.tool_dispatcher.tool_intent_recorder = Some(Arc::new(move |id, name, arguments| {
-            let path = intent_path.clone();
-            let run_id = intent_run_id.clone();
-            let id = id.to_string();
-            let name = name.to_string();
-            let arguments = arguments.to_string();
+        self.agent.tool_dispatcher.tool_intent_recorder =
+            Some(Arc::new(move |id, name, arguments| {
+                let harness = intent_harness.clone();
+                let run_id = intent_run_id.clone();
+                let id = id.to_string();
+                let name = name.to_string();
+                let arguments = arguments.to_string();
+                Box::pin(async move {
+                    let effective_args = serde_json::from_str(&arguments)
+                        .unwrap_or_else(|_| serde_json::Value::String(arguments.clone()));
+                    harness
+                        .lock()
+                        .await
+                        .append_tool_intent_after_hook(&run_id, &id, &name, effective_args)
+                        .await
+                })
+            }));
+        let tool_harness = trace_harness.clone();
+        let tool_run_id = run_id.clone();
+        self.agent.tool_dispatcher.tool_execution_trace_recorder = Some(Arc::new(move |event| {
+            let harness = tool_harness.clone();
+            let run_id = tool_run_id.clone();
             Box::pin(async move {
-                let effective_args = serde_json::from_str(&arguments)
-                    .unwrap_or_else(|_| serde_json::Value::String(arguments.clone()));
-                let mut harness = CodingSessionHarness::open(&path)?;
                 harness
-                    .append_tool_intent_after_hook(&run_id, &id, &name, effective_args)
+                    .lock()
+                    .await
+                    .record_tool_execution(&run_id, event)
                     .await
             })
         }));
-        let tool_path = path.clone();
-        let tool_run_id = run_id.clone();
-        self.agent.tool_dispatcher.tool_execution_trace_recorder = Some(Arc::new(move |event| {
-            let path = tool_path.clone();
-            let run_id = tool_run_id.clone();
-            Box::pin(async move {
-                CodingSessionHarness::record_tool_execution_to_path(&path, &run_id, event).await
-            })
-        }));
-        let completion_path = path.clone();
+        let completion_harness = trace_harness.clone();
         let completion_run_id = run_id.clone();
         self.agent.tool_dispatcher.tool_completion_recorder = Some(Arc::new(move |result| {
-            let path = completion_path.clone();
+            let harness = completion_harness.clone();
             let run_id = completion_run_id.clone();
             let result = result.clone();
-            Box::pin(async move {
-                CodingSessionHarness::record_tool_result_to_path(&path, &run_id, &result).await
-            })
+            Box::pin(async move { harness.lock().await.record_tool_result(&run_id, &result) })
         }));
+        let permission_harness = trace_harness;
         self.permission_handle
             .set_trace_recorder(Some(Arc::new(move |event| {
-                let path = path.clone();
+                let harness = permission_harness.clone();
                 let run_id = run_id.clone();
                 Box::pin(async move {
-                    CodingSessionHarness::record_permission_trace_to_path(
-                        &path,
-                        Some(&run_id),
-                        event,
-                    )
+                    harness
+                        .lock()
+                        .await
+                        .record_permission_trace(Some(&run_id), event)
                 })
             })));
+        Ok(())
     }
 
     pub(crate) async fn execute_accepted_run(
@@ -335,8 +341,14 @@ impl CodingAgent {
         capabilities.push(format!("tool_policy:{:?}", *self.tool_policy.lock().await));
         capabilities.sort();
         capabilities.dedup();
-        let capability_sha256 = sha256_hex(capabilities.join("
-").as_bytes());
+        let capability_sha256 = sha256_hex(
+            capabilities
+                .join(
+                    "
+",
+                )
+                .as_bytes(),
+        );
         let prompt_template_ids = self
             .prompt_templates
             .as_ref()
@@ -394,7 +406,7 @@ impl CodingAgent {
             .lock()
             .map_err(|_| "Harness run state is unavailable".to_string())? = Some(run_id.clone());
         if let Some(path) = self.session_file.clone() {
-            self.install_run_trace_recorders(path, run_id.clone());
+            self.install_run_trace_recorders(path, run_id.clone())?;
         }
         Ok(Some(accepted))
     }
@@ -410,7 +422,7 @@ impl CodingAgent {
         let Some(journal) = self.harness.as_mut() else {
             return Ok(());
         };
-        journal.refresh()?;
+        journal.ensure_fresh()?;
         let state = Reducer::reduce(&journal.store).map_err(|error| error.to_string())?;
         let Some(open_run) = state
             .lane("main")
@@ -476,8 +488,14 @@ impl CodingAgent {
             }
             capabilities.sort();
             capabilities.dedup();
-            let capability_sha256 = sha256_hex(capabilities.join("
-").as_bytes());
+            let capability_sha256 = sha256_hex(
+                capabilities
+                    .join(
+                        "
+",
+                    )
+                    .as_bytes(),
+            );
             let prompt_template_ids = self
                 .prompt_templates
                 .as_ref()
@@ -493,7 +511,7 @@ impl CodingAgent {
                 "main",
                 model,
                 provider,
-self.agent.reasoning_effort(),
+                self.agent.reasoning_effort(),
                 self.agent.prompt_cache_enabled(),
                 self.work_dir.to_string_lossy().into_owned(),
                 durable_prompt_snapshot(&turn.system_prompt),
@@ -506,7 +524,7 @@ self.agent.reasoning_effort(),
             )?;
         }
         if let Some(path) = self.session_file.clone() {
-            self.install_run_trace_recorders(path, run_id.into());
+            self.install_run_trace_recorders(path, run_id.into())?;
         }
         *self
             .harness_run_id
@@ -587,7 +605,7 @@ self.agent.reasoning_effort(),
         _harness_persisted: bool,
     ) -> Option<String> {
         self.harness.as_mut().and_then(|journal| {
-            let _ = journal.refresh();
+            let _ = journal.ensure_fresh();
             journal.store.preferred_leaf("main")
         })
     }
@@ -613,7 +631,7 @@ self.agent.reasoning_effort(),
         retained_tail: &[AgentMessage],
     ) -> Result<(), String> {
         if let Some(journal) = self.harness.as_mut() {
-            journal.refresh()?;
+            journal.ensure_fresh()?;
             let run_id = journal.unique_run_id("foreground-compaction")?;
             journal
                 .store
@@ -699,7 +717,7 @@ self.agent.reasoning_effort(),
                 .harness
                 .as_mut()
                 .and_then(|harness| {
-                    let _ = harness.refresh();
+                    let _ = harness.ensure_fresh();
                     harness.store.model_context("main").ok()
                 })
                 .map(|projection| projection.messages())
@@ -726,7 +744,7 @@ self.agent.reasoning_effort(),
             }
 
             if let Some(harness) = self.harness.as_mut() {
-                if let Err(error) = harness.refresh() {
+                if let Err(error) = harness.ensure_fresh() {
                     self.harness_journal_error = Some(error);
                     return;
                 }
@@ -1006,15 +1024,12 @@ self.agent.reasoning_effort(),
                 .unsafe_tools
                 .iter()
                 .filter_map(|record| match record {
-                    HarnessRecord::ToolStarted { tool_call_id, .. } => {
-                        Some(tool_call_id.clone())
-                    }
+                    HarnessRecord::ToolStarted { tool_call_id, .. } => Some(tool_call_id.clone()),
                     _ => None,
                 })
                 .collect::<HashSet<_>>();
             if !unsafe_tool_ids.is_empty() {
-                let error =
-                    Some("Interrupted unsafe tool execution was not replayed".to_string());
+                let error = Some("Interrupted unsafe tool execution was not replayed".to_string());
                 let mut messages =
                     Vec::with_capacity(1 + lane.messages.len() + safe_messages.len());
                 messages.push(AgentMessage::Custom {
@@ -1030,7 +1045,7 @@ self.agent.reasoning_effort(),
                 });
                 messages.extend(lane.messages.clone());
                 messages.extend(safe_messages);
-                journal.refresh().map_err(&retrying)?;
+                journal.ensure_fresh().map_err(&retrying)?;
                 journal
                     .finish_subagent_lane(
                         &lane.lane,
@@ -1068,8 +1083,8 @@ self.agent.reasoning_effort(),
                     description: "Recovered interrupted subagent".into(),
                     tools: None,
                     model: None,
-                    system_prompt:
-                        "Resume the interrupted child task from its durable checkpoint.".into(),
+                    system_prompt: "Resume the interrupted child task from its durable checkpoint."
+                        .into(),
                     source: crate::agents::AgentSource::Project,
                     file_path: self.work_dir.clone(),
                 },

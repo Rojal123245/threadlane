@@ -19,7 +19,6 @@ pub mod system_prompt;
 mod capabilities_catalog;
 pub mod coding_agent;
 pub use capabilities_catalog::CapabilityCatalog;
-pub use controller::{ExecutionMode, SessionController, SessionStatus};
 pub use coding_agent::harness::{
     CodingSessionHarness, HarnessRecord, HarnessWatch, InterruptedSubagentRecoveryState,
 };
@@ -29,6 +28,7 @@ pub use coding_agent::{
     SubagentCancellationGuard, SubagentInnerTool, SubagentInnerToolData, SubagentResult,
     SubagentSessionData,
 };
+pub use controller::{ExecutionMode, SessionController, SessionStatus};
 
 // ── Re-exports ───────────────────────────────────────────────────────
 pub use acp::{

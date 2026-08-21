@@ -1,4 +1,4 @@
-use super::reducer::{validate_candidate_entry, validate_candidate_record};
+use super::reducer::ReductionContext;
 use super::store::SessionStore;
 use super::types::{Entry, Record, ReduceError};
 use crate::types::PlanItem;
@@ -10,6 +10,11 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
+
+#[cfg(test)]
+thread_local! {
+    static LOAD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
@@ -98,6 +103,7 @@ enum KnownSessionRecord {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LegacySessionNode {
     id: String,
     parent_id: Option<String>,
@@ -106,6 +112,15 @@ struct LegacySessionNode {
     #[serde(default)]
     seq: Option<u64>,
     message: crate::types::AgentMessage,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum SessionLine {
+    Record(Record),
+    Entry(Entry),
+    Known(KnownSessionRecord),
+    Legacy(LegacySessionNode),
 }
 
 #[derive(Debug, Clone)]
@@ -119,6 +134,17 @@ pub struct JsonlStore {
     preferred_leaf: Option<String>,
     session_file_len: u64,
     harness_file_len: u64,
+    /// Highest sequence across entries and records, maintained incrementally
+    /// so sequence allocation does not rescan the whole file.
+    max_seq: u64,
+    /// Entry ids only (valid parents for new entries), maintained
+    /// incrementally for O(1) parent and duplicate checks.
+    entry_ids: HashSet<String>,
+    /// Record ids, maintained incrementally for O(1) duplicate checks.
+    record_ids: HashSet<String>,
+    /// Streaming reduction state advanced by guard/commit pairs on append;
+    /// rebuilt wholesale whenever the file is reloaded.
+    reduction: ReductionContext,
 }
 
 impl JsonlStore {
@@ -140,18 +166,45 @@ impl JsonlStore {
     }
 
     fn load(path: PathBuf, claim: Arc<WriterClaim>, writable: bool) -> io::Result<Self> {
+        #[cfg(test)]
+        LOAD_COUNT.with(|count| count.set(count.get() + 1));
         let _guard = claim
             .gate
             .lock()
             .map_err(|_| io::Error::other("writer claim poisoned"))?;
-        validate_session_lines(&path)?;
-        let (session_id, preferred_leaf, entries, mut records) = read_entries(&path)?;
-        records.extend(read_strict(&path.with_extension("harness.jsonl"))?);
-        records.sort_by_key(Record::seq);
-        validate_harness_records(&records, &path)?;
+        let (session_id, preferred_leaf, entries, records) = Self::load_parts(&path)?;
         let session_file_len = file_len(&path)?;
         let harness_file_len = file_len(&path.with_extension("harness.jsonl"))?;
-        let store = Self {
+        // Mirrors SessionStore::facts over the freshly parsed record stream.
+        let mut fact_seed = std::collections::BTreeMap::new();
+        for record in &records {
+            if let Record::FactSet {
+                key,
+                value,
+                run_id: None,
+                ..
+            } = record
+            {
+                fact_seed.insert(key.clone(), value.clone());
+            }
+        }
+        let preferred_main = preferred_leaf.clone();
+        let reduction = ReductionContext::build(&entries, &records, fact_seed, &|lane: &str| {
+            (lane == "main").then(|| preferred_main.clone()).flatten()
+        })
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+        let max_seq = entries
+            .iter()
+            .map(|entry| entry.seq)
+            .chain(records.iter().map(Record::seq))
+            .max()
+            .unwrap_or(0);
+        let entry_ids = entries.iter().map(|entry| entry.id.clone()).collect();
+        let record_ids = records
+            .iter()
+            .map(|record| record.id().to_owned())
+            .collect();
+        Ok(Self {
             path,
             session_id,
             claim: claim.clone(),
@@ -161,10 +214,37 @@ impl JsonlStore {
             preferred_leaf,
             session_file_len,
             harness_file_len,
-        };
-        super::Reducer::reduce(&store)
+            max_seq,
+            entry_ids,
+            record_ids,
+            reduction,
+        })
+    }
+
+    /// Recomputes everything derived from the entry/record streams after a
+    /// wholesale reload: the incremental indexes and the streaming reduction
+    /// context. Validation happens inside the context build, so failures
+    /// surface the same reduce errors as before.
+    fn rebuild_derived_state(&mut self) -> io::Result<()> {
+        self.reduction =
+            ReductionContext::build(&self.entries, &self.records, self.facts(), &|lane| {
+                self.preferred_leaf(lane)
+            })
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
-        Ok(store)
+        self.max_seq = self
+            .entries
+            .iter()
+            .map(|entry| entry.seq)
+            .chain(self.records.iter().map(Record::seq))
+            .max()
+            .unwrap_or(0);
+        self.entry_ids = self.entries.iter().map(|entry| entry.id.clone()).collect();
+        self.record_ids = self
+            .records
+            .iter()
+            .map(|record| record.id().to_owned())
+            .collect();
+        Ok(())
     }
 
     fn refresh(&mut self) -> io::Result<()> {
@@ -173,15 +253,32 @@ impl JsonlStore {
             .gate
             .lock()
             .map_err(|_| io::Error::other("writer claim poisoned"))?;
-        let refreshed = Self::load_parts(&self.path)?;
-        self.session_id = refreshed.0;
-        self.preferred_leaf = refreshed.1;
-        self.entries = refreshed.2;
-        self.records = refreshed.3;
-        self.refresh_file_lengths()?;
-        super::Reducer::reduce(self)
-            .map(|_| ())
+        // reload_unlocked rebuilds the streaming reduction context itself;
+        // a second full reduce here would be redundant.
+        self.reload_unlocked()
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
+    }
+
+    /// Reloads from disk only when another writer has appended (detected via
+    /// the cheap file-length check), otherwise leaves parsed state intact.
+    pub fn ensure_fresh(&mut self) -> Result<(), ReduceError> {
+        if !self
+            .is_fresh()
+            .map_err(|error| ReduceError::Storage(error.to_string()))?
+        {
+            let claim = self.claim.clone();
+            let _guard = claim
+                .gate
+                .lock()
+                .map_err(|error| ReduceError::Storage(error.to_string()))?;
+            if !self
+                .is_fresh()
+                .map_err(|error| ReduceError::Storage(error.to_string()))?
+            {
+                return self.reload_unlocked();
+            }
+        }
+        Ok(())
     }
 
     fn refresh_file_lengths(&mut self) -> io::Result<()> {
@@ -195,11 +292,9 @@ impl JsonlStore {
             && self.harness_file_len == file_len(&self.path.with_extension("harness.jsonl"))?)
     }
 
-    fn load_parts(
-        path: &Path,
-    ) -> io::Result<(String, Option<String>, Vec<Entry>, Vec<Record>)> {
-        validate_session_lines(path)?;
-        let (session_id, preferred_leaf, entries, mut records) = read_entries(path)?;
+    fn load_parts(path: &Path) -> io::Result<(String, Option<String>, Vec<Entry>, Vec<Record>)> {
+        let lines = read_strict::<SessionLine>(path)?;
+        let (session_id, preferred_leaf, entries, mut records) = classify_lines(path, lines);
         let record_path = path.with_extension("harness.jsonl");
         records.extend(read_strict(&record_path)?);
         records.sort_by_key(Record::seq);
@@ -209,6 +304,12 @@ impl JsonlStore {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Projects the streaming reduction context without rebuilding it;
+    /// used to assert equivalence against a fresh full reduction in tests.
+    pub(crate) fn reduced_state(&self) -> super::types::ReducedState {
+        self.reduction.to_reduced_state()
     }
 
     pub fn entries(&self) -> &[Entry] {
@@ -223,6 +324,9 @@ impl JsonlStore {
 impl SessionStore for JsonlStore {
     fn session_id(&self) -> &str {
         &self.session_id
+    }
+    fn reduced_state(&self) -> Option<super::types::ReducedState> {
+        Some(self.reduced_state())
     }
     fn next_sequence(&self) -> u64 {
         self.next_seq()
@@ -275,37 +379,26 @@ impl SessionStore for JsonlStore {
         {
             self.reload_unlocked()?;
         }
-        if entry.id.trim().is_empty() {
-            return Err(ReduceError::InvalidRecord("empty entry id".into()));
-        }
-        if entry.lane.trim().is_empty() {
-            return Err(ReduceError::InvalidLane(entry.lane));
-        }
-        if self
-            .entries
-            .iter()
-            .any(|candidate| candidate.id == entry.id)
-            || self.records.iter().any(|record| record.id() == entry.id)
-        {
-            return Err(ReduceError::DuplicateId(entry.id));
-        }
-        if let Some(parent) = &entry.parent_id {
-            if !self.entries.iter().any(|candidate| &candidate.id == parent) {
-                return Err(ReduceError::MissingParent(parent.clone()));
-            }
-        }
         // Sequence allocation belongs to the writer, not callers. This is the
-        // only point where a sequence becomes durable.
+        // only point where a sequence becomes durable. Validation runs before
+        // the preferred-leaf update so the dangling-pointer check judges the
+        // previously committed leaf; the commit then observes the new one,
+        // matching what a fresh full reduce would read from the store.
         entry.seq = self.next_seq();
-        validate_candidate_entry(self, &entry)?;
+        self.reduction.entry_guard(&entry)?;
         append_json_line(&self.path, &entry)?;
         self.session_file_len =
             file_len(&self.path).map_err(|error| ReduceError::Storage(error.to_string()))?;
         if entry.lane == "main" {
-            self.preferred_leaf = Some(entry.id.clone());
+            let leaf = entry.id.clone();
+            self.preferred_leaf = Some(leaf.clone());
+            self.reduction.set_preferred_leaf_main(leaf);
         }
+        self.reduction.commit_entry(&entry);
+        self.max_seq = entry.seq;
+        self.entry_ids.insert(entry.id.clone());
         self.entries.push(entry);
-        super::Reducer::reduce(self).map(|_| ())
+        Ok(())
     }
 
     fn append_record(&mut self, mut record: Record) -> Result<(), ReduceError> {
@@ -323,27 +416,29 @@ impl SessionStore for JsonlStore {
         {
             self.reload_unlocked()?;
         }
+        // Identity checks precede sequence allocation; stateful guards run on
+        // the allocated sequence, matching the historical validate-candidate
+        // ordering without cloning history.
         if record.lane().trim().is_empty() {
             return Err(ReduceError::InvalidLane(record.lane().into()));
         }
-        if record.id().trim().is_empty()
-            || self.entries.iter().any(|entry| entry.id == record.id())
-            || self
-                .records
-                .iter()
-                .any(|current| current.id() == record.id())
+        let record_id = record.id();
+        if record_id.trim().is_empty()
+            || self.entry_ids.contains(record_id)
+            || self.record_ids.contains(record_id)
         {
-            return Err(ReduceError::DuplicateId(record.id().into()));
+            return Err(ReduceError::DuplicateId(record_id.into()));
         }
-        // Sequence allocation belongs to the writer, not callers. This is the
-        // only point where a sequence becomes durable.
         record = record.with_seq(self.next_seq());
-        validate_candidate_record(self, &record)?;
+        self.reduction.record_guard(&record)?;
         append_json_line(&self.path, &record)?;
         self.session_file_len =
             file_len(&self.path).map_err(|error| ReduceError::Storage(error.to_string()))?;
+        self.reduction.commit_record(&record);
+        self.max_seq = record.seq();
+        self.record_ids.insert(record.id().to_owned());
         self.records.push(record);
-        super::Reducer::reduce(self).map(|_| ())
+        Ok(())
     }
 }
 
@@ -484,6 +579,8 @@ impl JsonlStore {
         self.next_seq()
     }
 
+    /// Reloads in-memory state from disk when another writer has appended.
+    /// Caller must hold the claim gate.
     fn reload_unlocked(&mut self) -> Result<(), ReduceError> {
         let refreshed = Self::load_parts(&self.path)
             .map_err(|error| ReduceError::Storage(error.to_string()))?;
@@ -493,17 +590,12 @@ impl JsonlStore {
         self.records = refreshed.3;
         self.refresh_file_lengths()
             .map_err(|error| ReduceError::Storage(error.to_string()))?;
-        super::Reducer::reduce(self).map(|_| ())
+        self.rebuild_derived_state()
+            .map_err(|error| ReduceError::Storage(error.to_string()))
     }
 
     fn next_seq(&self) -> u64 {
-        self.entries
-            .iter()
-            .map(|entry| entry.seq)
-            .chain(self.records.iter().map(Record::seq))
-            .max()
-            .unwrap_or(0)
-            + 1
+        self.max_seq + 1
     }
 }
 
@@ -537,24 +629,34 @@ fn append_json_line<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), R
     append_session_json_line(path, value).map_err(|error| ReduceError::Storage(error.to_string()))
 }
 
-fn read_entries(
+/// Typed classification entry point retained for focused compatibility tests.
+#[cfg(test)]
+fn read_entries(path: &Path) -> io::Result<(String, Option<String>, Vec<Entry>, Vec<Record>)> {
+    let lines = read_strict::<SessionLine>(path)?;
+    Ok(classify_lines(path, lines))
+}
+
+fn classify_lines(
     path: &Path,
-) -> io::Result<(String, Option<String>, Vec<Entry>, Vec<Record>)> {
+    lines: Vec<SessionLine>,
+) -> (String, Option<String>, Vec<Entry>, Vec<Record>) {
     let session_id = path
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "session".into());
     let mut preferred_leaf = None;
-    let values: Vec<serde_json::Value> = read_strict(path)?;
     let mut entries = Vec::new();
     let mut records = Vec::new();
-    for (index, value) in values.into_iter().enumerate() {
-        if let Ok(record) = serde_json::from_value::<Record>(value.clone()) {
-            records.push(record);
-            continue;
-        }
-        if let Ok(known) = serde_json::from_value::<KnownSessionRecord>(value.clone()) {
-            match known {
+    for (index, line) in lines.into_iter().enumerate() {
+        match line {
+            SessionLine::Record(record) => records.push(record),
+            SessionLine::Entry(entry) => {
+                if entry.lane == "main" {
+                    preferred_leaf = Some(entry.id.clone());
+                }
+                entries.push(entry);
+            }
+            SessionLine::Known(known) => match known {
                 KnownSessionRecord::Metadata {
                     name,
                     title_attempted,
@@ -623,28 +725,20 @@ fn read_entries(
                         value,
                     });
                 }
+            },
+            SessionLine::Legacy(node) => {
+                preferred_leaf = Some(node.id.clone());
+                entries.push(Entry {
+                    id: node.id,
+                    parent_id: node.parent_id,
+                    lane: "main".into(),
+                    seq: node.seq.unwrap_or((index + 1) as u64),
+                    timestamp: node.timestamp,
+                    message: node.message,
+                    surface_op: super::types::SurfaceOperation::Append,
+                    terminate: false,
+                });
             }
-            continue;
-        }
-        if value.get("seq").is_some() {
-            if let Ok(entry) = serde_json::from_value::<Entry>(value.clone()) {
-                if entry.lane == "main" {
-                    preferred_leaf = Some(entry.id.clone());
-                }
-                entries.push(entry);
-            }
-        } else if let Ok(node) = serde_json::from_value::<LegacySessionNode>(value) {
-            preferred_leaf = Some(node.id.clone());
-            entries.push(Entry {
-                id: node.id,
-                parent_id: node.parent_id,
-                lane: "main".into(),
-                seq: node.seq.unwrap_or((index + 1) as u64),
-                timestamp: node.timestamp,
-                message: node.message,
-                surface_op: super::types::SurfaceOperation::Append,
-                terminate: false,
-            });
         }
     }
     // Legacy metadata has no harness sequence. Allocate virtual values after
@@ -662,7 +756,7 @@ fn read_entries(
             next_seq += 1;
         }
     }
-    Ok((session_id, preferred_leaf, entries, records))
+    (session_id, preferred_leaf, entries, records)
 }
 
 fn validate_harness_records(records: &[Record], path: &Path) -> io::Result<()> {
@@ -684,37 +778,6 @@ fn validate_harness_records(records: &[Record], path: &Path) -> io::Result<()> {
             ));
         }
         previous = record.seq();
-    }
-    Ok(())
-}
-
-fn validate_session_lines(path: &Path) -> io::Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    let data = fs::read_to_string(path)?;
-    for (index, line) in data.split('\n').enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let is_torn_tail = index == data.split('\n').count() - 1 && !data.ends_with('\n');
-        let value: serde_json::Value = match serde_json::from_str(line) {
-            Ok(value) => value,
-            Err(_error) if is_torn_tail => break,
-            Err(error) => return Err(invalid_line(path, index + 1, error)),
-        };
-        let result = if serde_json::from_value::<Record>(value.clone()).is_ok() {
-            Ok(())
-        } else if value.get("lane").is_some() {
-            serde_json::from_value::<Entry>(value).map(|_| ())
-        } else if value.get("type").is_some() {
-            serde_json::from_value::<KnownSessionRecord>(value).map(|_| ())
-        } else {
-            serde_json::from_value::<LegacySessionNode>(value).map(|_| ())
-        };
-        if let Err(error) = result {
-            return Err(invalid_line(path, index + 1, error));
-        }
     }
     Ok(())
 }
@@ -751,9 +814,318 @@ fn invalid_line(path: &Path, line: usize, error: impl std::fmt::Display) -> io::
 mod tests {
     use super::read_entries;
     use crate::harness::{
-        ContextItemSource, ContextItemStatus, ContextManifestItem, JsonlStore, Record, Reducer,
-        SessionStore, TraceString,
+        AgentHarness, ContextItemSource, ContextItemStatus, ContextManifestItem, HarnessEventHub,
+        JsonlStore, Record, Reducer, SessionStore, TraceString,
     };
+    use crate::types::AgentMessage;
+
+    fn user_entry(id: &str, lane: &str) -> crate::harness::Entry {
+        crate::harness::Entry::new(
+            id,
+            None,
+            lane,
+            0,
+            0,
+            AgentMessage::User {
+                content: "hello".into(),
+            },
+            false,
+        )
+    }
+
+    #[test]
+    fn gated_append_does_not_reload_the_store_it_just_wrote() {
+        super::LOAD_COUNT.with(|count| count.set(0));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("single-store.jsonl");
+        let store = JsonlStore::open(&path).unwrap();
+        let mut harness = AgentHarness::with_events(store, HarnessEventHub::new(8));
+
+        harness
+            .append_entry_gated(user_entry("msg-1", "main"))
+            .unwrap();
+        harness.drive_to_completion().unwrap();
+
+        assert_eq!(harness.store().entries().len(), 1);
+        super::LOAD_COUNT.with(|count| assert_eq!(count.get(), 1));
+    }
+
+    #[test]
+    fn reducing_a_jsonl_store_reuses_its_incremental_state() {
+        super::super::reducer::BUILD_COUNT.with(|count| count.set(0));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cached-reduction.jsonl");
+        let store = JsonlStore::open(&path).unwrap();
+        super::super::reducer::BUILD_COUNT.with(|count| assert_eq!(count.get(), 1));
+
+        Reducer::reduce(&store).unwrap();
+
+        super::super::reducer::BUILD_COUNT.with(|count| assert_eq!(count.get(), 1));
+    }
+
+    #[test]
+    fn reload_rejects_an_entry_and_record_with_the_same_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("duplicate-id.jsonl");
+        let entry = user_entry("shared-id", "main");
+        let record = Record::FactSet {
+            id: "shared-id".into(),
+            seq: 2,
+            lane: "main".into(),
+            timestamp: 0,
+            run_id: None,
+            key: "key".into(),
+            value: "value".into(),
+        };
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                serde_json::to_string(&entry).unwrap(),
+                serde_json::to_string(&record).unwrap()
+            ),
+        )
+        .unwrap();
+
+        let error = JsonlStore::open(&path).unwrap_err();
+        assert!(error.to_string().contains("shared-id"), "{error}");
+    }
+
+    #[test]
+    fn malformed_modern_entry_does_not_fall_back_to_a_legacy_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("malformed-entry.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"id":"entry-1","parent_id":null,"lane":5,"seq":1,"timestamp":1,"message":{"role":"user","content":"hello"}}
+"#,
+        )
+        .unwrap();
+
+        assert!(JsonlStore::open(&path).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_entry_append_does_not_advance_the_in_memory_leaf() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("failed-append.jsonl");
+        let mut store = JsonlStore::open(&path).unwrap();
+        store.append_entry(user_entry("first", "main")).unwrap();
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+        let result = store.append_entry(user_entry("not-durable", "main"));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        assert!(result.is_err());
+        assert_eq!(store.preferred_leaf("main").as_deref(), Some("first"));
+        assert_eq!(store.entries().len(), 1);
+    }
+
+    /// Pins the incremental reducer: the live context advanced by
+    /// guard/commit pairs must project identically to a fresh full
+    /// reduction of the same history, in memory and after reload.
+    #[test]
+    fn incremental_appends_match_full_reduction() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("incremental.jsonl");
+        let mut store = JsonlStore::open(&path).unwrap();
+
+        store.append_entry(user_entry("msg-1", "main")).unwrap();
+        store
+            .append_record(Record::OperationStarted {
+                id: "run-1".into(),
+                seq: store.next_sequence(),
+                lane: "main".into(),
+                timestamp: 1,
+                source_leaf_id: Some("msg-1".into()),
+                intent: crate::harness::OperationIntent::Run,
+            })
+            .unwrap();
+        store
+            .append_entry(crate::harness::Entry::new(
+                "asst-1",
+                Some("msg-1".to_owned()),
+                "main",
+                0,
+                0,
+                AgentMessage::Assistant {
+                    content: None,
+                    tool_calls: Some(vec![threadlane_protocol::RuntimeToolCall {
+                        id: "call-1".into(),
+                        r#type: "function".into(),
+                        function: threadlane_protocol::RuntimeToolCallFunction {
+                            name: "run".into(),
+                            arguments: "{}".into(),
+                        },
+                        thought_signature: None,
+                    }]),
+                    stop_reason: None,
+                    deferred_handle: None,
+                },
+                false,
+            ))
+            .unwrap();
+        store
+            .append_entry(crate::harness::Entry::new(
+                "res-1",
+                Some("asst-1".to_owned()),
+                "main",
+                0,
+                0,
+                AgentMessage::Tool {
+                    tool_call_id: "call-1".into(),
+                    name: "run".into(),
+                    content: "ok".into(),
+                    is_error: false,
+                    terminate: false,
+                },
+                false,
+            ))
+            .unwrap();
+        store
+            .append_record(Record::ToolStarted {
+                id: "tool-1".into(),
+                seq: store.next_sequence(),
+                lane: "main".into(),
+                timestamp: 1,
+                run_id: "run-1".into(),
+                assistant_entry_id: "asst-1".into(),
+                tool_index: 0,
+                tool_call_id: "call-1".into(),
+                tool_name: "run".into(),
+                effective_args: serde_json::json!({}),
+                result_entry_id: "res-1".into(),
+                replay: crate::harness::ToolReplaySafety::Safe,
+            })
+            .unwrap();
+        store
+            .append_record(Record::ToolFinished {
+                id: "tool-finish-1".into(),
+                seq: store.next_sequence(),
+                lane: "main".into(),
+                timestamp: 1,
+                run_id: "run-1".into(),
+                tool_call_id: "call-1".into(),
+                result_entry_id: "res-1".into(),
+                terminate: false,
+            })
+            .unwrap();
+        store
+            .append_record(Record::StepAttempt {
+                id: "step-1".into(),
+                seq: store.next_sequence(),
+                lane: "main".into(),
+                timestamp: 1,
+                run_id: "run-1".into(),
+                attempt: 1,
+                result_entry_id: "res-1".into(),
+                compaction_reason: None,
+            })
+            .unwrap();
+        store
+            .append_record(Record::RetryScheduled {
+                id: "retry-1".into(),
+                seq: store.next_sequence(),
+                lane: "main".into(),
+                timestamp: 10,
+                run_id: "run-1".into(),
+                attempt: 2,
+                retry_at: 20,
+                reason: "rate limit".into(),
+            })
+            .unwrap();
+        store
+            .append_record(Record::RetryConsumed {
+                id: "retry-consumed-1".into(),
+                seq: store.next_sequence(),
+                lane: "main".into(),
+                timestamp: 20,
+                run_id: "run-1".into(),
+                attempt: 2,
+            })
+            .unwrap();
+        store
+            .append_record(Record::QueueEnqueued {
+                id: "queue-1".into(),
+                seq: store.next_sequence(),
+                lane: "main".into(),
+                timestamp: 1,
+                run_id: Some("run-1".into()),
+                queue: crate::harness::QueueKind::FollowUp,
+                priority: None,
+                target: crate::harness::ProvisionedEntry::new(
+                    "queued-msg",
+                    None,
+                    AgentMessage::user("q", vec![]),
+                ),
+            })
+            .unwrap();
+        store
+            .append_record(Record::QueueConsumed {
+                id: "queue-consumed-1".into(),
+                seq: store.next_sequence(),
+                lane: "main".into(),
+                timestamp: 1,
+                run_id: "run-1".into(),
+                entry_id: "queued-msg".into(),
+            })
+            .unwrap();
+        store
+            .append_record(Record::FactSet {
+                id: "fact-1".into(),
+                seq: store.next_sequence(),
+                lane: "main".into(),
+                timestamp: 1,
+                run_id: None,
+                key: "model".into(),
+                value: "test-model".into(),
+            })
+            .unwrap();
+        store.append_entry(user_entry("sub-msg", "lane-2")).unwrap();
+        store
+            .append_record(Record::OperationFinished {
+                id: "finish-1".into(),
+                seq: store.next_sequence(),
+                lane: "main".into(),
+                timestamp: 1,
+                run_id: "run-1".into(),
+                outcome: crate::harness::OperationOutcome::Completed,
+                error: None,
+            })
+            .unwrap();
+
+        let assert_equivalent = |label: &str| {
+            let live = store.reduced_state();
+            let fresh = Reducer::reduce(&store).expect("full reduction succeeds");
+            assert_eq!(
+                live.lanes.len(),
+                fresh.lanes.len(),
+                "{label}: lane count diverged"
+            );
+            for (live_lane, fresh_lane) in live.lanes.iter().zip(fresh.lanes.iter()) {
+                assert_eq!(live_lane, fresh_lane, "{label}: lane state diverged");
+            }
+        };
+
+        // Live incremental projection matches a fresh reduction at every step.
+        assert_equivalent("after interleaved appends");
+
+        // The same holds after a reload from disk.
+        drop(store);
+        let reloaded = JsonlStore::open(&path).unwrap();
+        let fresh_after_reload = Reducer::reduce(&reloaded).unwrap();
+        let reloaded_state = reloaded.reduced_state();
+        for (reloaded_lane, fresh_lane) in reloaded_state
+            .lanes
+            .iter()
+            .zip(fresh_after_reload.lanes.iter())
+        {
+            assert_eq!(reloaded_lane, fresh_lane, "reload: lane state diverged");
+        }
+    }
 
     #[test]
     fn legacy_metadata_records_get_distinct_virtual_sequences() {
@@ -766,7 +1138,10 @@ mod tests {
         .unwrap();
 
         let (_, _, _, records) = read_entries(&path).unwrap();
-        let sequences = records.iter().map(|record| record.seq()).collect::<Vec<_>>();
+        let sequences = records
+            .iter()
+            .map(|record| record.seq())
+            .collect::<Vec<_>>();
         assert_eq!(sequences.len(), 3);
         assert!(sequences.windows(2).all(|pair| pair[0] < pair[1]));
     }

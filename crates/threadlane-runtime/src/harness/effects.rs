@@ -206,6 +206,10 @@ impl GatedEffects {
         self.closed
     }
 
+    pub(crate) fn has_executor(&self) -> bool {
+        self.executor.is_some()
+    }
+
     fn execute_pending<S: SessionStore>(
         &mut self,
         store: &mut S,
@@ -299,31 +303,7 @@ impl GatedEffects {
                 return Err(error);
             }
         };
-        let payload = match &action {
-            EffectAction::AppendEntry { entry } => EventPayload::EntryCommitted(entry.clone()),
-            EffectAction::AppendRecord { record, .. } => {
-                EventPayload::RecordCommitted(record.clone())
-            }
-        };
-        let run_id = match &action {
-            EffectAction::AppendRecord { record, .. } => record.run_id().map(str::to_owned),
-            EffectAction::AppendEntry { .. } => None,
-        };
-        let turn = match &action {
-            EffectAction::AppendRecord { record, .. } => record.turn(),
-            EffectAction::AppendEntry { .. } => None,
-        };
-        if matches!(&action, EffectAction::AppendRecord { .. }) {
-            hub.publish_identified_with_turn(
-                payload,
-                Some(action.lane().to_owned()),
-                run_id,
-                turn,
-                None,
-            );
-        } else {
-            hub.publish_identified(payload, Some(action.lane().to_owned()), None, None);
-        }
+        publish_committed(hub, &action);
         Ok(action)
     }
 
@@ -381,6 +361,24 @@ impl GatedEffects {
 
     pub fn fault(&self) -> Option<&ReduceError> {
         self.fault.as_ref()
+    }
+}
+
+fn publish_committed(hub: &HarnessEventHub, action: &EffectAction) {
+    let payload = match action {
+        EffectAction::AppendEntry { entry } => EventPayload::EntryCommitted(entry.clone()),
+        EffectAction::AppendRecord { record, .. } => EventPayload::RecordCommitted(record.clone()),
+    };
+    if let EffectAction::AppendRecord { record, .. } = action {
+        hub.publish_identified_with_turn(
+            payload,
+            Some(action.lane().to_owned()),
+            record.run_id().map(str::to_owned),
+            record.turn(),
+            None,
+        );
+    } else {
+        hub.publish_identified(payload, Some(action.lane().to_owned()), None, None);
     }
 }
 

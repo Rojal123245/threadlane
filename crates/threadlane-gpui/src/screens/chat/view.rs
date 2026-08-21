@@ -23,7 +23,7 @@ use crate::screens::editor::EditorView;
 use crate::state::{
     compute_older_message_page, AppState, ChatMessageInfo, MessageRole, ToolActivityInfo,
 };
-use threadlane_session::commands::{SlashCommandInfo, available_slash_commands};
+use threadlane_session::commands::{available_slash_commands, SlashCommandInfo};
 use threadlane_session::{ImageAttachment, PlanItemStatus, ReasoningEffort, SessionPlan};
 
 actions!(threadlane_composer, [PasteClipboard]);
@@ -91,8 +91,11 @@ pub struct ChatListView {
     trajectory_lane: Option<String>,
     selected_trajectory_index: Option<usize>,
     trajectory_inspector_tab: TrajectoryInspectorTab,
-    slash_command_cache:
-        Option<(Option<std::path::PathBuf>, std::time::Instant, Vec<SlashCommandInfo>)>,
+    slash_command_cache: Option<(
+        Option<std::path::PathBuf>,
+        std::time::Instant,
+        Vec<SlashCommandInfo>,
+    )>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -485,12 +488,7 @@ impl ChatListView {
                         .rounded_full()
                         .border_1()
                         .border_color(colors.primary)
-                        .child(
-                            div()
-                                .size(px(6.0))
-                                .rounded_full()
-                                .bg(colors.primary),
-                        )
+                        .child(div().size(px(6.0)).rounded_full().bg(colors.primary))
                         .into_any_element()
                 }
             }
@@ -901,7 +899,8 @@ impl ChatListView {
         let mut previous_request = None;
         let mut request_input_seen = false;
         for (all_index, entry) in entries.into_iter() {
-            if self.trajectory_mode == TrajectoryMode::Requests && entry.request != previous_request {
+            if self.trajectory_mode == TrajectoryMode::Requests && entry.request != previous_request
+            {
                 if let Some(request) = entry.request {
                     request_input_seen = false;
                     rows.push(
@@ -974,19 +973,46 @@ impl ChatListView {
                 format!("{}  {}", entry.summary, entry.detail.replace('\n', " "))
             };
             let view = cx.entity().clone();
-            let (badge_bg, badge_fg, badge_label): (Hsla, Hsla, SharedString) = match entry.category.as_str() {
-                "Tool" | "Tool runtime" => (theme.warning.opacity(0.18), theme.warning, "TOOL".into()),
-                "Provider" => (theme.primary.opacity(0.18), theme.primary, "PROVIDER".into()),
-                "Context Manifest" | "Manifest" => (theme.accent.opacity(0.14), theme.muted_foreground, "MANIFEST".into()),
-                "Request" => (theme.primary.opacity(0.16), theme.accent, "REQUEST".into()),
-                "Anomaly" => (theme.warning.opacity(0.20), theme.warning, "ANOMALY".into()),
-                "Error" => (theme.danger.opacity(0.20), theme.danger, "ERROR".into()),
-                "Input" => (theme.muted.opacity(0.8), theme.foreground, "INPUT".into()),
-                "Assistant" => (theme.muted.opacity(0.8), theme.foreground, "ASSISTANT".into()),
-                "Permission" => (theme.warning.opacity(0.18), theme.warning, "PERMISSION".into()),
-                "Subagent" => (theme.primary.opacity(0.16), theme.primary, "SUBAGENT".into()),
-                _ => (theme.muted.opacity(0.5), theme.muted_foreground, entry.category.clone().into()),
-            };
+            let (badge_bg, badge_fg, badge_label): (Hsla, Hsla, SharedString) =
+                match entry.category.as_str() {
+                    "Tool" | "Tool runtime" => {
+                        (theme.warning.opacity(0.18), theme.warning, "TOOL".into())
+                    }
+                    "Provider" => (
+                        theme.primary.opacity(0.18),
+                        theme.primary,
+                        "PROVIDER".into(),
+                    ),
+                    "Context Manifest" | "Manifest" => (
+                        theme.accent.opacity(0.14),
+                        theme.muted_foreground,
+                        "MANIFEST".into(),
+                    ),
+                    "Request" => (theme.primary.opacity(0.16), theme.accent, "REQUEST".into()),
+                    "Anomaly" => (theme.warning.opacity(0.20), theme.warning, "ANOMALY".into()),
+                    "Error" => (theme.danger.opacity(0.20), theme.danger, "ERROR".into()),
+                    "Input" => (theme.muted.opacity(0.8), theme.foreground, "INPUT".into()),
+                    "Assistant" => (
+                        theme.muted.opacity(0.8),
+                        theme.foreground,
+                        "ASSISTANT".into(),
+                    ),
+                    "Permission" => (
+                        theme.warning.opacity(0.18),
+                        theme.warning,
+                        "PERMISSION".into(),
+                    ),
+                    "Subagent" => (
+                        theme.primary.opacity(0.16),
+                        theme.primary,
+                        "SUBAGENT".into(),
+                    ),
+                    _ => (
+                        theme.muted.opacity(0.5),
+                        theme.muted_foreground,
+                        entry.category.clone().into(),
+                    ),
+                };
             let dot_color = if entry.diagnostics.is_anomaly || entry.category == "Anomaly" {
                 theme.warning
             } else if entry.category == "Error"
@@ -1046,7 +1072,11 @@ impl ChatListView {
                             .px_1p5()
                             .py_0p5()
                             .rounded_sm()
-                            .bg(if is_ok { theme.success.opacity(0.15) } else { theme.danger.opacity(0.15) })
+                            .bg(if is_ok {
+                                theme.success.opacity(0.15)
+                            } else {
+                                theme.danger.opacity(0.15)
+                            })
                             .text_xs()
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(if is_ok { theme.success } else { theme.danger })
@@ -1386,7 +1416,10 @@ impl ChatListView {
                 .iter()
                 .enumerate()
                 .filter(|(_, entry)| match category {
-                    "Input" => matches!(entry.category.as_str(), "Input" | "Context" | "Context Manifest" | "Queue" | "Request"),
+                    "Input" => matches!(
+                        entry.category.as_str(),
+                        "Input" | "Context" | "Context Manifest" | "Queue" | "Request"
+                    ),
                     "Model" => matches!(
                         entry.category.as_str(),
                         "Operation" | "Step" | "Retry" | "Turn" | "Error" | "Provider" | "Anomaly"
@@ -1639,32 +1672,23 @@ impl ChatListView {
                     .child("tool calls"),
             )
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.foreground)
-                            .child(dur_label),
-                    ),
+                div().flex().items_center().gap_1().child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.foreground)
+                        .child(dur_label),
+                ),
             )
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_1()
-                    .child(
-                        div()
-                            .size(px(6.0))
-                            .rounded_full()
-                            .bg(if anomaly_count > 0 {
-                                theme.warning
-                            } else {
-                                theme.success
-                            }),
-                    )
+                    .child(div().size(px(6.0)).rounded_full().bg(if anomaly_count > 0 {
+                        theme.warning
+                    } else {
+                        theme.success
+                    }))
                     .child(format!("{anomaly_count} anomalies")),
             );
 
@@ -1857,8 +1881,8 @@ impl ChatListView {
                     (reasoning.to_string(), state, now)
                 });
             if entry.0 != reasoning {
-                let should_update = !msg.streaming
-                    || now.duration_since(entry.2) >= Duration::from_millis(120);
+                let should_update =
+                    !msg.streaming || now.duration_since(entry.2) >= Duration::from_millis(120);
                 if should_update {
                     entry.0 = reasoning.to_string();
                     entry.2 = now;
@@ -1991,7 +2015,8 @@ impl ChatListView {
                                             });
                                         if entry.0 != msg.content {
                                             let should_update = !msg.streaming
-                                                || now.duration_since(entry.2) >= Duration::from_millis(120);
+                                                || now.duration_since(entry.2)
+                                                    >= Duration::from_millis(120);
                                             if should_update {
                                                 entry.0 = msg.content.clone();
                                                 entry.2 = now;
@@ -2381,7 +2406,8 @@ impl ChatListView {
             }
         }
         let commands = available_slash_commands(project_root.as_deref());
-        self.slash_command_cache = Some((project_root, std::time::Instant::now(), commands.clone()));
+        self.slash_command_cache =
+            Some((project_root, std::time::Instant::now(), commands.clone()));
         commands
     }
 
@@ -2389,13 +2415,7 @@ impl ChatListView {
         let theme = cx.theme().colors;
         let model = self.model.clone();
         let input_state = self.input_state.clone();
-        let (
-            selected_model,
-            reasoning_effort,
-            is_generating,
-            pending_message,
-            active_session_id,
-        ) = {
+        let (selected_model, reasoning_effort, is_generating, pending_message, active_session_id) = {
             let state = self.model.read(cx);
             (
                 state.selected_model.clone(),
@@ -3130,9 +3150,7 @@ impl Render for ChatListView {
             let model = self.model.clone();
             let scroll_handle = self.scroll_handle.clone();
             cx.spawn(async move |this, cx| {
-                let request = model.update(cx, |state, _cx| {
-                    state.history_page_request()
-                });
+                let request = model.update(cx, |state, _cx| state.history_page_request());
                 let added = if let Some((session_file, end)) = request {
                     let page_file = session_file.clone();
                     let page = cx
@@ -3140,12 +3158,8 @@ impl Render for ChatListView {
                         .spawn(async move { compute_older_message_page(&page_file, end) })
                         .await;
                     model.update(cx, |state, cx| {
-                        let added = state.apply_older_message_page(
-                            &session_file,
-                            page.0,
-                            page.1,
-                            page.2,
-                        );
+                        let added =
+                            state.apply_older_message_page(&session_file, page.0, page.1, page.2);
                         if added > 0 {
                             cx.notify();
                         }

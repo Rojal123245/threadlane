@@ -20,9 +20,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use threadlane_runtime::harness::HookKind;
-use threadlane_runtime::{
-    AgentEvent, AgentMessage, AgentRuntime, TurnState,
-};
+use threadlane_runtime::{AgentEvent, AgentMessage, AgentRuntime, TurnState};
 use threadlane_wasi::WasiExtensionManager;
 use tokio::sync::broadcast;
 use tokio::time::{timeout, Duration};

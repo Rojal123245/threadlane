@@ -802,9 +802,8 @@ impl AppState {
     }
 
     pub(crate) fn refresh_available_models(&mut self) {
-        self.available_models = crate::model_catalog::available_models_for_project(
-            self.active_work_dir.as_deref(),
-        );
+        self.available_models =
+            crate::model_catalog::available_models_for_project(self.active_work_dir.as_deref());
     }
 
     pub(crate) fn set_needle_enabled(&mut self, enabled: bool) -> Result<(), String> {
@@ -907,11 +906,7 @@ impl AppState {
     }
 
     pub(crate) fn set_selected_model(&mut self, model: String) {
-        if !self
-            .available_models
-            .iter()
-            .any(|m| m.id == model)
-        {
+        if !self.available_models.iter().any(|m| m.id == model) {
             return;
         }
         self.selected_model = model.clone();
@@ -1046,7 +1041,11 @@ impl AppState {
 
     pub(crate) fn history_page_request(&self) -> Option<(PathBuf, usize)> {
         self.history_has_older
-            .then(|| self.history_session_file.clone().map(|file| (file, self.history_start)))
+            .then(|| {
+                self.history_session_file
+                    .clone()
+                    .map(|file| (file, self.history_start))
+            })
             .flatten()
     }
 
@@ -1356,7 +1355,8 @@ impl AppState {
             .insert(session_id.to_owned(), result.diagnostics);
         self.trajectory_by_session
             .insert(session_id.into(), result.trajectory);
-        self.session_metrics.insert(session_id.into(), result.metrics);
+        self.session_metrics
+            .insert(session_id.into(), result.metrics);
         self.session_token_usage
             .insert(session_id.into(), result.token_usage);
         Ok(())
@@ -2072,7 +2072,11 @@ impl AppState {
                     diagnostics: TrajectoryDiagnostics {
                         model_visible: true,
                         source: Some("Tool result".into()),
-                        error_summary: if *is_error { Some("Tool failed".into()) } else { None },
+                        error_summary: if *is_error {
+                            Some("Tool failed".into())
+                        } else {
+                            None
+                        },
                         ..Default::default()
                     },
                 });
@@ -2204,7 +2208,8 @@ impl AppState {
             .insert(session_id.to_owned(), result.trajectory);
         self.diagnostics_by_session
             .insert(session_id.to_owned(), result.diagnostics);
-        self.session_metrics.insert(session_id.to_owned(), result.metrics);
+        self.session_metrics
+            .insert(session_id.to_owned(), result.metrics);
         self.session_token_usage
             .insert(session_id.to_owned(), result.token_usage);
     }
@@ -2531,11 +2536,13 @@ impl AppState {
                         ChatAgentUpdate::TextDelta(delta) => {
                             active_changed = true;
                             let stream_prefix = format!("streaming-{session_id}-");
-                            if let Some(message) = self.messages_mut().last_mut().filter(|message| {
-                                message.role == MessageRole::Assistant
-                                    && message.id.starts_with(&stream_prefix)
-                                    && message.tool_activities.is_empty()
-                            }) {
+                            if let Some(message) =
+                                self.messages_mut().last_mut().filter(|message| {
+                                    message.role == MessageRole::Assistant
+                                        && message.id.starts_with(&stream_prefix)
+                                        && message.tool_activities.is_empty()
+                                })
+                            {
                                 message.content.push_str(&delta);
                             } else {
                                 let new_len = self.messages.len();
@@ -2588,9 +2595,12 @@ impl AppState {
                                 detail: arguments,
                                 is_expanded: false,
                             };
-                            if let Some(message) = self.messages_mut().last_mut().filter(|message| {
-                                message.role == MessageRole::Assistant && message.content.is_empty()
-                            }) {
+                            if let Some(message) =
+                                self.messages_mut().last_mut().filter(|message| {
+                                    message.role == MessageRole::Assistant
+                                        && message.content.is_empty()
+                                })
+                            {
                                 message.tool_activities.push(activity);
                             } else {
                                 let new_len = self.messages.len();

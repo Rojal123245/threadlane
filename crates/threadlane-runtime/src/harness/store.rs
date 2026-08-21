@@ -1,4 +1,4 @@
-use super::types::{Entry, Record, ReduceError};
+use super::types::{Entry, Record, ReduceError, ReducedState};
 use crate::types::{AgentMessage, TokenUsage};
 use std::collections::BTreeSet;
 
@@ -101,6 +101,9 @@ impl SessionIdGenerator {
 /// must not expose a new entry or record through the read methods.
 pub trait SessionStore {
     fn session_id(&self) -> &str;
+    fn reduced_state(&self) -> Option<ReducedState> {
+        None
+    }
     fn next_sequence(&self) -> u64 {
         self.entries()
             .iter()
@@ -433,8 +436,14 @@ mod tests {
         let context = store.model_context("main").unwrap();
         assert_eq!(context.entries.len(), 3);
         assert_eq!(context.entries[0].id, prompt);
-        assert!(matches!(context.entries[1].message, AgentMessage::Assistant { .. }));
-        assert!(matches!(context.entries[2].message, AgentMessage::Tool { .. }));
+        assert!(matches!(
+            context.entries[1].message,
+            AgentMessage::Assistant { .. }
+        ));
+        assert!(matches!(
+            context.entries[2].message,
+            AgentMessage::Tool { .. }
+        ));
     }
 
     #[test]

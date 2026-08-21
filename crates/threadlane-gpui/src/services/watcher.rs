@@ -29,7 +29,11 @@ pub fn classify_path_change(root: &Path, path: &Path, kind: &EventKind) -> Chang
 
     for component in relative.components() {
         let name = component.as_os_str().to_string_lossy();
-        if name == "target" || name == "node_modules" || name == ".threadlane" || name == ".DS_Store" {
+        if name == "target"
+            || name == "node_modules"
+            || name == ".threadlane"
+            || name == ".DS_Store"
+        {
             return ChangeClassification::Ignored;
         }
         if name.ends_with(".tmp") || name.ends_with(".swp") || name.starts_with(".#") {
@@ -108,7 +112,8 @@ impl WorkspaceWatcher {
                 let mut files_dirty = false;
                 let mut has_pending = false;
                 let poll_interval = Duration::from_millis(50);
-                let debounce_steps = (debounce_duration.as_millis() / poll_interval.as_millis()).max(1) as usize;
+                let debounce_steps =
+                    (debounce_duration.as_millis() / poll_interval.as_millis()).max(1) as usize;
                 let mut settle_counter = 0;
 
                 loop {
@@ -225,10 +230,22 @@ mod tests {
         let ds_store = Path::new("/workspace/.DS_Store");
         let kind = EventKind::Modify(notify::event::ModifyKind::Any);
 
-        assert_eq!(classify_path_change(root, target_path, &kind), ChangeClassification::Ignored);
-        assert_eq!(classify_path_change(root, node_modules, &kind), ChangeClassification::Ignored);
-        assert_eq!(classify_path_change(root, threadlane, &kind), ChangeClassification::Ignored);
-        assert_eq!(classify_path_change(root, ds_store, &kind), ChangeClassification::Ignored);
+        assert_eq!(
+            classify_path_change(root, target_path, &kind),
+            ChangeClassification::Ignored
+        );
+        assert_eq!(
+            classify_path_change(root, node_modules, &kind),
+            ChangeClassification::Ignored
+        );
+        assert_eq!(
+            classify_path_change(root, threadlane, &kind),
+            ChangeClassification::Ignored
+        );
+        assert_eq!(
+            classify_path_change(root, ds_store, &kind),
+            ChangeClassification::Ignored
+        );
     }
 
     #[test]
@@ -236,7 +253,9 @@ mod tests {
         let root = Path::new("/workspace");
         let src_file = Path::new("/workspace/src/lib.rs");
 
-        let mod_kind = EventKind::Modify(notify::event::ModifyKind::Data(notify::event::DataChange::Content));
+        let mod_kind = EventKind::Modify(notify::event::ModifyKind::Data(
+            notify::event::DataChange::Content,
+        ));
         assert_eq!(
             classify_path_change(root, src_file, &mod_kind),
             ChangeClassification::GitContent

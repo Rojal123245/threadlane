@@ -9,8 +9,8 @@ use crate::compaction::{
 use crate::config::AgentConfig;
 use crate::events::AgentEvent;
 use crate::harness::{
-    ContextItemSource, ContextItemStatus, ContextManifestItem, ErrorCategory,
-    ProviderErrorSummary, ProviderOutcome, TraceString,
+    ContextItemSource, ContextItemStatus, ContextManifestItem, ErrorCategory, ProviderErrorSummary,
+    ProviderOutcome, TraceString,
 };
 use crate::provider::{ProviderTraceEvent, ProviderTraceRecorder};
 use crate::rules::{StreamRule, StreamRuleMonitor};
@@ -22,7 +22,9 @@ use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use threadlane_protocol::{ProviderPort, RuntimeRequest, RuntimeStreamEvent as StreamEvent, RuntimeToolCall as ToolCall};
+use threadlane_protocol::{
+    ProviderPort, RuntimeRequest, RuntimeStreamEvent as StreamEvent, RuntimeToolCall as ToolCall,
+};
 
 use tokio::sync::{broadcast, mpsc, Mutex};
 
@@ -43,7 +45,12 @@ async fn persist_messages_with(
 
 fn is_quota_or_rate_limit(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
-    error.contains("429") || error.contains("rate limit") || error.contains("rate_limit") || error.contains("quota") || error.contains("too many requests") || error.contains("resource_exhausted")
+    error.contains("429")
+        || error.contains("rate limit")
+        || error.contains("rate_limit")
+        || error.contains("quota")
+        || error.contains("too many requests")
+        || error.contains("resource_exhausted")
 }
 
 fn classify_provider_error(error: &str) -> ErrorCategory {
@@ -247,12 +254,14 @@ impl<'a> TurnDriver<'a> {
             let configured_tool_definitions = self.tool_dispatcher.configured_tool_definitions();
             let query = {
                 let turn = self.turn.lock().await;
-                turn.messages.iter().rev().find_map(|message| match message {
-                    AgentMessage::User { content } | AgentMessage::UserWithImages { content, .. } => {
-                        Some(content.clone())
-                    }
-                    _ => None,
-                })
+                turn.messages
+                    .iter()
+                    .rev()
+                    .find_map(|message| match message {
+                        AgentMessage::User { content }
+                        | AgentMessage::UserWithImages { content, .. } => Some(content.clone()),
+                        _ => None,
+                    })
             };
             let tool_definitions = crate::local_tool_router::shortlist_from_environment(
                 &query.unwrap_or_default(),
@@ -302,10 +311,9 @@ impl<'a> TurnDriver<'a> {
                         AgentMessage::Tool { .. } => ContextItemSource::Skill,
                         _ => ContextItemSource::Message,
                     };
-                    if let (Ok(role_trace), Ok(digest_trace)) = (
-                        TraceString::new(role),
-                        TraceString::new(digest),
-                    ) {
+                    if let (Ok(role_trace), Ok(digest_trace)) =
+                        (TraceString::new(role), TraceString::new(digest))
+                    {
                         items.push(ContextManifestItem {
                             position: idx,
                             source,
@@ -345,7 +353,8 @@ impl<'a> TurnDriver<'a> {
                 }
                 items
             };
-            let total_estimated_tokens: u32 = manifest_items.iter().map(|item| item.token_estimate).sum();
+            let total_estimated_tokens: u32 =
+                manifest_items.iter().map(|item| item.token_estimate).sum();
             let _ = self
                 .record_provider_trace(ProviderTraceEvent::ContextManifest {
                     attempt: turn_number as u32,

@@ -873,7 +873,10 @@ mod tests {
         assert_eq!(projected.cursor, 1);
         assert_eq!(projected.lane.as_deref(), Some("main"));
         assert_eq!(projected.run_id.as_deref(), Some("run-1"));
-        assert!(matches!(projected.event, crate::events::AgentEvent::MessageEnd { .. }));
+        assert!(matches!(
+            projected.event,
+            crate::events::AgentEvent::MessageEnd { .. }
+        ));
 
         let step_record = Record::StepAttempt {
             id: "step-1".into(),

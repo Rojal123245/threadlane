@@ -2,12 +2,12 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use threadlane_protocol::ProviderPort;
 use threadlane_runtime::{
     harness::JsonlStore, AgentEvent, AgentToolDefinition, PlanItem, PlanItemStatus, SessionPlan,
     ToolExecutor,
 };
 use tokio::sync::broadcast;
-use threadlane_protocol::ProviderPort;
 
 pub(crate) const UPDATE_PLAN_TOOL_NAME: &str = "update_plan";
 const MAX_PLAN_ITEMS: usize = 20;
@@ -339,7 +339,8 @@ impl ToolExecutor for GeneratePlanToolExecutor {
             .resolve_plan(&current_model)
             .to_string();
 
-        match generate_plan_with_model(self.provider_client.clone(), &plan_model, &parsed.objective).await
+        match generate_plan_with_model(self.provider_client.clone(), &plan_model, &parsed.objective)
+            .await
         {
             Ok(plan) => {
                 if let Err(error) = self.store.replace(plan.clone()) {
