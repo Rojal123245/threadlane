@@ -1197,6 +1197,7 @@ impl ChatListView {
                                 .ghost()
                                 .xsmall()
                                 .label("📋")
+                                .tooltip("Copy trajectory entry")
                                 .on_click({
                                     let text = format!(
                                         "seq:{:?} turn:{:?} category:{} summary:{} detail:{} lane:{:?} run:{:?} call:{:?}",
@@ -1217,6 +1218,7 @@ impl ChatListView {
                                 .ghost()
                                 .xsmall()
                                 .label("×")
+                                .tooltip("Close inspector")
                                 .on_click(move |_, _, cx| {
                                     close_view.update(cx, |this, cx| {
                                         this.selected_trajectory_index = None;

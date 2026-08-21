@@ -192,14 +192,14 @@ impl TerminalView {
 
         let bytes: Option<Vec<u8>> = if modifiers.control {
             match key.to_ascii_lowercase().as_str() {
-                "c" => Some(vec![0x03]),
-                "d" => Some(vec![0x04]),
-                "l" => Some(vec![0x0c]),
-                "z" => Some(vec![0x1a]),
                 "v" if !modifiers.platform => cx
                     .read_from_clipboard()
                     .and_then(|item| item.text())
                     .map(|text| text.into_bytes()),
+                letter if letter.len() == 1 && letter.as_bytes()[0].is_ascii_lowercase() => {
+                    // Convert Ctrl+<letter> to the standard terminal control character.
+                    Some(vec![letter.as_bytes()[0] - b'a' + 1])
+                }
                 _ => None,
             }
         } else {
@@ -280,6 +280,7 @@ impl Render for TerminalView {
                     .child(
                         Button::new("pty-terminal-clear")
                             .label("Clear")
+                            .tooltip("Clear terminal screen")
                             .ghost()
                             .xsmall()
                             .on_click(cx.listener(|this, _, _, cx| this.clear(cx))),
@@ -287,6 +288,7 @@ impl Render for TerminalView {
                     .child(
                         Button::new("pty-terminal-restart")
                             .label("Restart")
+                            .tooltip("Restart shell")
                             .ghost()
                             .xsmall()
                             .on_click(cx.listener(|this, _, _, cx| this.restart(cx))),

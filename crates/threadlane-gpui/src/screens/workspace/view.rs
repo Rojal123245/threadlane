@@ -11,7 +11,18 @@ use gpui_component::{
     v_flex, ActiveTheme, Icon, IconName, Root, Selectable, Sizable,
 };
 
-actions!(threadlane_workspace, [ToggleCommandPalette]);
+actions!(
+    threadlane_workspace,
+    [
+        ToggleCommandPalette,
+        ToggleSidebar,
+        ToggleRightPanel,
+        ToggleTerminal,
+        BeginNewTask,
+        OpenSettings,
+        CancelActiveGeneration,
+    ]
+);
 use threadlane_git::GitStatus;
 
 use crate::app::actions::AppAction;
@@ -31,6 +42,17 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-k", ToggleCommandPalette, None),
         KeyBinding::new("ctrl-k", ToggleCommandPalette, None),
+        KeyBinding::new("cmd-b", ToggleSidebar, None),
+        KeyBinding::new("ctrl-b", ToggleSidebar, None),
+        KeyBinding::new("cmd-r", ToggleRightPanel, None),
+        KeyBinding::new("ctrl-r", ToggleRightPanel, None),
+        KeyBinding::new("cmd-j", ToggleTerminal, None),
+        KeyBinding::new("ctrl-j", ToggleTerminal, None),
+        KeyBinding::new("cmd-n", BeginNewTask, None),
+        KeyBinding::new("ctrl-n", BeginNewTask, None),
+        KeyBinding::new("cmd-,", OpenSettings, None),
+        KeyBinding::new("ctrl-,", OpenSettings, None),
+        KeyBinding::new("escape", CancelActiveGeneration, None),
     ]);
 }
 
@@ -828,18 +850,15 @@ impl WorkspaceView {
                     .items_center()
                     .gap_2()
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .px_2()
-                            .py_0p5()
-                            .rounded_md()
-                            .bg(theme.muted)
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(Icon::new(IconName::Cpu).xsmall())
-                            .child(model_name.to_string()),
+                        Button::new("status-model-badge")
+                            .icon(IconName::Cpu)
+                            .label(model_name.to_string())
+                            .ghost()
+                            .xsmall()
+                            .tooltip("Switch model")
+                            .on_click(cx.listener(|this, _event, window, cx| {
+                                this.execute_palette_action("model", window, cx);
+                            })),
                     )
                     .child(
                         Button::new("status-terminal-toggle")
@@ -857,12 +876,98 @@ impl WorkspaceView {
                             } else {
                                 "Show terminal"
                             })
-                            .on_click(cx.listener(|this, _event, _window, cx| {
+                            .on_click(cx.listener(|this, _event, window, cx| {
                                 this.bottom_panel_visible = !this.bottom_panel_visible;
+                                if this.bottom_panel_visible {
+                                    let focus = this.terminal.read(cx).focus_handle(cx);
+                                    focus.focus(window, cx);
+                                }
                                 cx.notify();
                             })),
                     ),
             )
+    }
+
+    fn toggle_sidebar_action(
+        &mut self,
+        _: &ToggleSidebar,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidebar_collapsed = !self.sidebar_collapsed;
+        let inset = if self.sidebar_collapsed {
+            px(110.0)
+        } else {
+            px(14.0)
+        };
+        self.chat_list.update(cx, |chat, cx| {
+            chat.header_left_padding = inset;
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    fn toggle_right_panel_action(
+        &mut self,
+        _: &ToggleRightPanel,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.right_panel_visible = !self.right_panel_visible;
+        cx.notify();
+    }
+
+    fn toggle_terminal_action(
+        &mut self,
+        _: &ToggleTerminal,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.bottom_panel_visible = !self.bottom_panel_visible;
+        if self.bottom_panel_visible {
+            let focus = self.terminal.read(cx).focus_handle(cx);
+            focus.focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn begin_new_task_action(
+        &mut self,
+        _: &BeginNewTask,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.model.update(cx, |state, _cx| {
+            controller::dispatch(state, AppAction::BeginNewTask);
+        });
+        cx.notify();
+    }
+
+    fn open_settings_action(
+        &mut self,
+        _: &OpenSettings,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.model.update(cx, |state, _cx| {
+            controller::dispatch(state, AppAction::OpenSettings);
+        });
+        cx.notify();
+    }
+
+    fn cancel_active_generation_action(
+        &mut self,
+        _: &CancelActiveGeneration,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let is_generating = self.model.read(cx).is_generating;
+        if is_generating {
+            self.model.update(cx, |state, cx| {
+                controller::dispatch(state, AppAction::CancelGeneration);
+                cx.notify();
+            });
+        }
     }
 }
 
@@ -905,17 +1010,6 @@ impl Render for WorkspaceView {
                     .flex()
                     .flex_col()
                     .bg(theme.background)
-                    .child(
-                        div()
-                            .h(px(36.0))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .px_3()
-                            .text_sm()
-                            .text_color(theme.muted_foreground)
-                            .child("Terminal"),
-                    )
                     .child(div().flex_1().min_h_0().child(self.terminal.clone()));
 
                 v_resizable("workspace-main-bottom-split")
@@ -966,6 +1060,12 @@ impl Render for WorkspaceView {
             .w_full()
             .h_full()
             .on_action(cx.listener(Self::toggle_command_palette))
+            .on_action(cx.listener(Self::toggle_sidebar_action))
+            .on_action(cx.listener(Self::toggle_right_panel_action))
+            .on_action(cx.listener(Self::toggle_terminal_action))
+            .on_action(cx.listener(Self::begin_new_task_action))
+            .on_action(cx.listener(Self::open_settings_action))
+            .on_action(cx.listener(Self::cancel_active_generation_action))
             .bg(theme.background)
             .child(view_with_status_bar)
             .children((workspace_page == WorkspacePage::Chat).then(|| {

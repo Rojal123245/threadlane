@@ -385,7 +385,7 @@ impl SidebarView {
             .and_then(|g| g.pr.as_ref())
             .cloned();
 
-        let tooltip_text = if let Some(pr) = &pr_info {
+        let _tooltip_text = if let Some(pr) = &pr_info {
             format!(
                 "{}\n{}\nUpdated {}\nPR #{}: {} (CI: {}/{} passed, {} comments)",
                 session.title,
@@ -656,7 +656,7 @@ impl SidebarView {
                                         .compact()
                                         .opacity(0.0)
                                         .group_hover("session-card", |style| style.opacity(1.0))
-                                        .tooltip(tooltip_text)
+                                        .tooltip("Archive session")
                                         .on_click(
                                             move |_event, _window, cx| {
                                                 quick_settle_model.update(cx, |state, cx| {

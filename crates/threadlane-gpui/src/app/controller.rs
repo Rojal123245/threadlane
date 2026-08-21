@@ -11,7 +11,9 @@ pub(crate) fn dispatch(
 ) -> Option<SessionHydrationRequest> {
     match action {
         AppAction::AttachProject(path) => {
-            let _ = state.attach_project(path);
+            if let Err(error) = state.attach_project(path) {
+                state.session_status = Some(error);
+            }
         }
         AppAction::SelectSession {
             work_dir,
@@ -37,10 +39,14 @@ pub(crate) fn dispatch(
         AppAction::BeginNewTask => state.begin_new_task(),
         AppAction::SelectDraftProject(path) => state.select_draft_project(path),
         AppAction::SendPrompt(text) => {
-            let _ = state.send_prompt(text);
+            if let Err(error) = state.send_prompt(text) {
+                state.session_status = Some(error);
+            }
         }
         AppAction::SendPromptWithImages { text, images } => {
-            let _ = state.send_prompt_with_images(text, images);
+            if let Err(error) = state.send_prompt_with_images(text, images) {
+                state.session_status = Some(error);
+            }
         }
         AppAction::StageBusyMessage(text) => {
             let _ = state.stage_busy_message(text);
@@ -54,17 +60,23 @@ pub(crate) fn dispatch(
         AppAction::DismissPendingMessage => state.dismiss_pending_message(),
         AppAction::ToggleToolActivity(tool_call_id) => state.toggle_tool_activity(&tool_call_id),
         AppAction::CancelGeneration => {
-            let _ = state.cancel_generation();
+            if let Err(error) = state.cancel_generation() {
+                state.session_status = Some(error);
+            }
         }
         AppAction::SelectModel(model) => state.set_selected_model(model),
         AppAction::SelectReasoningEffort(effort) => state.set_reasoning_effort(effort),
         AppAction::OpenSettings => state.open_settings(),
         AppAction::CloseSettings => state.close_settings(),
         AppAction::SaveOpenAiKey(key) => {
-            let _ = state.save_openai_key(key);
+            if let Err(error) = state.save_openai_key(key) {
+                state.session_status = Some(format!("Failed to save OpenAI key: {error}"));
+            }
         }
         AppAction::SaveOpenCodeKey(key) => {
-            let _ = state.save_opencode_key(key);
+            if let Err(error) = state.save_opencode_key(key) {
+                state.session_status = Some(format!("Failed to save OpenCode key: {error}"));
+            }
         }
         AppAction::SetActiveCodexAccount(id) => {
             let _ = threadlane_auth::openai_auth::set_active_codex_account(&id);
