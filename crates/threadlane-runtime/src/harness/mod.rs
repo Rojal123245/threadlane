@@ -31,7 +31,7 @@ pub use events::{
 pub use hooks::{
     HookContext, HookEffect, HookFailure, HookHandler, HookKind, HookRegistry, HookRun,
 };
-pub use jsonl::JsonlStore;
+pub use jsonl::{read_transcript_page, JsonlStore, TranscriptCursor, TranscriptPage};
 pub use memory::MemoryStore;
 pub use procedure::{
     AbortProcedure, AssistantAttemptProcedure, CompactionProcedure, DeferredProcedure,

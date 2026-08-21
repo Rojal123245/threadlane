@@ -7,7 +7,7 @@ use serde::Deserialize;
 use std::collections::HashSet as IdSet;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
@@ -121,6 +121,164 @@ enum SessionLine {
     Entry(Entry),
     Known(KnownSessionRecord),
     Legacy(LegacySessionNode),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TranscriptCursor {
+    offset: u64,
+}
+
+impl TranscriptCursor {
+    pub(crate) fn new(offset: u64) -> Self {
+        Self { offset }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TranscriptPage {
+    pub messages: Vec<crate::types::AgentMessage>,
+    pub next_cursor: Option<TranscriptCursor>,
+    pub has_older: bool,
+}
+
+const TRANSCRIPT_READ_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Reads one chronological page of main-lane transcript messages by scanning
+/// backward from an opaque byte cursor. This deliberately avoids opening a
+/// `JsonlStore`: UI transcript order depends only on durable entry order.
+pub fn read_transcript_page(
+    path: impl AsRef<Path>,
+    cursor: Option<TranscriptCursor>,
+    minimum_messages: usize,
+) -> io::Result<TranscriptPage> {
+    if minimum_messages == 0 {
+        return Ok(TranscriptPage {
+            messages: Vec::new(),
+            next_cursor: cursor,
+            has_older: cursor.is_some(),
+        });
+    }
+    let path = path.as_ref();
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(TranscriptPage {
+                messages: Vec::new(),
+                next_cursor: None,
+                has_older: false,
+            });
+        }
+        Err(error) => return Err(error),
+    };
+    let file_len = file.metadata()?.len();
+    let requested_end = cursor.map_or(file_len, |cursor| cursor.offset.min(file_len));
+    let at_eof = cursor.is_none_or(|cursor| cursor.offset >= file_len);
+    let mut scan_end = if at_eof {
+        complete_jsonl_end(&mut file, requested_end)?
+    } else {
+        requested_end
+    };
+    let mut suffix = Vec::new();
+    let mut messages = Vec::new();
+    let mut next_offset = 0;
+
+    'chunks: while scan_end > 0 {
+        let chunk_start = scan_end.saturating_sub(TRANSCRIPT_READ_CHUNK_BYTES as u64);
+        let mut chunk = vec![0; (scan_end - chunk_start) as usize];
+        file.seek(SeekFrom::Start(chunk_start))?;
+        file.read_exact(&mut chunk)?;
+        let mut segment_end = chunk.len();
+
+        for newline in chunk
+            .iter()
+            .enumerate()
+            .rev()
+            .filter_map(|(index, byte)| (*byte == b'\n').then_some(index))
+        {
+            let mut line = chunk[newline + 1..segment_end].to_vec();
+            if !suffix.is_empty() {
+                line.extend_from_slice(&suffix);
+                suffix.clear();
+            }
+            segment_end = newline;
+            if line.is_empty() {
+                continue;
+            }
+            let line_start = chunk_start + newline as u64 + 1;
+            next_offset = line_start.saturating_sub(1);
+            if let Some(message) = transcript_message(path, line_start, &line)? {
+                let starts_turn = message.is_user();
+                messages.push(message);
+                if messages.len() >= minimum_messages && starts_turn {
+                    break 'chunks;
+                }
+            }
+        }
+
+        let mut prefix = chunk[..segment_end].to_vec();
+        prefix.extend_from_slice(&suffix);
+        suffix = prefix;
+        scan_end = chunk_start;
+    }
+
+    if scan_end == 0 && !suffix.is_empty() {
+        next_offset = 0;
+        if let Some(message) = transcript_message(path, 0, &suffix)? {
+            messages.push(message);
+        }
+    }
+
+    messages.reverse();
+    let next_cursor = (next_offset > 0).then(|| TranscriptCursor::new(next_offset));
+    Ok(TranscriptPage {
+        messages,
+        next_cursor,
+        has_older: next_cursor.is_some(),
+    })
+}
+
+fn complete_jsonl_end(file: &mut fs::File, end: u64) -> io::Result<u64> {
+    if end == 0 {
+        return Ok(0);
+    }
+    file.seek(SeekFrom::Start(end - 1))?;
+    let mut final_byte = [0];
+    file.read_exact(&mut final_byte)?;
+    if final_byte[0] == b'\n' {
+        return Ok(end);
+    }
+    let mut scan_end = end;
+    while scan_end > 0 {
+        let start = scan_end.saturating_sub(TRANSCRIPT_READ_CHUNK_BYTES as u64);
+        let mut chunk = vec![0; (scan_end - start) as usize];
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(&mut chunk)?;
+        if let Some(newline) = chunk.iter().rposition(|byte| *byte == b'\n') {
+            return Ok(start + newline as u64 + 1);
+        }
+        scan_end = start;
+    }
+    Ok(0)
+}
+
+fn transcript_message(
+    path: &Path,
+    offset: u64,
+    line: &[u8],
+) -> io::Result<Option<crate::types::AgentMessage>> {
+    let invalid = |error: &dyn std::fmt::Display| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} byte {offset}: {error}", path.display()),
+        )
+    };
+    let line = std::str::from_utf8(line).map_err(|error| invalid(&error))?;
+    let parsed: SessionLine = serde_json::from_str(line).map_err(|error| invalid(&error))?;
+    Ok(match parsed {
+        SessionLine::Entry(entry) if entry.lane == "main" => Some(entry.message),
+        SessionLine::Legacy(node) => Some(node.message),
+        _ => None,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -863,7 +1021,7 @@ fn invalid_line(path: &Path, line: usize, error: impl std::fmt::Display) -> io::
 
 #[cfg(test)]
 mod tests {
-    use super::{read_entries, SyncPolicy};
+    use super::{read_entries, read_transcript_page, SyncPolicy, TranscriptCursor};
     use crate::harness::{
         AgentHarness, ContextItemSource, ContextItemStatus, ContextManifestItem, HarnessEventHub,
         JsonlStore, Record, Reducer, SessionStore, TraceString,
@@ -882,6 +1040,167 @@ mod tests {
             },
             false,
         )
+    }
+
+    fn transcript_entry(index: usize, message: AgentMessage) -> crate::harness::Entry {
+        crate::harness::Entry::new(
+            format!("entry-{index}"),
+            None,
+            "main",
+            index as u64 + 1,
+            index as u64 + 1,
+            message,
+            false,
+        )
+    }
+
+    fn assistant(content: impl Into<String>) -> AgentMessage {
+        AgentMessage::Assistant {
+            content: Some(content.into()),
+            tool_calls: None,
+            stop_reason: None,
+            deferred_handle: None,
+        }
+    }
+
+    fn write_transcript(path: &std::path::Path, messages: Vec<AgentMessage>) {
+        let data = messages
+            .into_iter()
+            .enumerate()
+            .map(|(index, message)| {
+                serde_json::to_string(&transcript_entry(index, message)).unwrap()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(path, format!("{data}\n")).unwrap();
+    }
+
+    #[test]
+    fn transcript_page_reads_newest_turn_then_continues_backward() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        write_transcript(
+            &path,
+            (0..6)
+                .flat_map(|turn| {
+                    [
+                        AgentMessage::user(format!("user-{turn}"), Vec::new()),
+                        assistant(format!("assistant-{turn}")),
+                    ]
+                })
+                .collect(),
+        );
+
+        let newest = read_transcript_page(&path, None, 4).unwrap();
+        assert_eq!(
+            newest.messages,
+            vec![
+                AgentMessage::user("user-4", Vec::new()),
+                assistant("assistant-4"),
+                AgentMessage::user("user-5", Vec::new()),
+                assistant("assistant-5"),
+            ]
+        );
+        assert!(newest.has_older);
+
+        let older = read_transcript_page(&path, newest.next_cursor, 4).unwrap();
+        assert_eq!(
+            older.messages,
+            vec![
+                AgentMessage::user("user-2", Vec::new()),
+                assistant("assistant-2"),
+                AgentMessage::user("user-3", Vec::new()),
+                assistant("assistant-3"),
+            ]
+        );
+        assert!(older.has_older);
+    }
+
+    #[test]
+    fn transcript_page_expands_to_the_start_of_a_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        write_transcript(
+            &path,
+            vec![
+                AgentMessage::user("older", Vec::new()),
+                assistant("older answer"),
+                AgentMessage::user("current", Vec::new()),
+                AgentMessage::Custom {
+                    custom_type: "thinking".into(),
+                    payload: serde_json::json!({"text": "reasoning"}),
+                },
+                assistant("current answer"),
+            ],
+        );
+
+        let page = read_transcript_page(&path, None, 2).unwrap();
+
+        assert_eq!(page.messages.len(), 3);
+        assert_eq!(page.messages[0], AgentMessage::user("current", Vec::new()));
+    }
+
+    #[test]
+    fn transcript_page_reads_legacy_nodes_and_ignores_torn_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let legacy = serde_json::json!({
+            "id": "legacy-1",
+            "parent_id": null,
+            "timestamp": 1,
+            "message": AgentMessage::user("legacy", Vec::new()),
+        });
+        std::fs::write(&path, format!("{}\n{{\"id\":", legacy)).unwrap();
+
+        let page = read_transcript_page(&path, None, 1).unwrap();
+
+        assert_eq!(
+            page.messages,
+            vec![AgentMessage::user("legacy", Vec::new())]
+        );
+        assert!(!page.has_older);
+    }
+
+    #[test]
+    fn transcript_page_cursor_is_clamped_after_file_shrink() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        write_transcript(
+            &path,
+            vec![AgentMessage::user("first", Vec::new()), assistant("second")],
+        );
+
+        let page = read_transcript_page(&path, Some(TranscriptCursor::new(u64::MAX)), 2).unwrap();
+
+        assert_eq!(page.messages.len(), 2);
+    }
+
+    #[test]
+    fn transcript_page_does_not_parse_an_unrequested_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut data = vec![b'x'; super::TRANSCRIPT_READ_CHUNK_BYTES * 2];
+        data.push(b'\n');
+        for (index, message) in [
+            AgentMessage::user("recent", Vec::new()),
+            assistant("recent answer"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            data.extend_from_slice(
+                serde_json::to_string(&transcript_entry(index, message))
+                    .unwrap()
+                    .as_bytes(),
+            );
+            data.push(b'\n');
+        }
+        std::fs::write(&path, data).unwrap();
+
+        let page = read_transcript_page(&path, None, 2).unwrap();
+
+        assert_eq!(page.messages.len(), 2);
+        assert!(page.has_older);
     }
 
     #[test]
