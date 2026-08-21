@@ -218,6 +218,10 @@ impl WorkspaceView {
             })
             .detach();
 
+            let right_panel_sub = cx.observe(&right_panel, |_this: &mut Self, _panel, cx| {
+                cx.notify();
+            });
+
             Self {
                 model,
                 sidebar,
@@ -238,7 +242,7 @@ impl WorkspaceView {
                 bottom_panel_resizable_state,
                 git_event_tx,
                 updater_tx,
-                _subscriptions: vec![sub],
+                _subscriptions: vec![sub, right_panel_sub],
             }
         });
 
@@ -281,6 +285,33 @@ impl WorkspaceView {
         self.right_panel_visible = true;
         self.right_panel.update(cx, |panel, cx| {
             panel.open_review(cx);
+        });
+        self.refresh_git_status(cx);
+        cx.notify();
+    }
+
+    fn open_git_branches(&mut self, cx: &mut Context<Self>) {
+        self.right_panel_visible = true;
+        self.right_panel.update(cx, |panel, cx| {
+            panel.open_branch_popover(cx);
+        });
+        self.refresh_git_status(cx);
+        cx.notify();
+    }
+
+    fn open_git_new_branch(&mut self, cx: &mut Context<Self>) {
+        self.right_panel_visible = true;
+        self.right_panel.update(cx, |panel, cx| {
+            panel.open_new_branch_dialog(cx);
+        });
+        self.refresh_git_status(cx);
+        cx.notify();
+    }
+
+    fn open_git_merge(&mut self, cx: &mut Context<Self>) {
+        self.right_panel_visible = true;
+        self.right_panel.update(cx, |panel, cx| {
+            panel.open_merge_dialog(cx);
         });
         self.refresh_git_status(cx);
         cx.notify();
@@ -390,6 +421,15 @@ impl WorkspaceView {
                 .detach();
             }
             "git" => self.open_git_review(cx),
+            "git_branch" => self.open_git_branches(cx),
+            "git_new_branch" => self.open_git_new_branch(cx),
+            "git_merge" => self.open_git_merge(cx),
+            "git_pull" => {
+                self.open_git_review(cx);
+                self.right_panel.update(cx, |panel, cx| {
+                    panel.run_git_action(crate::screens::right_panel::GitAction::Pull, window, cx);
+                });
+            }
             "settings" => {
                 model.update(cx, |state, _cx| {
                     controller::dispatch(state, AppAction::OpenSettings);
@@ -608,7 +648,7 @@ impl WorkspaceView {
         let model = self.model.clone();
         let state = model.read(cx);
 
-        let commands: [(&str, &str, &str, IconName, &[&str]); 9] = [
+        let commands: [(&str, &str, &str, IconName, &[&str]); 13] = [
             (
                 "New Task",
                 "Start a fresh session",
@@ -650,6 +690,34 @@ impl WorkspaceView {
                 "git",
                 IconName::Github,
                 &["git", "diff", "review", "commit", "stage"],
+            ),
+            (
+                "Git: Switch Branch",
+                "Switch or checkout a Git branch",
+                "git_branch",
+                IconName::Github,
+                &["git", "branch", "switch", "checkout"],
+            ),
+            (
+                "Git: New Branch",
+                "Create a new branch from current HEAD",
+                "git_new_branch",
+                IconName::Plus,
+                &["git", "branch", "new", "create"],
+            ),
+            (
+                "Git: Merge Branch",
+                "Merge another branch into current branch",
+                "git_merge",
+                IconName::Redo,
+                &["git", "merge", "branch", "integrate"],
+            ),
+            (
+                "Git: Pull Origin",
+                "Pull latest commits from remote origin",
+                "git_pull",
+                IconName::Redo,
+                &["git", "pull", "origin", "fetch", "sync"],
             ),
             (
                 "Toggle Sidebar",
@@ -898,9 +966,9 @@ impl WorkspaceView {
                             .label(format!("{active_project} · {branch}"))
                             .ghost()
                             .xsmall()
-                            .tooltip("Browse project files")
+                            .tooltip("Switch or manage Git branches")
                             .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.open_git_files(cx);
+                                this.open_git_branches(cx);
                             })),
                     )
                     .children((dirty_count > 0).then(|| {
@@ -1090,7 +1158,6 @@ impl Render for WorkspaceView {
             let fallback = self.fallback_terminal(cx);
             (vec![fallback.clone()], 0, fallback)
         };
-        let theme = cx.theme().colors;
         let sidebar_tooltip = if self.sidebar_collapsed {
             "Expand sidebar"
         } else {
@@ -1361,6 +1428,10 @@ impl Render for WorkspaceView {
             .child(div().flex_1().min_h_0().child(page_content))
             .child(self.render_status_bar(cx));
 
+        let git_dialog_layer = self.right_panel.update(cx, |panel, cx| {
+            panel.render_git_dialog_layer(cx)
+        });
+
         div()
             .relative()
             .flex()
@@ -1441,6 +1512,7 @@ impl Render for WorkspaceView {
                 self.command_palette_open
                     .then(|| self.render_command_palette(cx)),
             )
+            .children(git_dialog_layer)
             .children(self.render_update_notice(cx))
             .children(Root::render_dialog_layer(window, cx))
             .children(Root::render_notification_layer(window, cx))

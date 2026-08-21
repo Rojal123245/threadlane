@@ -18,7 +18,7 @@ use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::tree::{Tree, TreeEvent, TreeItem, TreeState};
 use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable, WindowExt};
-use threadlane_git::{GitFile, GitStatus};
+use threadlane_git::{GitBranchInfo, GitFile, GitStatus};
 
 use crate::services::watcher::WorkspaceWatcher;
 use crate::state::AppState;
@@ -42,11 +42,6 @@ fn normalize_generated_commit_message(raw: &str) -> String {
         unquoted.to_string()
     };
     without_fences
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 fn detect_language(path_str: &str) -> &'static str {
@@ -107,11 +102,18 @@ impl Surface {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitAction {
     Commit,
     CommitAndPush,
     Push,
+    Pull,
+    Fetch,
+    Checkout(String),
+    CheckoutStash(String),
+    CheckoutCarry(String),
+    CreateBranch(String),
+    Merge(String),
 }
 
 #[derive(Clone, Debug)]
@@ -158,6 +160,17 @@ pub struct RightPanelView {
     git_busy: bool,
     git_message_pending: bool,
     git_feedback: Option<String>,
+    branch_popover_open: bool,
+    branch_filter_input: Entity<InputState>,
+    new_branch_dialog_open: bool,
+    new_branch_name_input: Entity<InputState>,
+    merge_dialog_open: bool,
+    merge_filter_input: Entity<InputState>,
+    merge_selected_branch: Option<String>,
+    switch_dialog_open: bool,
+    switch_target_branch: Option<String>,
+    switch_stash_mode: bool,
+    last_fetched_time: Option<std::time::Instant>,
     document_title: Option<String>,
     document_state: Entity<TextViewState>,
     editor_state: Option<Entity<EditorState>>,
@@ -180,6 +193,12 @@ impl RightPanelView {
         let tree_state = cx.new(|cx| TreeState::new(cx));
         let commit_message_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Summary (required)"));
+        let branch_filter_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Filter branches…"));
+        let new_branch_name_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("e.g. feature/new-workflow"));
+        let merge_filter_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Filter branches to merge…"));
         let (event_tx, event_rx) = mpsc::channel();
 
         cx.spawn(async move |this, cx| loop {
@@ -230,6 +249,17 @@ impl RightPanelView {
             git_busy: false,
             git_message_pending: false,
             git_feedback: None,
+            branch_popover_open: false,
+            branch_filter_input,
+            new_branch_dialog_open: false,
+            new_branch_name_input,
+            merge_dialog_open: false,
+            merge_filter_input,
+            merge_selected_branch: None,
+            switch_dialog_open: false,
+            switch_target_branch: None,
+            switch_stash_mode: true,
+            last_fetched_time: None,
             document_title: None,
             document_state,
             editor_state: None,
@@ -284,6 +314,27 @@ impl RightPanelView {
 
     pub(crate) fn open_review(&mut self, cx: &mut Context<Self>) {
         self.open_surface(Surface::Review, cx);
+    }
+
+    pub(crate) fn open_branch_popover(&mut self, cx: &mut Context<Self>) {
+        self.open_surface(Surface::Review, cx);
+        self.branch_popover_open = true;
+        cx.notify();
+    }
+
+    pub(crate) fn open_new_branch_dialog(&mut self, cx: &mut Context<Self>) {
+        self.open_surface(Surface::Review, cx);
+        self.new_branch_dialog_open = true;
+        self.branch_popover_open = false;
+        cx.notify();
+    }
+
+    pub(crate) fn open_merge_dialog(&mut self, cx: &mut Context<Self>) {
+        self.open_surface(Surface::Review, cx);
+        self.merge_dialog_open = true;
+        self.merge_selected_branch = None;
+        self.branch_popover_open = false;
+        cx.notify();
     }
 
     pub(crate) fn open_files(&mut self, cx: &mut Context<Self>) {
@@ -495,6 +546,12 @@ impl RightPanelView {
                         self.review_files = status.files;
                         self.review_error = None;
                         self.should_clear_commit_message = true;
+                        self.branch_popover_open = false;
+                        self.new_branch_dialog_open = false;
+                        self.merge_dialog_open = false;
+                        self.switch_dialog_open = false;
+                        self.switch_target_branch = None;
+                        self.last_fetched_time = Some(std::time::Instant::now());
                         self.git_feedback = Some("Git action completed successfully.".into());
                     }
                     Err(error) => {
@@ -581,7 +638,7 @@ impl RightPanelView {
         cx.notify();
     }
 
-    fn run_git_action(
+    pub(crate) fn run_git_action(
         &mut self,
         action: GitAction,
         window: &mut Window,
@@ -618,33 +675,66 @@ impl RightPanelView {
         }
 
         self.git_busy = true;
-        let feedback = match action {
-            GitAction::Commit => "Committing…",
-            GitAction::CommitAndPush => "Committing and pushing…",
-            GitAction::Push => "Pushing…",
+        let feedback = match &action {
+            GitAction::Commit => "Committing…".to_string(),
+            GitAction::CommitAndPush => "Committing and pushing…".to_string(),
+            GitAction::Push => "Pushing…".to_string(),
+            GitAction::Pull => "Pulling from origin…".to_string(),
+            GitAction::Fetch => "Fetching origin…".to_string(),
+            GitAction::Checkout(b) => format!("Switching to {b}…"),
+            GitAction::CheckoutStash(b) => format!("Stashing changes & switching to {b}…"),
+            GitAction::CheckoutCarry(b) => format!("Switching to {b} with changes…"),
+            GitAction::CreateBranch(b) => format!("Creating branch {b}…"),
+            GitAction::Merge(b) => format!("Merging {b}…"),
         };
-        self.git_feedback = Some(feedback.into());
+        self.git_feedback = Some(feedback.clone());
         window.push_notification(Notification::info(feedback), cx);
         let tx = self.event_tx.clone();
         std::thread::spawn(move || {
             let result = (|| {
-                let status = threadlane_git::inspect(&work_dir).map_err(|e| e.to_string())?;
-                if matches!(action, GitAction::Commit | GitAction::CommitAndPush) {
-                    let selected_set: HashSet<&str> =
-                        selected_paths.iter().map(String::as_str).collect();
-                    for file in &status.files {
-                        if selected_set.contains(file.path.as_str()) {
-                            threadlane_git::stage_file(&work_dir, &file.path)
-                                .map_err(|e| e.to_string())?;
-                        } else {
-                            let _ = threadlane_git::unstage_file(&work_dir, &file.path);
+                match &action {
+                    GitAction::Commit | GitAction::CommitAndPush => {
+                        let status = threadlane_git::inspect(&work_dir).map_err(|e| e.to_string())?;
+                        let selected_set: HashSet<&str> =
+                            selected_paths.iter().map(String::as_str).collect();
+                        for file in &status.files {
+                            if selected_set.contains(file.path.as_str()) {
+                                threadlane_git::stage_file(&work_dir, &file.path)
+                                    .map_err(|e| e.to_string())?;
+                            } else {
+                                let _ = threadlane_git::unstage_file(&work_dir, &file.path);
+                            }
+                        }
+                        threadlane_git::commit_staged(&work_dir, &message)
+                            .map_err(|e| e.to_string())?;
+                        if matches!(action, GitAction::CommitAndPush) {
+                            threadlane_git::push(&work_dir).map_err(|e| e.to_string())?;
                         }
                     }
-                    threadlane_git::commit_staged(&work_dir, &message)
-                        .map_err(|e| e.to_string())?;
-                }
-                if matches!(action, GitAction::CommitAndPush | GitAction::Push) {
-                    threadlane_git::push(&work_dir).map_err(|e| e.to_string())?;
+                    GitAction::Push => {
+                        threadlane_git::push(&work_dir).map_err(|e| e.to_string())?;
+                    }
+                    GitAction::Pull => {
+                        threadlane_git::pull(&work_dir).map_err(|e| e.to_string())?;
+                    }
+                    GitAction::Fetch => {
+                        threadlane_git::fetch(&work_dir).map_err(|e| e.to_string())?;
+                    }
+                    GitAction::Checkout(branch) => {
+                        threadlane_git::checkout(&work_dir, branch).map_err(|e| e.to_string())?;
+                    }
+                    GitAction::CheckoutStash(branch) => {
+                        threadlane_git::checkout_with_stash(&work_dir, branch).map_err(|e| e.to_string())?;
+                    }
+                    GitAction::CheckoutCarry(branch) => {
+                        threadlane_git::checkout_carrying_changes(&work_dir, branch).map_err(|e| e.to_string())?;
+                    }
+                    GitAction::CreateBranch(branch) => {
+                        threadlane_git::create_branch(&work_dir, branch).map_err(|e| e.to_string())?;
+                    }
+                    GitAction::Merge(branch) => {
+                        threadlane_git::merge(&work_dir, branch).map_err(|e| e.to_string())?;
+                    }
                 }
                 threadlane_git::inspect(&work_dir).map_err(|e| e.to_string())
             })();
@@ -1024,21 +1114,81 @@ impl RightPanelView {
                 .as_ref()
                 .is_some_and(|status| status.ahead > 0);
 
+        let last_fetched_str = if let Some(instant) = self.last_fetched_time {
+            let secs = instant.elapsed().as_secs();
+            if secs < 60 {
+                "Last fetched just now".to_string()
+            } else if secs < 3600 {
+                format!("Last fetched {} minutes ago", secs / 60)
+            } else {
+                format!("Last fetched {} hours ago", secs / 3600)
+            }
+        } else {
+            "Fetch latest changes".to_string()
+        };
+
+        let behind = self.git_status.as_ref().map_or(0, |s| s.behind);
+        let ahead = self.git_status.as_ref().map_or(0, |s| s.ahead);
+
+        let sync_button = if behind > 0 {
+            Button::new("git-sync-action-btn")
+                .icon(IconName::ArrowDown)
+                .label(format!("Pull ({behind})"))
+                .primary()
+                .small()
+                .tooltip("Pull latest changes from origin")
+                .on_click(cx.listener(|this, _event, window, cx| {
+                    this.run_git_action(GitAction::Pull, window, cx);
+                }))
+        } else if ahead > 0 {
+            Button::new("git-sync-action-btn")
+                .icon(IconName::ArrowUp)
+                .label(format!("Push ({ahead})"))
+                .primary()
+                .small()
+                .tooltip("Push local commits to origin")
+                .on_click(cx.listener(|this, _event, window, cx| {
+                    this.run_git_action(GitAction::Push, window, cx);
+                }))
+        } else {
+            Button::new("git-sync-action-btn")
+                .icon(IconName::Redo)
+                .label("Fetch")
+                .ghost()
+                .small()
+                .tooltip(last_fetched_str)
+                .on_click(cx.listener(|this, _event, window, cx| {
+                    this.run_git_action(GitAction::Fetch, window, cx);
+                }))
+        };
+
         let branch_header = div()
             .flex()
             .items_center()
             .justify_between()
             .px_3()
             .py_2()
+            .gap_2()
             .border_b_1()
             .border_color(theme.border)
             .bg(theme.muted.opacity(0.3))
             .child(
                 div()
+                    .id("git-branch-selector-btn")
                     .flex()
                     .items_center()
                     .gap_2()
                     .min_w_0()
+                    .flex_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.muted.opacity(0.6)))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.branch_popover_open = !this.branch_popover_open;
+                        cx.notify();
+                    }))
                     .child(
                         div()
                             .size(px(16.0))
@@ -1055,18 +1205,22 @@ impl RightPanelView {
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.foreground)
                             .child(branch.to_string()),
+                    )
+                    .child(
+                        div()
+                            .size(px(14.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(theme.muted_foreground)
+                            .child(if self.branch_popover_open {
+                                IconName::ChevronUp
+                            } else {
+                                IconName::ChevronDown
+                            }),
                     ),
             )
-            .child(
-                Button::new("refresh-review-btn")
-                    .icon(IconName::Redo)
-                    .tooltip("Refresh Git Status")
-                    .ghost()
-                    .xsmall()
-                    .on_click(cx.listener(|this, _event, _window, cx| {
-                        this.refresh_review(cx);
-                    })),
-            );
+            .child(sync_button);
 
         let pr_card = self.git_status.as_ref().and_then(|s| s.pr.as_ref()).map(|pr| {
             let pr_url = pr.url.clone();
@@ -1659,17 +1813,907 @@ impl RightPanelView {
                     }),
             );
 
+        let review_body = if self.branch_popover_open {
+            self.render_branch_manager(cx).into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .children(pr_card)
+                .children(selection_bar)
+                .child(file_list_content)
+                .child(commit_footer)
+                .into_any_element()
+        };
+
         div()
+            .flex_1()
+            .min_h_0()
+            .relative()
+            .flex()
+            .flex_col()
+            .child(branch_header)
+            .child(review_body)
+            .into_any_element()
+    }
+
+    fn render_branch_manager(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().colors;
+        let filter_text = self.branch_filter_input.read(cx).value().trim().to_lowercase();
+        let current_branch = self.git_status.as_ref().and_then(|s| s.branch.as_deref()).unwrap_or("main");
+
+        let branch_details = self.git_status.as_ref().map(|s| &s.branch_details);
+        let default_branch_name = self.git_status.as_ref().and_then(|s| s.default_branch.as_deref()).unwrap_or("main");
+
+        let all_branches: Vec<GitBranchInfo> = if let Some(details) = branch_details {
+            details.clone()
+        } else if let Some(status) = &self.git_status {
+            status.branches.iter().filter(|b| b.as_str() != "origin" && !b.ends_with("/HEAD")).map(|b| GitBranchInfo {
+                name: b.clone(),
+                is_current: b == current_branch,
+                is_default: b == default_branch_name,
+                is_remote: b.starts_with("origin/"),
+                relative_time: String::new(),
+                committer_date_unix: 0,
+                upstream: None,
+            }).collect()
+        } else {
+            Vec::new()
+        };
+
+        let filtered_branches: Vec<GitBranchInfo> = all_branches
+            .into_iter()
+            .filter(|b| b.name != "origin" && !b.name.ends_with("/HEAD") && (filter_text.is_empty() || b.name.to_lowercase().contains(&filter_text)))
+            .collect();
+
+        let default_branches: Vec<GitBranchInfo> = filtered_branches
+            .iter()
+            .filter(|b| b.is_default && !b.is_remote)
+            .cloned()
+            .collect();
+
+        let recent_branches: Vec<GitBranchInfo> = filtered_branches
+            .iter()
+            .filter(|b| !b.is_default && !b.is_remote)
+            .cloned()
+            .collect();
+
+        let other_branches: Vec<GitBranchInfo> = filtered_branches
+            .iter()
+            .filter(|b| b.is_remote)
+            .cloned()
+            .collect();
+
+        let current_branch_str = current_branch.to_string();
+
+        div()
+            .id("git-branch-manager")
             .flex_1()
             .min_h_0()
             .flex()
             .flex_col()
-            .child(branch_header)
-            .children(pr_card)
-            .children(selection_bar)
-            .child(file_list_content)
-            .child(commit_footer)
-            .into_any_element()
+            .bg(theme.title_bar)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .p_3()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .px_2()
+                            .h(px(32.0))
+                            .rounded_md()
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.background)
+                            .child(
+                                div()
+                                    .size(px(14.0))
+                                    .text_color(theme.muted_foreground)
+                                    .child(IconName::Search),
+                            )
+                            .child(
+                                div().flex_1().child(
+                                    Input::new(&self.branch_filter_input)
+                                        .appearance(false)
+                                        .bordered(false),
+                                ),
+                            ),
+                    )
+                    .child(
+                        Button::new("open-new-branch-modal-btn")
+                            .icon(IconName::Plus)
+                            .label("New Branch")
+                            .outline()
+                            .small()
+                            .tooltip("Create a new branch")
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.new_branch_dialog_open = true;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("close-branch-manager-btn")
+                            .icon(IconName::Close)
+                            .ghost()
+                            .small()
+                            .tooltip("Back to review")
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.branch_popover_open = false;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .p_3()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .id("quick-merge-banner")
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .px_2p5()
+                            .py_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.muted.opacity(0.35))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.muted.opacity(0.7)))
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.merge_dialog_open = true;
+                                this.merge_selected_branch = None;
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .size(px(16.0))
+                                            .text_color(theme.primary)
+                                            .child(Icon::default().path("icons/git/branch.svg")),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme.foreground)
+                                            .child(format!("Choose a branch to merge into {current_branch_str}…")),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .size(px(14.0))
+                                    .text_color(theme.muted_foreground)
+                                    .child(IconName::ChevronRight),
+                            ),
+                    )
+                    .when(!default_branches.is_empty(), |el| {
+                        el.child(self.render_branch_section("DEFAULT BRANCH", default_branches, cx))
+                    })
+                    .when(!recent_branches.is_empty(), |el| {
+                        el.child(self.render_branch_section("RECENT BRANCHES", recent_branches, cx))
+                    })
+                    .when(!other_branches.is_empty(), |el| {
+                        el.child(self.render_branch_section("OTHER BRANCHES", other_branches, cx))
+                    }),
+            )
+    }
+
+    fn render_branch_section(
+        &self,
+        title: &'static str,
+        branches: Vec<GitBranchInfo>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme().colors;
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(theme.muted_foreground)
+                    .px_1()
+                    .pb_0p5()
+                    .child(title),
+            )
+            .children(branches.into_iter().map(|branch| {
+                let name = branch.name.clone();
+                let is_current = branch.is_current;
+                let rel_time = branch.relative_time.clone();
+                let branch_name_for_click = name.clone();
+                div()
+                    .id(SharedString::from(format!("branch-row-{}", name)))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .px_2p5()
+                    .py_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .bg(if is_current {
+                        theme.muted.opacity(0.7)
+                    } else {
+                        gpui::transparent_black()
+                    })
+                    .hover(|s| s.bg(theme.muted))
+                    .on_click(cx.listener(move |this, _event, window, cx| {
+                        if !is_current {
+                            let has_dirty = this.git_status.as_ref().map_or(false, |s| !s.files.is_empty());
+                            if has_dirty {
+                                this.switch_target_branch = Some(branch_name_for_click.clone());
+                                this.switch_dialog_open = true;
+                                this.switch_stash_mode = true;
+                                cx.notify();
+                            } else {
+                                this.run_git_action(GitAction::Checkout(branch_name_for_click.clone()), window, cx);
+                                this.branch_popover_open = false;
+                            }
+                        }
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .min_w_0()
+                            .flex_1()
+                            .child(
+                                div()
+                                    .size(px(16.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(if is_current {
+                                        theme.primary
+                                    } else {
+                                        theme.muted_foreground
+                                    })
+                                    .child(if is_current {
+                                        Icon::new(IconName::Check)
+                                    } else {
+                                        Icon::default().path("icons/git/branch.svg")
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_xs()
+                                    .font_weight(if is_current {
+                                        FontWeight::BOLD
+                                    } else {
+                                        FontWeight::MEDIUM
+                                    })
+                                    .text_color(if is_current {
+                                        theme.foreground
+                                    } else {
+                                        theme.foreground.opacity(0.9)
+                                    })
+                                    .child(name),
+                            )
+                            .children(is_current.then(|| {
+                                Tag::new()
+                                    .child("current")
+                                    .with_variant(TagVariant::Info)
+                                    .small()
+                            })),
+                    )
+                    .children((!rel_time.is_empty()).then(|| {
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(rel_time)
+                    }))
+            }))
+    }
+
+    pub(crate) fn close_all_git_dialogs(&mut self) {
+        self.new_branch_dialog_open = false;
+        self.merge_dialog_open = false;
+        self.merge_selected_branch = None;
+        self.switch_dialog_open = false;
+        self.switch_target_branch = None;
+    }
+
+    pub(crate) fn render_git_dialog_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.new_branch_dialog_open {
+            Some(self.render_new_branch_dialog(cx).into_any_element())
+        } else if self.merge_dialog_open {
+            Some(self.render_merge_dialog(cx).into_any_element())
+        } else if self.switch_dialog_open {
+            Some(self.render_switch_branch_dialog(cx).into_any_element())
+        } else {
+            None
+        }
+    }
+
+    fn render_new_branch_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().colors;
+        let current_branch = self.git_status.as_ref().and_then(|s| s.branch.as_deref()).unwrap_or("main").to_string();
+        let name = self.new_branch_name_input.read(cx).value().trim().to_string();
+        let can_create = !name.is_empty() && !self.git_busy;
+
+        div()
+            .id("new-branch-modal-backdrop")
+            .absolute()
+            .inset_0()
+            .bg(hsla(0.0, 0.0, 0.0, 0.6))
+            .flex()
+            .items_center()
+            .justify_center()
+            .p_4()
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _event, _window, cx| {
+                this.close_all_git_dialogs();
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .id("new-branch-dialog")
+                    .w(px(420.0))
+                    .p_5()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.title_bar)
+                    .shadow_xl()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .on_mouse_down(MouseButton::Left, |_event, _window, _cx| {})
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(theme.foreground)
+                                    .child("Create a branch"),
+                            )
+                            .child(
+                                Button::new("close-new-branch-dialog-btn")
+                                    .icon(IconName::Close)
+                                    .ghost()
+                                    .xsmall()
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.close_all_git_dialogs();
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("Based on")
+                            .child(
+                                Tag::new()
+                                    .child(current_branch)
+                                    .with_variant(TagVariant::Secondary)
+                                    .small(),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.foreground)
+                                    .child("Branch name"),
+                            )
+                            .child(
+                                div()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .bg(theme.background)
+                                    .child(
+                                        Input::new(&self.new_branch_name_input)
+                                            .bordered(false),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .gap_2()
+                            .pt_2()
+                            .child(
+                                Button::new("cancel-new-branch-btn")
+                                    .label("Cancel")
+                                    .ghost()
+                                    .small()
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.close_all_git_dialogs();
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("submit-new-branch-btn")
+                                    .label("Create Branch")
+                                    .primary()
+                                    .small()
+                                    .disabled(!can_create)
+                                    .on_click(cx.listener(move |this, _event, window, cx| {
+                                        let name = this.new_branch_name_input.read(cx).value().trim().to_string();
+                                        if !name.is_empty() {
+                                            this.run_git_action(GitAction::CreateBranch(name), window, cx);
+                                            this.close_all_git_dialogs();
+                                        }
+                                    })),
+                            ),
+                    ),
+            )
+    }
+
+    fn render_merge_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().colors;
+        let current_branch = self.git_status.as_ref().and_then(|s| s.branch.as_deref()).unwrap_or("main").to_string();
+        let filter = self.merge_filter_input.read(cx).value().trim().to_lowercase();
+
+        let branch_details = self.git_status.as_ref().map(|s| &s.branch_details);
+        let branches: Vec<GitBranchInfo> = if let Some(details) = branch_details {
+            details.iter().filter(|b| b.name != "origin" && !b.name.ends_with("/HEAD") && b.name != current_branch && (filter.is_empty() || b.name.to_lowercase().contains(&filter))).cloned().collect()
+        } else if let Some(status) = &self.git_status {
+            status.branches.iter().filter(|b| b.as_str() != "origin" && !b.ends_with("/HEAD") && b.as_str() != current_branch.as_str() && (filter.is_empty() || b.to_lowercase().contains(&filter))).map(|b| GitBranchInfo {
+                name: b.clone(),
+                is_current: false,
+                is_default: false,
+                is_remote: b.starts_with("origin/"),
+                relative_time: String::new(),
+                committer_date_unix: 0,
+                upstream: None,
+            }).collect()
+        } else {
+            Vec::new()
+        };
+
+        let selected = self.merge_selected_branch.clone();
+        let can_merge = selected.is_some() && !self.git_busy;
+
+        div()
+            .id("merge-branch-modal-backdrop")
+            .absolute()
+            .inset_0()
+            .bg(hsla(0.0, 0.0, 0.0, 0.6))
+            .flex()
+            .items_center()
+            .justify_center()
+            .p_4()
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _event, _window, cx| {
+                this.close_all_git_dialogs();
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .id("merge-branch-dialog")
+                    .w(px(460.0))
+                    .max_h(px(520.0))
+                    .p_5()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.title_bar)
+                    .shadow_xl()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .on_mouse_down(MouseButton::Left, |_event, _window, _cx| {})
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(theme.foreground)
+                                    .child(format!("Merge into {current_branch}")),
+                            )
+                            .child(
+                                Button::new("close-merge-dialog-btn")
+                                    .icon(IconName::Close)
+                                    .ghost()
+                                    .xsmall()
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.close_all_git_dialogs();
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("Select a branch to merge into your current working tree:"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .px_2()
+                            .h(px(32.0))
+                            .rounded_md()
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.background)
+                            .child(
+                                div()
+                                    .size(px(14.0))
+                                    .text_color(theme.muted_foreground)
+                                    .child(IconName::Search),
+                            )
+                            .child(
+                                div().flex_1().child(
+                                    Input::new(&self.merge_filter_input)
+                                        .appearance(false)
+                                        .bordered(false),
+                                ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .max_h(px(240.0))
+                            .overflow_y_scrollbar()
+                            .gap_1()
+                            .children(branches.into_iter().map(|b| {
+                                let name = b.name.clone();
+                                let is_selected = selected.as_deref() == Some(&name);
+                                let name_for_click = name.clone();
+                                div()
+                                    .id(SharedString::from(format!("merge-select-{}", name)))
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
+                                    .px_2p5()
+                                    .py_2()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .border_1()
+                                    .border_color(if is_selected {
+                                        theme.primary
+                                    } else {
+                                        gpui::transparent_black()
+                                    })
+                                    .bg(if is_selected {
+                                        theme.muted.opacity(0.8)
+                                    } else {
+                                        gpui::transparent_black()
+                                    })
+                                    .hover(|s| s.bg(theme.muted))
+                                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                                        this.merge_selected_branch = Some(name_for_click.clone());
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .size(px(16.0))
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .text_color(if is_selected {
+                                                        theme.primary
+                                                    } else {
+                                                        theme.muted_foreground
+                                                    })
+                                                    .child(Icon::default().path("icons/git/branch.svg")),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .font_weight(if is_selected {
+                                                        FontWeight::BOLD
+                                                    } else {
+                                                        FontWeight::NORMAL
+                                                    })
+                                                    .text_color(theme.foreground)
+                                                    .child(name),
+                                            ),
+                                    )
+                                    .children((!b.relative_time.is_empty()).then(|| {
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(b.relative_time)
+                                    }))
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .gap_2()
+                            .pt_2()
+                            .border_t_1()
+                            .border_color(theme.border)
+                            .child(
+                                Button::new("cancel-merge-btn")
+                                    .label("Cancel")
+                                    .ghost()
+                                    .small()
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.close_all_git_dialogs();
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("submit-merge-btn")
+                                    .label(if let Some(target) = &selected {
+                                        format!("Merge {target} into {current_branch}")
+                                    } else {
+                                        format!("Merge into {current_branch}")
+                                    })
+                                    .primary()
+                                    .small()
+                                    .disabled(!can_merge)
+                                    .on_click(cx.listener(move |this, _event, window, cx| {
+                                        if let Some(branch_to_merge) = this.merge_selected_branch.clone() {
+                                            this.run_git_action(GitAction::Merge(branch_to_merge), window, cx);
+                                            this.close_all_git_dialogs();
+                                        }
+                                    })),
+                            ),
+                    ),
+            )
+    }
+
+    fn render_switch_branch_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().colors;
+        let current_branch = self.git_status.as_ref().and_then(|s| s.branch.as_deref()).unwrap_or("main").to_string();
+        let target_branch = self.switch_target_branch.clone().unwrap_or_else(|| "main".to_string());
+        let is_stash = self.switch_stash_mode;
+
+        div()
+            .id("switch-branch-modal-backdrop")
+            .absolute()
+            .inset_0()
+            .bg(hsla(0.0, 0.0, 0.0, 0.6))
+            .flex()
+            .items_center()
+            .justify_center()
+            .p_4()
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _event, _window, cx| {
+                this.close_all_git_dialogs();
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .id("switch-branch-dialog")
+                    .w(px(460.0))
+                    .p_5()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.title_bar)
+                    .shadow_xl()
+                    .flex()
+                    .flex_col()
+                    .gap_3p5()
+                    .on_mouse_down(MouseButton::Left, |_event, _window, _cx| {})
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(theme.foreground)
+                                    .child("Switch Branch"),
+                            )
+                            .child(
+                                Button::new("close-switch-dialog-btn")
+                                    .icon(IconName::Close)
+                                    .ghost()
+                                    .xsmall()
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.close_all_git_dialogs();
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(format!("You have uncommitted changes on {current_branch}. What would you like to do with them?")),
+                    )
+                    .child(
+                        div()
+                            .id("switch-opt-stash")
+                            .flex()
+                            .items_start()
+                            .gap_2p5()
+                            .p_3()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(if is_stash { theme.primary } else { theme.border })
+                            .bg(if is_stash { theme.muted.opacity(0.8) } else { theme.background })
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.muted))
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.switch_stash_mode = true;
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .size(px(16.0))
+                                    .mt(px(2.0))
+                                    .rounded_full()
+                                    .border_2()
+                                    .border_color(if is_stash { theme.primary } else { theme.muted_foreground })
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .children(is_stash.then(|| {
+                                        div()
+                                            .size(px(8.0))
+                                            .rounded_full()
+                                            .bg(theme.primary)
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_0p5()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme.foreground)
+                                            .child(format!("Leave my changes on {current_branch} (Stash)")),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child("Your in-progress changes will be stashed and restored when you switch back."),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("switch-opt-carry")
+                            .flex()
+                            .items_start()
+                            .gap_2p5()
+                            .p_3()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(if !is_stash { theme.primary } else { theme.border })
+                            .bg(if !is_stash { theme.muted.opacity(0.8) } else { theme.background })
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.muted))
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.switch_stash_mode = false;
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .size(px(16.0))
+                                    .mt(px(2.0))
+                                    .rounded_full()
+                                    .border_2()
+                                    .border_color(if !is_stash { theme.primary } else { theme.muted_foreground })
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .children((!is_stash).then(|| {
+                                        div()
+                                            .size(px(8.0))
+                                            .rounded_full()
+                                            .bg(theme.primary)
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_0p5()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme.foreground)
+                                            .child(format!("Bring my changes to {target_branch}")),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(format!("Your in-progress changes will be carried over to {target_branch}.")),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .gap_2()
+                            .pt_2()
+                            .child(
+                                Button::new("cancel-switch-dialog-btn")
+                                    .label("Cancel")
+                                    .ghost()
+                                    .small()
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.close_all_git_dialogs();
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("submit-switch-dialog-btn")
+                                    .label("Switch Branch")
+                                    .primary()
+                                    .small()
+                                    .disabled(self.git_busy)
+                                    .on_click(cx.listener(move |this, _event, window, cx| {
+                                        let target = this.switch_target_branch.clone().unwrap_or_else(|| "main".to_string());
+                                        if this.switch_stash_mode {
+                                            this.run_git_action(GitAction::CheckoutStash(target), window, cx);
+                                        } else {
+                                            this.run_git_action(GitAction::CheckoutCarry(target), window, cx);
+                                        }
+                                        this.close_all_git_dialogs();
+                                        this.branch_popover_open = false;
+                                    })),
+                            ),
+                    ),
+            )
     }
 
     fn render_empty(&self, title: &str, description: &str, cx: &mut Context<Self>) -> AnyElement {
