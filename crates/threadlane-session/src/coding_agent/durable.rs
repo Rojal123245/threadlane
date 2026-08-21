@@ -297,12 +297,11 @@ impl CodingAgent {
                 "run {run_id} is already active; prompt acceptance cannot be repeated"
             ));
         }
-        let turn = self.agent.get_state().await;
         let model = self
             .agent
             .config()
             .model_roles
-            .resolve_task(&turn.model)
+            .resolve_task(&self.agent.model())
             .to_string();
         let provider = self
             .agent
@@ -348,7 +347,7 @@ impl CodingAgent {
                     .collect()
             })
             .unwrap_or_default();
-        let system_prompt = durable_prompt_snapshot(&turn.system_prompt);
+        let system_prompt = durable_prompt_snapshot(&self.agent.system_prompt());
         let work_dir = self.work_dir.to_string_lossy().into_owned();
         let Some(journal) = self.harness.as_mut() else {
             return Ok(None);
@@ -360,7 +359,7 @@ impl CodingAgent {
             "main",
             model,
             provider,
-            turn.reasoning_effort(),
+            self.agent.reasoning_effort(),
             self.agent.prompt_cache_enabled(),
             work_dir,
             system_prompt,
@@ -494,7 +493,7 @@ impl CodingAgent {
                 "main",
                 model,
                 provider,
-                turn.reasoning_effort(),
+self.agent.reasoning_effort(),
                 self.agent.prompt_cache_enabled(),
                 self.work_dir.to_string_lossy().into_owned(),
                 durable_prompt_snapshot(&turn.system_prompt),
@@ -597,14 +596,13 @@ impl CodingAgent {
         if !self.agent.compact_history(None).await {
             return Ok(false);
         }
-        let state = self.agent.get_state().await;
-        let summary = state
-            .messages
+        let messages = self.agent.messages().await;
+        let summary = messages
             .iter()
             .rev()
             .find_map(threadlane_runtime::compaction_summary_text)
             .ok_or_else(|| "compaction produced no durable summary".to_string())?;
-        let retained_tail = compaction_retained_tail(&state.messages);
+        let retained_tail = compaction_retained_tail(&messages);
         self.persist_harness_compaction(summary, &retained_tail)?;
         Ok(true)
     }
@@ -690,9 +688,8 @@ impl CodingAgent {
     }
 
     pub(crate) async fn sync_harness_and_dispatch_assistant_hooks(&mut self) {
-        let state = self.agent.get_state().await;
-        let state_messages: Vec<AgentMessage> = state
-            .messages
+        let messages = self.agent.messages().await;
+        let state_messages: Vec<AgentMessage> = messages
             .into_iter()
             .filter(|message| !matches!(message, AgentMessage::System { .. }))
             .collect();

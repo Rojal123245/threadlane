@@ -33,6 +33,39 @@ enum SettingsPage {
     AcpAgents,
 }
 
+/// Provider auth state shown on the Providers page. Reading it hits disk
+/// (`gh auth status` even spawns a subprocess), so it is snapshotted when
+/// the page opens or an auth action runs instead of on every render frame.
+#[derive(Clone, Debug, Default)]
+struct ProvidersStatusSnapshot {
+    github_status: Option<String>,
+    gitlab_status: Option<String>,
+    /// `(id, label)` pairs of connected Codex accounts; tokens are
+    /// deliberately not retained here.
+    codex_accounts: Vec<(String, String)>,
+    active_codex_account_id: Option<String>,
+    antigravity_connected: bool,
+}
+
+impl ProvidersStatusSnapshot {
+    fn load() -> Self {
+        Self {
+            github_status: threadlane_auth::github_auth::get_github_auth_status(),
+            gitlab_status: threadlane_auth::github_auth::get_gitlab_auth_status(),
+            codex_accounts: threadlane_auth::openai_auth::load_all_codex_accounts()
+                .into_iter()
+                .filter(|account| threadlane_auth::openai_auth::is_own_source(&account.source))
+                .map(|account| (account.id, account.label))
+                .collect(),
+            active_codex_account_id: threadlane_auth::openai_auth::get_active_codex_account()
+                .map(|account| account.id),
+            antigravity_connected: threadlane_provider::antigravity_auth
+                ::load_antigravity_credentials()
+                .is_some(),
+        }
+    }
+}
+
 pub struct SettingsView {
     model: Entity<AppState>,
     openai_input: Entity<InputState>,
@@ -49,6 +82,7 @@ pub struct SettingsView {
     auth_tx: Sender<ProviderAuthEvent>,
     settings_tx: Sender<SettingsEvent>,
     auth_message: Option<String>,
+    providers_snapshot: Option<ProvidersStatusSnapshot>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -114,6 +148,12 @@ impl SettingsView {
                         });
                     }
                 }
+                if this.page == SettingsPage::Providers {
+                    // Auth flows report completion through this pump; keep the
+                    // Providers page snapshot current without re-reading
+                    // credentials on unrelated frames.
+                    this.refresh_providers_snapshot();
+                }
                 cx.notify();
             });
         })
@@ -151,7 +191,7 @@ impl SettingsView {
         let save_github = cx.subscribe_in(
             &github_input,
             window,
-            move |_this, input, event: &InputEvent, _window, cx| {
+            move |this, input, event: &InputEvent, _window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
                     let key = input.read(cx).value().to_string();
                     let tx = github_tx.clone();
@@ -160,6 +200,7 @@ impl SettingsView {
                     } else {
                         let _ = provider_auth::save_github_pat(&key, tx);
                     }
+                    this.refresh_providers_snapshot();
                 }
             },
         );
@@ -198,6 +239,7 @@ impl SettingsView {
             auth_tx,
             settings_tx,
             auth_message: None,
+            providers_snapshot: None,
             _subscriptions: vec![observe_model, save_openai, save_opencode, save_github],
         }
     }
@@ -213,6 +255,10 @@ impl SettingsView {
     fn refresh_skills(&mut self, cx: &mut Context<Self>) {
         let project = self.active_project(cx);
         self.skill_rows = settings::discover_skills(project.as_deref());
+    }
+
+    fn refresh_providers_snapshot(&mut self) {
+        self.providers_snapshot = Some(ProvidersStatusSnapshot::load());
     }
 
     fn refresh_acp(&mut self, cx: &mut Context<Self>) {
@@ -348,6 +394,7 @@ impl SettingsView {
                             .justify_start()
                             .on_click(cx.listener(|this, _event, _window, cx| {
                                 this.page = SettingsPage::Providers;
+                                this.refresh_providers_snapshot();
                                 cx.notify();
                             })),
                     )
@@ -1078,7 +1125,11 @@ impl SettingsView {
     fn render_github_connection(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
         let view = cx.entity().downgrade();
-        let github_status = threadlane_auth::github_auth::get_github_auth_status();
+        let github_status = self
+            .providers_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.github_status.clone())
+            .unwrap_or_else(threadlane_auth::github_auth::get_github_auth_status);
         let connected = github_status.is_some();
         let status_label = github_status.unwrap_or_else(|| "Not connected".to_string());
         let auth_tx = self.auth_tx.clone();
@@ -1173,6 +1224,7 @@ impl SettingsView {
                                         Some(format!("GitHub CLI connection: {err}"));
                                 }
                             }
+                            this.refresh_providers_snapshot();
                             cx.notify();
                         });
                     }),
@@ -1218,6 +1270,7 @@ impl SettingsView {
                                     } else {
                                         let _ = provider_auth::save_github_pat(&val, tx);
                                     }
+                                    this.refresh_providers_snapshot();
                                     cx.notify();
                                 });
                             }),
@@ -1228,7 +1281,11 @@ impl SettingsView {
     fn render_gitlab_connection(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
         let view = cx.entity().downgrade();
-        let gitlab_status = threadlane_auth::github_auth::get_gitlab_auth_status();
+        let gitlab_status = self
+            .providers_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.gitlab_status.clone())
+            .unwrap_or_else(threadlane_auth::github_auth::get_gitlab_auth_status);
         let connected = gitlab_status.is_some();
         let status_label = gitlab_status.unwrap_or_else(|| "Not connected".to_string());
 
@@ -1302,18 +1359,19 @@ impl SettingsView {
                     .label("Disconnect")
                     .disabled(!connected)
                     .ghost()
-                    .on_click(move |_event, _window, cx| {
-                        let _ = view.update(cx, |this, cx| {
-                            if connected {
-                                let result = provider_auth::disconnect_gitlab();
-                                this.auth_message = Some(match result {
-                                    Ok(()) => "Disconnected GitLab.".to_string(),
-                                    Err(err) => format!("Failed to disconnect GitLab: {err}"),
-                                });
-                            }
-                            cx.notify();
-                        });
-                    }),
+                     .on_click(move |_event, _window, cx| {
+                         let _ = view.update(cx, |this, cx| {
+                             if connected {
+                                 let result = provider_auth::disconnect_gitlab();
+                                 this.auth_message = Some(match result {
+                                     Ok(()) => "Disconnected GitLab.".to_string(),
+                                     Err(err) => format!("Failed to disconnect GitLab: {err}"),
+                                 });
+                                 this.refresh_providers_snapshot();
+                             }
+                             cx.notify();
+                         });
+                     }),
             )
     }
 
@@ -1321,13 +1379,23 @@ impl SettingsView {
         let theme = cx.theme().colors;
         let view = cx.entity().downgrade();
         let model = self.model.clone();
-        let accounts = threadlane_auth::openai_auth::load_all_codex_accounts();
-        let own_accounts: Vec<_> = accounts
-            .into_iter()
-            .filter(|a| threadlane_auth::openai_auth::is_own_source(&a.source))
-            .collect();
-        let active_account_id =
-            threadlane_auth::openai_auth::get_active_codex_account().map(|a| a.id);
+        let (own_accounts, active_account_id) = match self.providers_snapshot.as_ref() {
+            Some(snapshot) => (
+                snapshot.codex_accounts.clone(),
+                snapshot.active_codex_account_id.clone(),
+            ),
+            None => {
+                let accounts = threadlane_auth::openai_auth::load_all_codex_accounts()
+                    .into_iter()
+                    .filter(|a| threadlane_auth::openai_auth::is_own_source(&a.source))
+                    .map(|a| (a.id, a.label))
+                    .collect::<Vec<_>>();
+                (
+                    accounts,
+                    threadlane_auth::openai_auth::get_active_codex_account().map(|a| a.id),
+                )
+            }
+        };
 
         if own_accounts.is_empty() {
             return self
@@ -1454,18 +1522,17 @@ impl SettingsView {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .children(own_accounts.into_iter().enumerate().map(|(idx, acc)| {
-                        let is_active = active_account_id.as_deref() == Some(&acc.id)
+                    .children(own_accounts.into_iter().enumerate().map(|(idx, (acc_id, acc_label))| {
+                        let is_active = active_account_id.as_deref() == Some(&acc_id)
                             || (active_account_id.is_none() && idx == 0);
-                        let acc_id_make_active = acc.id.clone();
-                        let acc_id_remove = acc.id.clone();
+                        let acc_id_make_active = acc_id.clone();
+                        let acc_id_remove = acc_id.clone();
                         let model_active = model.clone();
                         let model_remove = model.clone();
                         let view_active = view.clone();
                         let view_remove = view.clone();
 
-                        let initial = acc
-                            .label
+                        let initial = acc_label
                             .chars()
                             .next()
                             .map(|c| c.to_uppercase().to_string())
@@ -1515,7 +1582,7 @@ impl SettingsView {
                                                             .text_xs()
                                                             .font_weight(FontWeight::MEDIUM)
                                                             .text_color(theme.foreground)
-                                                            .child(acc.label.clone()),
+                                                            .child(acc_label.clone()),
                                                     )
                                                     .child(
                                                         Tag::new()
@@ -1550,43 +1617,45 @@ impl SettingsView {
                                     .flex()
                                     .items_center()
                                     .gap_2()
-                                    .children((!is_active).then(|| {
-                                        Button::new(format!("make-active-{}", acc.id))
+                                     .children((!is_active).then(|| {
+                                        Button::new(format!("make-active-{}", acc_id))
                                             .icon(IconName::Check)
                                             .label("Set Active")
                                             .outline()
-                                            .on_click(move |_event, _window, cx| {
-                                                let acc_id = acc_id_make_active.clone();
-                                                let _ = model_active.update(cx, |state, cx| {
-                                                    controller::dispatch(
-                                                        state,
-                                                        AppAction::SetActiveCodexAccount(acc_id),
-                                                    );
-                                                    cx.notify();
-                                                });
-                                                let _ = view_active.update(cx, |_this, cx| {
-                                                    cx.notify();
-                                                });
-                                            })
+                                             .on_click(move |_event, _window, cx| {
+                                                 let acc_id = acc_id_make_active.clone();
+                                                 let _ = model_active.update(cx, |state, cx| {
+                                                     controller::dispatch(
+                                                         state,
+                                                         AppAction::SetActiveCodexAccount(acc_id),
+                                                     );
+                                                     cx.notify();
+                                                 });
+                                                 let _ = view_active.update(cx, |this, cx| {
+                                                     this.refresh_providers_snapshot();
+                                                     cx.notify();
+                                                 });
+                                             })
                                     }))
                                     .child(
-                                        Button::new(format!("remove-acc-{}", acc.id))
+                                        Button::new(format!("remove-acc-{}", acc_id))
                                             .icon(IconName::Delete)
                                             .label("Disconnect")
                                             .ghost()
-                                            .on_click(move |_event, _window, cx| {
-                                                let acc_id = acc_id_remove.clone();
-                                                let _ = model_remove.update(cx, |state, cx| {
-                                                    controller::dispatch(
-                                                        state,
-                                                        AppAction::RemoveCodexAccount(acc_id),
-                                                    );
-                                                    cx.notify();
-                                                });
-                                                let _ = view_remove.update(cx, |_this, cx| {
-                                                    cx.notify();
-                                                });
-                                            }),
+                                             .on_click(move |_event, _window, cx| {
+                                                 let acc_id = acc_id_remove.clone();
+                                                 let _ = model_remove.update(cx, |state, cx| {
+                                                     controller::dispatch(
+                                                         state,
+                                                         AppAction::RemoveCodexAccount(acc_id),
+                                                     );
+                                                     cx.notify();
+                                                 });
+                                                 let _ = view_remove.update(cx, |this, cx| {
+                                                     this.refresh_providers_snapshot();
+                                                     cx.notify();
+                                                 });
+                                             }),
                                     ),
                             )
                     })),
@@ -1681,8 +1750,13 @@ impl SettingsView {
         let theme = cx.theme().colors;
         let state_status = self.model.read(cx).auth_status_msg.clone();
         let status = self.auth_message.clone().or(state_status);
-        let antigravity_connected =
-            threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some();
+        let antigravity_connected = self
+            .providers_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.antigravity_connected)
+            .unwrap_or_else(|| {
+                threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some()
+            });
 
         div()
             .mt_5()
@@ -2322,6 +2396,9 @@ impl SettingsView {
 impl Render for SettingsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
+        if self.page == SettingsPage::Providers && self.providers_snapshot.is_none() {
+            self.refresh_providers_snapshot();
+        }
         let (title, description, content) = match self.page {
             SettingsPage::General => (
                 "General",

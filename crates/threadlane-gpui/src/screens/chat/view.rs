@@ -23,7 +23,7 @@ use crate::screens::editor::EditorView;
 use crate::state::{
     compute_older_message_page, AppState, ChatMessageInfo, MessageRole, ToolActivityInfo,
 };
-use threadlane_session::commands::available_slash_commands;
+use threadlane_session::commands::{SlashCommandInfo, available_slash_commands};
 use threadlane_session::{ImageAttachment, PlanItemStatus, ReasoningEffort, SessionPlan};
 
 actions!(threadlane_composer, [PasteClipboard]);
@@ -91,6 +91,8 @@ pub struct ChatListView {
     trajectory_lane: Option<String>,
     selected_trajectory_index: Option<usize>,
     trajectory_inspector_tab: TrajectoryInspectorTab,
+    slash_command_cache:
+        Option<(Option<std::path::PathBuf>, std::time::Instant, Vec<SlashCommandInfo>)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -238,8 +240,12 @@ impl ChatListView {
 
                 if follow_tail && (changed || settle_frames > 0) {
                     stream_scroll_handle.scroll_to_bottom();
-                    let _ = this.update(cx, |_this, cx| cx.notify());
                     if !changed {
+                        // A drained batch already invalidated the view through
+                        // AppState; only settle frames need their own redraw to
+                        // apply deferred scrolling against settled markdown
+                        // layout.
+                        let _ = this.update(cx, |_this, cx| cx.notify());
                         settle_frames = settle_frames.saturating_sub(1);
                     }
                 }
@@ -273,6 +279,7 @@ impl ChatListView {
             trajectory_lane: None,
             selected_trajectory_index: None,
             trajectory_inspector_tab: TrajectoryInspectorTab::Overview,
+            slash_command_cache: None,
             _subscriptions: vec![sub1, sub2, sub3, sub_editor],
         }
     }
@@ -2357,7 +2364,28 @@ impl ChatListView {
         )
     }
 
-    fn render_composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Cached slash-command discovery. `available_slash_commands` scans
+    /// extension directories and compiles each installed WASM module just to
+    /// read its manifest, so it must not run per keystroke in render. The
+    /// cache is keyed by project root and refreshed at most once per TTL
+    /// while the command menu is open.
+    fn cached_slash_commands(
+        &mut self,
+        project_root: Option<&std::path::Path>,
+    ) -> Vec<SlashCommandInfo> {
+        const SLASH_COMMAND_CACHE_TTL: Duration = Duration::from_secs(10);
+        let project_root = project_root.map(std::path::Path::to_path_buf);
+        if let Some((root, loaded_at, commands)) = &self.slash_command_cache {
+            if *root == project_root && loaded_at.elapsed() < SLASH_COMMAND_CACHE_TTL {
+                return commands.clone();
+            }
+        }
+        let commands = available_slash_commands(project_root.as_deref());
+        self.slash_command_cache = Some((project_root, std::time::Instant::now(), commands.clone()));
+        commands
+    }
+
+    fn render_composer(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
         let model = self.model.clone();
         let input_state = self.input_state.clone();
@@ -2591,7 +2619,8 @@ impl ChatListView {
                 .split_whitespace()
                 .next()
                 .unwrap_or_default();
-            let commands = available_slash_commands(project_root.as_deref())
+            let commands = self
+                .cached_slash_commands(project_root.as_deref())
                 .into_iter()
                 .filter(|command| query.is_empty() || command.name.starts_with(query))
                 .collect::<Vec<_>>();
@@ -3136,7 +3165,6 @@ impl Render for ChatListView {
             .detach();
         }
         let theme = cx.theme().colors;
-        let transcript_rows = self.render_transcript_rows(&messages, cx);
 
         div()
             .flex()
@@ -3165,6 +3193,7 @@ impl Render for ChatListView {
                             ))
                             .into_any_element()
                     } else {
+                        let transcript_rows = self.render_transcript_rows(&messages, cx);
                         div()
                             .id("chat-transcript-container")
                             .relative()

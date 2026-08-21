@@ -26,7 +26,7 @@ use threadlane_protocol::{ProviderPort, RuntimeRequest, RuntimeStreamEvent as St
 
 use tokio::sync::{broadcast, mpsc, Mutex};
 
-const STREAM_CHECKPOINT_BYTES: usize = 16 * 1024;
+const STREAM_CHECKPOINT_BYTES: usize = 64 * 1024;
 
 async fn persist_messages_with(
     recorder: Option<&crate::provider::AssistantMessageRecorder>,
@@ -143,6 +143,8 @@ pub(crate) struct TurnDriver<'a> {
     pub(crate) stream_rules: Vec<(StreamRule, Regex)>,
     pub(crate) steering_queue: &'a mut Vec<AgentMessage>,
     pub(crate) follow_up_queue: &'a mut Vec<AgentMessage>,
+    /// Cached serialized tool definitions JSON to avoid re-serializing on every turn.
+    pub(crate) cached_tools_json: Option<String>,
 }
 
 impl<'a> TurnDriver<'a> {
@@ -317,7 +319,11 @@ impl<'a> TurnDriver<'a> {
                     }
                 }
                 if !tool_definitions.is_empty() {
-                    let tools_json = serde_json::to_string(&tool_definitions).unwrap_or_default();
+                    let tools_json = self
+                        .cached_tools_json
+                        .as_deref()
+                        .unwrap_or(&serde_json::to_string(&tool_definitions).unwrap_or_default())
+                        .to_string();
                     let digest = format!("{:x}", Sha256::digest(tools_json.as_bytes()));
                     let token_estimate = ((tools_json.len() + 3) / 4) as u32;
                     if let (Ok(role_trace), Ok(digest_trace), Ok(label_trace)) = (

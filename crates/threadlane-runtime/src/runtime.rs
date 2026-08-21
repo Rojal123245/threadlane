@@ -392,6 +392,27 @@ impl AgentRuntime {
         self.turn.lock().await.clone()
     }
 
+    /// Returns the current system prompt.
+    pub fn system_prompt(&self) -> String {
+        self.turn
+            .try_lock()
+            .map(|t| t.system_prompt.clone())
+            .unwrap_or_else(|_| "".to_string())
+    }
+
+    /// Returns the current reasoning effort.
+    pub fn reasoning_effort(&self) -> crate::types::ReasoningEffort {
+        self.turn
+            .try_lock()
+            .map(|t| t.reasoning_effort)
+            .unwrap_or_else(|_| Default::default())
+    }
+
+    /// Returns a snapshot of the current messages.
+    pub async fn messages(&self) -> Vec<AgentMessage> {
+        self.turn.lock().await.messages.clone()
+    }
+
     pub fn register_tool_executor(
         &mut self,
         executor: Arc<dyn crate::tool_executor::ToolExecutor>,
@@ -622,6 +643,14 @@ impl AgentRuntime {
     /// Runs the main turn loop.
     async fn run_turns(&mut self) {
         let tool_dispatcher = self.synced_dispatcher();
+        let cached_tools_json = {
+            let defs = tool_dispatcher.configured_tool_definitions();
+            if defs.is_empty() {
+                None
+            } else {
+                Some(serde_json::to_string(&defs).unwrap_or_default())
+            }
+        };
         let mut driver = crate::turn_driver::TurnDriver {
             turn: self.turn.clone(),
             provider_client: self.provider_client.clone(),
@@ -635,6 +664,7 @@ impl AgentRuntime {
             stream_rules: self.stream_rules.clone(),
             steering_queue: &mut self.steering_queue,
             follow_up_queue: &mut self.follow_up_queue,
+            cached_tools_json,
         };
         driver.run_turns().await;
     }
