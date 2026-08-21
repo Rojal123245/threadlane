@@ -7244,7 +7244,7 @@ dependencies = [
 
 [[package]]
 name = "threadlane-gpui"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "base64",
@@ -7403,7 +7403,7 @@ dependencies = [
 
 [[package]]
 name = "threadlane-updater"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "cargo-packager-updater",
 ]

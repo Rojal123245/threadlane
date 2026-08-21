@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.7](https://github.com/wheregmis/threadlane/compare/v0.1.6...v0.1.7) (2026-08-21)
+
+
+### Features
+
+* complete revamp of harness and agent ([a31d770](https://github.com/wheregmis/threadlane/commit/a31d77028a70e927c506abb7497d70305079272c))
+* **gpui:** add workspace watcher for automatic panel refresh ([1e3288a](https://github.com/wheregmis/threadlane/commit/1e3288a20872c838a4c61fd45a9f7cee7c650ea7))
+
 ## [0.1.6](https://github.com/wheregmis/threadlane/compare/v0.1.5...v0.1.6) (2026-08-19)
 
 
