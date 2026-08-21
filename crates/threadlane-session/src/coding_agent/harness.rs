@@ -295,14 +295,35 @@ impl CodingSessionHarness {
                 let reasoning_entry_id = if let Some(reasoning) =
                     reasoning.filter(|reasoning| !reasoning.trim().is_empty())
                 {
-                    Some(journal.append_message(AgentMessage::Custom {
+                    let thinking = AgentMessage::Custom {
                         custom_type: "thinking".into(),
                         payload: serde_json::json!({ "text": reasoning }),
-                    })?)
+                    };
+                    let existing = journal
+                        .store
+                        .entries()
+                        .iter()
+                        .rev()
+                        .find(|entry| entry.message == thinking)
+                        .map(|entry| entry.id.clone());
+                    Some(match existing {
+                        Some(id) => id,
+                        None => journal.append_message(thinking)?,
+                    })
                 } else {
                     None
                 };
-                let entry_id = journal.append_message(message)?;
+                let existing = journal
+                    .store
+                    .entries()
+                    .iter()
+                    .rev()
+                    .find(|entry| entry.message == message)
+                    .map(|entry| entry.id.clone());
+                let entry_id = match existing {
+                    Some(id) => id,
+                    None => journal.append_message(message)?,
+                };
                 let seq = harness_next_seq(journal.store.store());
                 let record = HarnessRecord::ProviderResponseAttached {
                     id: format!("provider-response-{run_id}-{request_id}"),
@@ -345,6 +366,22 @@ impl CodingSessionHarness {
                 provider: TraceString::new(provider)?,
                 model: TraceString::new(model)?,
                 request_id: Some(TraceString::new(request_id)?),
+            },
+            ProviderTraceEvent::ContextManifest {
+                attempt,
+                request_id,
+                total_estimated_tokens,
+                items,
+            } => HarnessRecord::ContextManifestCaptured {
+                id: format!("context-manifest-{run_id}-{request_id}"),
+                seq,
+                lane: "main".into(),
+                timestamp: timestamp(),
+                run_id: run_id.into(),
+                attempt,
+                request_id: TraceString::new(request_id)?,
+                total_estimated_tokens,
+                items,
             },
             ProviderTraceEvent::Checkpoint {
                 attempt,
@@ -2748,6 +2785,75 @@ mod tests {
         ));
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parallel_tool_observations_receive_distinct_sequences() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        harness
+            .begin_run("run-1", AgentMessage::user("prompt", vec![]))
+            .unwrap();
+        harness.prepare_assistant_attempt("run-1").unwrap();
+        CodingSessionHarness::record_provider_trace_to_path(
+            &path,
+            "run-1",
+            ProviderTraceEvent::AssistantReady {
+                attempt: 1,
+                request_id: "request-1".into(),
+                reasoning: None,
+                message: AgentMessage::Assistant {
+                    content: None,
+                    tool_calls: Some(vec![
+                        threadlane_provider::openai::ToolCall {
+                            id: "call-1".into(),
+                            r#type: "function".into(),
+                            function: threadlane_provider::openai::ToolCallFunction {
+                                name: "grep_search".into(),
+                                arguments: "{}".into(),
+                            },
+                            thought_signature: None,
+                        },
+                        threadlane_provider::openai::ToolCall {
+                            id: "call-2".into(),
+                            r#type: "function".into(),
+                            function: threadlane_provider::openai::ToolCallFunction {
+                                name: "grep_search".into(),
+                                arguments: "{}".into(),
+                            },
+                            thought_signature: None,
+                        },
+                    ]),
+                    stop_reason: None,
+                    deferred_handle: None,
+                },
+            },
+        )
+        .unwrap();
+
+        let started = |call_id: &str| ToolExecutionTraceEvent::Started {
+            tool_call_id: call_id.into(),
+            tool_name: "grep_search".into(),
+            executor_kind: "builtin".into(),
+            started_at_ms: 10,
+            effective_arguments: "{}".into(),
+        };
+        let left_path = path.clone();
+        let right_path = path.clone();
+        let left = tokio::spawn(async move {
+            CodingSessionHarness::record_tool_execution_to_path(&left_path, "run-1", started("call-1"))
+                .await
+        });
+        let right = tokio::spawn(async move {
+            CodingSessionHarness::record_tool_execution_to_path(&right_path, "run-1", started("call-2"))
+                .await
+        });
+        left.await.unwrap().unwrap();
+        right.await.unwrap().unwrap();
+
+        let store = JsonlStore::open(&path).unwrap();
+        let sequences = store.records().iter().map(HarnessRecord::seq).collect::<Vec<_>>();
+        assert!(sequences.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
     #[test]
     fn provider_attempt_trace_has_one_ordered_terminal_record() {
         let (_dir, path) = temp_session();
@@ -3448,8 +3554,33 @@ mod tests {
             },
         )
         .unwrap();
+        CodingSessionHarness::record_provider_trace_to_path(
+            &path,
+            &run_id,
+            ProviderTraceEvent::AssistantReady {
+                attempt: 1,
+                request_id: "req-123-retry".into(),
+                reasoning: Some("deep thinking".into()),
+                message: AgentMessage::Assistant {
+                    content: Some("final answer".into()),
+                    tool_calls: None,
+                    stop_reason: None,
+                    deferred_handle: None,
+                },
+            },
+        )
+        .unwrap();
 
         let updated_harness = CodingSessionHarness::open(&path).unwrap();
+        assert_eq!(
+            updated_harness
+                .store
+                .entries()
+                .iter()
+                .filter(|entry| matches!(entry.message, AgentMessage::Assistant { .. }))
+                .count(),
+            1
+        );
         let response_record = updated_harness
             .store
             .records()

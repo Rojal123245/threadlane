@@ -654,6 +654,7 @@ impl Reducer {
                     lane.attempts = *attempt;
                 }
                 Record::RunContextCaptured { run_id, .. }
+                | Record::ContextManifestCaptured { run_id, .. }
                 | Record::ProviderRequestStarted { run_id, .. }
                 | Record::ProviderRequestFinished { run_id, .. }
                 | Record::ProviderResponseAttached { run_id, .. }

@@ -9,7 +9,8 @@ use crate::compaction::{
 use crate::config::AgentConfig;
 use crate::events::AgentEvent;
 use crate::harness::{
-    ErrorCategory, ProviderErrorSummary, ProviderOutcome, TraceString,
+    ContextItemSource, ContextItemStatus, ContextManifestItem, ErrorCategory,
+    ProviderErrorSummary, ProviderOutcome, TraceString,
 };
 use crate::provider::{ProviderTraceEvent, ProviderTraceRecorder};
 use crate::rules::{StreamRule, StreamRuleMonitor};
@@ -17,6 +18,7 @@ use crate::tool_dispatcher::ToolDispatcher;
 use crate::types::{AgentMessage, TokenUsage, ToolExecutionMode, TurnState};
 use crate::utils::AbortOnDrop;
 use regex::Regex;
+use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -273,6 +275,79 @@ impl<'a> TurnDriver<'a> {
                     reasoning_effort: turn.reasoning_effort.as_api_str().map(str::to_owned),
                 }
             };
+
+            let manifest_items = {
+                let turn = self.turn.lock().await;
+                let mut items = Vec::new();
+                for (idx, msg) in turn.messages.iter().enumerate() {
+                    let role = msg.role_str();
+                    let custom_serialized;
+                    let content_str = match msg {
+                        AgentMessage::User { content } => content.as_str(),
+                        AgentMessage::UserWithImages { content, .. } => content.as_str(),
+                        AgentMessage::Assistant { content, .. } => content.as_deref().unwrap_or(""),
+                        AgentMessage::System { content } => content.as_str(),
+                        AgentMessage::Tool { content, .. } => content.as_str(),
+                        AgentMessage::Custom { payload, .. } => {
+                            custom_serialized = payload.to_string();
+                            custom_serialized.as_str()
+                        }
+                    };
+                    let digest = format!("{:x}", Sha256::digest(content_str.as_bytes()));
+                    let token_estimate = ((content_str.len() + 3) / 4) as u32;
+                    let source = match msg {
+                        AgentMessage::System { .. } => ContextItemSource::SystemPrompt,
+                        AgentMessage::Tool { .. } => ContextItemSource::Skill,
+                        _ => ContextItemSource::Message,
+                    };
+                    if let (Ok(role_trace), Ok(digest_trace)) = (
+                        TraceString::new(role),
+                        TraceString::new(digest),
+                    ) {
+                        items.push(ContextManifestItem {
+                            position: idx,
+                            source,
+                            entry_id: None,
+                            role: role_trace,
+                            token_estimate,
+                            status: ContextItemStatus::Active,
+                            digest_sha256: digest_trace,
+                            label: None,
+                        });
+                    }
+                }
+                if !tool_definitions.is_empty() {
+                    let tools_json = serde_json::to_string(&tool_definitions).unwrap_or_default();
+                    let digest = format!("{:x}", Sha256::digest(tools_json.as_bytes()));
+                    let token_estimate = ((tools_json.len() + 3) / 4) as u32;
+                    if let (Ok(role_trace), Ok(digest_trace), Ok(label_trace)) = (
+                        TraceString::new("tools"),
+                        TraceString::new(digest),
+                        TraceString::new(format!("{} tools", tool_definitions.len())),
+                    ) {
+                        items.push(ContextManifestItem {
+                            position: items.len(),
+                            source: ContextItemSource::ToolSchema,
+                            entry_id: None,
+                            role: role_trace,
+                            token_estimate,
+                            status: ContextItemStatus::Active,
+                            digest_sha256: digest_trace,
+                            label: Some(label_trace),
+                        });
+                    }
+                }
+                items
+            };
+            let total_estimated_tokens: u32 = manifest_items.iter().map(|item| item.token_estimate).sum();
+            let _ = self
+                .record_provider_trace(ProviderTraceEvent::ContextManifest {
+                    attempt: turn_number as u32,
+                    request_id: request_id.clone(),
+                    total_estimated_tokens: Some(total_estimated_tokens),
+                    items: manifest_items,
+                })
+                .await;
 
             let _stream_task = AbortOnDrop::new(tokio::spawn(async move {
                 client.stream_request(request, stream_tx).await;
@@ -586,22 +661,6 @@ impl<'a> TurnDriver<'a> {
                 deferred_handle: None,
             };
 
-            if let Err(error) = self
-                .record_provider_trace(ProviderTraceEvent::AssistantReady {
-                    attempt: turn_number as u32,
-                    request_id: request_id.clone(),
-                    reasoning: (!current_reasoning.trim().is_empty())
-                        .then(|| current_reasoning.clone()),
-                    message: assistant_msg.clone(),
-                })
-                .await
-            {
-                self.emit_event(AgentEvent::AgentError {
-                    error: format!("failed to persist provider assistant result: {error}"),
-                });
-                return;
-            }
-
             let mut step_messages = Vec::new();
             if !current_reasoning.trim().is_empty() {
                 let thinking = AgentMessage::Custom {
@@ -619,6 +678,21 @@ impl<'a> TurnDriver<'a> {
             if let Err(error) = self.persist_messages(&step_messages).await {
                 self.emit_event(AgentEvent::AgentError {
                     error: format!("failed to persist assistant step before continuation: {error}"),
+                });
+                return;
+            }
+            if let Err(error) = self
+                .record_provider_trace(ProviderTraceEvent::AssistantReady {
+                    attempt: turn_number as u32,
+                    request_id: request_id.clone(),
+                    reasoning: (!current_reasoning.trim().is_empty())
+                        .then(|| current_reasoning.clone()),
+                    message: assistant_msg.clone(),
+                })
+                .await
+            {
+                self.emit_event(AgentEvent::AgentError {
+                    error: format!("failed to persist provider assistant result: {error}"),
                 });
                 return;
             }

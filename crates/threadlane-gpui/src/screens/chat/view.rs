@@ -45,9 +45,19 @@ pub enum CentralTab {
 enum TrajectoryMode {
     #[default]
     Execution,
+    Requests,
     ModelContext,
     DurableEvents,
     Recovery,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum TrajectoryInspectorTab {
+    #[default]
+    Overview,
+    Preview,
+    Raw,
+    Source,
 }
 
 pub fn init(cx: &mut App) {
@@ -80,6 +90,7 @@ pub struct ChatListView {
     trajectory_category: Option<String>,
     trajectory_lane: Option<String>,
     selected_trajectory_index: Option<usize>,
+    trajectory_inspector_tab: TrajectoryInspectorTab,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -261,6 +272,7 @@ impl ChatListView {
             trajectory_category: None,
             trajectory_lane: None,
             selected_trajectory_index: None,
+            trajectory_inspector_tab: TrajectoryInspectorTab::Overview,
             _subscriptions: vec![sub1, sub2, sub3, sub_editor],
         }
     }
@@ -424,8 +436,12 @@ impl ChatListView {
     }
 
     /// Renders the 16px status circle used for a plan step: a bordered ✓ for
-    /// completed, a spinner for in-progress, and an empty ring for pending.
-    fn plan_step_marker(status: PlanItemStatus, colors: gpui_component::ThemeColor) -> AnyElement {
+    /// completed, a spinner for in-progress (active generation), a static dot for in-progress (idle), and an empty ring for pending.
+    fn plan_step_marker(
+        status: PlanItemStatus,
+        is_generating: bool,
+        colors: gpui_component::ThemeColor,
+    ) -> AnyElement {
         match status {
             PlanItemStatus::Completed => div()
                 .size(px(16.0))
@@ -441,15 +457,36 @@ impl ChatListView {
                 .text_color(colors.success)
                 .child("✓")
                 .into_any_element(),
-            PlanItemStatus::InProgress => div()
-                .size(px(16.0))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_color(colors.primary)
-                .child(gpui_component::spinner::Spinner::new().xsmall())
-                .into_any_element(),
+            PlanItemStatus::InProgress => {
+                if is_generating {
+                    div()
+                        .size(px(16.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(colors.primary)
+                        .child(gpui_component::spinner::Spinner::new().xsmall())
+                        .into_any_element()
+                } else {
+                    div()
+                        .size(px(16.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(colors.primary)
+                        .child(
+                            div()
+                                .size(px(6.0))
+                                .rounded_full()
+                                .bg(colors.primary),
+                        )
+                        .into_any_element()
+                }
+            }
             PlanItemStatus::Pending => div()
                 .size(px(16.0))
                 .flex_none()
@@ -469,6 +506,7 @@ impl ChatListView {
             return None;
         }
 
+        let is_generating = self.model.read(cx).is_generating;
         let theme = cx.theme().colors;
         let completed = plan
             .items
@@ -509,6 +547,7 @@ impl ChatListView {
                                     } else {
                                         PlanItemStatus::InProgress
                                     },
+                                    is_generating,
                                     theme,
                                 ))
                                 .child(
@@ -524,7 +563,7 @@ impl ChatListView {
                 .content(move |_state, _window, _cx| {
                     let colors = theme;
                     let rows = content_plan.items.iter().enumerate().map(|(index, item)| {
-                        let marker = Self::plan_step_marker(item.status, colors);
+                        let marker = Self::plan_step_marker(item.status, is_generating, colors);
                         div().flex().items_start().gap_2().child(marker).child(
                             div()
                                 .min_w_0()
@@ -580,6 +619,23 @@ impl ChatListView {
             .nth(1)
             .and_then(|value| value.split_whitespace().next())
             .map(str::to_owned);
+
+        let display_summary = {
+            let first_line = activity
+                .summary
+                .lines()
+                .next()
+                .unwrap_or(activity.summary.as_str())
+                .trim();
+            if activity.summary.lines().nth(1).is_some()
+                && !first_line.ends_with('…')
+                && !first_line.ends_with("...")
+            {
+                format!("{first_line} …")
+            } else {
+                first_line.to_string()
+            }
+        };
 
         div()
             .w_full()
@@ -643,7 +699,7 @@ impl ChatListView {
                             .truncate()
                             .text_sm()
                             .text_color(theme.muted_foreground)
-                            .child(activity.summary.clone()),
+                            .child(display_summary),
                     )
                     .children(proposal_id.as_ref().map(|proposal_id| {
                         let model = self.model.clone();
@@ -805,7 +861,9 @@ impl ChatListView {
 
     fn render_trajectory(&self, cx: &mut Context<Self>) -> AnyElement {
         let all_entries = match self.trajectory_mode {
-            TrajectoryMode::Execution => self.model.read(cx).active_trajectory().to_vec(),
+            TrajectoryMode::Execution | TrajectoryMode::Requests => {
+                self.model.read(cx).active_trajectory().to_vec()
+            }
             TrajectoryMode::ModelContext => self.model.read(cx).active_model_context_diagnostics(),
             TrajectoryMode::DurableEvents => self.model.read(cx).active_durable_event_diagnostics(),
             TrajectoryMode::Recovery => self.model.read(cx).active_recovery_diagnostics(),
@@ -866,8 +924,57 @@ impl ChatListView {
             .cloned();
         let mut rows = Vec::new();
         let mut previous_turn = None;
+        let mut previous_request = None;
+        let mut request_input_seen = false;
         for (all_index, entry) in entries.into_iter() {
-            if entry.turn != previous_turn {
+            if self.trajectory_mode == TrajectoryMode::Requests && entry.request != previous_request {
+                if let Some(request) = entry.request {
+                    request_input_seen = false;
+                    rows.push(
+                        div()
+                            .h(px(28.0))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .border_b_1()
+                            .border_color(theme.border.opacity(0.65))
+                            .bg(theme.muted.opacity(0.35))
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.accent)
+                            .child(format!("Request #{request}"))
+                            .into_any_element(),
+                    );
+                }
+                previous_request = entry.request;
+            }
+            if self.trajectory_mode == TrajectoryMode::Requests
+                && entry.request.is_some()
+                && !request_input_seen
+                && entry.category == "Input"
+            {
+                request_input_seen = true;
+            } else if self.trajectory_mode == TrajectoryMode::Requests
+                && entry.request.is_some()
+                && !request_input_seen
+            {
+                rows.push(
+                    div()
+                        .h(px(20.0))
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .border_b_1()
+                        .border_color(theme.border.opacity(0.35))
+                        .text_xs()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.muted_foreground)
+                        .child("Setup")
+                        .into_any_element(),
+                );
+                request_input_seen = true;
+            }
+            if self.trajectory_mode != TrajectoryMode::Requests && entry.turn != previous_turn {
                 if let Some(turn) = entry.turn {
                     rows.push(
                         div()
@@ -893,6 +1000,35 @@ impl ChatListView {
                 format!("{}  {}", entry.summary, entry.detail.replace('\n', " "))
             };
             let view = cx.entity().clone();
+            let (badge_bg, badge_fg, badge_label): (Hsla, Hsla, SharedString) = match entry.category.as_str() {
+                "Tool" | "Tool runtime" => (theme.accent.opacity(0.18), theme.accent, "TOOL".into()),
+                "Provider" => (theme.primary.opacity(0.18), theme.primary, "PROVIDER".into()),
+                "Context Manifest" | "Manifest" => (theme.accent.opacity(0.14), theme.muted_foreground, "MANIFEST".into()),
+                "Request" => (theme.primary.opacity(0.16), theme.accent, "REQUEST".into()),
+                "Anomaly" => (theme.warning.opacity(0.20), theme.warning, "ANOMALY".into()),
+                "Error" => (theme.danger.opacity(0.20), theme.danger, "ERROR".into()),
+                "Input" => (theme.muted.opacity(0.8), theme.foreground, "INPUT".into()),
+                "Assistant" => (theme.muted.opacity(0.8), theme.foreground, "ASSISTANT".into()),
+                "Permission" => (theme.warning.opacity(0.18), theme.warning, "PERMISSION".into()),
+                "Subagent" => (theme.primary.opacity(0.16), theme.primary, "SUBAGENT".into()),
+                _ => (theme.muted.opacity(0.5), theme.muted_foreground, entry.category.clone().into()),
+            };
+            let dot_color = if entry.diagnostics.is_anomaly || entry.category == "Anomaly" {
+                theme.warning
+            } else if entry.category == "Error"
+                || entry.detail.contains("Failed")
+                || entry.detail.contains("Error")
+                || entry.diagnostics.status.as_deref() == Some("Failed")
+                || entry.diagnostics.status.as_deref() == Some("failed")
+            {
+                theme.danger
+            } else if entry.category == "Tool" || entry.category == "Tool runtime" {
+                theme.accent
+            } else if entry.category == "Request" {
+                theme.primary
+            } else {
+                theme.muted_foreground
+            };
             rows.push(
                 div()
                     .id(SharedString::from(format!("trajectory-{all_index}")))
@@ -912,28 +1048,51 @@ impl ChatListView {
                             .border_color(theme.accent)
                     })
                     .hover(|style| style.bg(theme.muted.opacity(0.65)))
-                    .child(div().size(px(6.0)).flex_none().rounded_full().bg(
-                        if entry.category == "Tool" {
-                            theme.warning
-                        } else if entry.category == "Error"
-                            || entry.detail.contains("Failed")
-                            || entry.detail.contains("Error")
-                        {
-                            theme.danger
-                        } else {
-                            theme.primary
-                        },
-                    ))
+                    .child(div().size(px(6.0)).flex_none().rounded_full().bg(dot_color))
                     .child(
                         div()
-                            .w(px(74.0))
+                            .w(px(84.0))
                             .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .px_1p5()
+                            .py_0p5()
+                            .rounded_md()
+                            .bg(badge_bg)
                             .text_xs()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.muted_foreground)
-                            .child(entry.category.to_uppercase()),
+                            .text_color(badge_fg)
+                            .child(badge_label),
                     )
                     .child(div().min_w_0().flex_1().text_sm().truncate().child(preview))
+                    .children(entry.diagnostics.exit_code.map(|code| {
+                        let is_ok = code == 0;
+                        div()
+                            .px_1p5()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(if is_ok { theme.success.opacity(0.15) } else { theme.danger.opacity(0.15) })
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(if is_ok { theme.success } else { theme.danger })
+                            .child(format!("exit {code}"))
+                    }))
+                    .children(entry.diagnostics.duration_ms.map(|dur| {
+                        let dur_str = if dur < 1000 {
+                            format!("{dur}ms")
+                        } else {
+                            format!("{:.1}s", dur as f64 / 1000.0)
+                        };
+                        div()
+                            .px_1p5()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(theme.muted.opacity(0.8))
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(dur_str)
+                    }))
                     .children(entry.lane.clone().map(|lane| {
                         div()
                             .max_w(px(110.0))
@@ -953,26 +1112,72 @@ impl ChatListView {
                     .on_click(move |_, _, cx| {
                         view.update(cx, |this, cx| {
                             this.selected_trajectory_index = Some(all_index);
+                            this.trajectory_inspector_tab = TrajectoryInspectorTab::Overview;
                             cx.notify();
                         })
                     })
                     .into_any_element(),
             );
         }
+        let inspector_tab = self.trajectory_inspector_tab;
         let inspector = selected_entry.map(|entry| {
             let close_view = cx.entity().clone();
-            let metadata = [
+            let inspector_view = cx.entity().clone();
+            let model_visible = entry.diagnostics.model_visible || matches!(
+                entry.category.as_str(),
+                "Input" | "Assistant" | "Context" | "Context Manifest" | "Tool"
+            );
+            let provenance = match entry.category.as_str() {
+                "Input" => "User transcript · model-visible",
+                "Assistant" => "Assistant transcript · model-visible",
+                "Context" | "Context Manifest" => "Runtime context package · model-visible",
+                "Tool" | "Tool runtime" => "Tool transcript · model-visible",
+                "Anomaly" => "Automated diagnostic anomaly · durable",
+                "Error" => "Runtime diagnostic · durable",
+                _ => "Runtime lifecycle record · durable",
+            };
+            let mut metadata_items = vec![
                 entry.seq.map(|value| ("Sequence", format!("#{value}"))),
+                entry.request.map(|value| ("Request", format!("#{value}"))),
                 entry.turn.map(|value| ("Turn", value.to_string())),
                 entry.run_id.clone().map(|value| ("Run", value)),
                 entry.lane.clone().map(|value| ("Lane", value)),
-                entry.correlation_id.clone().map(|value| ("Call", value)),
-            ]
-            .into_iter()
-            .flatten();
+                entry.correlation_id.clone().map(|value| ("Call / Correlation", value)),
+                entry.diagnostics.status.clone().map(|value| ("Status", value)),
+                entry.diagnostics.duration_ms.map(|value| {
+                    (
+                        "Duration",
+                        if value < 1000 {
+                            format!("{value} ms")
+                        } else {
+                            format!("{:.2} s", value as f64 / 1000.0)
+                        },
+                    )
+                }),
+                entry.diagnostics.exit_code.map(|value| ("Exit Code", value.to_string())),
+                entry.diagnostics.output_bytes.map(|value| ("Output Size", format!("{value} bytes"))),
+                entry.diagnostics.token_estimate.map(|value| ("Est. Tokens", format!("~{value}"))),
+                entry.diagnostics.items_count.map(|value| ("Item Count", value.to_string())),
+            ];
+            if !entry.diagnostics.files_mutated.is_empty() {
+                metadata_items.push(Some(("Files Mutated", entry.diagnostics.files_mutated.join(", "))));
+            }
+            if !entry.diagnostics.commands_executed.is_empty() {
+                metadata_items.push(Some(("Commands Executed", entry.diagnostics.commands_executed.join(", "))));
+            }
+            let metadata = metadata_items.into_iter().flatten();
+            let (header_bg, header_fg, header_tag): (Hsla, Hsla, SharedString) = match entry.category.as_str() {
+                "Tool" | "Tool runtime" => (theme.accent.opacity(0.18), theme.accent, "TOOL".into()),
+                "Provider" => (theme.primary.opacity(0.18), theme.primary, "PROVIDER".into()),
+                "Context Manifest" | "Manifest" => (theme.accent.opacity(0.14), theme.muted_foreground, "MANIFEST".into()),
+                "Request" => (theme.primary.opacity(0.16), theme.accent, "REQUEST".into()),
+                "Anomaly" => (theme.warning.opacity(0.20), theme.warning, "ANOMALY".into()),
+                "Error" => (theme.danger.opacity(0.20), theme.danger, "ERROR".into()),
+                _ => (theme.muted.opacity(0.5), theme.muted_foreground, entry.category.clone().into()),
+            };
             div()
-                .w(px(390.0))
-                .min_w(px(300.0))
+                .w(px(410.0))
+                .min_w(px(320.0))
                 .h_full()
                 .flex_none()
                 .flex()
@@ -982,7 +1187,7 @@ impl ChatListView {
                 .bg(theme.secondary)
                 .child(
                     div()
-                        .h(px(44.0))
+                        .h(px(48.0))
                         .px_3()
                         .flex()
                         .items_center()
@@ -992,12 +1197,13 @@ impl ChatListView {
                         .child(
                             div()
                                 .px_2()
-                                .py_1()
+                                .py_0p5()
                                 .rounded_md()
-                                .bg(theme.accent.opacity(0.18))
+                                .bg(header_bg)
                                 .text_xs()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .child(entry.category.to_uppercase()),
+                                .text_color(header_fg)
+                                .child(header_tag),
                         )
                         .child(
                             div()
@@ -1005,8 +1211,20 @@ impl ChatListView {
                                 .flex_1()
                                 .truncate()
                                 .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
                                 .child(entry.summary.clone()),
                         )
+                        .children(entry.diagnostics.duration_ms.map(|dur| {
+                            let dur_str = if dur < 1000 { format!("{dur}ms") } else { format!("{:.1}s", dur as f64 / 1000.0) };
+                            div()
+                                .px_1p5()
+                                .py_0p5()
+                                .rounded_sm()
+                                .bg(theme.muted.opacity(0.7))
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(dur_str)
+                        }))
                         .child(
                             Button::new("copy-trajectory-row")
                                 .ghost()
@@ -1042,6 +1260,37 @@ impl ChatListView {
                 )
                 .child(
                     div()
+                        .h(px(38.0))
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .children([
+                            ("Overview", TrajectoryInspectorTab::Overview),
+                            ("Preview", TrajectoryInspectorTab::Preview),
+                            ("Raw", TrajectoryInspectorTab::Raw),
+                            ("Source", TrajectoryInspectorTab::Source),
+                        ]
+                        .into_iter()
+                        .map(|(label, tab)| {
+                            let view = inspector_view.clone();
+                            Button::new(SharedString::from(format!("trajectory-inspector-{label}")))
+                                .ghost()
+                                .small()
+                                .selected(inspector_tab == tab)
+                                .label(label)
+                                .on_click(move |_, _, cx| {
+                                    view.update(cx, |this, cx| {
+                                        this.trajectory_inspector_tab = tab;
+                                        cx.notify();
+                                    })
+                                })
+                        })),
+                )
+                .child(
+                    div()
                         .flex_1()
                         .min_h_0()
                         .overflow_y_scrollbar()
@@ -1049,49 +1298,111 @@ impl ChatListView {
                         .flex()
                         .flex_col()
                         .gap_4()
-                        .child(div().flex().flex_col().gap_2().children(metadata.map(
-                            |(label, value)| {
+                        .child(match inspector_tab {
+                            TrajectoryInspectorTab::Overview => div()
+                                .flex()
+                                .flex_col()
+                                .gap_4()
+                                .child(
+                                    div()
+                                        .p_3()
+                                        .rounded_lg()
+                                        .bg(theme.muted.opacity(0.3))
+                                        .border_1()
+                                        .border_color(theme.border.opacity(0.5))
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2()
+                                        .children(metadata.map(|(label, value)| {
+                                            div()
+                                                .flex()
+                                                .gap_2()
+                                                .text_sm()
+                                                .child(
+                                                    div()
+                                                        .w(px(110.0))
+                                                        .flex_none()
+                                                        .text_xs()
+                                                        .font_weight(FontWeight::MEDIUM)
+                                                        .text_color(theme.muted_foreground)
+                                                        .child(label),
+                                                )
+                                                .child(div().min_w_0().flex_1().text_xs().child(value.clone()))
+                                        })),
+                                )
+                                .children(entry.diagnostics.raw.as_ref().map(|raw_args| {
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2()
+                                        .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child("INPUT ARGUMENTS"))
+                                        .child(TextView::markdown(
+                                            format!("trajectory-args-{}", entry.seq.unwrap_or(0)),
+                                            format!("```json\n{}\n```", raw_args),
+                                        ).selectable(true))
+                                }))
+                                .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child("VISIBILITY"))
+                                .child(div().text_sm().child(if model_visible { "Model-visible transcript/context" } else { "Runtime-only durable diagnostic" }))
+                                .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child("SUMMARY"))
+                                .child(div().text_sm().child(entry.summary.clone()))
+                                .into_any_element(),
+                            TrajectoryInspectorTab::Preview => div()
+                                .flex()
+                                .flex_col()
+                                .gap_3()
+                                .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child("OUTPUT PREVIEW"))
+                                .child(
+                                    if entry.detail.is_empty() {
+                                        div().text_sm().child("No preview content is available for this event.").into_any_element()
+                                    } else {
+                                        TextView::markdown(
+                                            format!("trajectory-preview-{}", entry.seq.unwrap_or(0)),
+                                            entry.detail.clone(),
+                                        )
+                                        .selectable(true)
+                                        .into_any_element()
+                                    },
+                                )
+                                .into_any_element(),
+                            TrajectoryInspectorTab::Raw => {
+                                let raw_json = serde_json::to_string_pretty(&entry).unwrap_or_else(|_| entry.detail.clone());
                                 div()
                                     .flex()
-                                    .gap_2()
-                                    .text_sm()
-                                    .child(
-                                        div()
-                                            .w(px(82.0))
-                                            .flex_none()
-                                            .text_color(theme.muted_foreground)
-                                            .child(label),
-                                    )
-                                    .child(
-                                        div().min_w_0().flex_1().child(
-                                            TextView::markdown(
-                                                format!("trajectory-meta-{}", entry.seq.unwrap_or(0)),
-                                                value.clone(),
-                                            )
-                                            .selectable(true),
-                                        ),
-                                    )
-                            },
-                        )))
-                        .child(
-                            div()
-                                .text_xs()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.muted_foreground)
-                                .child("DETAIL"),
-                        )
-                        .child(div().text_sm().child(
-                            if entry.detail.is_empty() {
-                                div().child("No additional detail").into_any_element()
-                            } else {
-                                TextView::markdown(
-                                    format!("trajectory-detail-{}", entry.seq.unwrap_or(0)),
-                                    entry.detail.clone(),
-                                )
-                                .selectable(true)
-                                .into_any_element()
-                            },
-                        )),
+                                    .flex_col()
+                                    .gap_3()
+                                    .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child("CANONICAL PROJECTION (JSON)"))
+                                    .child(TextView::markdown(
+                                        format!("trajectory-raw-{}", entry.seq.unwrap_or(0)),
+                                        format!("```json\n{raw_json}\n```"),
+                                    ).selectable(true))
+                                    .into_any_element()
+                            }
+                            TrajectoryInspectorTab::Source => div()
+                                .flex()
+                                .flex_col()
+                                .gap_3()
+                                .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child("PROVENANCE"))
+                                .child(div().text_sm().child(entry.diagnostics.source.clone().unwrap_or_else(|| provenance.to_string())))
+                                .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child("LINEAGE"))
+                                .child(div().text_sm().child(format!(
+                                    "Request {} · Turn {} · Lane {}",
+                                    entry.request.map_or("—".to_string(), |request| format!("#{request}")),
+                                    entry.turn.map_or("—".to_string(), |turn| turn.to_string()),
+                                    entry.lane.as_deref().unwrap_or("—"),
+                                )))
+                                .children(entry.diagnostics.parent_id.as_ref().map(|p| {
+                                    div().flex().flex_col().gap_1()
+                                        .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child("PARENT ENTRY"))
+                                        .child(div().text_sm().font_family("monospace").child(p.clone()))
+                                }))
+                                .children(entry.diagnostics.result_id.as_ref().map(|r| {
+                                    div().flex().flex_col().gap_1()
+                                        .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child("RESULT ENTRY"))
+                                        .child(div().text_sm().font_family("monospace").child(r.clone()))
+                                }))
+                                .children(entry.correlation_id.clone().map(|id| div().text_sm().child(format!("Correlation: {id}"))))
+                                .into_any_element(),
+                        }),
                 )
         });
         let overview_lane = |label: &'static str, category: &'static str, color: Hsla| {
@@ -1099,12 +1410,12 @@ impl ChatListView {
                 .iter()
                 .enumerate()
                 .filter(|(_, entry)| match category {
-                    "Input" => matches!(entry.category.as_str(), "Input" | "Context" | "Queue"),
+                    "Input" => matches!(entry.category.as_str(), "Input" | "Context" | "Context Manifest" | "Queue" | "Request"),
                     "Model" => matches!(
                         entry.category.as_str(),
-                        "Operation" | "Step" | "Retry" | "Turn" | "Error"
+                        "Operation" | "Step" | "Retry" | "Turn" | "Error" | "Provider" | "Anomaly"
                     ),
-                    _ => entry.category == "Tool",
+                    _ => matches!(entry.category.as_str(), "Tool" | "Tool runtime"),
                 })
                 .map(|(index, _)| {
                     let position = index * 48 / all_entries.len().max(1);
@@ -1173,6 +1484,7 @@ impl ChatListView {
         let mode_view = cx.entity().clone();
         let mode_label = match self.trajectory_mode {
             TrajectoryMode::Execution => "Execution",
+            TrajectoryMode::Requests => "Requests",
             TrajectoryMode::ModelContext => "Model Context",
             TrajectoryMode::DurableEvents => "Durable Events",
             TrajectoryMode::Recovery => "Recovery",
@@ -1197,6 +1509,7 @@ impl ChatListView {
                         let mut menu = menu;
                         for (label, mode) in [
                             ("Execution", TrajectoryMode::Execution),
+                            ("Requests", TrajectoryMode::Requests),
                             ("Model Context", TrajectoryMode::ModelContext),
                             ("Durable Events", TrajectoryMode::DurableEvents),
                             ("Recovery", TrajectoryMode::Recovery),
@@ -1247,7 +1560,7 @@ impl ChatListView {
                         menu
                     }),
             )
-            .child(
+            .children((lanes.len() > 1).then(|| {
                 Button::new("trajectory-lane-filter")
                     .ghost()
                     .small()
@@ -1278,8 +1591,8 @@ impl ChatListView {
                             );
                         }
                         menu
-                    }),
-            )
+                    })
+            }))
             .child(div().flex_1())
             .child(
                 div()
@@ -1292,6 +1605,93 @@ impl ChatListView {
                     .bg(theme.background)
                     .child(Input::new(&self.trajectory_search_input).appearance(false)),
             );
+        let tool_count = all_entries
+            .iter()
+            .filter(|e| e.category == "Tool" || e.category == "Tool runtime")
+            .count();
+        let total_dur_ms: u64 = all_entries
+            .iter()
+            .filter_map(|e| e.diagnostics.duration_ms)
+            .sum();
+        let dur_label = if total_dur_ms < 1000 {
+            format!("{total_dur_ms}ms total")
+        } else {
+            format!("{:.2}s total", total_dur_ms as f64 / 1000.0)
+        };
+        let anomaly_count = all_entries
+            .iter()
+            .filter(|e| e.diagnostics.is_anomaly || e.category == "Anomaly")
+            .count();
+        let max_turn = all_entries.iter().filter_map(|e| e.turn).max().unwrap_or(0);
+
+        let stats_bar = div()
+            .h(px(26.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_4()
+            .px_3()
+            .border_b_1()
+            .border_color(theme.border.opacity(0.4))
+            .bg(theme.muted.opacity(0.15))
+            .text_xs()
+            .text_color(theme.muted_foreground)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.foreground)
+                            .child(format!("{max_turn}")),
+                    )
+                    .child("turns"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.foreground)
+                            .child(format!("{tool_count}")),
+                    )
+                    .child("tool calls"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.foreground)
+                            .child(dur_label),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .size(px(6.0))
+                            .rounded_full()
+                            .bg(if anomaly_count > 0 {
+                                theme.warning
+                            } else {
+                                theme.success
+                            }),
+                    )
+                    .child(format!("{anomaly_count} anomalies")),
+            );
+
         div()
             .id("session-trajectory")
             .w_full()
@@ -1301,6 +1701,7 @@ impl ChatListView {
             .flex_col()
             .child(overview)
             .child(toolbar)
+            .child(stats_bar)
             .child(
                 div()
                     .flex_1()
@@ -2004,14 +2405,14 @@ impl ChatListView {
             .len();
         let has_prompt =
             !self.input_state.read(cx).value().trim().is_empty() || !self.pasted_images.is_empty();
-        let project_root = self.model.read(cx).active_work_dir.clone();
-        let model_options =
-            crate::model_catalog::available_models_for_project(project_root.as_deref());
+        let (model_options, selected_option, project_root) = {
+            let state = self.model.read(cx);
+            let options = state.available_models().to_vec();
+            let opt = options.iter().find(|o| o.id == selected_model).cloned();
+            let project = state.active_work_dir.clone();
+            (options, opt, project)
+        };
         let has_models = !model_options.is_empty();
-        let selected_option = crate::model_catalog::available_option_for_project(
-            &selected_model,
-            project_root.as_deref(),
-        );
         let model_label = selected_option
             .as_ref()
             .map(|option| option.label.clone())
@@ -2545,35 +2946,6 @@ impl ChatListView {
             .pb_2()
             .bg(theme.background)
             .children(pending_preview)
-            .when(
-                metrics.turns > 0
-                    || metrics.tool_calls > 0
-                    || billed_input_tokens > 0
-                    || metrics.output_tokens > 0
-                    || lane_count > 0,
-                |this| this.child(
-                    div()
-                        .w_full()
-                        .max_w(px(1000.0))
-                        .mx_auto()
-                        .pb_2()
-                        .px_1()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(format!(
-                            "{} turns · {} tool calls{cache_hit} · {} input / {} output tokens · {} subagent lanes",
-                            metrics.turns,
-                            metrics.tool_calls,
-                            crate::model_catalog::format_tokens(
-                                billed_input_tokens.min(u64::from(u32::MAX)) as u32
-                            ),
-                            crate::model_catalog::format_tokens(
-                                metrics.output_tokens.min(u64::from(u32::MAX)) as u32
-                            ),
-                            lane_count,
-                        )),
-                ),
-            )
             .child(
                 div()
                     .w_full()
@@ -2659,6 +3031,40 @@ impl ChatListView {
                             ),
                     ),
             )
+            .when(
+                metrics.turns > 0
+                    || metrics.tool_calls > 0
+                    || billed_input_tokens > 0
+                    || metrics.output_tokens > 0
+                    || lane_count > 0,
+                |this| {
+                    this.child(
+                        div()
+                            .w_full()
+                            .max_w(px(1000.0))
+                            .mx_auto()
+                            .flex()
+                            .justify_center()
+                            .pt_1()
+                            .pb_2()
+                            .px_1()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(format!(
+                                "{} turns · {} tool calls{cache_hit} · {} input / {} output tokens · {} subagent lanes",
+                                metrics.turns,
+                                metrics.tool_calls,
+                                crate::model_catalog::format_tokens(
+                                    billed_input_tokens.min(u64::from(u32::MAX)) as u32
+                                ),
+                                crate::model_catalog::format_tokens(
+                                    metrics.output_tokens.min(u64::from(u32::MAX)) as u32
+                                ),
+                                lane_count,
+                            )),
+                    )
+                },
+            )
     }
 }
 
@@ -2684,6 +3090,7 @@ impl Render for ChatListView {
             self.trajectory_lane = None;
             self.selected_trajectory_index = None;
             self.trajectory_search.clear();
+            self.markdown_states.clear();
             self.trajectory_search_input.update(cx, |state, cx| {
                 state.set_value("", window, cx);
             });

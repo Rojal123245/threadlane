@@ -543,6 +543,7 @@ impl HarnessEvent {
                 Record::AbortRequested { .. } => "AbortRequested",
                 Record::LaneMoved { .. } => "LaneMoved",
                 Record::RunContextCaptured { .. } => "RunContextCaptured",
+                Record::ContextManifestCaptured { .. } => "ContextManifestCaptured",
                 Record::ProviderRequestStarted { .. } => "ProviderRequestStarted",
                 Record::ProviderRequestFinished { .. } => "ProviderRequestFinished",
                 Record::ProviderResponseAttached { .. } => "ProviderResponseAttached",

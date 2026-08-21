@@ -13,6 +13,7 @@ pub struct GitHubPrInfo {
     pub title: String,
     pub url: String,
     pub state: String,
+    pub is_draft: bool,
     pub head_ref: String,
     pub base_ref: String,
     pub comments_count: usize,
@@ -330,6 +331,7 @@ pub fn parse_gh_pr_json(json_str: &str) -> Result<GitHubPrInfo, String> {
     let title = val["title"].as_str().unwrap_or("").to_string();
     let url = val["url"].as_str().unwrap_or("").to_string();
     let state = val["state"].as_str().unwrap_or("").to_string();
+    let is_draft = val["isDraft"].as_bool().unwrap_or(false);
     let head_ref = val["headRefName"].as_str().unwrap_or("").to_string();
     let base_ref = val["baseRefName"].as_str().unwrap_or("").to_string();
 
@@ -416,6 +418,7 @@ pub fn parse_gh_pr_json(json_str: &str) -> Result<GitHubPrInfo, String> {
         title,
         url,
         state,
+        is_draft,
         head_ref,
         base_ref,
         comments_count,
@@ -434,7 +437,7 @@ pub fn inspect_pr(work_dir: &Path) -> Result<Option<GitHubPrInfo>, GitError> {
             "pr",
             "view",
             "--json",
-            "number,title,url,state,comments,statusCheckRollup,headRefName,baseRefName",
+            "number,title,url,state,isDraft,comments,statusCheckRollup,headRefName,baseRefName",
         ])
         .current_dir(work_dir)
         .output();
@@ -1042,6 +1045,7 @@ mod tests {
         assert_eq!(pr.title, "Center editor panel");
         assert_eq!(pr.head_ref, "center_editor_panel");
         assert_eq!(pr.base_ref, "main");
+        assert!(!pr.is_draft);
         assert_eq!(pr.comments_count, 3);
         assert_eq!(pr.review_comments.len(), 3);
         assert_eq!(pr.review_comments[0].author, "reviewer1");
@@ -1049,5 +1053,35 @@ mod tests {
         assert_eq!(pr.failing_checks, 1);
         assert_eq!(pr.passing_checks, 1);
         assert_eq!(pr.pending_checks, 1);
+
+        let draft_sample = r#"{
+            "number": 43,
+            "title": "WIP Feature",
+            "url": "https://github.com/threadlane/threadlane/pull/43",
+            "state": "OPEN",
+            "isDraft": true,
+            "headRefName": "wip-feature",
+            "baseRefName": "main",
+            "comments": [],
+            "statusCheckRollup": []
+        }"#;
+        let draft_pr = parse_gh_pr_json(draft_sample).unwrap();
+        assert!(draft_pr.is_draft);
+        assert_eq!(draft_pr.state, "OPEN");
+
+        let merged_sample = r#"{
+            "number": 44,
+            "title": "Merged Feature",
+            "url": "https://github.com/threadlane/threadlane/pull/44",
+            "state": "MERGED",
+            "isDraft": false,
+            "headRefName": "merged-feature",
+            "baseRefName": "main",
+            "comments": [],
+            "statusCheckRollup": []
+        }"#;
+        let merged_pr = parse_gh_pr_json(merged_sample).unwrap();
+        assert!(!merged_pr.is_draft);
+        assert_eq!(merged_pr.state, "MERGED");
     }
 }

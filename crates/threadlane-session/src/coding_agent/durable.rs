@@ -129,6 +129,23 @@ impl CodingAgent {
                     async move { CodingSessionHarness::append_message_to_path(&path, message) },
                 )
             })));
+        let intent_path = path.clone();
+        let intent_run_id = run_id.clone();
+        self.agent.tool_dispatcher.tool_intent_recorder = Some(Arc::new(move |id, name, arguments| {
+            let path = intent_path.clone();
+            let run_id = intent_run_id.clone();
+            let id = id.to_string();
+            let name = name.to_string();
+            let arguments = arguments.to_string();
+            Box::pin(async move {
+                let effective_args = serde_json::from_str(&arguments)
+                    .unwrap_or_else(|_| serde_json::Value::String(arguments.clone()));
+                let mut harness = CodingSessionHarness::open(&path)?;
+                harness
+                    .append_tool_intent_after_hook(&run_id, &id, &name, effective_args)
+                    .await
+            })
+        }));
         let tool_path = path.clone();
         let tool_run_id = run_id.clone();
         self.agent.tool_dispatcher.tool_execution_trace_recorder = Some(Arc::new(move |event| {
@@ -551,7 +568,9 @@ impl CodingAgent {
         }
         self.agent.set_provider_trace_recorder(None);
         self.agent.set_message_recorder(None);
+        self.agent.tool_dispatcher.tool_intent_recorder = None;
         self.agent.tool_dispatcher.tool_execution_trace_recorder = None;
+        self.agent.tool_dispatcher.tool_completion_recorder = None;
         self.permission_handle.set_trace_recorder(None);
         result
     }

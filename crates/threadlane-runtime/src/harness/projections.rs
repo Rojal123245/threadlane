@@ -35,17 +35,44 @@ pub struct UiChatMessage {
 }
 
 fn tool_activity_summary(name: &str, arguments: &str) -> String {
-    let display_name = name.replace("_", " ");
+    let display_name = name.replace('_', " ");
     let Ok(args_val) = serde_json::from_str::<serde_json::Value>(arguments) else {
         return display_name;
     };
-    let context = ["path", "file_path", "regex", "query", "glob", "command"]
-        .iter()
-        .find_map(|key| args_val.get(key).and_then(|v| v.as_str()));
-    match context {
-        Some(ctx) => format!("{display_name}: {ctx}"),
-        None => display_name,
+    let context = [
+        "path",
+        "file_path",
+        "FilePath",
+        "TargetFile",
+        "command",
+        "CommandLine",
+        "query",
+        "Query",
+        "regex",
+        "glob",
+        "pattern",
+        "Pattern",
+        "prompt",
+        "Prompt",
+        "description",
+        "Description",
+    ]
+    .iter()
+    .find_map(|key| args_val.get(key).and_then(|v| v.as_str()));
+
+    if let Some(ctx) = context {
+        let trimmed = ctx.trim();
+        if !trimmed.is_empty() {
+            let first_line = trimmed.lines().next().unwrap_or(trimmed).trim();
+            let has_more_lines = trimmed.lines().nth(1).is_some();
+            let mut summary_ctx = first_line.to_string();
+            if has_more_lines && !summary_ctx.ends_with('…') && !summary_ctx.ends_with("...") {
+                summary_ctx.push_str(" …");
+            }
+            return format!("{display_name}: {summary_ctx}");
+        }
     }
+    display_name
 }
 
 /// Projects a sequence of [`AgentMessage`]s into canonical [`UiChatMessage`]s.
@@ -239,4 +266,36 @@ pub fn project_chat_messages(agent_messages: &[AgentMessage]) -> Vec<UiChatMessa
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use threadlane_protocol::{RuntimeToolCall, RuntimeToolCallFunction};
+
+    #[test]
+    fn multiline_command_arguments_are_sanitized_to_single_line_summary() {
+        let python_cmd = r#"{"CommandLine": "python3 - <<'PY'\nfrom pathlib import Path\np=Path('file.rs')\np.write_text('hello')\nPY"}"#;
+        let messages = vec![AgentMessage::Assistant {
+            content: None,
+            tool_calls: Some(vec![RuntimeToolCall {
+                id: "call_123".into(),
+                r#type: "function".into(),
+                function: RuntimeToolCallFunction {
+                    name: "run_command".into(),
+                    arguments: python_cmd.into(),
+                },
+                thought_signature: None,
+            }]),
+            stop_reason: None,
+            deferred_handle: None,
+        }];
+
+        let projected = project_chat_messages(&messages);
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].tool_activities.len(), 1);
+        let activity = &projected[0].tool_activities[0];
+        assert_eq!(activity.summary, "run command: python3 - <<'PY' …");
+        assert!(!activity.summary.contains('\n'));
+    }
 }

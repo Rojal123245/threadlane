@@ -521,6 +521,12 @@ pub enum ProviderTraceEvent {
         model: String,
         provider: String,
     },
+    ContextManifest {
+        attempt: u32,
+        request_id: String,
+        total_estimated_tokens: Option<u32>,
+        items: Vec<crate::harness::ContextManifestItem>,
+    },
     AssistantReady {
         attempt: u32,
         request_id: String,

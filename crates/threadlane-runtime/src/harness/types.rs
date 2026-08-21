@@ -436,6 +436,40 @@ pub struct RetryState {
     pub(crate) reason: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ContextItemSource {
+    SystemPrompt,
+    WorkspaceInstructions,
+    Skill,
+    Memory,
+    Message,
+    ToolSchema,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ContextItemStatus {
+    Active,
+    Superseded,
+    Truncated,
+    Omitted,
+    Compacted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextManifestItem {
+    pub position: usize,
+    pub source: ContextItemSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_id: Option<TraceString>,
+    pub role: TraceString,
+    pub token_estimate: u32,
+    pub status: ContextItemStatus,
+    pub digest_sha256: TraceString,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<TraceString>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Record {
     OperationStarted {
@@ -445,6 +479,18 @@ pub enum Record {
         timestamp: u64,
         source_leaf_id: Option<String>,
         intent: OperationIntent,
+    },
+    ContextManifestCaptured {
+        id: String,
+        seq: u64,
+        lane: String,
+        timestamp: u64,
+        run_id: String,
+        attempt: u32,
+        request_id: TraceString,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        total_estimated_tokens: Option<u32>,
+        items: Vec<ContextManifestItem>,
     },
     AbortRequested {
         id: String,
@@ -1059,6 +1105,12 @@ impl Record {
                 }
                 record
             }
+            mut record @ Self::ContextManifestCaptured { .. } => {
+                if let Self::ContextManifestCaptured { seq: current, .. } = &mut record {
+                    *current = seq;
+                }
+                record
+            }
             mut record @ Self::ProviderRequestStarted { .. } => {
                 if let Self::ProviderRequestStarted { seq: current, .. } = &mut record {
                     *current = seq;
@@ -1136,6 +1188,7 @@ impl Record {
             | Self::HookResumeData { id, .. }
             | Self::Usage { id, .. }
             | Self::RunContextCaptured { id, .. }
+            | Self::ContextManifestCaptured { id, .. }
             | Self::ProviderRequestStarted { id, .. }
             | Self::ProviderRequestFinished { id, .. }
             | Self::ProviderResponseAttached { id, .. }
@@ -1168,6 +1221,7 @@ impl Record {
             | Self::HookResumeData { seq, .. }
             | Self::Usage { seq, .. }
             | Self::RunContextCaptured { seq, .. }
+            | Self::ContextManifestCaptured { seq, .. }
             | Self::ProviderRequestStarted { seq, .. }
             | Self::ProviderRequestFinished { seq, .. }
             | Self::ProviderResponseAttached { seq, .. }
@@ -1200,6 +1254,7 @@ impl Record {
             | Self::HookResumeData { lane, .. }
             | Self::Usage { lane, .. }
             | Self::RunContextCaptured { lane, .. }
+            | Self::ContextManifestCaptured { lane, .. }
             | Self::ProviderRequestStarted { lane, .. }
             | Self::ProviderRequestFinished { lane, .. }
             | Self::ProviderResponseAttached { lane, .. }
@@ -1228,6 +1283,7 @@ impl Record {
             | Self::WriteDeferred { run_id, .. }
             | Self::WriteApplied { run_id, .. } => Some(run_id),
             Self::RunContextCaptured { run_id, .. }
+            | Self::ContextManifestCaptured { run_id, .. }
             | Self::ProviderRequestStarted { run_id, .. }
             | Self::ProviderRequestFinished { run_id, .. }
             | Self::ProviderResponseAttached { run_id, .. }
@@ -1257,7 +1313,8 @@ impl Record {
             | Self::AbortObserved { attempt, .. }
             | Self::SubagentLifecycle { attempt, .. }
             | Self::StreamCheckpoint { attempt, .. } => *attempt,
-            Self::ProviderRequestStarted { attempt, .. }
+            Self::ContextManifestCaptured { attempt, .. }
+            | Self::ProviderRequestStarted { attempt, .. }
             | Self::ProviderRequestFinished { attempt, .. }
             | Self::ProviderResponseAttached { attempt, .. } => Some(*attempt),
             _ => None,

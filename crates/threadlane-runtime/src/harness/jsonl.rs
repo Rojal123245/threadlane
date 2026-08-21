@@ -45,7 +45,8 @@ impl Drop for WriterClaim {
 
 fn writer_claim(path: &Path) -> io::Result<Arc<WriterClaim>> {
     static CLAIMS: OnceLock<Mutex<HashMap<PathBuf, Weak<WriterClaim>>>> = OnceLock::new();
-    let lock_path = path.with_extension("harness.lock");
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let lock_path = canonical.with_extension("harness.lock");
     let claims = CLAIMS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut claims = claims
         .lock()
@@ -139,17 +140,21 @@ impl JsonlStore {
     }
 
     fn load(path: PathBuf, claim: Arc<WriterClaim>, writable: bool) -> io::Result<Self> {
+        let _guard = claim
+            .gate
+            .lock()
+            .map_err(|_| io::Error::other("writer claim poisoned"))?;
         validate_session_lines(&path)?;
         let (session_id, preferred_leaf, entries, mut records) = read_entries(&path)?;
         records.extend(read_strict(&path.with_extension("harness.jsonl"))?);
         records.sort_by_key(Record::seq);
-        validate_harness_records(&records, &path.with_extension("harness.jsonl"))?;
+        validate_harness_records(&records, &path)?;
         let session_file_len = file_len(&path)?;
         let harness_file_len = file_len(&path.with_extension("harness.jsonl"))?;
         let store = Self {
             path,
             session_id,
-            claim,
+            claim: claim.clone(),
             writable,
             entries,
             records,
@@ -198,7 +203,7 @@ impl JsonlStore {
         let record_path = path.with_extension("harness.jsonl");
         records.extend(read_strict(&record_path)?);
         records.sort_by_key(Record::seq);
-        validate_harness_records(&records, &record_path)?;
+        validate_harness_records(&records, path)?;
         Ok((session_id, preferred_leaf, entries, records))
     }
 
@@ -486,6 +491,8 @@ impl JsonlStore {
         self.preferred_leaf = refreshed.1;
         self.entries = refreshed.2;
         self.records = refreshed.3;
+        self.refresh_file_lengths()
+            .map_err(|error| ReduceError::Storage(error.to_string()))?;
         super::Reducer::reduce(self).map(|_| ())
     }
 
@@ -743,6 +750,10 @@ fn invalid_line(path: &Path, line: usize, error: impl std::fmt::Display) -> io::
 #[cfg(test)]
 mod tests {
     use super::read_entries;
+    use crate::harness::{
+        ContextItemSource, ContextItemStatus, ContextManifestItem, JsonlStore, Record, Reducer,
+        SessionStore, TraceString,
+    };
 
     #[test]
     fn legacy_metadata_records_get_distinct_virtual_sequences() {
@@ -758,5 +769,96 @@ mod tests {
         let sequences = records.iter().map(|record| record.seq()).collect::<Vec<_>>();
         assert_eq!(sequences.len(), 3);
         assert!(sequences.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn context_manifest_captured_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut store = JsonlStore::open(&path).unwrap();
+
+        let items = vec![
+            ContextManifestItem {
+                position: 0,
+                source: ContextItemSource::SystemPrompt,
+                entry_id: None,
+                role: TraceString::new("system").unwrap(),
+                token_estimate: 42,
+                status: ContextItemStatus::Active,
+                digest_sha256: TraceString::new("abc123sha").unwrap(),
+                label: None,
+            },
+            ContextManifestItem {
+                position: 1,
+                source: ContextItemSource::Message,
+                entry_id: Some(TraceString::new("entry-1").unwrap()),
+                role: TraceString::new("user").unwrap(),
+                token_estimate: 15,
+                status: ContextItemStatus::Active,
+                digest_sha256: TraceString::new("def456sha").unwrap(),
+                label: None,
+            },
+            ContextManifestItem {
+                position: 2,
+                source: ContextItemSource::ToolSchema,
+                entry_id: None,
+                role: TraceString::new("tools").unwrap(),
+                token_estimate: 120,
+                status: ContextItemStatus::Active,
+                digest_sha256: TraceString::new("toolssha789").unwrap(),
+                label: Some(TraceString::new("3 tools").unwrap()),
+            },
+        ];
+
+        let manifest_record = Record::ContextManifestCaptured {
+            id: "context-manifest-run1-req1".into(),
+            seq: store.next_sequence(),
+            lane: "main".into(),
+            timestamp: 1234567890,
+            run_id: "run1".into(),
+            attempt: 1,
+            request_id: TraceString::new("provider-req-1").unwrap(),
+            total_estimated_tokens: Some(177),
+            items,
+        };
+
+        store.append_record(manifest_record).unwrap();
+        drop(store);
+
+        // Verify reading back from file
+        let reloaded = JsonlStore::open(&path).unwrap();
+        assert_eq!(reloaded.records().len(), 1);
+        match &reloaded.records()[0] {
+            Record::ContextManifestCaptured {
+                id,
+                seq,
+                lane,
+                run_id,
+                attempt,
+                request_id,
+                total_estimated_tokens,
+                items,
+                ..
+            } => {
+                assert_eq!(id, "context-manifest-run1-req1");
+                assert_eq!(*seq, 1);
+                assert_eq!(lane, "main");
+                assert_eq!(run_id, "run1");
+                assert_eq!(*attempt, 1);
+                assert_eq!(request_id.as_str(), "provider-req-1");
+                assert_eq!(*total_estimated_tokens, Some(177));
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[0].source, ContextItemSource::SystemPrompt);
+                assert_eq!(items[1].source, ContextItemSource::Message);
+                assert_eq!(items[2].source, ContextItemSource::ToolSchema);
+                assert_eq!(items[2].label.as_ref().unwrap().as_str(), "3 tools");
+            }
+            other => panic!("expected ContextManifestCaptured, got: {other:?}"),
+        }
+
+        // Verify reducer handles the record gracefully
+        let reduced = Reducer::reduce(&reloaded).unwrap();
+        assert_eq!(reduced.lanes.len(), 1);
+        assert_eq!(reduced.lanes[0].name, "main");
     }
 }

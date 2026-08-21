@@ -77,13 +77,34 @@ fn parse_anchor(anchor: &str) -> Result<(usize, String), String> {
     Ok((line_no, hash))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HashlineApplyResult {
+    pub new_content: String,
+    pub diff: String,
+    pub updated_context: String,
+}
+
 /// Apply a series of hash-anchored edits to a multi-line document.
 pub fn apply_hashline_edits(content: &str, edits: &[HashlineEdit]) -> Result<String, String> {
+    apply_hashline_edits_detailed(content, edits, 0).map(|r| r.new_content)
+}
+
+/// Apply a series of hash-anchored edits and return the updated content, unified diff, and surrounding line hashes.
+pub fn apply_hashline_edits_detailed(
+    content: &str,
+    edits: &[HashlineEdit],
+    context_lines: usize,
+) -> Result<HashlineApplyResult, String> {
     if edits.is_empty() {
-        return Ok(content.to_string());
+        return Ok(HashlineApplyResult {
+            new_content: content.to_string(),
+            diff: String::new(),
+            updated_context: String::new(),
+        });
     }
 
-    let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+    let original_lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+    let mut lines = original_lines.clone();
 
     // Preserve trailing newline if present
     let has_trailing_newline = content.ends_with('\n');
@@ -94,6 +115,7 @@ pub fn apply_hashline_edits(content: &str, edits: &[HashlineEdit]) -> Result<Str
         end_idx: usize,   // 0-based inclusive
         action: HashlineAction,
         new_lines: Vec<String>,
+        old_lines: Vec<String>,
     }
 
     let mut validated_edits = Vec::with_capacity(edits.len());
@@ -153,11 +175,19 @@ pub fn apply_hashline_edits(content: &str, edits: &[HashlineEdit]) -> Result<Str
             edit.new_content.lines().map(|s| s.to_string()).collect()
         };
 
+        let old_lines = match edit.action {
+            HashlineAction::Replace | HashlineAction::Delete => {
+                lines[start_idx..=end_idx].to_vec()
+            }
+            HashlineAction::InsertAfter => Vec::new(),
+        };
+
         validated_edits.push(ValidatedEdit {
             start_idx,
             end_idx,
             action: edit.action.clone(),
             new_lines,
+            old_lines,
         });
     }
 
@@ -179,15 +209,15 @@ pub fn apply_hashline_edits(content: &str, edits: &[HashlineEdit]) -> Result<Str
         }
     }
 
-    // Apply validated edits
-    for edit in validated_edits {
+    // Apply validated edits (descending order)
+    for edit in &validated_edits {
         match edit.action {
             HashlineAction::Replace => {
-                lines.splice(edit.start_idx..=edit.end_idx, edit.new_lines);
+                lines.splice(edit.start_idx..=edit.end_idx, edit.new_lines.clone());
             }
             HashlineAction::InsertAfter => {
                 let insert_at = edit.end_idx + 1;
-                lines.splice(insert_at..insert_at, edit.new_lines);
+                lines.splice(insert_at..insert_at, edit.new_lines.clone());
             }
             HashlineAction::Delete => {
                 lines.drain(edit.start_idx..=edit.end_idx);
@@ -195,11 +225,115 @@ pub fn apply_hashline_edits(content: &str, edits: &[HashlineEdit]) -> Result<Str
         }
     }
 
+    // Sort ascending for diff and context generation
+    validated_edits.sort_by_key(|edit| edit.start_idx);
+
+    // Generate unified diff
+    let mut diff_chunks = Vec::new();
+    let mut current_offset: isize = 0;
+    let diff_ctx = context_lines.min(3);
+
+    for edit in &validated_edits {
+        let orig_start_1based = match edit.action {
+            HashlineAction::InsertAfter => edit.end_idx + 1,
+            _ => edit.start_idx + 1,
+        };
+        let orig_count = match edit.action {
+            HashlineAction::InsertAfter => 0,
+            _ => edit.end_idx - edit.start_idx + 1,
+        };
+
+        let new_start_1based = ((orig_start_1based as isize) + current_offset).max(1) as usize;
+        let new_count = edit.new_lines.len();
+
+        let ctx_before_start = edit.start_idx.saturating_sub(diff_ctx);
+        let ctx_before = &original_lines[ctx_before_start..edit.start_idx];
+
+        let ctx_after_end = (edit.end_idx + 1 + diff_ctx).min(original_lines.len());
+        let ctx_after = if edit.end_idx + 1 < original_lines.len() {
+            &original_lines[(edit.end_idx + 1)..ctx_after_end]
+        } else {
+            &[]
+        };
+
+        let mut hunk = Vec::new();
+        hunk.push(format!(
+            "@@ -{},{} +{},{} @@",
+            orig_start_1based, orig_count, new_start_1based, new_count
+        ));
+        for line in ctx_before {
+            hunk.push(format!(" {line}"));
+        }
+        for line in &edit.old_lines {
+            hunk.push(format!("-{line}"));
+        }
+        for line in &edit.new_lines {
+            hunk.push(format!("+{line}"));
+        }
+        for line in ctx_after {
+            hunk.push(format!(" {line}"));
+        }
+        diff_chunks.push(hunk.join("\n"));
+
+        let diff_offset = (new_count as isize) - (orig_count as isize);
+        current_offset += diff_offset;
+    }
+    let diff = diff_chunks.join("\n");
+
+    // Generate surrounding line anchors in the modified document
+    let mut context_ranges = Vec::new();
+    let mut offset: isize = 0;
+    let anchor_ctx = if context_lines == 0 { 5 } else { context_lines };
+
+    for edit in &validated_edits {
+        let orig_start = edit.start_idx;
+        let orig_count = match edit.action {
+            HashlineAction::InsertAfter => 0,
+            _ => edit.end_idx - edit.start_idx + 1,
+        };
+        let new_count = edit.new_lines.len();
+        let new_start = ((orig_start as isize) + offset).max(0) as usize;
+        let new_end = new_start + new_count;
+
+        let range_start = new_start.saturating_sub(anchor_ctx);
+        let range_end = (new_end + anchor_ctx).min(lines.len());
+        context_ranges.push((range_start, range_end));
+
+        let diff_offset = (new_count as isize) - (orig_count as isize);
+        offset += diff_offset;
+    }
+
+    // Merge overlapping context ranges
+    let mut merged_ranges: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in context_ranges {
+        if let Some(last) = merged_ranges.last_mut() {
+            if start <= last.1 {
+                last.1 = last.1.max(end);
+                continue;
+            }
+        }
+        merged_ranges.push((start, end));
+    }
+
+    let mut context_lines_out = Vec::new();
+    for (start_idx, end_idx) in merged_ranges {
+        for idx in start_idx..end_idx {
+            if idx < lines.len() {
+                context_lines_out.push(format_line_hashline(idx + 1, &lines[idx]));
+            }
+        }
+    }
+    let updated_context = context_lines_out.join("\n");
+
     let mut result = lines.join("\n");
     if has_trailing_newline && !result.is_empty() {
         result.push('\n');
     }
-    Ok(result)
+    Ok(HashlineApplyResult {
+        new_content: result,
+        diff,
+        updated_context,
+    })
 }
 
 #[cfg(test)]
@@ -281,5 +415,29 @@ mod tests {
 
         let result = apply_hashline_edits(original, &[edit]).unwrap();
         assert_eq!(result, "line1\nline1_b\nline2\n");
+    }
+
+    #[test]
+    fn test_apply_hashline_edits_detailed_returns_diff_and_anchors() {
+        let original = "fn first() {}\nfn second() {\n    let a = 1;\n}\nfn third() {}\n";
+        let h2 = compute_line_hash("fn second() {");
+        let h4 = compute_line_hash("}");
+
+        let edit = HashlineEdit {
+            start_anchor: format!("2:{h2}"),
+            end_anchor: Some(format!("4:{h4}")),
+            action: HashlineAction::Replace,
+            new_content: "fn second() {\n    let a = 2;\n    let b = 3;\n}".into(),
+        };
+
+        let result = apply_hashline_edits_detailed(original, &[edit], 3).unwrap();
+        assert!(result.new_content.contains("let a = 2;"));
+        assert!(result.diff.contains("@@ -2,3 +2,4 @@"));
+        assert!(result.diff.contains("-    let a = 1;"));
+        assert!(result.diff.contains("+    let a = 2;"));
+        assert!(result.diff.contains("+    let b = 3;"));
+        assert!(result.updated_context.contains("2:"));
+        assert!(result.updated_context.contains("|fn second() {"));
+        assert!(result.updated_context.contains("|    let a = 2;"));
     }
 }

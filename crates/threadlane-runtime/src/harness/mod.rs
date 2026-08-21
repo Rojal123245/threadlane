@@ -13,6 +13,7 @@ mod session;
 mod sqlite;
 mod store;
 mod telemetry;
+mod trajectory;
 mod types;
 
 pub use agent::AgentHarness;
@@ -47,13 +48,19 @@ pub use store::{
     TranscriptProjection,
 };
 pub use telemetry::{ExecutionContext, NoopTelemetry, TelemetrySink};
+pub use trajectory::{
+    project_trajectory, AnomalyKind, ContextManifestTrajectory, DiagnosticAnomaly,
+    GenericDurableTrajectory, PermissionTrajectory, ProviderTrajectory, RequestStatus,
+    RequestTrajectory, SessionTrajectory, SubagentTrajectory, ToolStatus, ToolTrajectory,
+    TrajectoryItem, TrajectoryRef,
+};
 pub use types::{
     sanitize_tool_args, AbortInitiator, AbortObservation, AbortTarget, AcceptedRun,
-    BoundedPromptText, BoundedText, CapabilitySnapshot, Entry, ErrorCategory,
-    InterruptedSubagentLane, LaneState, LaneStatus, OperationIntent, OperationOutcome,
-    PermissionTraceDecision, PermissionTraceScope, PermissionTraceSource, PromptSnapshot,
-    ProviderErrorSummary, ProviderOutcome, ProvisionedEntry, QueueKind, QueuedEntry, Record,
-    RecoveryResult, ReduceError, ReducedState, RetryState, StreamCheckpointKind,
-    SubagentLifecyclePhase, SurfaceOperation, ToolExecutionOutcome, ToolExecutionPhase,
-    ToolReplaySafety, ToolResult, ToolSpec, ToolState, TraceString, UsageCause,
+    BoundedPromptText, BoundedText, CapabilitySnapshot, ContextItemSource, ContextItemStatus,
+    ContextManifestItem, Entry, ErrorCategory, InterruptedSubagentLane, LaneState, LaneStatus,
+    OperationIntent, OperationOutcome, PermissionTraceDecision, PermissionTraceScope,
+    PermissionTraceSource, PromptSnapshot, ProviderErrorSummary, ProviderOutcome, ProvisionedEntry,
+    QueueKind, QueuedEntry, Record, RecoveryResult, ReduceError, ReducedState, RetryState,
+    StreamCheckpointKind, SubagentLifecyclePhase, SurfaceOperation, ToolExecutionOutcome,
+    ToolExecutionPhase, ToolReplaySafety, ToolResult, ToolSpec, ToolState, TraceString, UsageCause,
 };

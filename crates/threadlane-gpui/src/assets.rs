@@ -28,6 +28,7 @@ impl AssetSource for Assets {
             "icons/git/commit.svg" => Some(include_bytes!("../assets/icons/git/commit.svg")),
             "icons/git/compare.svg" => Some(include_bytes!("../assets/icons/git/compare.svg")),
             "icons/git/branch.svg" => Some(include_bytes!("../assets/icons/git/branch.svg")),
+            "icons/git/comments.svg" => Some(include_bytes!("../assets/icons/git/comments.svg")),
             _ => None,
         };
 
@@ -53,6 +54,7 @@ impl AssetSource for Assets {
                 "icons/git/commit.svg",
                 "icons/git/compare.svg",
                 "icons/git/branch.svg",
+                "icons/git/comments.svg",
             ]
             .into_iter()
             .filter(|asset| asset.starts_with(path))

@@ -80,7 +80,7 @@ pub(crate) fn dispatch(
             state.reconcile_selected_model();
         }
         AppAction::ToggleReasoningExpanded(msg_id) => {
-            if let Some(message) = state.messages.iter_mut().find(|m| m.id == msg_id) {
+            if let Some(message) = state.messages_mut().iter_mut().find(|m| m.id == msg_id) {
                 message.reasoning_expanded = !message.reasoning_expanded;
             }
         }

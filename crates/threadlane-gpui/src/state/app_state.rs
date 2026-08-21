@@ -59,16 +59,39 @@ pub struct ToolActivityInfo {
     pub(crate) is_expanded: bool,
 }
 
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct TrajectoryDiagnostics {
+    pub(crate) status: Option<String>,
+    pub(crate) duration_ms: Option<u64>,
+    pub(crate) model_visible: bool,
+    pub(crate) source: Option<String>,
+    pub(crate) raw: Option<String>,
+    pub(crate) parent_id: Option<String>,
+    pub(crate) result_id: Option<String>,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) output_bytes: Option<u64>,
+    pub(crate) files_mutated: Vec<String>,
+    pub(crate) commands_executed: Vec<String>,
+    pub(crate) error_summary: Option<String>,
+    pub(crate) items_count: Option<usize>,
+    pub(crate) token_estimate: Option<u32>,
+    pub(crate) is_anomaly: bool,
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct TrajectoryEntry {
     pub(crate) seq: Option<u64>,
     pub(crate) run_id: Option<String>,
     pub(crate) turn: Option<u32>,
+    /// The user-facing request this entry belongs to, when it can be inferred
+    /// from the canonical transcript. Runtime records inherit the active request.
+    pub(crate) request: Option<u32>,
     pub(crate) category: String,
     pub(crate) summary: String,
     pub(crate) detail: String,
     pub(crate) lane: Option<String>,
     pub(crate) correlation_id: Option<String>,
+    pub(crate) diagnostics: TrajectoryDiagnostics,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -182,7 +205,8 @@ pub struct AppState {
     pub(crate) active_session_id: Option<String>,
     pub(crate) is_new_task: bool,
     pub(crate) search_query: String,
-    pub(crate) messages: Vec<ChatMessageInfo>,
+    pub(crate) messages: Arc<Vec<ChatMessageInfo>>,
+    pub(crate) available_models: Vec<crate::model_catalog::ModelOption>,
     history_session_file: Option<PathBuf>,
     history_start: usize,
     history_has_older: bool,
@@ -198,6 +222,7 @@ pub struct AppState {
     stashed_prompts: HashMap<String, String>,
     pub(crate) pending_permissions: HashMap<String, threadlane_session::PermissionRequest>,
     pub(crate) pending_hydrations: Vec<SessionHydrationRequest>,
+    pub(crate) git_statuses: HashMap<PathBuf, threadlane_git::GitStatus>,
 
     pub(crate) selected_model: String,
     pub(crate) model_roles: threadlane_session::ModelRoles,
@@ -448,13 +473,40 @@ fn tool_activity_summary(name: &str, arguments: &str) -> String {
     let Ok(arguments) = serde_json::from_str::<serde_json::Value>(arguments) else {
         return display_name;
     };
-    let context = ["path", "file_path", "regex", "query", "glob", "command"]
-        .iter()
-        .find_map(|key| arguments.get(key).and_then(|value| value.as_str()));
-    context
-        .filter(|value| !value.is_empty())
-        .map(|value| format!("{display_name} {value}"))
-        .unwrap_or(display_name)
+    let context = [
+        "path",
+        "file_path",
+        "FilePath",
+        "TargetFile",
+        "command",
+        "CommandLine",
+        "query",
+        "Query",
+        "regex",
+        "glob",
+        "pattern",
+        "Pattern",
+        "prompt",
+        "Prompt",
+        "description",
+        "Description",
+    ]
+    .iter()
+    .find_map(|key| arguments.get(key).and_then(|value| value.as_str()));
+
+    if let Some(value) = context {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            let first_line = trimmed.lines().next().unwrap_or(trimmed).trim();
+            let has_more_lines = trimmed.lines().nth(1).is_some();
+            let mut summary_ctx = first_line.to_string();
+            if has_more_lines && !summary_ctx.ends_with('…') && !summary_ctx.ends_with("...") {
+                summary_ctx.push_str(" …");
+            }
+            return format!("{display_name} {summary_ctx}");
+        }
+    }
+    display_name
 }
 
 fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageInfo> {
@@ -669,13 +721,17 @@ impl AppState {
             _ => Vec::new(),
         };
 
+        let available_models =
+            crate::model_catalog::available_models_for_project(active_work_dir.as_deref());
+
         let mut state = Self {
             projects: project_infos,
             active_work_dir,
             is_new_task: active_session_id.is_none(),
             active_session_id,
             search_query: String::new(),
-            messages,
+            messages: Arc::new(messages),
+            available_models,
             history_session_file: active_session_file.clone(),
             history_start,
             history_has_older,
@@ -710,6 +766,7 @@ impl AppState {
             deferred_stream_events: HashMap::new(),
             pending_permissions: HashMap::new(),
             pending_hydrations: Vec::new(),
+            git_statuses: HashMap::new(),
         };
         if let (Some(session_id), Some(session_file)) = (
             state.active_session_id.clone(),
@@ -722,16 +779,32 @@ impl AppState {
                         seq: None,
                         run_id: None,
                         turn: None,
+                        request: None,
                         category: "Error".into(),
                         summary: "Could not load durable trajectory".into(),
                         detail: error,
                         lane: Some("main".into()),
                         correlation_id: None,
+                        diagnostics: TrajectoryDiagnostics::default(),
                     }],
                 );
             }
         }
         state
+    }
+
+    pub(crate) fn messages_mut(&mut self) -> &mut Vec<ChatMessageInfo> {
+        Arc::make_mut(&mut self.messages)
+    }
+
+    pub(crate) fn available_models(&self) -> &[crate::model_catalog::ModelOption] {
+        &self.available_models
+    }
+
+    pub(crate) fn refresh_available_models(&mut self) {
+        self.available_models = crate::model_catalog::available_models_for_project(
+            self.active_work_dir.as_deref(),
+        );
     }
 
     pub(crate) fn set_needle_enabled(&mut self, enabled: bool) -> Result<(), String> {
@@ -818,19 +891,26 @@ impl AppState {
     }
 
     pub(crate) fn reconcile_selected_model(&mut self) {
-        if !crate::model_catalog::is_available_for_project(
-            &self.selected_model,
-            self.active_work_dir.as_deref(),
-        ) {
-            self.selected_model =
-                crate::model_catalog::default_model_for_project(self.active_work_dir.as_deref())
-                    .unwrap_or_default();
+        self.refresh_available_models();
+        if !self
+            .available_models
+            .iter()
+            .any(|model| model.id == self.selected_model)
+        {
+            self.selected_model = self
+                .available_models
+                .first()
+                .map(|model| model.id.clone())
+                .unwrap_or_default();
         }
         self.invalidate_idle_runtimes();
     }
 
     pub(crate) fn set_selected_model(&mut self, model: String) {
-        if !crate::model_catalog::is_available_for_project(&model, self.active_work_dir.as_deref())
+        if !self
+            .available_models
+            .iter()
+            .any(|m| m.id == model)
         {
             return;
         }
@@ -910,7 +990,7 @@ impl AppState {
         self.workspace_page = WorkspacePage::Chat;
         self.active_session_id = None;
         self.is_new_task = true;
-        self.messages.clear();
+        self.messages = Arc::new(Vec::new());
         self.history_session_file = None;
         self.history_start = 0;
         self.history_has_older = false;
@@ -940,7 +1020,7 @@ impl AppState {
             self.active_work_dir = Some(work_dir.clone());
             self.active_session_id = None;
             self.is_new_task = true;
-            self.messages.clear();
+            self.messages = Arc::new(Vec::new());
             self.history_session_file = None;
             self.history_start = 0;
             self.history_has_older = false;
@@ -948,13 +1028,14 @@ impl AppState {
             self.is_generating = false;
             self.session_status = None;
             self.persist_project_selection(&work_dir, None);
+            self.refresh_available_models();
             self.request_session_refresh(&work_dir);
         }
     }
 
     fn replace_visible_history(&mut self, session_file: &Path) {
         let (messages, start, has_older) = load_session_message_page(session_file, usize::MAX);
-        self.messages = messages;
+        self.messages = Arc::new(messages);
         self.history_session_file = Some(session_file.to_path_buf());
         self.history_start = start;
         self.history_has_older = has_older;
@@ -1000,6 +1081,7 @@ impl AppState {
         self.active_session_id = Some(session_id.clone());
         self.is_new_task = false;
         self.persist_project_selection(&work_dir, Some(&session_id));
+        self.refresh_available_models();
 
         let session_file = self.session_file(&work_dir, &session_id);
         let completed_events = self
@@ -1012,7 +1094,7 @@ impl AppState {
                 self.record_trajectory(&session_id, &event);
             }
         }
-        self.messages.clear();
+        self.messages = Arc::new(Vec::new());
         self.history_session_file = Some(session_file.clone());
         self.history_start = 0;
         self.history_has_older = false;
@@ -1166,7 +1248,7 @@ impl AppState {
 
         self.active_session_id = None;
         self.is_new_task = true;
-        self.messages.clear();
+        self.messages = Arc::new(Vec::new());
         self.active_plan = SessionPlan::default();
         self.is_generating = false;
         self.session_status = None;
@@ -1212,7 +1294,7 @@ impl AppState {
 
     pub(crate) fn toggle_tool_activity(&mut self, tool_call_id: &str) {
         if let Some(activity) = self
-            .messages
+            .messages_mut()
             .iter_mut()
             .flat_map(|message| message.tool_activities.iter_mut())
             .find(|activity| activity.id == tool_call_id)
@@ -1244,10 +1326,11 @@ impl AppState {
         self.active_work_dir = Some(canonical);
         self.active_session_id = None;
         self.is_new_task = true;
-        self.messages.clear();
+        self.messages = Arc::new(Vec::new());
         self.active_plan = SessionPlan::default();
         self.is_generating = false;
         self.session_status = None;
+        self.refresh_available_models();
         Ok(())
     }
 
@@ -1320,6 +1403,7 @@ impl AppState {
                 _ => None,
             })
             .collect::<HashSet<_>>();
+
         for record in store.records() {
             use threadlane_session::harness::Record;
             let entry = match record {
@@ -1333,11 +1417,13 @@ impl AppState {
                     seq: Some(*seq),
                     run_id: Some(id.clone()),
                     turn: None,
+                    request: None,
                     category: "Operation".into(),
                     summary: format!("{intent:?} started"),
                     detail: String::new(),
                     lane: Some(lane.clone()),
                     correlation_id: None,
+                    diagnostics: TrajectoryDiagnostics::default(),
                 }),
                 Record::OperationFinished {
                     seq,
@@ -1350,11 +1436,13 @@ impl AppState {
                     seq: Some(*seq),
                     run_id: Some(run_id.clone()),
                     turn: None,
+                    request: None,
                     category: "Operation".into(),
                     summary: format!("Operation {outcome:?}"),
                     detail: error.clone().unwrap_or_default(),
                     lane: Some(lane.clone()),
                     correlation_id: None,
+                    diagnostics: TrajectoryDiagnostics::default(),
                 }),
                 Record::StepAttempt {
                     seq,
@@ -1368,11 +1456,13 @@ impl AppState {
                         seq: Some(*seq),
                         run_id: Some(run_id.clone()),
                         turn: Some(*attempt),
+                        request: None,
                         category: "Step".into(),
                         summary: format!("Step {attempt} started"),
                         detail: format!("lane {}", lane.as_str()),
                         lane: Some(lane.clone()),
                         correlation_id: None,
+                        diagnostics: TrajectoryDiagnostics::default(),
                     })
                 }
                 Record::RetryScheduled {
@@ -1386,51 +1476,78 @@ impl AppState {
                     seq: Some(*seq),
                     run_id: Some(run_id.clone()),
                     turn: Some(*attempt),
+                    request: None,
                     category: "Retry".into(),
                     summary: format!("Retry {attempt} scheduled"),
                     detail: reason.clone(),
                     lane: Some(lane.clone()),
                     correlation_id: None,
+                    diagnostics: TrajectoryDiagnostics::default(),
                 }),
-                Record::ToolStarted {
+                Record::RetryConsumed {
+                    seq,
                     lane,
                     run_id,
-                    assistant_entry_id,
-                    tool_call_id,
-                    tool_name,
-                    effective_args,
+                    attempt,
                     ..
-                } => {
-                    tool_starts.insert(
-                        (assistant_entry_id.clone(), tool_call_id.clone()),
-                        (
-                            run_id.clone(),
-                            lane.clone(),
-                            tool_name.clone(),
-                            effective_args.clone(),
-                        ),
-                    );
-                    None
-                }
-                Record::ToolFinished {
+                } => Some(TrajectoryEntry {
+                    seq: Some(*seq),
+                    run_id: Some(run_id.clone()),
+                    turn: Some(*attempt),
+                    request: None,
+                    category: "Retry".into(),
+                    summary: format!("Retry {attempt} consumed"),
+                    detail: String::new(),
+                    lane: Some(lane.clone()),
+                    correlation_id: None,
+                    diagnostics: TrajectoryDiagnostics::default(),
+                }),
+                Record::LaneMoved {
+                    seq,
                     lane,
                     run_id,
-                    tool_call_id,
-                    result_entry_id,
+                    target_leaf_id,
+                    ..
+                } => Some(TrajectoryEntry {
+                    seq: Some(*seq),
+                    run_id: Some(run_id.clone()),
+                    turn: None,
+                    request: None,
+                    category: "Lane".into(),
+                    summary: format!("Lane moved to {target_leaf_id}"),
+                    detail: format!("target: {target_leaf_id}"),
+                    lane: Some(lane.clone()),
+                    correlation_id: None,
+                    diagnostics: TrajectoryDiagnostics::default(),
+                }),
+                Record::Usage {
+                    seq,
+                    lane,
+                    run_id,
+                    attempt,
+                    cause,
+                    usage,
                     ..
                 } => {
-                    tool_finishes.insert(
-                        result_entry_id.clone(),
-                        (run_id.clone(), lane.clone(), tool_call_id.clone()),
-                    );
-                    None
-                }
-                Record::Usage { cause, usage, .. } => {
-                    if matches!(cause, threadlane_session::harness::UsageCause::Provider) {
+                    if *cause == threadlane_session::harness::UsageCause::Provider {
                         metrics.accumulate_usage(usage);
                         durable_usage.accumulate(usage);
                     }
-                    None
+                    Some(TrajectoryEntry {
+                        seq: Some(*seq),
+                        run_id: run_id.clone(),
+                        turn: *attempt,
+                        request: None,
+                        category: "Usage".into(),
+                        summary: format!("Usage: {} total tokens ({cause:?})", usage.total_tokens),
+                        detail: format!(
+                            "input: {}, output: {}, cache read: {}, cache write: {}",
+                            usage.input_tokens, usage.output_tokens, usage.cache_read_tokens, usage.cache_write_tokens
+                        ),
+                        lane: Some(lane.clone()),
+                        correlation_id: None,
+                        diagnostics: TrajectoryDiagnostics::default(),
+                    })
                 }
                 Record::RunContextCaptured {
                     seq,
@@ -1485,6 +1602,7 @@ impl AppState {
                         seq: Some(*seq),
                         run_id: Some(run_id.clone()),
                         turn: None,
+                        request: None,
                         category: "Context".into(),
                         summary: format!(
                             "{} via {} ({reasoning_effort:?})",
@@ -1494,6 +1612,74 @@ impl AppState {
                         detail,
                         lane: Some(lane.clone()),
                         correlation_id: None,
+                        diagnostics: TrajectoryDiagnostics {
+                            model_visible: true,
+                            source: Some("Run context captured".into()),
+                            ..Default::default()
+                        },
+                    })
+                }
+                Record::ContextManifestCaptured {
+                    seq,
+                    lane,
+                    run_id,
+                    attempt,
+                    request_id,
+                    total_estimated_tokens,
+                    items,
+                    ..
+                } => {
+                    let items_summary = items
+                        .iter()
+                        .map(|item| {
+                            let digest_prefix = if item.digest_sha256.as_str().len() >= 8 {
+                                &item.digest_sha256.as_str()[..8]
+                            } else {
+                                item.digest_sha256.as_str()
+                            };
+                            format!(
+                                "- [{:?}] `{}` (~{} tokens, sha256: `{}`)",
+                                item.source,
+                                item.role.as_str(),
+                                item.token_estimate,
+                                digest_prefix,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    Some(TrajectoryEntry {
+                        seq: Some(*seq),
+                        run_id: Some(run_id.clone()),
+                        turn: Some(*attempt),
+                        request: None,
+                        category: "Context Manifest".into(),
+                        summary: format!(
+                            "Context manifest ({} items, ~{} tokens)",
+                            items.len(),
+                            total_estimated_tokens.unwrap_or(0)
+                        ),
+                        detail: format!(
+                            "**Request ID**: `{}`\n\n**Turn / Attempt**: `{}`\n\n**Context Items ({} total)**:\n{}",
+                            request_id.as_str(),
+                            attempt,
+                            items.len(),
+                            items_summary
+                        ),
+                        lane: Some(lane.clone()),
+                        correlation_id: Some(request_id.as_str().to_owned()),
+                        diagnostics: TrajectoryDiagnostics {
+                            source: Some("Context manifest captured".into()),
+                            raw: Some(format!(
+                                "items={}; total_tokens={:?}; request_id={}",
+                                items.len(),
+                                total_estimated_tokens,
+                                request_id.as_str()
+                            )),
+                            items_count: Some(items.len()),
+                            token_estimate: *total_estimated_tokens,
+                            model_visible: true,
+                            ..Default::default()
+                        },
                     })
                 }
                 Record::ProviderRequestStarted {
@@ -1509,6 +1695,7 @@ impl AppState {
                     seq: Some(*seq),
                     run_id: Some(run_id.clone()),
                     turn: Some(*attempt),
+                    request: None,
                     category: "Provider".into(),
                     summary: format!("{} request started", provider.as_str()),
                     detail: format!(
@@ -1520,6 +1707,17 @@ impl AppState {
                     ),
                     lane: Some(lane.clone()),
                     correlation_id: request_id.as_ref().map(|id| id.as_str().to_owned()),
+                    diagnostics: TrajectoryDiagnostics {
+                        status: Some("started".into()),
+                        source: Some("Provider request lifecycle".into()),
+                        raw: Some(format!(
+                            "provider={} model={} request_id={}",
+                            provider.as_str(),
+                            model.as_str(),
+                            request_id.as_ref().map(|id| id.as_str()).unwrap_or("none")
+                        )),
+                        ..Default::default()
+                    },
                 }),
                 Record::ProviderRequestFinished {
                     seq,
@@ -1564,11 +1762,19 @@ impl AppState {
                         seq: Some(*seq),
                         run_id: Some(run_id.clone()),
                         turn: Some(*attempt),
+                        request: None,
                         category: "Provider".into(),
                         summary: format!("Provider request {outcome:?}"),
                         detail: detail_lines.join("\n\n"),
                         lane: Some(lane.clone()),
                         correlation_id: request_id.as_ref().map(|id| id.as_str().to_owned()),
+                        diagnostics: TrajectoryDiagnostics {
+                            status: Some(format!("{outcome:?}")),
+                            duration_ms: *duration_ms,
+                            source: Some("Provider request lifecycle".into()),
+                            raw: Some(format!("outcome={outcome:?}; request_id={}", request_id.as_ref().map(|id| id.as_str()).unwrap_or("none"))),
+                            ..Default::default()
+                        },
                     })
                 }
                 Record::ProviderResponseAttached {
@@ -1584,6 +1790,7 @@ impl AppState {
                     seq: Some(*seq),
                     run_id: Some(run_id.clone()),
                     turn: Some(*attempt),
+                    request: None,
                     category: "Provider".into(),
                     summary: "Provider response attached".into(),
                     detail: format!(
@@ -1596,6 +1803,7 @@ impl AppState {
                     ),
                     lane: Some(lane.clone()),
                     correlation_id: request_id.as_ref().map(|id| id.as_str().to_owned()),
+                    diagnostics: TrajectoryDiagnostics::default(),
                 }),
                 Record::PermissionRequested {
                     seq,
@@ -1611,11 +1819,13 @@ impl AppState {
                     seq: Some(*seq),
                     run_id: run_id.clone(),
                     turn: *attempt,
+                    request: None,
                     category: "Permission".into(),
                     summary: format!("{} permission requested", capability.as_str()),
                     detail: format!("scopes {scopes:?}; detail sha256 {}", detail_sha256.as_str()),
                     lane: Some(lane.clone()),
                     correlation_id: Some(request_id.as_str().to_owned()),
+                    diagnostics: TrajectoryDiagnostics::default(),
                 }),
                 Record::PermissionResolved {
                     seq,
@@ -1631,12 +1841,47 @@ impl AppState {
                     seq: Some(*seq),
                     run_id: run_id.clone(),
                     turn: *attempt,
+                    request: None,
                     category: "Permission".into(),
                     summary: format!("Permission {decision:?}"),
                     detail: format!("source {source:?}; remembered {remembered}"),
                     lane: Some(lane.clone()),
                     correlation_id: Some(request_id.as_str().to_owned()),
+                    diagnostics: TrajectoryDiagnostics::default(),
                 }),
+                Record::ToolStarted {
+                    lane,
+                    run_id,
+                    assistant_entry_id,
+                    tool_call_id,
+                    tool_name,
+                    effective_args,
+                    ..
+                } => {
+                    tool_starts.insert(
+                        (assistant_entry_id.clone(), tool_call_id.clone()),
+                        (
+                            run_id.clone(),
+                            lane.clone(),
+                            tool_name.clone(),
+                            effective_args.clone(),
+                        ),
+                    );
+                    None
+                }
+                Record::ToolFinished {
+                    lane,
+                    run_id,
+                    tool_call_id,
+                    result_entry_id,
+                    ..
+                } => {
+                    tool_finishes.insert(
+                        result_entry_id.clone(),
+                        (run_id.clone(), lane.clone(), tool_call_id.clone()),
+                    );
+                    None
+                }
                 Record::ToolExecutionObserved {
                     seq,
                     lane,
@@ -1649,11 +1894,14 @@ impl AppState {
                     duration_ms,
                     outcome,
                     cancelled,
+                    exit_code,
+                    output_bytes,
                     ..
                 } => Some(TrajectoryEntry {
                     seq: Some(*seq),
                     run_id: Some(run_id.clone()),
                     turn: *attempt,
+                    request: None,
                     category: "Tool runtime".into(),
                     summary: format!("{} {phase:?}", tool_name.as_str()),
                     detail: format!(
@@ -1662,6 +1910,18 @@ impl AppState {
                     ),
                     lane: Some(lane.clone()),
                     correlation_id: Some(tool_call_id.as_str().to_owned()),
+                    diagnostics: TrajectoryDiagnostics {
+                        duration_ms: *duration_ms,
+                        status: outcome.as_ref().map(|o| format!("{o:?}")).or_else(|| Some(format!("{phase:?}"))),
+                        exit_code: *exit_code,
+                        output_bytes: *output_bytes,
+                        source: Some(format!("Tool Executor ({})", executor_kind.as_str())),
+                        raw: Some(format!(
+                            "tool={}; phase={:?}; outcome={:?}; duration={:?}ms; exit_code={:?}; output_bytes={:?}",
+                            tool_name.as_str(), phase, outcome, duration_ms, exit_code, output_bytes
+                        )),
+                        ..Default::default()
+                    },
                 }),
                 Record::AbortObserved {
                     seq,
@@ -1677,11 +1937,13 @@ impl AppState {
                     seq: Some(*seq),
                     run_id: Some(run_id.clone()),
                     turn: *attempt,
+                    request: None,
                     category: "Cancellation".into(),
                     summary: format!("{observation:?} for {target:?}"),
                     detail: format!("initiator {initiator:?}; acknowledged {acknowledged}"),
                     lane: Some(lane.clone()),
                     correlation_id: None,
+                    diagnostics: TrajectoryDiagnostics::default(),
                 }),
                 Record::SubagentLifecycle {
                     seq,
@@ -1698,6 +1960,7 @@ impl AppState {
                     seq: Some(*seq),
                     run_id: run_id.clone(),
                     turn: *attempt,
+                    request: None,
                     category: "Subagent".into(),
                     summary: format!("{} {phase:?}", agent_id.as_str()),
                     detail: format!(
@@ -1711,6 +1974,7 @@ impl AppState {
                     ),
                     lane: Some(lane.clone()),
                     correlation_id: Some(child_run_id.as_str().to_owned()),
+                    diagnostics: TrajectoryDiagnostics::default(),
                 }),
                 Record::StreamCheckpoint {
                     seq,
@@ -1728,6 +1992,7 @@ impl AppState {
                     seq: Some(*seq),
                     run_id: Some(run_id.clone()),
                     turn: *attempt,
+                    request: None,
                     category: "Incomplete stream".into(),
                     summary: format!("Incomplete stream checkpoint {checkpoint_index}"),
                     detail: format!(
@@ -1740,6 +2005,7 @@ impl AppState {
                     ),
                     lane: Some(lane.clone()),
                     correlation_id: Some(request_id.as_str().to_owned()),
+                    diagnostics: TrajectoryDiagnostics::default(),
                 }),
                 _ => None,
             };
@@ -1747,7 +2013,16 @@ impl AppState {
                 trajectory.push(entry);
             }
         }
+
+        let mut request_number = 0u32;
         for entry in store.entries() {
+            if matches!(
+                &entry.message,
+                AgentMessage::User { .. } | AgentMessage::UserWithImages { .. }
+            ) {
+                request_number = request_number.saturating_add(1);
+            }
+            let request = (request_number > 0).then_some(request_number);
             if let AgentMessage::Assistant {
                 tool_calls: Some(calls),
                 ..
@@ -1770,11 +2045,17 @@ impl AppState {
                         seq: Some(entry.seq),
                         run_id,
                         turn: None,
+                        request,
                         category: "Tool".into(),
                         summary: format!("{name} running"),
                         detail,
                         lane: Some(lane),
                         correlation_id: Some(call.id.clone()),
+                        diagnostics: TrajectoryDiagnostics {
+                            model_visible: true,
+                            source: Some("Assistant tool call".into()),
+                            ..Default::default()
+                        },
                     });
                 }
             }
@@ -1791,6 +2072,7 @@ impl AppState {
                     seq: Some(entry.seq),
                     run_id: durable.map(|(run_id, _, _)| run_id.clone()),
                     turn: None,
+                    request,
                     category: "Tool".into(),
                     summary: format!("{name} {}", if *is_error { "failed" } else { "finished" }),
                     detail: content.clone(),
@@ -1804,6 +2086,12 @@ impl AppState {
                             .map(|(_, _, call_id)| call_id.clone())
                             .unwrap_or_else(|| tool_call_id.clone()),
                     ),
+                    diagnostics: TrajectoryDiagnostics {
+                        model_visible: true,
+                        source: Some("Tool result".into()),
+                        error_summary: if *is_error { Some("Tool failed".into()) } else { None },
+                        ..Default::default()
+                    },
                 });
                 continue;
             }
@@ -1858,15 +2146,53 @@ impl AppState {
                     seq: Some(entry.seq),
                     run_id: None,
                     turn: None,
+                    request,
                     category: category.into(),
                     summary: summary.into(),
                     detail,
                     lane: Some(entry.lane.clone()),
                     correlation_id: None,
+                    diagnostics: TrajectoryDiagnostics {
+                        model_visible: true,
+                        ..Default::default()
+                    },
                 });
             }
         }
+
+        // Anomaly items from typed trajectory pass
+        let typed_traj = threadlane_session::harness::project_trajectory(store);
+        for anomaly in typed_traj.anomalies {
+            trajectory.push(TrajectoryEntry {
+                seq: anomaly.related_refs.first().map(|r| r.seq),
+                run_id: None,
+                turn: None,
+                request: None,
+                category: "Anomaly".into(),
+                summary: anomaly.summary.clone(),
+                detail: anomaly.description.clone(),
+                lane: Some("main".into()),
+                correlation_id: None,
+                diagnostics: TrajectoryDiagnostics {
+                    status: Some("Warning".into()),
+                    model_visible: false,
+                    source: Some("Diagnostic Engine".into()),
+                    is_anomaly: true,
+                    ..Default::default()
+                },
+            });
+        }
+
         trajectory.sort_by_key(|entry| entry.seq.unwrap_or(u64::MAX));
+
+        if request_number > 0 {
+            for entry in &mut trajectory {
+                if entry.request.is_none() && entry.seq.is_some() {
+                    entry.request = Some(1);
+                }
+            }
+        }
+
         (trajectory, metrics, durable_usage)
     }
 
@@ -1886,7 +2212,7 @@ impl AppState {
         if self.active_session_id.as_deref() != Some(session_id) {
             return;
         }
-        self.messages = result.messages;
+        self.messages = Arc::new(result.messages);
         self.history_session_file = Some(session_file.to_path_buf());
         self.history_start = result.history_start;
         self.history_has_older = result.history_has_older;
@@ -1913,7 +2239,7 @@ impl AppState {
         }
         let added = older.len();
         if added > 0 {
-            self.messages.splice(0..0, older);
+            self.messages_mut().splice(0..0, older);
             self.history_start = start;
             self.history_has_older = has_older;
         } else {
@@ -2013,6 +2339,7 @@ impl AppState {
                     seq: None,
                     run_id: lane.clone(),
                     turn: None,
+                    request: None,
                     category: category.into(),
                     summary,
                     detail,
@@ -2024,6 +2351,7 @@ impl AppState {
                         }
                         _ => None,
                     },
+                    diagnostics: TrajectoryDiagnostics::default(),
                 });
         }
     }
@@ -2046,6 +2374,7 @@ impl AppState {
                     seq: Some(entry.seq),
                     run_id: None,
                     turn: None,
+                    request: None,
                     category: "Model Context".into(),
                     summary: format!("{} · {}", entry.id, entry.message.role_str()),
                     detail: format!(
@@ -2057,6 +2386,12 @@ impl AppState {
                     ),
                     lane: Some(entry.lane.clone()),
                     correlation_id: Some(entry.id.clone()),
+                    diagnostics: TrajectoryDiagnostics {
+                        model_visible: true,
+                        source: Some("Model context projection".into()),
+                        raw: Some(json_text),
+                        ..Default::default()
+                    },
                 }
             })
             .collect()
@@ -2095,11 +2430,17 @@ impl AppState {
                     seq: Some(event.seq),
                     run_id: event.run_id.clone(),
                     turn: event.turn,
+                    request: None,
                     category: category.into(),
                     summary,
-                    detail,
+                    detail: detail.clone(),
                     lane: Some(event.lane.clone()),
                     correlation_id: Some(event.id.clone()),
+                    diagnostics: TrajectoryDiagnostics {
+                        source: Some("Canonical durable event".into()),
+                        raw: Some(detail.clone()),
+                        ..Default::default()
+                    },
                 }
             })
             .collect()
@@ -2182,7 +2523,7 @@ impl AppState {
                 {
                     if matches!(&event, AgentEvent::TurnStart { .. }) {
                         if let Some(message) = self
-                            .messages
+                            .messages_mut()
                             .last_mut()
                             .filter(|message| message.role == MessageRole::Assistant)
                         {
@@ -2202,15 +2543,16 @@ impl AppState {
                     match adapt_agent_event(event) {
                         ChatAgentUpdate::TextDelta(delta) => {
                             let stream_prefix = format!("streaming-{session_id}-");
-                            if let Some(message) = self.messages.last_mut().filter(|message| {
+                            if let Some(message) = self.messages_mut().last_mut().filter(|message| {
                                 message.role == MessageRole::Assistant
                                     && message.id.starts_with(&stream_prefix)
                                     && message.tool_activities.is_empty()
                             }) {
                                 message.content.push_str(&delta);
                             } else {
-                                self.messages.push(ChatMessageInfo {
-                                    id: format!("streaming-{session_id}-{}", self.messages.len()),
+                                let new_len = self.messages.len();
+                                self.messages_mut().push(ChatMessageInfo {
+                                    id: format!("streaming-{session_id}-{new_len}"),
                                     role: MessageRole::Assistant,
                                     content: delta,
                                     tool_activities: Vec::new(),
@@ -2222,7 +2564,7 @@ impl AppState {
                         }
                         ChatAgentUpdate::ReasoningDelta(delta) => {
                             if let Some(message) = self
-                                .messages
+                                .messages_mut()
                                 .last_mut()
                                 .filter(|m| m.role == MessageRole::Assistant && m.streaming)
                             {
@@ -2232,7 +2574,7 @@ impl AppState {
                                 }
                             } else {
                                 let segment = self.messages.len();
-                                self.messages.push(ChatMessageInfo {
+                                self.messages_mut().push(ChatMessageInfo {
                                     id: format!("streaming-{session_id}-{segment}"),
                                     role: MessageRole::Assistant,
                                     content: String::new(),
@@ -2256,13 +2598,14 @@ impl AppState {
                                 detail: arguments,
                                 is_expanded: false,
                             };
-                            if let Some(message) = self.messages.last_mut().filter(|message| {
+                            if let Some(message) = self.messages_mut().last_mut().filter(|message| {
                                 message.role == MessageRole::Assistant && message.content.is_empty()
                             }) {
                                 message.tool_activities.push(activity);
                             } else {
-                                self.messages.push(ChatMessageInfo {
-                                    id: format!("streaming-{session_id}-{}", self.messages.len()),
+                                let new_len = self.messages.len();
+                                self.messages_mut().push(ChatMessageInfo {
+                                    id: format!("streaming-{session_id}-{new_len}"),
                                     role: MessageRole::Assistant,
                                     content: String::new(),
                                     tool_activities: vec![activity],
@@ -2277,7 +2620,7 @@ impl AppState {
                             partial_result,
                         } => {
                             if let Some(activity) = self
-                                .messages
+                                .messages_mut()
                                 .iter_mut()
                                 .rev()
                                 .flat_map(|message| message.tool_activities.iter_mut().rev())
@@ -2292,7 +2635,7 @@ impl AppState {
                             is_error,
                         } => {
                             if let Some(activity) = self
-                                .messages
+                                .messages_mut()
                                 .iter_mut()
                                 .rev()
                                 .flat_map(|message| message.tool_activities.iter_mut().rev())
@@ -2312,7 +2655,7 @@ impl AppState {
                         ChatAgentUpdate::AdvisorNote(note) => {
                             let note_id =
                                 format!("advisor-note-{session_id}-{}", self.messages.len());
-                            self.messages.push(ChatMessageInfo {
+                            self.messages_mut().push(ChatMessageInfo {
                                 id: note_id,
                                 role: MessageRole::Advisor(note.severity),
                                 content: format!("**{}**\n\n{}", note.summary, note.details),
@@ -2336,7 +2679,7 @@ impl AppState {
                             self.pending_permissions.insert(session_id.clone(), request);
                         }
                         ChatAgentUpdate::Error(error) => {
-                            self.messages.push(ChatMessageInfo {
+                            self.messages_mut().push(ChatMessageInfo {
                                 id: format!("stream-error-{session_id}"),
                                 role: MessageRole::Error,
                                 content: error.clone(),
@@ -2502,8 +2845,9 @@ impl AppState {
 
     fn push_optimistic_follow_up(&mut self, session_id: &str, text: String) {
         if self.active_session_id.as_deref() == Some(session_id) {
-            self.messages.push(ChatMessageInfo {
-                id: format!("queued-user-{session_id}-{}", self.messages.len()),
+            let new_len = self.messages.len();
+            self.messages_mut().push(ChatMessageInfo {
+                id: format!("queued-user-{session_id}-{new_len}"),
                 role: MessageRole::User,
                 content: text,
                 tool_activities: Vec::new(),
@@ -2554,7 +2898,7 @@ impl AppState {
         let (api_key, account_id) = provider_credentials(&model);
 
         if api_key.is_empty() {
-            self.messages.push(ChatMessageInfo {
+            self.messages_mut().push(ChatMessageInfo {
                 id: format!("credential-error-{session_id}"),
                 role: MessageRole::Error,
                 content: format!(
@@ -2591,11 +2935,13 @@ impl AppState {
                 seq: None,
                 run_id: None,
                 turn: None,
+                request: None,
                 category: "Input".into(),
                 summary: "User input".into(),
                 detail: prompt_detail.clone(),
                 lane: Some("main".into()),
                 correlation_id: None,
+                diagnostics: TrajectoryDiagnostics::default(),
             });
         if !threadlane_provider::router::is_antigravity_model(&model) {
             crate::services::chat::maybe_generate_session_title(
@@ -2611,8 +2957,9 @@ impl AppState {
 
         // Present the accepted prompt immediately. CodingAgent owns durable
         // persistence; writing it directly here would duplicate it.
-        self.messages.push(ChatMessageInfo {
-            id: format!("pending-user-{session_id}-{}", self.messages.len()),
+        let new_len = self.messages.len();
+        self.messages_mut().push(ChatMessageInfo {
+            id: format!("pending-user-{session_id}-{new_len}"),
             role: MessageRole::User,
             content: prompt_detail,
             tool_activities: Vec::new(),
@@ -2677,6 +3024,7 @@ fn project_recovery_diagnostics(
             seq: None,
             run_id: lane.open_operation.clone(),
             turn: None,
+            request: None,
             category: "Decision".into(),
             summary: format!("{} · {decision}", lane.lane),
             detail: format!(
@@ -2688,12 +3036,14 @@ fn project_recovery_diagnostics(
             ),
             lane: Some(lane.lane.clone()),
             correlation_id: lane.open_operation.clone(),
+            diagnostics: TrajectoryDiagnostics::default(),
         });
         for tool in &lane.interrupted_tools {
             rows.push(TrajectoryEntry {
                 seq: None,
                 run_id: Some(tool.run_id.clone()),
                 turn: None,
+                request: None,
                 category: "Interrupted Tool".into(),
                 summary: format!("{} · replay {:?}", tool.name, tool.replay),
                 detail: format!(
@@ -2702,6 +3052,7 @@ fn project_recovery_diagnostics(
                 ),
                 lane: Some(lane.lane.clone()),
                 correlation_id: Some(tool.call_id.clone()),
+                diagnostics: TrajectoryDiagnostics::default(),
             });
         }
         for queued in &lane.queued_work {
@@ -2709,11 +3060,13 @@ fn project_recovery_diagnostics(
                 seq: None,
                 run_id: lane.open_operation.clone(),
                 turn: None,
+                request: None,
                 category: "Queued Work".into(),
                 summary: format!("{:?} · {}", queued.queue, queued.entry_id),
                 detail: String::new(),
                 lane: Some(lane.lane.clone()),
                 correlation_id: Some(queued.entry_id.clone()),
+                diagnostics: TrajectoryDiagnostics::default(),
             });
         }
     }
@@ -3454,21 +3807,25 @@ mod tests {
                     seq: None,
                     run_id: None,
                     turn: None,
+                    request: None,
                     category: "Tool".into(),
                     summary: "read_file running".into(),
                     detail: r#"{"path":"src/lib.rs"}"#.into(),
                     lane: Some("main".into()),
                     correlation_id: Some("call-1".into()),
+                    diagnostics: TrajectoryDiagnostics::default(),
                 },
                 TrajectoryEntry {
                     seq: None,
                     run_id: None,
                     turn: None,
+                    request: None,
                     category: "Tool".into(),
                     summary: "read_file finished".into(),
                     detail: "file contents".into(),
                     lane: Some("main".into()),
                     correlation_id: Some("call-1".into()),
+                    diagnostics: TrajectoryDiagnostics::default(),
                 },
             ],
         );
@@ -3605,7 +3962,7 @@ mod tests {
     #[test]
     fn inactive_session_stream_events_replay_after_switching_back() {
         let mut state = AppState::load_from_registry(Vec::new());
-        state.messages.clear();
+        state.messages_mut().clear();
         state.active_session_id = Some("foreground-session".into());
         state.is_new_task = false;
 
@@ -3663,7 +4020,7 @@ mod tests {
     #[test]
     fn stream_drain_preserves_events_beyond_one_frame_budget() {
         let mut state = AppState::load_from_registry(Vec::new());
-        state.messages.clear();
+        state.messages_mut().clear();
         state.active_session_id = Some("session".into());
         state.is_new_task = false;
 
@@ -3816,6 +4173,7 @@ mod tests {
                 }),
             })
             .unwrap();
+        drop(store);
 
         let mut attached_project = AttachedProject::from_path(project_root.clone());
         attached_project.last_opened_at = 1_000_000;

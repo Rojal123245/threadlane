@@ -455,12 +455,22 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
                 };
 
             match fs::read_to_string(&validated_path) {
-                Ok(content) => match hashline::apply_hashline_edits(&content, &edits) {
-                    Ok(new_content) => match fs::write(&validated_path, new_content) {
+                Ok(content) => match hashline::apply_hashline_edits_detailed(&content, &edits, 5) {
+                    Ok(result) => match fs::write(&validated_path, result.new_content) {
                         Ok(_) => {
                             let diag = run_post_edit_diagnostics(workspace_root, raw_path);
+                            let diff_section = if !result.diff.is_empty() {
+                                format!("\n\nDiff:\n{}", result.diff)
+                            } else {
+                                String::new()
+                            };
+                            let anchors_section = if !result.updated_context.is_empty() {
+                                format!("\n\nUpdated Line Hashes:\n{}", result.updated_context)
+                            } else {
+                                String::new()
+                            };
                             format!(
-                                "Successfully applied {} hashline edit(s) to '{raw_path}'{diag}",
+                                "Successfully applied {} hashline edit(s) to '{raw_path}'{diag}{diff_section}{anchors_section}",
                                 edits.len()
                             )
                         }

@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -34,7 +35,14 @@ pub fn init(cx: &mut App) {
 }
 
 enum GitEvent {
-    Loaded(Result<GitStatus, String>),
+    Loaded {
+        work_dir: PathBuf,
+        result: Result<GitStatus, String>,
+    },
+}
+
+fn git_result_matches_active(requested: &Path, active: &Path) -> bool {
+    requested == active
 }
 
 pub struct WorkspaceView {
@@ -50,6 +58,7 @@ pub struct WorkspaceView {
     command_palette_open: bool,
     command_state: Entity<CommandState>,
     git_status: Option<GitStatus>,
+    last_git_work_dir: Option<PathBuf>,
     sidebar_resizable_state: Entity<ResizableState>,
     right_panel_resizable_state: Entity<ResizableState>,
     bottom_panel_resizable_state: Entity<ResizableState>,
@@ -114,7 +123,8 @@ impl WorkspaceView {
 
         let model_clone = model.clone();
         let view = cx.new(|cx| {
-            let sub = cx.observe(&model_clone, |_this: &mut Self, _model, cx| {
+            let sub = cx.observe(&model_clone, |this: &mut Self, _model, cx| {
+                this.sync_git_status_with_active_project(cx);
                 cx.notify();
             });
 
@@ -139,9 +149,12 @@ impl WorkspaceView {
                         Self::spawn_session_hydration(model, request, cx);
                     }
                 }
+                let has_events = !git_events.is_empty() || !updater_events.is_empty();
                 let _ = this.update(cx, |this, cx| {
+                    let mut changed = has_events;
                     this.model.update(cx, |state, cx| {
                         if state.apply_session_refreshes() {
+                            changed = true;
                             cx.notify();
                         }
                     });
@@ -155,7 +168,9 @@ impl WorkspaceView {
                             cx.notify();
                         });
                     }
-                    cx.notify();
+                    if changed {
+                        cx.notify();
+                    }
                 });
             })
             .detach();
@@ -173,6 +188,7 @@ impl WorkspaceView {
                 command_palette_open: false,
                 command_state,
                 git_status: None,
+                last_git_work_dir: None,
                 sidebar_resizable_state,
                 right_panel_resizable_state,
                 bottom_panel_resizable_state,
@@ -180,6 +196,10 @@ impl WorkspaceView {
                 updater_tx,
                 _subscriptions: vec![sub],
             }
+        });
+
+        view.update(cx, |view, cx| {
+            view.sync_git_status_with_active_project(cx);
         });
 
         let view_handle = view.downgrade();
@@ -286,27 +306,58 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    fn sync_git_status_with_active_project(&mut self, cx: &App) {
+        let active_work_dir = self.model.read(cx).active_work_dir.clone();
+        if self.last_git_work_dir == active_work_dir {
+            return;
+        }
+
+        self.last_git_work_dir = active_work_dir.clone();
+        self.git_status = None;
+
+        if let Some(work_dir) = active_work_dir {
+            self.spawn_git_status_refresh(work_dir);
+        }
+    }
+
     fn refresh_git_status(&mut self, cx: &App) {
         let Some(work_dir) = self.model.read(cx).active_work_dir.clone() else {
+            self.last_git_work_dir = None;
             self.git_status = None;
             return;
         };
+
+        self.last_git_work_dir = Some(work_dir.clone());
+        self.git_status = None;
+        self.spawn_git_status_refresh(work_dir);
+    }
+
+    fn spawn_git_status_refresh(&self, work_dir: PathBuf) {
         let tx = self.git_event_tx.clone();
         std::thread::spawn(move || {
             let result = threadlane_git::inspect(&work_dir).map_err(|error| error.to_string());
-            let _ = tx.send(GitEvent::Loaded(result));
+            let _ = tx.send(GitEvent::Loaded { work_dir, result });
         });
     }
 
-    fn apply_git_event(&mut self, event: GitEvent, _cx: &mut Context<Self>) {
-        match event {
-            GitEvent::Loaded(Ok(status)) => {
-                self.git_status = Some(status);
-            }
-            GitEvent::Loaded(Err(_)) => {
-                self.git_status = None;
-            }
+    fn apply_git_event(&mut self, event: GitEvent, cx: &mut Context<Self>) {
+        let GitEvent::Loaded { work_dir, result } = event;
+        let Some(active_work_dir) = self.model.read(cx).active_work_dir.clone() else {
+            return;
+        };
+        if !git_result_matches_active(&work_dir, &active_work_dir) {
+            return;
         }
+
+        if let Ok(status) = &result {
+            self.model.update(cx, |state, cx| {
+                state.git_statuses.insert(work_dir.clone(), status.clone());
+                cx.notify();
+            });
+        }
+
+        self.git_status = result.ok();
+        cx.notify();
     }
 
     fn render_update_notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -963,5 +1014,21 @@ impl Render for WorkspaceView {
             .children(Root::render_dialog_layer(window, cx))
             .children(Root::render_notification_layer(window, cx))
             .children(Root::render_sheet_layer(window, cx))
+    }
+
+}
+
+#[cfg(test)]
+mod tests {
+    use super::git_result_matches_active;
+    use std::path::Path;
+
+    #[test]
+    fn git_result_is_accepted_only_for_active_work_dir() {
+        let active = Path::new("/projects/current");
+        let stale = Path::new("/projects/previous");
+
+        assert!(git_result_matches_active(active, active));
+        assert!(!git_result_matches_active(stale, active));
     }
 }

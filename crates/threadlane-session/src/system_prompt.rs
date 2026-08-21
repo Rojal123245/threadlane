@@ -142,9 +142,10 @@ pub(crate) fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> Stri
             add_tool_guideline("Keep edits focused, preserve existing user work, and follow the project's established style.");
         }
         if available_tool_names.contains("edit_file_hashline") {
-            add_tool_guideline("Prefer `edit_file_hashline` for high-precision edits using line:hash anchors (e.g. '12:a3f') returned from `read_file`.");
+            add_tool_guideline("Prefer `edit_file_hashline` for high-precision edits using line:hash anchors (e.g. '12:a3f') returned from `read_file` or prior `edit_file_hashline` outputs.");
             add_tool_guideline("For multi-line code blocks or deletions, use range edits (start_anchor and end_anchor) rather than per-line edits.");
             add_tool_guideline("Batch all edits for a file into a single `edit_file_hashline` tool call's edits array.");
+            add_tool_guideline("Successful `edit_file_hashline` calls return the unified diff and updated surrounding line:hash anchors. Do not run redundant `read_file` or `git diff` commands simply to check what changed or to obtain new hashes for adjacent edits.");
             add_tool_guideline("If a hashline mismatch occurs, re-read the relevant file range with `read_file` to obtain updated line hashes before retrying.");
         }
         if available_tool_names.contains("subagent") {
@@ -157,9 +158,10 @@ pub(crate) fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> Stri
             add_tool_guideline("When invoking `subagent`, specify clear custom `instructions` and the minimum required `tools` for each subagent.");
         }
         if available_tool_names.contains("generate_plan") {
+            add_tool_guideline("FAST-PATH EXECUTION: For localized fixes, UI styling, or single-file edits (<50 lines), proceed directly with read -> edit -> test. Do not create spec files, plan files, or plan overhead for small tasks.");
             add_tool_guideline("Whenever the user asks to plan, formulate an architecture, or start complex multi-step work, generate structured steps using `generate_plan`. Once the plan is created, execute the steps using your implementation tools and keep progress updated with `update_plan`.");
         }
-        if available_tool_names.contains("update_plan") {
+        if available_tool_names.contains("update_plan") && !available_tool_names.contains("generate_plan") {
             add_tool_guideline("For multi-step work, maintain a concise plan with `update_plan`; keep at most one item in progress and skip plans for simple requests.");
             add_tool_guideline("Update the plan throughout the work, not only at the end: mark a step in_progress when you start it, mark it completed immediately after it succeeds, and update the next step before continuing. Keep the plan statuses accurate after every meaningful milestone.");
         }
@@ -298,9 +300,10 @@ mod tests {
             loaded_extension_count: 0,
         });
 
-        assert!(prompt.contains("Prefer `edit_file_hashline` for high-precision edits using line:hash anchors (e.g. '12:a3f') returned from `read_file`."));
+        assert!(prompt.contains("Prefer `edit_file_hashline` for high-precision edits using line:hash anchors (e.g. '12:a3f') returned from `read_file` or prior `edit_file_hashline` outputs."));
         assert!(prompt.contains("For multi-line code blocks or deletions, use range edits (start_anchor and end_anchor) rather than per-line edits."));
         assert!(prompt.contains("Batch all edits for a file into a single `edit_file_hashline` tool call's edits array."));
+        assert!(prompt.contains("Successful `edit_file_hashline` calls return the unified diff and updated surrounding line:hash anchors."));
         assert!(prompt.contains("If a hashline mismatch occurs, re-read the relevant file range with `read_file` to obtain updated line hashes before retrying."));
     }
 
@@ -386,5 +389,25 @@ mod tests {
         ));
         assert!(prompt.contains("NEVER spawn a `reviewer` or `tester` subagent concurrently with or before code changes exist."));
         assert!(!prompt.contains("ALWAYS use the `subagent` tool to fan out work"));
+    }
+
+    #[test]
+    fn test_fast_path_and_plan_guidelines() {
+        let tools = vec![
+            tool("generate_plan", "Generate plan."),
+            tool("update_plan", "Update plan."),
+        ];
+        let prompt = build_system_prompt(SystemPromptBuildOptions {
+            config: &SystemPromptConfig::default(),
+            work_dir: Path::new("/workspace"),
+            tools: &tools,
+            project_context: &ProjectContext::default(),
+            skill_catalog: None,
+            agent_catalog: None,
+            loaded_extension_count: 0,
+        });
+
+        assert!(prompt.contains("FAST-PATH EXECUTION: For localized fixes, UI styling, or single-file edits (<50 lines), proceed directly with read -> edit -> test."));
+        assert!(prompt.contains("Whenever the user asks to plan, formulate an architecture, or start complex multi-step work, generate structured steps using `generate_plan`."));
     }
 }
