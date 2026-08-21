@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+#[cfg(test)]
 use std::time::Duration;
 use threadlane_runtime::harness::{
     DurableEvent, HarnessEvent, LaneStatus as HarnessLaneStatus, OperationOutcome,
