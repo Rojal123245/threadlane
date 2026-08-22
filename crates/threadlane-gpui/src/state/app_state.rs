@@ -2310,17 +2310,34 @@ impl AppState {
                 })
             })
             .unwrap_or_default();
+        let estimating = store.records().iter().any(|record| match record {
+            Record::ProviderRequestStarted {
+                seq,
+                lane,
+                run_id: started_run_id,
+                attempt: started_attempt,
+                request_id: started_request_id,
+                ..
+            } if lane == "main" && *seq > manifest_seq => {
+                started_run_id != run_id
+                    || *started_attempt != attempt
+                    || started_request_id.as_ref().map(|value| value.as_str()) != Some(request_id)
+            }
+            _ => false,
+        });
         let mut info = ContextWindowInfo {
             current_tokens: u64::from(token_estimate.unwrap_or_default()),
-            context_limit: persisted_limit.map(|value| value.min(u64::MAX as usize) as u64)
-                .unwrap_or_else(|| u64::from(crate::model_catalog::model_context_window(&effective_model))),
+            context_limit: persisted_limit
+                .map(|value| value.min(u64::MAX as usize) as u64)
+                .unwrap_or_else(|| {
+                    u64::from(crate::model_catalog::model_context_window(&effective_model))
+                }),
             context_limit_is_estimate: persisted_limit.is_none() || persisted_limit_estimate,
             effective_model,
             compaction_generation: manifest_generation,
             last_compacted_at: compaction.map(|value| value.2),
             provisional: false,
-            estimating: store.records().iter().any(|record| matches!(record,
-                Record::ProviderRequestStarted { seq, lane, .. } if lane == "main" && *seq > manifest_seq)),
+            estimating,
         };
         if let Some((generation, _, _, model, limit, estimated, post_tokens)) = compaction {
             if generation > manifest_generation {
@@ -3248,6 +3265,10 @@ pub(crate) use tests::reported_session_shape_state;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
     use threadlane_session::harness::{
         OperationIntent, OperationOutcome, ProviderOutcome, Record, SessionStore, TraceString,
     };
@@ -3263,160 +3284,139 @@ mod tests {
         assert_eq!(metrics.cache_hit_percent(), Some(100));
     }
 
-    fn context_fixture_path() -> PathBuf {
-        use threadlane_session::harness::{CompactionReason, Entry, SurfaceOperation, UsageCause};
-        let path = std::env::temp_dir().join(format!(
-            "threadlane-gpui-context-{}-{}.jsonl",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let mut store = JsonlStore::open(&path).unwrap();
-        store
-            .append_record(Record::OperationStarted {
-                id: "run".into(),
-                seq: 0,
-                lane: "main".into(),
-                timestamp: 0,
-                source_leaf_id: None,
-                intent: OperationIntent::Run,
-            })
-            .unwrap();
-        store
-            .append_entry(Entry {
-                id: "user".into(),
-                parent_id: None,
-                lane: "main".into(),
-                seq: 1,
-                timestamp: 1,
-                message: AgentMessage::User {
-                    content: "before".into(),
-                },
-                surface_op: SurfaceOperation::Append,
-                terminate: false,
-            })
-            .unwrap();
-        store
-            .append_record(Record::ContextCompacted {
-                id: "compact".into(),
-                seq: 2,
-                lane: "main".into(),
-                timestamp: 20,
-                run_id: "run".into(),
-                generation: 1,
-                reason: CompactionReason::AdaptiveBudget,
-                effective_model: TraceString::new("gpt-5.6-sol").unwrap(),
-                context_limit: 1_000_000,
-                context_limit_is_estimate: false,
-                pre_tokens: 742_000,
-                post_tokens: 118_000,
-                retained_tail_target: 0,
-                retained_tail_tokens: 0,
-                compacted_messages: 1,
-            })
-            .unwrap();
-        store
-            .append_entry(Entry {
-                id: "assistant".into(),
-                parent_id: Some("user".into()),
-                lane: "main".into(),
-                seq: 3,
-                timestamp: 3,
-                message: AgentMessage::Assistant {
-                    content: Some("after".into()),
-                    tool_calls: Some(vec![threadlane_provider::openai::ToolCall {
-                        id: "loop-1".into(),
-                        r#type: "function".into(),
-                        function: threadlane_provider::openai::ToolCallFunction {
-                            name: "reported_session_shape_tool".into(),
-                            arguments: r#"{"attempt":1}"#.into(),
-                        },
-                        thought_signature: None,
-                    }]),
-                    stop_reason: None,
-                    deferred_handle: None,
-                },
-                surface_op: SurfaceOperation::Append,
-                terminate: false,
-            })
-            .unwrap();
-        store
-            .append_entry(Entry {
-                id: "tool".into(),
-                parent_id: Some("assistant".into()),
-                lane: "main".into(),
-                seq: 4,
-                timestamp: 4,
-                message: AgentMessage::Tool {
-                    tool_call_id: "loop-1".into(),
-                    name: "reported_session_shape_tool".into(),
-                    content: "cached report output ".repeat(400),
-                    is_error: false,
-                    terminate: false,
-                },
-                surface_op: SurfaceOperation::Append,
-                terminate: false,
-            })
-            .unwrap();
-        store
-            .append_record(Record::ProviderRequestStarted {
-                id: "provider".into(),
-                seq: 5,
-                lane: "main".into(),
-                timestamp: 5,
-                run_id: "run".into(),
-                attempt: 1,
-                provider: TraceString::new("openai").unwrap(),
-                model: TraceString::new("gpt-5.6-sol").unwrap(),
-                request_id: Some(TraceString::new("req").unwrap()),
-            })
-            .unwrap();
-        store
-            .append_record(Record::ContextManifestCaptured {
-                id: "manifest".into(),
-                seq: 6,
-                lane: "main".into(),
-                timestamp: 6,
-                run_id: "run".into(),
-                attempt: 1,
-                request_id: TraceString::new("req").unwrap(),
-                total_estimated_tokens: Some(103_732),
-                effective_model: Some(TraceString::new("gpt-5.6-sol").unwrap()),
-                context_limit: Some(1_000_000),
-                context_limit_is_estimate: false,
-                compaction_generation: 1,
-                items: Vec::new(),
-            })
-            .unwrap();
-        for attempt in 1..=102 {
-            store
-                .append_record(Record::Usage {
-                    id: format!("usage-{attempt}"),
-                    seq: 6 + u64::from(attempt),
-                    lane: "main".into(),
-                    timestamp: 6 + u64::from(attempt),
-                    run_id: Some("run".into()),
-                    cause: UsageCause::Provider,
-                    entry_id: None,
-                    tool_call_id: None,
-                    attempt: Some(attempt),
-                    usage: TokenUsage {
-                        input_tokens: if attempt == 102 { 15_064 } else { 15_048 },
-                        output_tokens: 20,
-                        cache_read_tokens: 100_000,
+    struct ReportedShapeProvider {
+        attempts: AtomicUsize,
+        previous_serialized_request: Mutex<Option<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl threadlane_protocol::ProviderPort for ReportedShapeProvider {
+        async fn stream_request(
+            &self,
+            request: threadlane_protocol::RuntimeRequest,
+            events: tokio::sync::mpsc::Sender<threadlane_protocol::RuntimeStreamEvent>,
+        ) {
+            use threadlane_protocol::{
+                RuntimeStreamEvent, RuntimeToolCall, RuntimeToolCallFunction, RuntimeUsage,
+            };
+
+            let serialized_request = format!("{}\n{}", request.messages, request.tools);
+            let estimate = serialized_request.len().div_ceil(4);
+            let cache_read_tokens = {
+                let mut previous = self.previous_serialized_request.lock().unwrap();
+                let repeated_prefix_bytes = previous
+                    .as_ref()
+                    .map(|prior| {
+                        prior
+                            .bytes()
+                            .zip(serialized_request.bytes())
+                            .take_while(|(left, right)| left == right)
+                            .count()
+                    })
+                    .unwrap_or(0);
+                *previous = Some(serialized_request);
+                repeated_prefix_bytes / 4
+            };
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            let tool_calls = (attempt < 102)
+                .then(|| RuntimeToolCall {
+                    id: format!("loop-{attempt}"),
+                    r#type: "function".into(),
+                    function: RuntimeToolCallFunction {
+                        name: threadlane_skills::LOAD_SKILL_TOOL_NAME.into(),
+                        arguments: serde_json::json!({ "name": "reported-shape" }).to_string(),
+                    },
+                    thought_signature: None,
+                })
+                .into_iter()
+                .collect();
+            if attempt == 102 {
+                events
+                    .send(RuntimeStreamEvent::ContentToken("complete".into()))
+                    .await
+                    .unwrap();
+            }
+            let input_tokens = u32::try_from(estimate.saturating_sub(cache_read_tokens)).unwrap();
+            let cache_read_tokens = u32::try_from(cache_read_tokens).unwrap();
+            events
+                .send(RuntimeStreamEvent::Finished {
+                    tool_calls,
+                    usage: RuntimeUsage {
+                        input_tokens,
+                        output_tokens: if attempt == 102 { 1 } else { 20 },
+                        cache_read_tokens,
                         cache_write_tokens: 0,
-                        total_tokens: if attempt == 102 { 115_084 } else { 115_068 },
+                        total_tokens: u32::try_from(estimate).unwrap()
+                            + if attempt == 102 { 1 } else { 20 },
                     },
                 })
+                .await
                 .unwrap();
         }
+
+        async fn fetch_deferred(
+            &self,
+            _model: &str,
+            _handle_id: &str,
+        ) -> Result<threadlane_protocol::DeferredResponse, String> {
+            Ok(threadlane_protocol::DeferredResponse::Pending)
+        }
+
+        async fn cancel_deferred(&self, _model: &str, _handle_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn provider_kind(&self, _model: &str) -> &'static str {
+            "test"
+        }
+    }
+
+    async fn generated_reported_session_path() -> PathBuf {
+        use threadlane_runtime::AgentConfig;
+        use threadlane_session::coding_agent::CodingAgentOptions;
+        use threadlane_session::SystemPromptConfig;
+
+        let root = tempfile::tempdir().unwrap().keep();
+        let skill_dir = root.join(".agents/skills/reported-shape");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!(
+                "---\nname: reported-shape\ndescription: deterministic compaction input\n---\n{}",
+                "segment ".repeat(1_000)
+            ),
+        )
+        .unwrap();
+        let path = root.join("reported-session-shape.jsonl");
+        let provider = Arc::new(ReportedShapeProvider {
+            attempts: AtomicUsize::new(0),
+            previous_serialized_request: Mutex::new(None),
+        });
+        let mut agent = threadlane_session::test_support::coding_agent_with_provider(
+            CodingAgentOptions {
+                api_key: "test-key".into(),
+                account_id: None,
+                model: "gpt-4o".into(),
+                work_dir: root,
+                session_file: Some(path.clone()),
+                system_prompt: SystemPromptConfig::default(),
+                agent_config: Some(AgentConfig::default()),
+                coding_config: None,
+            },
+            provider.clone(),
+        );
+        let result = agent
+            .handle_input_with_images("continue the cached tool loop", vec![])
+            .await;
+        assert!(result.is_none(), "foreground run failed: {result:?}");
+        assert_eq!(provider.attempts.load(Ordering::SeqCst), 102);
+        drop(agent);
         path
     }
 
-    pub(crate) fn reported_session_shape_state() -> (PathBuf, AppState) {
-        let path = context_fixture_path();
+    pub(crate) async fn reported_session_shape_state() -> (PathBuf, AppState) {
+        let path = generated_reported_session_path().await;
+        // This is the production GPUI projection reading the journal emitted above by CodingAgent.
         let projection = compute_full_session_projection(&path).unwrap();
         let mut state = AppState::load_from_registry(Vec::new());
         activate_test_session(&mut state, "context-session", &path);
@@ -3424,9 +3424,9 @@ mod tests {
         (path, state)
     }
 
-    #[test]
-    fn reported_session_shape_keeps_total_processed_separate() {
-        let (path, state) = reported_session_shape_state();
+    #[tokio::test]
+    async fn reported_session_shape_keeps_total_processed_separate() {
+        let (path, state) = reported_session_shape_state().await;
 
         let projected_context = state.active_context_window().unwrap();
         let projected_metrics = state.active_session_metrics();
@@ -3437,32 +3437,43 @@ mod tests {
                 > projected_context.context_limit as u64
         );
         assert!(projected_context.current_tokens < projected_context.context_limit);
-        assert_eq!(projected_context.current_tokens, 103_732);
-        assert_eq!(projected_context.context_limit, 1_000_000);
-        assert_eq!(projected_context.effective_model, "gpt-5.6-sol");
+        assert_eq!(projected_context.current_tokens, 38_304);
+        assert_eq!(projected_context.context_limit, 128_000);
+        assert_eq!(projected_context.effective_model, "gpt-4o");
         assert!(!projected_context.context_limit_is_estimate);
 
         let reloaded = compute_session_messages(&path).unwrap();
+        assert_eq!(
+            reloaded
+                .iter()
+                .filter(|message| message.role == MessageRole::ContextMarker)
+                .count(),
+            3
+        );
         assert!(reloaded.iter().any(|message| {
             message.role == MessageRole::ContextMarker
-                && message.content == "Context compacted · 742k → 118k"
-        }));
-        assert!(reloaded
-            .iter()
-            .any(|message| { message.role == MessageRole::User && message.content == "before" }));
-        assert!(reloaded.iter().any(|message| {
-            message.role == MessageRole::Assistant && message.content == "after"
+                && message.content == "Context compacted · 96.9k → 38.3k"
         }));
         assert!(reloaded.iter().any(|message| {
-            message.tool_activities.iter().any(|activity| {
-                activity.id == "loop-1" && activity.detail.starts_with("cached report output")
-            })
+            message.role == MessageRole::User && message.content == "continue the cached tool loop"
         }));
+        assert!(reloaded.iter().any(|message| {
+            message.role == MessageRole::Assistant && message.content == "complete"
+        }));
+        assert_eq!(
+            reloaded
+                .iter()
+                .flat_map(|message| &message.tool_activities)
+                .filter(|activity| activity.id == "loop-1")
+                .count(),
+            1,
+            "retained compaction tail must not duplicate visible tool activity"
+        );
         std::fs::remove_file(path).ok();
     }
 
-    #[test]
-    fn durable_projections_and_hydration_are_scoped_by_session_file() {
+    #[tokio::test]
+    async fn durable_projections_and_hydration_are_scoped_by_session_file() {
         use threadlane_session::harness::UsageCause;
 
         let root = std::env::temp_dir().join(format!(
@@ -3479,13 +3490,24 @@ mod tests {
         std::fs::create_dir_all(&project_b).unwrap();
         let file_a = project_a.join("same-session.jsonl");
         let file_b = project_b.join("same-session.jsonl");
-        std::fs::rename(context_fixture_path(), &file_a).unwrap();
-        std::fs::rename(context_fixture_path(), &file_b).unwrap();
+        std::fs::rename(generated_reported_session_path().await, &file_a).unwrap();
+        std::fs::rename(generated_reported_session_path().await, &file_b).unwrap();
         let mut store_b = JsonlStore::open(&file_b).unwrap();
+        let next_generation = store_b
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                Record::ContextCompacted { generation, .. } => Some(*generation),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let manifest_seq = store_b.next_sequence();
         store_b
             .append_record(Record::ContextManifestCaptured {
                 id: "project-b-manifest".into(),
-                seq: 7,
+                seq: manifest_seq,
                 lane: "main".into(),
                 timestamp: 7,
                 run_id: "run".into(),
@@ -3495,17 +3517,17 @@ mod tests {
                 effective_model: Some(TraceString::new("project-b-model").unwrap()),
                 context_limit: Some(333_333),
                 context_limit_is_estimate: false,
-                compaction_generation: 1,
+                compaction_generation: next_generation,
                 items: Vec::new(),
             })
             .unwrap();
         store_b
             .append_record(Record::Usage {
                 id: "project-b-usage".into(),
-                seq: 8,
+                seq: manifest_seq + 1,
                 lane: "main".into(),
                 timestamp: 8,
-                run_id: Some("run".into()),
+                run_id: None,
                 cause: UsageCause::Provider,
                 entry_id: None,
                 tool_call_id: None,
@@ -3520,6 +3542,7 @@ mod tests {
 
         let projection_a = compute_full_session_projection(&file_a).unwrap();
         let projection_b = compute_full_session_projection(&file_b).unwrap();
+        let expected_b_billed = projection_b.metrics.billed_input_tokens();
         let mut state = AppState::load_from_registry(Vec::new());
         activate_test_session(&mut state, "same-session", &file_a);
         state.apply_session_hydration("same-session", &file_a, projection_a);
@@ -3534,7 +3557,7 @@ mod tests {
         );
         assert_eq!(
             state.active_session_metrics().billed_input_tokens(),
-            11_735_035
+            expected_b_billed
         );
 
         let stale = compute_full_session_projection(&file_a).unwrap();
@@ -3545,21 +3568,22 @@ mod tests {
         );
         assert_eq!(
             state.active_session_metrics().billed_input_tokens(),
-            11_735_035
+            expected_b_billed
         );
         std::fs::remove_dir_all(root).ok();
     }
 
-    #[test]
-    fn newer_provisional_compaction_clears_manifest_estimation() {
+    #[tokio::test]
+    async fn newer_provisional_compaction_clears_manifest_estimation() {
         use threadlane_session::harness::CompactionReason;
 
-        let path = context_fixture_path();
+        let path = generated_reported_session_path().await;
         let mut store = JsonlStore::open(&path).unwrap();
+        let request_seq = store.next_sequence();
         store
             .append_record(Record::ProviderRequestStarted {
                 id: "newer-request".into(),
-                seq: 7,
+                seq: request_seq,
                 lane: "main".into(),
                 timestamp: 7,
                 run_id: "run".into(),
@@ -3572,11 +3596,11 @@ mod tests {
         store
             .append_record(Record::ContextCompacted {
                 id: "newer-compaction".into(),
-                seq: 8,
+                seq: request_seq + 1,
                 lane: "main".into(),
                 timestamp: 8,
                 run_id: "run".into(),
-                generation: 2,
+                generation: 4,
                 reason: CompactionReason::AdaptiveBudget,
                 effective_model: TraceString::new("newer-model").unwrap(),
                 context_limit: 500_000,
@@ -3595,20 +3619,21 @@ mod tests {
             .context_window
             .unwrap();
         assert!(context.provisional);
-        assert_eq!(context.compaction_generation, 2);
+        assert_eq!(context.compaction_generation, 4);
         assert_eq!(context.current_tokens, 111_111);
         assert!(!context.estimating);
         std::fs::remove_file(path).ok();
     }
 
-    #[test]
-    fn model_switch_estimation_keeps_latest_manifest_model() {
-        let path = context_fixture_path();
+    #[tokio::test]
+    async fn model_switch_estimation_keeps_latest_manifest_model() {
+        let path = generated_reported_session_path().await;
         let mut store = JsonlStore::open(&path).unwrap();
+        let request_seq = store.next_sequence();
         store
             .append_record(Record::ProviderRequestStarted {
                 id: "next-provider".into(),
-                seq: 7,
+                seq: request_seq,
                 lane: "main".into(),
                 timestamp: 7,
                 run_id: "run".into(),
@@ -3624,35 +3649,33 @@ mod tests {
             .context_window
             .unwrap();
         assert!(context.estimating);
-        assert_eq!(context.effective_model, "gpt-5.6-sol");
-        assert_eq!(context.context_limit, 1_000_000);
+        assert_eq!(context.effective_model, "gpt-4o");
+        assert_eq!(context.context_limit, 128_000);
         std::fs::remove_file(path).ok();
     }
 
-    #[test]
-    fn transcript_marker_survives_reload_without_summary_content() {
-        let path = context_fixture_path();
+    #[tokio::test]
+    async fn transcript_marker_survives_reload_without_summary_content() {
+        let path = generated_reported_session_path().await;
         let first = compute_session_messages(&path).unwrap();
         let second = compute_session_messages(&path).unwrap();
-        let marker = first
-            .iter()
-            .find(|message| message.role == MessageRole::ContextMarker)
-            .unwrap();
-        assert_eq!(marker.content, "Context compacted · 742k → 118k");
+        assert!(first.iter().any(|message| {
+            message.role == MessageRole::ContextMarker
+                && message.content.starts_with("Context compacted · ")
+        }));
         assert_eq!(
             first.iter().map(|row| &row.id).collect::<Vec<_>>(),
             second.iter().map(|row| &row.id).collect::<Vec<_>>()
         );
         assert!(!first
             .iter()
-            .any(|message| message.content.contains("Summary of prior conversation")));
-        assert_eq!(
-            first
-                .iter()
-                .map(|row| row.content.as_str())
-                .collect::<Vec<_>>(),
-            vec!["before", "Context compacted · 742k → 118k", "after"]
-        );
+            .any(|message| message.content.contains("Context checkpoint from")));
+        assert!(first.iter().any(|message| {
+            message.role == MessageRole::User && message.content == "continue the cached tool loop"
+        }));
+        assert!(first.iter().any(|message| {
+            message.role == MessageRole::Assistant && message.content == "complete"
+        }));
         std::fs::remove_file(path).ok();
     }
 

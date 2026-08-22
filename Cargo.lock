@@ -7247,6 +7247,7 @@ name = "threadlane-gpui"
 version = "0.1.7"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64",
  "dirs 5.0.1",
  "gpui",
@@ -7262,6 +7263,7 @@ dependencies = [
  "tempfile",
  "threadlane-auth",
  "threadlane-git",
+ "threadlane-protocol",
  "threadlane-provider",
  "threadlane-runtime",
  "threadlane-session",

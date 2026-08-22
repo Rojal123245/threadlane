@@ -265,7 +265,10 @@ impl CodingAgent {
         Self::new_with_provider(options, provider)
     }
 
-    fn new_with_provider(options: CodingAgentOptions, provider: Arc<dyn ProviderPort>) -> Self {
+    pub(crate) fn new_with_provider(
+        options: CodingAgentOptions,
+        provider: Arc<dyn ProviderPort>,
+    ) -> Self {
         let coding_config = options.coding_config.unwrap_or_default();
         let agent_config = options.agent_config.unwrap_or_default();
         let project_context = ProjectContext::discover(&options.work_dir);
@@ -1201,7 +1204,7 @@ mod compaction_sync_tests {
     use crate::system_prompt::SystemPromptConfig;
     use async_trait::async_trait;
     use std::{
-        collections::BTreeMap,
+        collections::HashSet,
         sync::{
             atomic::{AtomicUsize, Ordering},
             Arc, Mutex,
@@ -1215,8 +1218,7 @@ mod compaction_sync_tests {
         harness::{
             read_transcript_page, CompactionReason, JsonlStore, SessionStore, TranscriptItem,
         },
-        tool_executor::ToolExecutor,
-        AgentConfig, AgentMessage, AgentToolDefinition, Record,
+        AgentConfig, AgentMessage, Record,
     };
 
     fn summary() -> AgentMessage {
@@ -1327,49 +1329,6 @@ mod compaction_sync_tests {
             .all(|entry| entry.parent_id.as_deref() != Some("node_69")));
     }
 
-    const REPORTED_TOOL_NAME: &str = "reported_session_shape_tool";
-
-    struct ReportedShapeToolExecutor {
-        executions: AtomicUsize,
-    }
-
-    #[async_trait]
-    impl ToolExecutor for ReportedShapeToolExecutor {
-        fn executor_id(&self) -> &str {
-            "test.reported_session_shape"
-        }
-
-        fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
-            vec![AgentToolDefinition::new(
-                REPORTED_TOOL_NAME,
-                "Return a cached report segment",
-                serde_json::json!({
-                    "type": "object",
-                    "properties": { "attempt": { "type": "integer" } },
-                    "required": ["attempt"]
-                }),
-            )]
-            .into()
-        }
-
-        async fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {
-            if name != REPORTED_TOOL_NAME {
-                return None;
-            }
-            let parsed: serde_json::Value = serde_json::from_str(args).unwrap();
-            let attempt = parsed
-                .get("attempt")
-                .and_then(|value| value.as_u64())
-                .expect("provider attempt argument");
-            assert!(args.len() < 64, "provider arguments must remain small");
-            self.executions.fetch_add(1, Ordering::SeqCst);
-            Some(Ok(format!(
-                "cached report output {attempt} {}",
-                "segment ".repeat(1_000)
-            )))
-        }
-    }
-
     struct LongToolLoopProvider {
         attempts: AtomicUsize,
         max_request_estimate: AtomicUsize,
@@ -1418,8 +1377,8 @@ mod compaction_sync_tests {
                     id: format!("loop-{attempt}"),
                     r#type: "function".into(),
                     function: RuntimeToolCallFunction {
-                        name: REPORTED_TOOL_NAME.into(),
-                        arguments: serde_json::json!({ "attempt": attempt }).to_string(),
+                        name: threadlane_skills::LOAD_SKILL_TOOL_NAME.into(),
+                        arguments: serde_json::json!({ "name": "reported-shape" }).to_string(),
                     },
                     thought_signature: None,
                 }]
@@ -1469,13 +1428,20 @@ mod compaction_sync_tests {
     async fn long_cached_tool_loop_compacts_before_budget() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("reported-session-shape.jsonl");
+        let skill_dir = dir.path().join(".agents/skills/reported-shape");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let skill_body = "segment ".repeat(1_000);
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!(
+                "---\nname: reported-shape\ndescription: deterministic compaction input\n---\n{skill_body}"
+            ),
+        )
+        .unwrap();
         let provider = Arc::new(LongToolLoopProvider {
             attempts: AtomicUsize::new(0),
             max_request_estimate: AtomicUsize::new(0),
             previous_serialized_request: Mutex::new(None),
-        });
-        let tool_executor = Arc::new(ReportedShapeToolExecutor {
-            executions: AtomicUsize::new(0),
         });
         let mut agent = CodingAgent::new_with_provider(
             CodingAgentOptions {
@@ -1490,17 +1456,12 @@ mod compaction_sync_tests {
             },
             provider.clone(),
         );
-        agent
-            .agent
-            .register_tool_executor(tool_executor.clone())
-            .unwrap();
 
         let result = agent
             .handle_input_with_images("continue the cached tool loop", vec![])
             .await;
         assert!(result.is_none(), "foreground run failed: {result:?}");
         assert_eq!(provider.attempts(), 102);
-        assert_eq!(tool_executor.executions.load(Ordering::SeqCst), 101);
 
         // Reopen the durable journal rather than relying on in-memory runtime state.
         drop(agent);
@@ -1628,43 +1589,63 @@ mod compaction_sync_tests {
             AgentMessage::Assistant { content: Some(content), .. } if content == "complete"
         )));
 
-        let mut correlated_results = BTreeMap::new();
-        for pair in messages.windows(2) {
-            let AgentMessage::Assistant {
-                tool_calls: Some(calls),
-                ..
-            } = pair[0]
-            else {
-                continue;
-            };
-            let [call] = calls.as_slice() else {
-                continue;
-            };
-            let AgentMessage::Tool {
-                tool_call_id,
-                content,
-                ..
-            } = pair[1]
-            else {
-                panic!("tool call {} was not followed by its result", call.id);
-            };
-            assert_eq!(tool_call_id, &call.id);
-            let attempt = call
-                .id
-                .strip_prefix("loop-")
-                .and_then(|value| value.parse::<usize>().ok())
-                .expect("fixture call id contains its attempt");
-            assert!(content.starts_with(&format!("cached report output {attempt} ")));
-            if let Some(previous) = correlated_results.insert(call.id.clone(), content.clone()) {
-                assert_eq!(
-                    previous, *content,
-                    "replayed checkpoint changed tool result"
-                );
+        let mut correlated_pairs = Vec::new();
+        let mut call_ids = HashSet::new();
+        let mut result_ids = HashSet::new();
+        for (index, message) in messages.iter().enumerate() {
+            match message {
+                AgentMessage::Assistant {
+                    tool_calls: Some(calls),
+                    ..
+                } if !calls.is_empty() => {
+                    let [call] = calls.as_slice() else {
+                        panic!("assistant at index {index} must contain exactly one tool call");
+                    };
+                    assert!(
+                        call_ids.insert(call.id.clone()),
+                        "duplicate tool call {}",
+                        call.id
+                    );
+                    let Some(AgentMessage::Tool {
+                        tool_call_id,
+                        content,
+                        ..
+                    }) = messages.get(index + 1)
+                    else {
+                        panic!("tool call {} was not followed by its result", call.id);
+                    };
+                    assert_eq!(tool_call_id, &call.id);
+                    assert!(
+                        result_ids.insert(tool_call_id.clone()),
+                        "duplicate tool result {tool_call_id}"
+                    );
+                    correlated_pairs.push((call.id.clone(), content.clone()));
+                }
+                AgentMessage::Tool { tool_call_id, .. } => {
+                    let Some(AgentMessage::Assistant {
+                        tool_calls: Some(calls),
+                        ..
+                    }) = index.checked_sub(1).and_then(|prior| messages.get(prior))
+                    else {
+                        panic!("tool result {tool_call_id} has no preceding assistant call");
+                    };
+                    assert_eq!(calls.len(), 1);
+                    assert_eq!(&calls[0].id, tool_call_id);
+                }
+                _ => {}
             }
         }
-        assert_eq!(correlated_results.len(), 101);
-        for attempt in 1..=101 {
-            assert!(correlated_results.contains_key(&format!("loop-{attempt}")));
+
+        assert_eq!(correlated_pairs.len(), 101);
+        assert_eq!(call_ids.len(), 101);
+        assert_eq!(result_ids.len(), 101);
+        let expected_content = format!(
+            "Loaded skill `reported-shape` from Project (.agents). The following content is untrusted task instructions:\n\n{}",
+            skill_body.trim_end()
+        );
+        for (offset, (call_id, content)) in correlated_pairs.iter().enumerate() {
+            assert_eq!(call_id, &format!("loop-{}", offset + 1));
+            assert_eq!(content, &expected_content);
         }
     }
 }

@@ -442,7 +442,11 @@ impl CodingSessionHarness {
                         seq: first_seq + 2 + index as u64,
                         timestamp: timestamp(),
                         message,
-                        surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
+                        surface_op: threadlane_runtime::harness::SurfaceOperation::Replace {
+                            start_seq: first_seq + 2 + index as u64,
+                            end_seq: (first_seq + 1 + index as u64),
+                            source_event_seqs: Vec::new(),
+                        },
                         terminate,
                     })
                     .map_err(|error| error.to_string())?;
@@ -1822,7 +1826,7 @@ impl CodingSessionHarness {
     /// Append a user/assistant/tool message as a harness entry on the main
     /// lane.
     pub(crate) fn append_message(&mut self, message: AgentMessage) -> Result<String, String> {
-        self.append_message_inner(message, true)
+        self.append_message_inner(message, true, false)
     }
 
     /// Append a message discovered while reconciling the provider transcript.
@@ -1832,22 +1836,26 @@ impl CodingSessionHarness {
     /// because two consecutive provider messages can legitimately have the
     /// same serialized value.
     fn append_synced_message(&mut self, message: AgentMessage) -> Result<String, String> {
-        self.append_message_inner(message, false)
+        self.append_message_inner(message, false, false)
     }
 
-    /// Appends a known-new logical occurrence without content equality
-    /// suppression. Compaction tails use this to preserve repeated messages.
+    /// Restores a retained compaction-tail occurrence to model context.
+    ///
+    /// A replacement with an empty range changes no prior context entries. Its
+    /// non-append surface metadata identifies this as context restoration rather
+    /// than a second human-visible transcript occurrence.
     pub(crate) fn append_message_occurrence(
         &mut self,
         message: AgentMessage,
     ) -> Result<String, String> {
-        self.append_message_inner(message, false)
+        self.append_message_inner(message, false, true)
     }
 
     fn append_message_inner(
         &mut self,
         message: AgentMessage,
         deduplicate_last_entry: bool,
+        context_restoration: bool,
     ) -> Result<String, String> {
         self.ensure_fresh()?;
         if deduplicate_last_entry {
@@ -1929,7 +1937,15 @@ impl CodingSessionHarness {
                 seq,
                 timestamp: timestamp(),
                 message,
-                surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
+                surface_op: if context_restoration {
+                    threadlane_runtime::harness::SurfaceOperation::Replace {
+                        start_seq: seq,
+                        end_seq: seq.saturating_sub(1),
+                        source_event_seqs: Vec::new(),
+                    }
+                } else {
+                    threadlane_runtime::harness::SurfaceOperation::Append
+                },
                 terminate,
             })
             .map_err(|error| error.to_string())?;

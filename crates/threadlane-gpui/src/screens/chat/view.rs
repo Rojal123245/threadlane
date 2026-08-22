@@ -3718,9 +3718,9 @@ mod hot_path_tests {
         }
     }
 
-    #[test]
-    fn meter_separates_current_context_from_total_processed() {
-        let (path, state) = reported_session_shape_state();
+    #[tokio::test]
+    async fn meter_separates_current_context_from_total_processed() {
+        let (path, state) = reported_session_shape_state().await;
         let projected_context = state.active_context_window().unwrap();
         let projected_metrics = state.active_session_metrics();
         let view = context_meter_view_model(
@@ -3739,12 +3739,12 @@ mod hot_path_tests {
                 cache_hit_percent: projected_metrics.cache_hit_percent(),
             },
         );
-        assert_eq!(view.percent, Some(10.3732));
-        assert_eq!(view.bar_percent, 10.3732);
-        assert_eq!(view.current_label, "103.7k / 1.0M");
-        assert_eq!(view.total_processed_label, "11.7M");
-        assert_eq!(view.cache_hit_label.as_deref(), Some("87%"));
-        assert_eq!(view.detail_label, "Context usage details, 10% used");
+        assert_eq!(view.percent, Some(29.925));
+        assert_eq!(view.bar_percent, 29.925);
+        assert_eq!(view.current_label, "38.3k / 128.0k");
+        assert_eq!(view.total_processed_label, "11.9M");
+        assert_eq!(view.cache_hit_label.as_deref(), Some("91%"));
+        assert_eq!(view.detail_label, "Context usage details, 30% used");
         std::fs::remove_file(path).ok();
     }
 

@@ -38,4 +38,7 @@ notify = "7.0"
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "wayland", "x11"] }
 
 [dev-dependencies]
+async-trait = "0.1"
 tempfile = "3.8"
+threadlane-protocol = { version = "0.1.0", path = "../threadlane-protocol" }
+threadlane-session = { version = "0.1.0", path = "../threadlane-session", features = ["test-support"] }

@@ -347,12 +347,17 @@ fn transcript_items(path: &Path, offset: u64, bytes: &[u8]) -> io::Result<Vec<Tr
             .atomic_batch
             .into_iter()
             .filter_map(|item| match item {
-                AtomicBatchItem::Entry(entry) if entry.lane == "main" => match entry.message {
-                    crate::types::AgentMessage::Custom {
-                        ref custom_type, ..
-                    } if custom_type == "compaction_summary" => None,
-                    message => Some(TranscriptItem::Message(message)),
-                },
+                AtomicBatchItem::Entry(entry)
+                    if entry.lane == "main"
+                        && matches!(entry.surface_op, super::types::SurfaceOperation::Append) =>
+                {
+                    match entry.message {
+                        crate::types::AgentMessage::Custom {
+                            ref custom_type, ..
+                        } if custom_type == "compaction_summary" => None,
+                        message => Some(TranscriptItem::Message(message)),
+                    }
+                }
                 AtomicBatchItem::Record(Record::ContextCompacted {
                     seq,
                     lane,
@@ -377,12 +382,17 @@ fn transcript_items(path: &Path, offset: u64, bytes: &[u8]) -> io::Result<Vec<Tr
                 _ => None,
             })
             .collect(),
-        SessionLine::Entry(entry) if entry.lane == "main" => match entry.message {
-            crate::types::AgentMessage::Custom {
-                ref custom_type, ..
-            } if custom_type == "compaction_summary" => Vec::new(),
-            message => vec![TranscriptItem::Message(message)],
-        },
+        SessionLine::Entry(entry)
+            if entry.lane == "main"
+                && matches!(entry.surface_op, super::types::SurfaceOperation::Append) =>
+        {
+            match entry.message {
+                crate::types::AgentMessage::Custom {
+                    ref custom_type, ..
+                } if custom_type == "compaction_summary" => Vec::new(),
+                message => vec![TranscriptItem::Message(message)],
+            }
+        }
         SessionLine::Legacy(node) => vec![TranscriptItem::Message(node.message)],
         SessionLine::Record(Record::ContextCompacted {
             seq,
@@ -2084,9 +2094,15 @@ mod tests {
     }
 
     #[test]
-    fn transcript_page_orders_compaction_marker_without_exposing_summary() {
+    fn transcript_page_orders_compaction_marker_without_exposing_context_entries() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
+        let mut restored = transcript_entry(2, assistant("before"));
+        restored.surface_op = crate::harness::SurfaceOperation::Replace {
+            start_seq: 2,
+            end_seq: 1,
+            source_event_seqs: vec![0],
+        };
         let lines = vec![
             serde_json::to_string(&transcript_entry(
                 0,
@@ -2103,6 +2119,7 @@ mod tests {
                 },
             ))
             .unwrap(),
+            serde_json::to_string(&restored).unwrap(),
             serde_json::to_string(&Record::ContextCompacted {
                 id: "compaction-marker".into(),
                 seq: 3,

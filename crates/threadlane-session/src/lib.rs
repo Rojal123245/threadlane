@@ -69,3 +69,21 @@ pub use threadlane_skills::*;
 pub use threadlane_wasi::broker::*;
 pub use threadlane_wasi::packages::*;
 pub use threadlane_wasi::*;
+
+/// Narrow adapters for cross-crate integration tests.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod test_support {
+    use std::sync::Arc;
+
+    use threadlane_protocol::ProviderPort;
+
+    use crate::coding_agent::{CodingAgent, CodingAgentOptions};
+
+    pub fn coding_agent_with_provider(
+        options: CodingAgentOptions,
+        provider: Arc<dyn ProviderPort>,
+    ) -> CodingAgent {
+        CodingAgent::new_with_provider(options, provider)
+    }
+}
