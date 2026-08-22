@@ -220,7 +220,7 @@ pub fn read_transcript_page(
     let requested_end = cursor.map_or(file_len, |cursor| cursor.offset.min(file_len));
     let at_eof = cursor.is_none_or(|cursor| cursor.offset >= file_len);
     let mut scan_end = if at_eof {
-        complete_jsonl_end(&mut file, requested_end)?
+        complete_jsonl_end(&mut file, path, requested_end)?
     } else {
         requested_end
     };
@@ -291,7 +291,7 @@ pub fn read_transcript_page(
     })
 }
 
-fn complete_jsonl_end(file: &mut fs::File, end: u64) -> io::Result<u64> {
+fn complete_jsonl_end(file: &mut fs::File, path: &Path, end: u64) -> io::Result<u64> {
     if end == 0 {
         return Ok(0);
     }
@@ -302,28 +302,46 @@ fn complete_jsonl_end(file: &mut fs::File, end: u64) -> io::Result<u64> {
         return Ok(end);
     }
     let mut scan_end = end;
-    while scan_end > 0 {
+    let tail_start = loop {
         let start = scan_end.saturating_sub(TRANSCRIPT_READ_CHUNK_BYTES as u64);
         let mut chunk = vec![0; (scan_end - start) as usize];
         file.seek(SeekFrom::Start(start))?;
         file.read_exact(&mut chunk)?;
         if let Some(newline) = chunk.iter().rposition(|byte| *byte == b'\n') {
-            return Ok(start + newline as u64 + 1);
+            break start + newline as u64 + 1;
+        }
+        if start == 0 {
+            break 0;
         }
         scan_end = start;
+    };
+    let mut tail = vec![0; (end - tail_start) as usize];
+    file.seek(SeekFrom::Start(tail_start))?;
+    file.read_exact(&mut tail)?;
+    if parse_transcript_line(path, tail_start, &tail, true)?.is_some() {
+        Ok(end)
+    } else {
+        Ok(tail_start)
     }
-    Ok(0)
 }
 
-fn transcript_items(path: &Path, offset: u64, bytes: &[u8]) -> io::Result<Vec<TranscriptItem>> {
-    if bytes.ends_with(TORN_EOF_SENTINEL.as_bytes())
-        || ATOMIC_FRAME_SENTINEL.as_bytes().starts_with(bytes)
-    {
-        return Ok(Vec::new());
-    }
+fn parse_transcript_line(
+    path: &Path,
+    offset: u64,
+    bytes: &[u8],
+    is_physical_eof: bool,
+) -> io::Result<Option<SessionLine>> {
     let payload = atomic_frame_payload(bytes).unwrap_or(bytes);
-    let line: SessionLine = serde_json::from_slice(payload)
-        .map_err(|error| invalid_line(path, offset as usize, error))?;
+    match serde_json::from_slice(payload) {
+        Ok(line) => Ok(Some(line)),
+        Err(_) if is_recoverable_atomic_fragment(bytes, is_physical_eof) => Ok(None),
+        Err(error) => Err(invalid_line(path, offset as usize, error)),
+    }
+}
+fn transcript_items(path: &Path, offset: u64, bytes: &[u8]) -> io::Result<Vec<TranscriptItem>> {
+    let Some(line) = parse_transcript_line(path, offset, bytes, false)? else {
+        return Ok(Vec::new());
+    };
     Ok(match line {
         SessionLine::AtomicBatch(batch) => batch
             .atomic_batch
@@ -1257,6 +1275,13 @@ fn is_atomic_frame_fragment(bytes: &[u8]) -> bool {
             || bytes.starts_with(LEGACY_ATOMIC_FRAME_PREFIX.as_bytes()))
 }
 
+fn is_recoverable_atomic_fragment(bytes: &[u8], is_physical_eof: bool) -> bool {
+    (is_physical_eof && is_atomic_frame_fragment(bytes))
+        || bytes
+            .strip_suffix(TORN_EOF_SENTINEL.as_bytes())
+            .is_some_and(is_atomic_frame_fragment)
+}
+
 fn read_strict<T: DeserializeOwned>(path: &Path) -> io::Result<Vec<T>> {
     if !path.exists() {
         return Ok(Vec::new());
@@ -1272,12 +1297,7 @@ fn read_strict<T: DeserializeOwned>(path: &Path) -> io::Result<Vec<T>> {
         let payload = line.strip_prefix(ATOMIC_FRAME_SENTINEL).unwrap_or(line);
         match serde_json::from_str(payload) {
             Ok(value) => values.push(value),
-            Err(_error) if is_physical_eof && is_atomic_frame_fragment(line.as_bytes()) => break,
-            Err(_error)
-                if line
-                    .strip_suffix(TORN_EOF_SENTINEL)
-                    .is_some_and(|fragment| is_atomic_frame_fragment(fragment.as_bytes())) =>
-            {
+            Err(_error) if is_recoverable_atomic_fragment(line.as_bytes(), is_physical_eof) => {
                 continue
             }
             Err(error) => return Err(invalid_line(path, index + 1, error)),
@@ -1422,7 +1442,7 @@ mod tests {
     }
 
     #[test]
-    fn transcript_page_reads_legacy_nodes_and_ignores_torn_tail() {
+    fn transcript_page_reads_legacy_nodes_and_ignores_torn_atomic_tail() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
         let legacy = serde_json::json!({
@@ -1431,7 +1451,11 @@ mod tests {
             "timestamp": 1,
             "message": AgentMessage::user("legacy", Vec::new()),
         });
-        std::fs::write(&path, format!("{}\n{{\"id\":", legacy)).unwrap();
+        std::fs::write(
+            &path,
+            format!("{}\n{ATOMIC_FRAME_SENTINEL}{{\"atomic_", legacy),
+        )
+        .unwrap();
 
         let page = read_transcript_page(&path, None, 1).unwrap();
 
@@ -1634,6 +1658,50 @@ mod tests {
     fn strict_open_rejects_completed_legacy_atomic_json_prefix() {
         let line = format!("{LEGACY_ATOMIC_FRAME_PREFIX}junk");
         assert_completed_malformed_line_is_rejected("legacy-prefix.jsonl", line.as_bytes());
+    }
+
+    fn assert_completed_malformed_transcript_line_is_rejected(name: &str, line: &[u8]) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(name);
+        let mut bytes = line.to_vec();
+        bytes.push(b'\n');
+        std::fs::write(&path, bytes).unwrap();
+        assert!(read_transcript_page(&path, None, 1).is_err());
+    }
+
+    #[test]
+    fn transcript_page_rejects_completed_partial_atomic_sentinel_prefix() {
+        assert_completed_malformed_transcript_line_is_rejected(
+            "transcript-partial-sentinel.jsonl",
+            &ATOMIC_FRAME_SENTINEL.as_bytes()[..10],
+        );
+    }
+
+    #[test]
+    fn transcript_page_rejects_completed_full_atomic_sentinel_junk() {
+        let line = format!("{ATOMIC_FRAME_SENTINEL}junk");
+        assert_completed_malformed_transcript_line_is_rejected(
+            "transcript-sentinel-junk.jsonl",
+            line.as_bytes(),
+        );
+    }
+
+    #[test]
+    fn transcript_page_rejects_completed_arbitrary_torn_eof_suffix() {
+        let line = format!("junk{TORN_EOF_SENTINEL}");
+        assert_completed_malformed_transcript_line_is_rejected(
+            "transcript-torn-suffix.jsonl",
+            line.as_bytes(),
+        );
+    }
+
+    #[test]
+    fn transcript_page_rejects_completed_legacy_atomic_json_prefix() {
+        let line = format!("{LEGACY_ATOMIC_FRAME_PREFIX}junk");
+        assert_completed_malformed_transcript_line_is_rejected(
+            "transcript-legacy-prefix.jsonl",
+            line.as_bytes(),
+        );
     }
 
     #[cfg(unix)]
@@ -2121,6 +2189,8 @@ mod tests {
                     .any(|record| record.id() == "fact-after-crash"),
                 "cut {cut}"
             );
+            let page = read_transcript_page(&path, None, 1).unwrap();
+            assert_eq!(page.messages().len(), 1, "cut {cut}");
         }
 
         // Compatibility with frames written before the sentinel contract: an
@@ -2155,6 +2225,8 @@ mod tests {
                 fragment
             );
             JsonlStore::open(&path).unwrap();
+            let page = read_transcript_page(&path, None, 1).unwrap();
+            assert_eq!(page.messages().len(), 1);
         }
     }
 

@@ -158,3 +158,20 @@ Verification:
 - `git diff --check` — PASS.
 
 Warnings remain unchanged: one unused session test import and five GPUI dead-code warnings.
+
+## Transcript paging parser parity closure
+
+- Transcript paging now applies the same recoverable atomic-fragment predicate as strict JSONL loading. Only malformed physical-EOF atomic fragments or recovery-boundary fragments carrying the torn-EOF marker are skipped; valid unterminated JSON remains readable and unrelated malformed EOF data is rejected.
+- Newline-terminated partial modern sentinels, full modern-sentinel junk, arbitrary torn-marker suffixes, and malformed legacy atomic prefixes now fail transcript paging just as they fail strict loading.
+- Four negative paging fixtures cover those malformed shapes. The exhaustive every-byte atomic-frame cut fixture now also reads the recovered transcript at every cut (including legacy prefix cuts), while the multi-visible-item atomic page fixture remains intact.
+
+Verification:
+
+- `cargo test -p threadlane-runtime harness::jsonl::tests:: -- --nocapture` — PASS, 27 tests.
+- `cargo test -p threadlane-runtime` — PASS, 99 unit tests; 2 performance and 2 doc tests ignored.
+- `cargo test -p threadlane-session` — PASS, 119 tests.
+- `cargo check -p threadlane-gpui` — PASS.
+- `cargo fmt --all -- --check` — PASS.
+- `git diff --check` — PASS.
+
+Warnings remain unchanged: one unused session test import and five GPUI dead-code warnings.
