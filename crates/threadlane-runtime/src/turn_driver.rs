@@ -12,7 +12,10 @@ use crate::harness::{
     ContextItemSource, ContextItemStatus, ContextManifestItem, ErrorCategory, ProviderErrorSummary,
     ProviderOutcome, TraceString,
 };
-use crate::provider::{ProviderTraceEvent, ProviderTraceRecorder};
+use crate::provider::{
+    ProviderBoundaryPreparer, ProviderBoundaryRequest, ProviderBoundaryResult, ProviderTraceEvent,
+    ProviderTraceRecorder,
+};
 use crate::rules::{StreamRule, StreamRuleMonitor};
 use crate::tool_dispatcher::ToolDispatcher;
 use crate::types::{AgentMessage, TokenUsage, ToolExecutionMode, TurnState};
@@ -144,14 +147,13 @@ pub(crate) struct TurnDriver<'a> {
     pub(crate) event_tx: broadcast::Sender<AgentEvent>,
     pub(crate) harness_event_hub: crate::harness::HarnessEventHub,
     pub(crate) provider_trace_recorder: Option<ProviderTraceRecorder>,
+    pub(crate) provider_boundary_preparer: Option<ProviderBoundaryPreparer>,
     /// Persists model-visible messages before they may affect another provider
     /// request. Durable runtimes install the canonical session-journal writer.
     pub(crate) message_recorder: Option<crate::provider::AssistantMessageRecorder>,
     pub(crate) stream_rules: Vec<(StreamRule, Regex)>,
     pub(crate) steering_queue: &'a mut Vec<AgentMessage>,
     pub(crate) follow_up_queue: &'a mut Vec<AgentMessage>,
-    /// Cached serialized tool definitions JSON to avoid re-serializing on every turn.
-    pub(crate) cached_tools_json: Option<String>,
 }
 
 impl<'a> TurnDriver<'a> {
@@ -226,6 +228,51 @@ impl<'a> TurnDriver<'a> {
                     task.to_string()
                 }
             };
+            let configured_tool_definitions = self.tool_dispatcher.configured_tool_definitions();
+            let query = {
+                let turn = self.turn.lock().await;
+                turn.messages
+                    .iter()
+                    .rev()
+                    .find_map(|message| match message {
+                        AgentMessage::User { content }
+                        | AgentMessage::UserWithImages { content, .. } => Some(content.clone()),
+                        _ => None,
+                    })
+            };
+            let tool_definitions = crate::local_tool_router::shortlist_from_environment(
+                &query.unwrap_or_default(),
+                &configured_tool_definitions,
+                self.config.needle_enabled,
+            )
+            .await;
+            let tool_schema_json = (!tool_definitions.is_empty())
+                .then(|| serde_json::to_string(&tool_definitions).unwrap_or_default());
+
+            let mut boundary_result: Option<ProviderBoundaryResult> = None;
+            if let Some(preparer) = &self.provider_boundary_preparer {
+                let messages = self.turn.lock().await.messages.clone();
+                let prepared = preparer(ProviderBoundaryRequest {
+                    attempt: turn_number as u32,
+                    model: model.clone(),
+                    messages,
+                    tool_schema_json: tool_schema_json.clone(),
+                    overflow_recovery: overflow_recovery_attempted,
+                })
+                .await
+                .map_err(|error| format!("context preparation failed: {error}"));
+                match prepared {
+                    Ok(prepared) => {
+                        self.turn.lock().await.messages = prepared.messages.clone();
+                        boundary_result = Some(prepared);
+                    }
+                    Err(error) => {
+                        self.emit_event(AgentEvent::AgentError { error });
+                        return;
+                    }
+                }
+            }
+
             let provider = self.provider_client.provider_kind(&model).to_string();
             static PROVIDER_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
             let request_id = format!(
@@ -250,47 +297,27 @@ impl<'a> TurnDriver<'a> {
             let mut provider_terminal_recorded = false;
             let (stream_tx, mut stream_rx) = mpsc::channel(100);
             let client = self.provider_client.clone();
-            let pc_key = self.prompt_cache_key.clone();
-            let configured_tool_definitions = self.tool_dispatcher.configured_tool_definitions();
-            let query = {
-                let turn = self.turn.lock().await;
-                turn.messages
-                    .iter()
-                    .rev()
-                    .find_map(|message| match message {
-                        AgentMessage::User { content }
-                        | AgentMessage::UserWithImages { content, .. } => Some(content.clone()),
-                        _ => None,
-                    })
-            };
-            let tool_definitions = crate::local_tool_router::shortlist_from_environment(
-                &query.unwrap_or_default(),
-                &configured_tool_definitions,
-                self.config.needle_enabled,
-            )
-            .await;
-            let payload_cache_key = pc_key.clone();
-
+            let payload_cache_key = self.prompt_cache_key.clone();
+            let request_messages = self.turn.lock().await.messages.clone();
             let request = {
                 let turn = self.turn.lock().await;
                 RuntimeRequest {
                     model: model.clone(),
-                    messages: serde_json::to_value(&turn.messages).unwrap_or_default(),
+                    messages: serde_json::to_value(&request_messages).unwrap_or_default(),
                     tools: serde_json::Value::Array(
                         tool_definitions
                             .iter()
                             .map(|tool| tool.to_chat_completions_tool())
                             .collect(),
                     ),
-                    prompt_cache_key: payload_cache_key.clone(),
+                    prompt_cache_key: payload_cache_key,
                     reasoning_effort: turn.reasoning_effort.as_api_str().map(str::to_owned),
                 }
             };
 
             let manifest_items = {
-                let turn = self.turn.lock().await;
                 let mut items = Vec::new();
-                for (idx, msg) in turn.messages.iter().enumerate() {
+                for (idx, msg) in request_messages.iter().enumerate() {
                     let role = msg.role_str();
                     let custom_serialized;
                     let content_str = match msg {
@@ -326,14 +353,9 @@ impl<'a> TurnDriver<'a> {
                         });
                     }
                 }
-                if !tool_definitions.is_empty() {
-                    let tools_json = self
-                        .cached_tools_json
-                        .as_deref()
-                        .unwrap_or(&serde_json::to_string(&tool_definitions).unwrap_or_default())
-                        .to_string();
+                if let Some(tools_json) = tool_schema_json.as_deref() {
                     let digest = format!("{:x}", Sha256::digest(tools_json.as_bytes()));
-                    let token_estimate = ((tools_json.len() + 3) / 4) as u32;
+                    let token_estimate = tools_json.len().div_ceil(4) as u32;
                     if let (Ok(role_trace), Ok(digest_trace), Ok(label_trace)) = (
                         TraceString::new("tools"),
                         TraceString::new(digest),
@@ -353,13 +375,31 @@ impl<'a> TurnDriver<'a> {
                 }
                 items
             };
-            let total_estimated_tokens: u32 =
-                manifest_items.iter().map(|item| item.token_estimate).sum();
+            let total_estimated_tokens = crate::compaction::estimate_request_tokens(
+                &request_messages,
+                tool_schema_json.as_deref(),
+                &self.config,
+            )
+            .try_into()
+            .ok();
+            let (context_limit, context_limit_is_estimate, compaction_generation) = boundary_result
+                .as_ref()
+                .map_or((None, false, 0), |prepared| {
+                    (
+                        Some(prepared.context_limit),
+                        prepared.context_limit_is_estimate,
+                        prepared.compaction_generation,
+                    )
+                });
             let _ = self
                 .record_provider_trace(ProviderTraceEvent::ContextManifest {
                     attempt: turn_number as u32,
                     request_id: request_id.clone(),
-                    total_estimated_tokens: Some(total_estimated_tokens),
+                    model: model.clone(),
+                    context_limit,
+                    context_limit_is_estimate,
+                    compaction_generation,
+                    total_estimated_tokens,
                     items: manifest_items,
                 })
                 .await;
@@ -599,14 +639,17 @@ impl<'a> TurnDriver<'a> {
                             return;
                         }
                         if !overflow_recovery_attempted
-                            && self.message_recorder.is_none()
                             && is_context_overflow_error(&err)
+                            && (self.provider_boundary_preparer.is_some()
+                                || self.message_recorder.is_none())
                         {
-                            let mut turn = self.turn.lock().await;
-                            turn.messages = compact_messages_to_token_budget(
-                                &turn.messages,
-                                self.config.auto_compaction_keep_recent_tokens,
-                            );
+                            if self.provider_boundary_preparer.is_none() {
+                                let mut turn = self.turn.lock().await;
+                                turn.messages = compact_messages_to_token_budget(
+                                    &turn.messages,
+                                    self.config.auto_compaction_keep_recent_tokens,
+                                );
+                            }
                             overflow_recovery_attempted = true;
                             continue 'turns;
                         }

@@ -44,9 +44,10 @@ pub use local_tool_router::LocalToolRouter;
 pub use loop_engine::repair_interrupted_tool_turn;
 pub use provider::{
     convert_to_codex_llm, convert_to_llm, AssistantMessageRecorder, ChatCompletionsAdapter,
-    CodexResponsesAdapter, ProviderAdapter, ProviderDiscardedUsageRecorder, ProviderHookRecorder,
-    ProviderMessages, ProviderRouter, ProviderTraceEvent, ProviderTraceRecorder,
-    ProviderUsageRecorder, StreamingStateRecorder, ToolCompletionRecorder, ToolExecutionTraceEvent,
+    CodexResponsesAdapter, ProviderAdapter, ProviderBoundaryPreparer, ProviderBoundaryRequest,
+    ProviderBoundaryResult, ProviderDiscardedUsageRecorder, ProviderHookRecorder, ProviderMessages,
+    ProviderRouter, ProviderTraceEvent, ProviderTraceRecorder, ProviderUsageRecorder,
+    StreamingStateRecorder, ToolCompletionRecorder, ToolExecutionTraceEvent,
     ToolExecutionTraceRecorder, ToolIntentRecorder,
 };
 pub use rules::*;

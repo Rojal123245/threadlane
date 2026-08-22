@@ -86,6 +86,8 @@ pub struct AgentRuntime {
     allowed_tool_names: Option<HashSet<String>>,
     /// Provider trace recorder (for auditing).
     provider_trace_recorder: Option<crate::provider::ProviderTraceRecorder>,
+    /// Asynchronous context preparation at the provider-attempt boundary.
+    provider_boundary_preparer: Option<crate::provider::ProviderBoundaryPreparer>,
     /// Assistant message recorder (for persistence).
     message_recorder: Option<crate::provider::AssistantMessageRecorder>,
     /// Harness event hub for wiring durability events.
@@ -139,6 +141,7 @@ impl AgentRuntime {
             prompt_cache_key: None,
             allowed_tool_names: None,
             provider_trace_recorder: None,
+            provider_boundary_preparer: None,
             message_recorder: None,
         }
     }
@@ -381,6 +384,13 @@ impl AgentRuntime {
         recorder: Option<crate::provider::ProviderTraceRecorder>,
     ) {
         self.provider_trace_recorder = recorder;
+    }
+
+    pub fn set_provider_boundary_preparer(
+        &mut self,
+        preparer: Option<crate::provider::ProviderBoundaryPreparer>,
+    ) {
+        self.provider_boundary_preparer = preparer;
     }
 
     pub fn set_message_recorder(
@@ -673,14 +683,6 @@ impl AgentRuntime {
     /// Runs the main turn loop.
     async fn run_turns(&mut self) {
         let tool_dispatcher = self.synced_dispatcher();
-        let cached_tools_json = {
-            let defs = tool_dispatcher.configured_tool_definitions();
-            if defs.is_empty() {
-                None
-            } else {
-                Some(serde_json::to_string(&defs).unwrap_or_default())
-            }
-        };
         let mut driver = crate::turn_driver::TurnDriver {
             turn: self.turn.clone(),
             provider_client: self.provider_client.clone(),
@@ -690,11 +692,11 @@ impl AgentRuntime {
             event_tx: self.event_tx.clone(),
             harness_event_hub: self.harness_event_hub.clone(),
             provider_trace_recorder: self.provider_trace_recorder.clone(),
+            provider_boundary_preparer: self.provider_boundary_preparer.clone(),
             message_recorder: self.message_recorder.clone(),
             stream_rules: self.stream_rules.clone(),
             steering_queue: &mut self.steering_queue,
             follow_up_queue: &mut self.follow_up_queue,
-            cached_tools_json,
         };
         driver.run_turns().await;
     }
@@ -704,7 +706,9 @@ impl AgentRuntime {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use threadlane_protocol::{RuntimeRequest, RuntimeStreamEvent};
+    use threadlane_protocol::{RuntimeRequest, RuntimeStreamEvent, RuntimeUsage};
+
+    use crate::provider::{ProviderBoundaryRequest, ProviderBoundaryResult};
 
     struct UnusedProvider;
 
@@ -767,5 +771,149 @@ mod tests {
             message,
             AgentMessage::User { content } if content == "child task"
         )));
+    }
+
+    struct RecordingProvider {
+        order: Arc<std::sync::Mutex<Vec<&'static str>>>,
+        message_counts: Arc<std::sync::Mutex<Vec<usize>>>,
+    }
+
+    #[async_trait]
+    impl ProviderPort for RecordingProvider {
+        async fn stream_request(
+            &self,
+            request: RuntimeRequest,
+            events: tokio::sync::mpsc::Sender<RuntimeStreamEvent>,
+        ) {
+            self.order.lock().unwrap().push("sent");
+            self.message_counts
+                .lock()
+                .unwrap()
+                .push(request.messages.as_array().map_or(0, Vec::len));
+            let _ = events
+                .send(RuntimeStreamEvent::ContentToken("done".into()))
+                .await;
+            let _ = events
+                .send(RuntimeStreamEvent::Finished {
+                    tool_calls: Vec::new(),
+                    usage: RuntimeUsage::default(),
+                })
+                .await;
+        }
+
+        async fn fetch_deferred(
+            &self,
+            _model: &str,
+            _handle_id: &str,
+        ) -> Result<DeferredResponse, String> {
+            Ok(DeferredResponse::Pending)
+        }
+
+        async fn cancel_deferred(&self, _model: &str, _handle_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn provider_kind(&self, _model: &str) -> &'static str {
+            "test"
+        }
+    }
+
+    #[tokio::test]
+    async fn preparation_finishes_before_provider_started_and_network_send() {
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = Arc::new(RecordingProvider {
+            order: order.clone(),
+            message_counts: Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let mut runtime = AgentRuntime::new_with_provider(
+            "",
+            None,
+            "effective-model",
+            Some(&dir.path().join("session.jsonl")),
+            AgentConfig::default(),
+            provider,
+        )
+        .unwrap();
+        runtime
+            .turn
+            .lock()
+            .await
+            .messages
+            .push(AgentMessage::user("test", Vec::new()));
+
+        let started_order = order.clone();
+        runtime.set_provider_trace_recorder(Some(Arc::new(move |event| {
+            let started_order = started_order.clone();
+            Box::pin(async move {
+                if matches!(event, crate::provider::ProviderTraceEvent::Started { .. }) {
+                    started_order.lock().unwrap().push("started");
+                }
+                Ok(())
+            })
+        })));
+        let preparer_order = order.clone();
+        runtime.set_provider_boundary_preparer(Some(Arc::new(
+            move |request: ProviderBoundaryRequest| {
+                let preparer_order = preparer_order.clone();
+                Box::pin(async move {
+                    assert_eq!(request.model, "effective-model");
+                    let tools: Vec<AgentToolDefinition> = serde_json::from_str(
+                        request
+                            .tool_schema_json
+                            .as_deref()
+                            .expect("shortlisted schema"),
+                    )
+                    .unwrap();
+                    assert!(!tools.is_empty());
+                    preparer_order.lock().unwrap().push("prepared");
+                    Ok(ProviderBoundaryResult {
+                        messages: request.messages,
+                        context_limit: 128_000,
+                        context_limit_is_estimate: true,
+                        compaction_generation: 0,
+                        provisional_estimated_tokens: None,
+                    })
+                })
+            },
+        )));
+
+        runtime.run_turns().await;
+
+        assert_eq!(&*order.lock().unwrap(), &["prepared", "started", "sent"]);
+    }
+
+    #[tokio::test]
+    async fn non_durable_runtime_keeps_direct_compaction() {
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let message_counts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = Arc::new(RecordingProvider {
+            order,
+            message_counts: message_counts.clone(),
+        });
+        let config = AgentConfig::builder()
+            .auto_compaction_threshold_tokens(1)
+            .auto_compaction_keep_recent_tokens(16)
+            .build();
+        let dir = tempfile::tempdir().unwrap();
+        let mut runtime = AgentRuntime::new_with_provider(
+            "",
+            None,
+            "test-model",
+            Some(&dir.path().join("session.jsonl")),
+            config,
+            provider,
+        )
+        .unwrap();
+        let original_count = 8;
+        runtime.turn.lock().await.messages = (0..original_count)
+            .map(|index| {
+                AgentMessage::user(format!("message {index} {}", "x".repeat(100)), Vec::new())
+            })
+            .collect();
+
+        runtime.run_turns().await;
+
+        assert!(message_counts.lock().unwrap()[0] < original_count);
     }
 }

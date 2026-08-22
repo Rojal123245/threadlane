@@ -516,6 +516,31 @@ pub type ToolExecutionTraceRecorder = Arc<
         + Sync,
 >;
 
+#[derive(Clone, Debug)]
+pub struct ProviderBoundaryRequest {
+    pub attempt: u32,
+    pub model: String,
+    pub messages: Vec<AgentMessage>,
+    pub tool_schema_json: Option<String>,
+    pub overflow_recovery: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProviderBoundaryResult {
+    pub messages: Vec<AgentMessage>,
+    pub context_limit: usize,
+    pub context_limit_is_estimate: bool,
+    pub compaction_generation: u64,
+    pub provisional_estimated_tokens: Option<usize>,
+}
+
+pub type ProviderBoundaryPreparer = Arc<
+    dyn Fn(
+            ProviderBoundaryRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<ProviderBoundaryResult, String>> + Send>>
+        + Send
+        + Sync,
+>;
 #[derive(Debug, Clone)]
 pub enum ProviderTraceEvent {
     Started {
@@ -527,6 +552,10 @@ pub enum ProviderTraceEvent {
     ContextManifest {
         attempt: u32,
         request_id: String,
+        model: String,
+        context_limit: Option<usize>,
+        context_limit_is_estimate: bool,
+        compaction_generation: u64,
         total_estimated_tokens: Option<u32>,
         items: Vec<crate::harness::ContextManifestItem>,
     },
