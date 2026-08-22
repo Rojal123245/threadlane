@@ -233,6 +233,7 @@ impl CodingSessionHarness {
         capability_sha256: Option<String>,
         prompt_template_ids: Vec<String>,
         git_head: Option<String>,
+        context_window_limit: Option<usize>,
     ) -> Result<(), String> {
         self.ensure_fresh()?;
         let trace = |value: String| TraceString::new(value);
@@ -269,7 +270,7 @@ impl CodingSessionHarness {
                 .map(TraceString::new)
                 .collect::<Result<Vec<_>, _>>()?,
             git_head: git_head.map(TraceString::new).transpose()?,
-            context_window_limit: None,
+            context_window_limit,
             route_defaults: None,
         };
         self.store
@@ -297,6 +298,12 @@ impl CodingSessionHarness {
         config: &AgentConfig,
     ) -> Result<ProviderBoundaryResult, String> {
         self.ensure_fresh()?;
+        // No provider boundary may proceed after cancellation, even when the
+        // already-compacted context is below the adaptive trigger. Once a
+        // checkpoint procedure starts, it is driven atomically to completion.
+        if self.cancellation.load(Ordering::SeqCst) {
+            return Err("context preparation cancelled".into());
+        }
         let budget = context_budget(&request.model, config);
         let mut current = self.model_context("main")?.messages();
         let pre_tokens =
@@ -308,12 +315,6 @@ impl CodingSessionHarness {
                 self.compaction_generation(),
                 None,
             ));
-        }
-
-        // Cancellation is checked before accepting any durable effects. Once a
-        // checkpoint is accepted, commit_prepared_compaction drives it fully.
-        if self.cancellation.load(Ordering::SeqCst) {
-            return Err("context preparation cancelled".into());
         }
         let reason = if request.overflow_recovery {
             CompactionReason::OverflowRecovery
@@ -333,7 +334,15 @@ impl CodingSessionHarness {
             ) else {
                 return Err("context preparation could not drop historical messages".into());
             };
-            self.commit_prepared_compaction(run_id, &request.model, budget, reason, prepared)?;
+            self.commit_prepared_compaction(
+                run_id,
+                &request.model,
+                request.tool_schema_json.as_deref(),
+                config,
+                budget,
+                reason,
+                prepared,
+            )?;
             current = self.model_context("main")?.messages();
             let post_tokens =
                 estimate_request_tokens(&current, request.tool_schema_json.as_deref(), config);
@@ -389,6 +398,8 @@ impl CodingSessionHarness {
         &mut self,
         parent_run_id: &str,
         model: &str,
+        tool_schema_json: Option<&str>,
+        config: &AgentConfig,
         budget: ContextBudget,
         reason: CompactionReason,
         prepared: PreparedCompaction,
@@ -401,11 +412,14 @@ impl CodingSessionHarness {
                 .ok_or_else(|| "context preparation produced no durable summary".to_string())?;
             self.checkpoint_open_run_compaction(parent_run_id, summary, reason)?;
             for message in super::durable::compaction_retained_tail(&prepared.messages) {
-                self.append_message(message)?;
+                // Every retained occurrence is significant, including adjacent
+                // messages with equal serialized values.
+                self.append_message_inner(message, false)?;
             }
-            // Re-project before telemetry so a committed ContextCompacted record
-            // always describes the canonical context already on disk.
-            let post_tokens = prepared.post_tokens;
+            // Re-project after all checkpoint effects and retained occurrences
+            // are durable; telemetry must describe that canonical projection.
+            let canonical = self.model_context("main")?.messages();
+            let post_tokens = estimate_request_tokens(&canonical, tool_schema_json, config);
             let generation = self.compaction_generation().saturating_add(1);
             let seq = self.next_seq();
             let record = HarnessRecord::ContextCompacted {
@@ -443,6 +457,9 @@ impl CodingSessionHarness {
         run_id: &str,
         model: &str,
         config: &AgentConfig,
+        pre_tokens: usize,
+        retained_tail_tokens: usize,
+        compacted_messages: usize,
     ) -> Result<(), String> {
         self.ensure_fresh()?;
         let budget = context_budget(model, config);
@@ -460,11 +477,11 @@ impl CodingSessionHarness {
             effective_model: TraceString::new(model)?,
             context_limit: budget.limit,
             context_limit_is_estimate: budget.limit_is_estimate,
-            pre_tokens: post_tokens,
+            pre_tokens,
             post_tokens,
             retained_tail_target: budget.retained_tail_tokens,
-            retained_tail_tokens: post_tokens.min(budget.retained_tail_tokens),
-            compacted_messages: 0,
+            retained_tail_tokens,
+            compacted_messages,
         };
         self.store
             .append_record_gated(record)
@@ -1789,6 +1806,15 @@ impl CodingSessionHarness {
         self.append_message_inner(message, false)
     }
 
+    /// Appends a known-new logical occurrence without content equality
+    /// suppression. Compaction tails use this to preserve repeated messages.
+    pub(crate) fn append_message_occurrence(
+        &mut self,
+        message: AgentMessage,
+    ) -> Result<String, String> {
+        self.append_message_inner(message, false)
+    }
+
     fn append_message_inner(
         &mut self,
         message: AgentMessage,
@@ -3049,6 +3075,16 @@ mod tests {
             })
             .expect("provider start after compaction");
         assert!(compacted_seq < start_seq);
+        assert_eq!(
+            Reducer::reduce(&harness.store)
+                .unwrap()
+                .lane("main")
+                .unwrap()
+                .open_operation
+                .as_deref(),
+            Some("run-compact"),
+            "provider-boundary compaction must preserve the foreground run"
+        );
     }
 
     #[test]
@@ -3099,25 +3135,45 @@ mod tests {
         harness
             .begin_run(
                 "run-compact",
-                AgentMessage::user("x".repeat(500_000), vec![]),
+                AgentMessage::user("x".repeat(50_000), vec![]),
             )
             .unwrap();
         harness
-            .append_message(AgentMessage::user("y".repeat(500_000), vec![]))
+            .append_message(AgentMessage::user("y".repeat(50_000), vec![]))
+            .unwrap();
+        // The oversized accepted tail survives the normal checkpoint, so the
+        // strict pass is attempted and deterministically cannot drop further.
+        harness
+            .append_message(AgentMessage::user("z".repeat(500_000), vec![]))
             .unwrap();
         let result = harness.prepare_provider_boundary(
             "run-compact",
             boundary_request(false),
             &AgentConfig::default(),
         );
-        assert!(result.is_err());
+        let error = result.expect_err("strict compaction must remain over budget");
+        assert_eq!(
+            error,
+            "context preparation could not drop historical messages"
+        );
         let attempts = harness
             .store
             .records()
             .iter()
-            .filter(|record| matches!(record, HarnessRecord::ContextCompacted { .. }))
-            .count();
-        assert!(attempts <= 2, "strict retry must be bounded");
+            .filter_map(|record| match record {
+                HarnessRecord::ContextCompacted {
+                    generation,
+                    reason: CompactionReason::AdaptiveBudget,
+                    run_id,
+                    ..
+                } => Some((*generation, run_id.as_str())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        // The normal attempt commits generation 1. The exact terminal error
+        // proves the second (strict) attempt ran and found no further droppable
+        // history; there is no recursive third checkpoint.
+        assert_eq!(attempts, vec![(1, "run-compact")]);
     }
 
     #[test]
@@ -3135,17 +3191,154 @@ mod tests {
             .store
             .records()
             .iter()
-            .filter(|record| {
-                matches!(
-                    record,
-                    HarnessRecord::ContextCompacted {
-                        reason: CompactionReason::OverflowRecovery,
-                        ..
-                    }
-                )
+            .filter_map(|record| match record {
+                HarnessRecord::ContextCompacted {
+                    generation,
+                    reason: CompactionReason::OverflowRecovery,
+                    run_id,
+                    pre_tokens,
+                    post_tokens,
+                    ..
+                } => Some((*generation, run_id.as_str(), *pre_tokens, *post_tokens)),
+                _ => None,
             })
-            .count();
-        assert_eq!(recoveries, 1);
+            .collect::<Vec<_>>();
+        assert_eq!(recoveries.len(), 1);
+        assert_eq!(recoveries[0].0, 1);
+        assert_eq!(recoveries[0].1, "run-compact");
+        assert!(recoveries[0].2 > recoveries[0].3);
+        assert_eq!(
+            Reducer::reduce(&harness.store)
+                .unwrap()
+                .lane("main")
+                .unwrap()
+                .open_operation
+                .as_deref(),
+            Some("run-compact")
+        );
+    }
+
+    #[test]
+    fn retained_tail_appends_equal_occurrences_without_value_deduplication() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        harness
+            .begin_run("run-compact", AgentMessage::user("old", vec![]))
+            .unwrap();
+        let repeated = AgentMessage::user("repeat", vec![]);
+        let summary = AgentMessage::Custom {
+            custom_type: "compaction_summary".into(),
+            payload: serde_json::json!({ "summary": "summary" }),
+        };
+        harness
+            .commit_prepared_compaction(
+                "run-compact",
+                "unknown/test-model",
+                None,
+                &AgentConfig::default(),
+                context_budget("unknown/test-model", &AgentConfig::default()),
+                CompactionReason::AdaptiveBudget,
+                PreparedCompaction {
+                    messages: vec![summary, repeated.clone(), repeated.clone()],
+                    pre_tokens: 100,
+                    post_tokens: 20,
+                    compacted_messages: 1,
+                    retained_tail_tokens: 10,
+                },
+            )
+            .unwrap();
+
+        let context = harness.model_context("main").unwrap().messages();
+        assert_eq!(context.len(), 3);
+        assert_eq!(context[1], repeated);
+        assert_eq!(context[2], repeated);
+        let tail_entries = harness
+            .store
+            .entries()
+            .iter()
+            .rev()
+            .take(2)
+            .collect::<Vec<_>>();
+        assert_ne!(tail_entries[0].id, tail_entries[1].id);
+        assert_eq!(tail_entries[0].message, tail_entries[1].message);
+    }
+
+    #[test]
+    fn manual_compaction_telemetry_reports_true_pre_post_and_removed_count() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        let config = AgentConfig::default();
+        harness
+            .begin_run(
+                "run",
+                AgentMessage::user(format!("old-{}", "x".repeat(4_000)), vec![]),
+            )
+            .unwrap();
+        harness
+            .append_message(AgentMessage::Assistant {
+                content: Some("discarded".repeat(500)),
+                tool_calls: None,
+                stop_reason: None,
+                deferred_handle: None,
+            })
+            .unwrap();
+        let before = harness.model_context("main").unwrap().messages();
+        let pre_tokens = estimate_request_tokens(&before, None, &config);
+        let compacted_messages = 2;
+        harness
+            .checkpoint_open_run_compaction("run", "durable summary", CompactionReason::Manual)
+            .unwrap();
+        let tail = AgentMessage::user("tail", vec![]);
+        let retained_tail_tokens =
+            estimate_request_tokens(std::slice::from_ref(&tail), None, &config);
+        harness.append_message_occurrence(tail).unwrap();
+        let expected_post = estimate_request_tokens(
+            &harness.model_context("main").unwrap().messages(),
+            None,
+            &config,
+        );
+        harness
+            .record_manual_compaction(
+                "run",
+                "unknown/test-model",
+                &config,
+                pre_tokens,
+                retained_tail_tokens,
+                compacted_messages,
+            )
+            .unwrap();
+
+        let telemetry = harness
+            .store
+            .records()
+            .iter()
+            .find_map(|record| match record {
+                HarnessRecord::ContextCompacted {
+                    reason: CompactionReason::Manual,
+                    pre_tokens,
+                    post_tokens,
+                    retained_tail_tokens,
+                    compacted_messages,
+                    ..
+                } => Some((
+                    *pre_tokens,
+                    *post_tokens,
+                    *retained_tail_tokens,
+                    *compacted_messages,
+                )),
+                _ => None,
+            })
+            .expect("manual compaction telemetry");
+        assert_eq!(
+            telemetry,
+            (
+                pre_tokens,
+                expected_post,
+                retained_tail_tokens,
+                compacted_messages,
+            )
+        );
+        assert!(telemetry.1 < telemetry.0);
     }
 
     #[test]
@@ -3173,6 +3366,71 @@ mod tests {
             matches!(record, HarnessRecord::ContextCompacted { seq, .. } if *seq > abort_seq)
                 || matches!(record, HarnessRecord::ProviderRequestStarted { seq, .. } if *seq > abort_seq)
         }));
+    }
+
+    #[test]
+    fn cancellation_after_accepted_checkpoint_keeps_complete_canonical_state() {
+        let (_dir, path) = temp_session();
+        let mut harness = open_long_run(&path);
+        harness
+            .prepare_provider_boundary(
+                "run-compact",
+                boundary_request(false),
+                &AgentConfig::default(),
+            )
+            .unwrap();
+        let compacted = harness.model_context("main").unwrap();
+        let checkpoint = compacted.checkpoint.clone().expect("accepted checkpoint");
+        assert!(
+            compacted.messages().len() > 1,
+            "retained tail was committed"
+        );
+        let compacted_seq = harness
+            .store
+            .records()
+            .iter()
+            .find_map(|record| match record {
+                HarnessRecord::ContextCompacted { seq, .. } => Some(*seq),
+                _ => None,
+            })
+            .expect("completed compaction telemetry");
+
+        harness.request_abort().unwrap();
+        let error = harness
+            .prepare_provider_boundary(
+                "run-compact",
+                boundary_request(false),
+                &AgentConfig::default(),
+            )
+            .expect_err("accepted cancellation blocks subsequent provider preparation");
+        assert_eq!(error, "context preparation cancelled");
+        assert!(!harness.store.records().iter().any(|record| {
+            matches!(record, HarnessRecord::ContextCompacted { seq, .. } if *seq > compacted_seq)
+                || matches!(record, HarnessRecord::ProviderRequestStarted { .. })
+        }));
+
+        drop(harness);
+        let reloaded = CodingSessionHarness::open(&path).unwrap();
+        let reloaded_context = reloaded.model_context("main").unwrap();
+        assert_eq!(reloaded_context.checkpoint, Some(checkpoint));
+        let expected_json = serde_json::to_vec(&reloaded_context.messages()).unwrap();
+        drop(reloaded);
+        let reloaded = CodingSessionHarness::open(&path).unwrap();
+        let second_json =
+            serde_json::to_vec(&reloaded.model_context("main").unwrap().messages()).unwrap();
+        assert_eq!(
+            (second_json.len(), Sha256::digest(&second_json)),
+            (expected_json.len(), Sha256::digest(&expected_json))
+        );
+        assert_eq!(
+            Reducer::reduce(&reloaded.store)
+                .unwrap()
+                .lane("main")
+                .unwrap()
+                .open_operation
+                .as_deref(),
+            Some("run-compact")
+        );
     }
     #[tokio::test(flavor = "current_thread")]
     async fn path_scoped_async_helper_uses_blocking_worker() {

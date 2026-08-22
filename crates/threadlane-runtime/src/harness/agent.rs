@@ -379,6 +379,53 @@ impl<S: SessionStore> AgentHarness<S> {
         Ok(())
     }
 
+    /// Validates the public, compact accepted-run token against committed state.
+    /// The named prompt must be in the committed prefix and the operation must
+    /// still be open on the same lane.
+    pub fn validate_accepted_run_token(
+        &self,
+        run_id: &str,
+        lane_name: &str,
+        accepted_through_seq: u64,
+    ) -> Result<(), ReduceError> {
+        if run_id.is_empty() || lane_name.is_empty() || accepted_through_seq == 0 {
+            return Err(ReduceError::InvalidLane(
+                "accepted run token contains an empty identifier or zero prefix".into(),
+            ));
+        }
+        let max_seq = self
+            .store
+            .entries()
+            .iter()
+            .map(|entry| entry.seq)
+            .chain(self.store.records().iter().map(|record| record.seq()))
+            .max()
+            .unwrap_or(0);
+        if accepted_through_seq > max_seq {
+            return Err(ReduceError::InvalidLane(format!(
+                "accepted prefix {accepted_through_seq} exceeds committed sequence {max_seq}"
+            )));
+        }
+        let state = super::Reducer::reduce(&self.store)?;
+        let lane = state.lane(lane_name).ok_or_else(|| {
+            ReduceError::InvalidLane(format!("lane {lane_name} not found in reduced state"))
+        })?;
+        if lane.open_operation.as_deref() != Some(run_id) {
+            return Err(ReduceError::InvalidLane(format!(
+                "lane {lane_name} does not have accepted run {run_id} open"
+            )));
+        }
+        let prompt_id = format!("entry-{run_id}-user");
+        if !self.store.entries().iter().any(|entry| {
+            entry.id == prompt_id && entry.lane == lane_name && entry.seq <= accepted_through_seq
+        }) {
+            return Err(ReduceError::InvalidLane(format!(
+                "accepted prompt {prompt_id} is absent from committed prefix {accepted_through_seq}"
+            )));
+        }
+        Ok(())
+    }
+
     pub fn append_entry_gated(&mut self, entry: super::Entry) -> Result<(), ProcedureError> {
         let next = self
             .effects

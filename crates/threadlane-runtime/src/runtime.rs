@@ -288,7 +288,7 @@ impl AgentRuntime {
 
     pub fn steer(&mut self, message: AgentMessage) {
         let seq = self.harness.store().next_sequence();
-        let _ = self.harness.enqueue_unbound(
+        let persisted = self.harness.enqueue_unbound(
             QueueKind::Steer,
             ProvisionedEntry {
                 id: format!("queued-steer-{seq}"),
@@ -297,13 +297,24 @@ impl AgentRuntime {
                 surface_op: crate::harness::SurfaceOperation::Append,
             },
         );
-        let _ = self.harness.drive_to_completion();
-        self.steering_queue.push(message);
+        let persisted = persisted.and_then(|_| {
+            self.harness
+                .drive_to_completion()
+                .map_err(ProcedureError::from)
+        });
+        match persisted {
+            Ok(()) => self.steering_queue.push(message),
+            Err(error) => {
+                let _ = self.event_tx.send(AgentEvent::AgentError {
+                    error: format!("failed to persist steering: {error}"),
+                });
+            }
+        }
     }
 
     pub fn follow_up(&mut self, message: AgentMessage) {
         let seq = self.harness.store().next_sequence();
-        let _ = self.harness.enqueue_unbound(
+        let persisted = self.harness.enqueue_unbound(
             QueueKind::FollowUp,
             ProvisionedEntry {
                 id: format!("queued-followup-{seq}"),
@@ -312,8 +323,19 @@ impl AgentRuntime {
                 surface_op: crate::harness::SurfaceOperation::Append,
             },
         );
-        let _ = self.harness.drive_to_completion();
-        self.follow_up_queue.push(message);
+        let persisted = persisted.and_then(|_| {
+            self.harness
+                .drive_to_completion()
+                .map_err(ProcedureError::from)
+        });
+        match persisted {
+            Ok(()) => self.follow_up_queue.push(message),
+            Err(error) => {
+                let _ = self.event_tx.send(AgentEvent::AgentError {
+                    error: format!("failed to persist follow-up: {error}"),
+                });
+            }
+        }
     }
 
     /// Records a user prompt through the harness then runs the turn loop.
@@ -342,14 +364,24 @@ impl AgentRuntime {
             .await;
     }
 
-    /// Execute a turn loop for a pre-accepted run token.
+    /// Execute a turn loop for a pre-accepted durable run token.
     pub async fn run_accepted(&mut self, run_id: &str, lane: &str, accepted_through_seq: u64) {
-        assert!(!run_id.is_empty(), "accepted run id must not be empty");
-        assert!(!lane.is_empty(), "accepted run lane must not be empty");
-        assert!(
-            accepted_through_seq > 0,
-            "accepted run must name a committed prefix"
-        );
+        let validation = self
+            .harness
+            .store_mut()
+            .ensure_fresh()
+            .map_err(|error| error.to_string())
+            .and_then(|_| {
+                self.harness
+                    .validate_accepted_run_token(run_id, lane, accepted_through_seq)
+                    .map_err(|error| error.to_string())
+            });
+        if let Err(error) = validation {
+            let _ = self.event_tx.send(AgentEvent::AgentError {
+                error: format!("refusing unvalidated accepted run: {error}"),
+            });
+            return;
+        }
         let _ = self.event_tx.send(AgentEvent::AgentStart);
         self.run_turns().await;
         let _ = self.event_tx.send(AgentEvent::AgentEnd {
@@ -495,12 +527,14 @@ impl AgentRuntime {
         }
     }
 
-    pub async fn compact_history(
+    /// Computes manual compaction without mutating provider context. Durable
+    /// callers commit this projection before installing it in memory.
+    pub async fn preview_compact_history(
         &self,
         options: Option<crate::compaction::CompactionOptions>,
-    ) -> bool {
-        let mut turn = self.turn.lock().await;
-        let compacted = match options {
+    ) -> Vec<AgentMessage> {
+        let turn = self.turn.lock().await;
+        match options {
             Some(opts) => crate::compaction::compact_messages(&turn.messages, &opts),
             None => {
                 let by_tokens = compact_messages_to_token_budget(
@@ -516,8 +550,16 @@ impl AgentRuntime {
                     by_tokens
                 }
             }
-        };
-        let changed = compacted.len() != turn.messages.len();
+        }
+    }
+
+    pub async fn compact_history(
+        &self,
+        options: Option<crate::compaction::CompactionOptions>,
+    ) -> bool {
+        let compacted = self.preview_compact_history(options).await;
+        let mut turn = self.turn.lock().await;
+        let changed = compacted != turn.messages;
         turn.messages = compacted;
         changed
     }
@@ -548,12 +590,20 @@ impl AgentRuntime {
 
     pub async fn run_steer(&mut self) {
         if !self.steering_queue.is_empty() {
-            let items: Vec<_> = self.steering_queue.drain(..).collect();
+            let items = self.steering_queue.clone();
             if let Some(recorder) = self.message_recorder.as_ref() {
                 for item in &items {
-                    let _ = recorder(item.clone()).await;
+                    if let Err(error) = recorder(item.clone()).await {
+                        let _ = self.event_tx.send(AgentEvent::AgentError {
+                            error: format!(
+                                "failed to persist steering before provider work: {error}"
+                            ),
+                        });
+                        return;
+                    }
                 }
             }
+            self.steering_queue.clear();
             {
                 let mut turn = self.turn.lock().await;
                 turn.messages.extend(items);
@@ -564,12 +614,20 @@ impl AgentRuntime {
 
     pub async fn run_follow_up(&mut self) {
         if !self.follow_up_queue.is_empty() {
-            let items: Vec<_> = self.follow_up_queue.drain(..).collect();
+            let items = self.follow_up_queue.clone();
             if let Some(recorder) = self.message_recorder.as_ref() {
                 for item in &items {
-                    let _ = recorder(item.clone()).await;
+                    if let Err(error) = recorder(item.clone()).await {
+                        let _ = self.event_tx.send(AgentEvent::AgentError {
+                            error: format!(
+                                "failed to persist follow-up before provider work: {error}"
+                            ),
+                        });
+                        return;
+                    }
                 }
             }
+            self.follow_up_queue.clear();
             {
                 let mut turn = self.turn.lock().await;
                 turn.messages.extend(items);
@@ -706,6 +764,7 @@ impl AgentRuntime {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use sha2::Digest;
     use threadlane_protocol::{RuntimeRequest, RuntimeStreamEvent, RuntimeUsage};
 
     use crate::provider::{ProviderBoundaryRequest, ProviderBoundaryResult};
@@ -824,6 +883,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn public_run_accepted_rejects_non_durable_token_before_provider_send() {
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = Arc::new(RecordingProvider {
+            order: order.clone(),
+            message_counts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            request_tools: Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+        let mut runtime = AgentRuntime::new_with_provider(
+            "",
+            None,
+            "test-model",
+            None,
+            AgentConfig::default(),
+            provider,
+        )
+        .unwrap();
+        let mut events = runtime.subscribe();
+
+        runtime.run_accepted("invented-run", "main", 99).await;
+
+        assert!(
+            order.lock().unwrap().is_empty(),
+            "provider must not be sent"
+        );
+        let event = events.try_recv().expect("validation error event");
+        assert!(matches!(
+            event,
+            AgentEvent::AgentError { error }
+                if error.contains("refusing unvalidated accepted run")
+        ));
+        assert!(events.try_recv().is_err(), "no start/end events are valid");
+    }
+
+    #[tokio::test]
     async fn preparation_finishes_before_provider_started_and_network_send() {
         let order = Arc::new(std::sync::Mutex::new(Vec::new()));
         let request_tools = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -849,18 +942,54 @@ mod tests {
             .messages
             .push(AgentMessage::user("test", Vec::new()));
 
+        let prepared_tools = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let manifest_tools = prepared_tools.clone();
         let started_order = order.clone();
         runtime.set_provider_trace_recorder(Some(Arc::new(move |event| {
             let started_order = started_order.clone();
+            let manifest_tools = manifest_tools.clone();
             Box::pin(async move {
-                if matches!(event, crate::provider::ProviderTraceEvent::Started { .. }) {
-                    started_order.lock().unwrap().push("started");
+                match event {
+                    crate::provider::ProviderTraceEvent::Started { .. } => {
+                        started_order.lock().unwrap().push("started");
+                    }
+                    crate::provider::ProviderTraceEvent::ContextManifest {
+                        context_limit,
+                        items,
+                        ..
+                    } => {
+                        assert_eq!(context_limit, Some(128_000));
+                        let prepared = manifest_tools.lock().unwrap();
+                        let tools = prepared.last().expect("preparer schema before manifest");
+                        let tools_json = serde_json::to_string(tools).unwrap();
+                        let expected_count = tools.as_array().expect("tool array").len();
+                        let expected_label = format!("{expected_count} tools");
+                        let expected_digest =
+                            format!("{:x}", sha2::Sha256::digest(tools_json.as_bytes()));
+                        let tool_items = items
+                            .iter()
+                            .filter(|item| {
+                                item.source == crate::harness::ContextItemSource::ToolSchema
+                            })
+                            .collect::<Vec<_>>();
+                        assert_eq!(tool_items.len(), 1);
+                        assert_eq!(
+                            tool_items[0].label.as_ref().map(|label| label.as_str()),
+                            Some(expected_label.as_str())
+                        );
+                        assert_eq!(tool_items[0].digest_sha256.as_str(), expected_digest);
+                        assert_eq!(
+                            tool_items[0].token_estimate,
+                            tools_json.len().div_ceil(4) as u32
+                        );
+                        started_order.lock().unwrap().push("manifest");
+                    }
+                    _ => {}
                 }
                 Ok(())
             })
         })));
         let preparer_order = order.clone();
-        let prepared_tools = Arc::new(std::sync::Mutex::new(Vec::new()));
         let preparer_tools = prepared_tools.clone();
         runtime.set_provider_boundary_preparer(Some(Arc::new(
             move |request: ProviderBoundaryRequest| {
@@ -891,11 +1020,59 @@ mod tests {
 
         runtime.run_turns().await;
 
-        assert_eq!(&*order.lock().unwrap(), &["prepared", "started", "sent"]);
+        assert_eq!(
+            &*order.lock().unwrap(),
+            &["prepared", "started", "manifest", "sent"]
+        );
         assert_eq!(
             *prepared_tools.lock().unwrap(),
             *request_tools.lock().unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn context_manifest_persistence_failure_blocks_network_send() {
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = Arc::new(RecordingProvider {
+            order: order.clone(),
+            message_counts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            request_tools: Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+        let mut runtime = AgentRuntime::new_with_provider(
+            "",
+            None,
+            "test-model",
+            None,
+            AgentConfig::default(),
+            provider,
+        )
+        .unwrap();
+        runtime
+            .turn
+            .lock()
+            .await
+            .messages
+            .push(AgentMessage::user("test", Vec::new()));
+        let trace_order = order.clone();
+        runtime.set_provider_trace_recorder(Some(Arc::new(move |event| {
+            let trace_order = trace_order.clone();
+            Box::pin(async move {
+                match event {
+                    crate::provider::ProviderTraceEvent::Started { .. } => {
+                        trace_order.lock().unwrap().push("started");
+                        Ok(())
+                    }
+                    crate::provider::ProviderTraceEvent::ContextManifest { .. } => {
+                        Err("manifest disk full".into())
+                    }
+                    _ => Ok(()),
+                }
+            })
+        })));
+
+        runtime.run_turns().await;
+
+        assert_eq!(&*order.lock().unwrap(), &["started"]);
     }
 
     #[tokio::test]

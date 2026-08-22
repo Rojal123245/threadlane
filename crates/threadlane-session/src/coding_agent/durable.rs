@@ -373,6 +373,9 @@ impl CodingAgent {
             })
             .unwrap_or_default();
         let system_prompt = durable_prompt_snapshot(&self.agent.system_prompt());
+        let context_window_limit = Some(
+            threadlane_runtime::model_metadata::context_budget(&model, self.agent.config()).limit,
+        );
         let work_dir = self.work_dir.to_string_lossy().into_owned();
         let Some(journal) = self.harness.as_mut() else {
             return Ok(None);
@@ -394,6 +397,7 @@ impl CodingAgent {
             Some(capability_sha256),
             prompt_template_ids,
             None,
+            context_window_limit,
         )?;
         let context = HookContext {
             session_id: journal.store.session_id().to_owned(),
@@ -519,6 +523,10 @@ impl CodingAgent {
                         .collect()
                 })
                 .unwrap_or_default();
+            let context_window_limit = Some(
+                threadlane_runtime::model_metadata::context_budget(&model, self.agent.config())
+                    .limit,
+            );
             journal.capture_run_context(
                 run_id,
                 "main",
@@ -534,6 +542,7 @@ impl CodingAgent {
                 Some(capability_sha256),
                 prompt_template_ids,
                 None,
+                context_window_limit,
             )?;
         }
         if let Some(path) = self.session_file.clone() {
@@ -625,17 +634,34 @@ impl CodingAgent {
     }
 
     pub(crate) async fn compact_history_with_harness(&mut self) -> Result<bool, String> {
-        if !self.agent.compact_history(None).await {
+        let before = self.agent.messages().await;
+        let compacted = self.agent.preview_compact_history(None).await;
+        if compacted == before {
             return Ok(false);
         }
-        let messages = self.agent.messages().await;
-        let summary = messages
+        let summary = compacted
             .iter()
             .rev()
             .find_map(threadlane_runtime::compaction_summary_text)
             .ok_or_else(|| "compaction produced no durable summary".to_string())?;
-        let retained_tail = compaction_retained_tail(&messages);
-        self.persist_harness_compaction(summary, &retained_tail)?;
+        let retained_tail = compaction_retained_tail(&compacted);
+        let config = self.agent.config().clone();
+        let pre_tokens =
+            threadlane_runtime::compaction::estimate_request_tokens(&before, None, &config);
+        let compacted_messages = before
+            .len()
+            .saturating_sub(compacted.len().saturating_sub(1));
+        let persisted = self.persist_harness_compaction(
+            summary,
+            &retained_tail,
+            pre_tokens,
+            compacted_messages,
+        );
+        // Install only the canonical durable projection, including on a partial
+        // append failure. The journal remains authoritative and append-only.
+        let sync = self.sync_turn_from_model_context().await;
+        persisted?;
+        sync?;
         Ok(true)
     }
 
@@ -643,8 +669,12 @@ impl CodingAgent {
         &mut self,
         summary: &str,
         retained_tail: &[AgentMessage],
+        pre_tokens: usize,
+        compacted_messages: usize,
     ) -> Result<(), String> {
         let config = self.agent.config().clone();
+        let retained_tail_tokens =
+            threadlane_runtime::compaction::estimate_request_tokens(retained_tail, None, &config);
         let model = config
             .model_roles
             .resolve_task(&self.agent.model())
@@ -661,9 +691,16 @@ impl CodingAgent {
                 .drive_to_completion()
                 .map_err(|error| error.to_string())?;
             for message in retained_tail {
-                journal.append_message(message.clone())?;
+                journal.append_message_occurrence(message.clone())?;
             }
-            journal.record_manual_compaction(&run_id, &model, &config)?;
+            journal.record_manual_compaction(
+                &run_id,
+                &model,
+                &config,
+                pre_tokens,
+                retained_tail_tokens,
+                compacted_messages,
+            )?;
         }
         Ok(())
     }
@@ -749,7 +786,21 @@ impl CodingAgent {
                     .expect("compaction reset requires a summary")
                     .to_owned();
                 let retained_tail = compaction_retained_tail(&state_messages);
-                if let Err(error) = self.persist_harness_compaction(&summary, &retained_tail) {
+                let config = self.agent.config().clone();
+                let pre_tokens = threadlane_runtime::compaction::estimate_request_tokens(
+                    &durable_messages,
+                    None,
+                    &config,
+                );
+                let compacted_messages = durable_messages
+                    .len()
+                    .saturating_sub(state_messages.len().saturating_sub(1));
+                if let Err(error) = self.persist_harness_compaction(
+                    &summary,
+                    &retained_tail,
+                    pre_tokens,
+                    compacted_messages,
+                ) {
                     self.harness_journal_error = Some(error);
                     return;
                 }

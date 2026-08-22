@@ -182,15 +182,17 @@ impl<'a> TurnDriver<'a> {
         'turns: loop {
             turn_number += 1;
 
-            // Drain steering queue into turn state.
+            // Persist the complete steering batch before removing it from the
+            // queue or exposing it to provider context.
             if !self.steering_queue.is_empty() {
-                let items: Vec<_> = self.steering_queue.drain(..).collect();
+                let items = self.steering_queue.clone();
                 if let Err(error) = self.persist_messages(&items).await {
                     self.emit_event(AgentEvent::AgentError {
                         error: format!("failed to persist steering before provider work: {error}"),
                     });
                     return;
                 }
+                self.steering_queue.clear();
                 let mut turn = self.turn.lock().await;
                 turn.messages.extend(items);
             }
@@ -390,7 +392,7 @@ impl<'a> TurnDriver<'a> {
                         prepared.compaction_generation,
                     )
                 });
-            let _ = self
+            if let Err(error) = self
                 .record_provider_trace(ProviderTraceEvent::ContextManifest {
                     attempt: turn_number as u32,
                     request_id: request_id.clone(),
@@ -401,7 +403,13 @@ impl<'a> TurnDriver<'a> {
                     total_estimated_tokens,
                     items: manifest_items,
                 })
-                .await;
+                .await
+            {
+                self.emit_event(AgentEvent::AgentError {
+                    error: format!("failed to persist request context manifest: {error}"),
+                });
+                return;
+            }
 
             let _stream_task = AbortOnDrop::new(tokio::spawn(async move {
                 client.stream_request(request, stream_tx).await;
