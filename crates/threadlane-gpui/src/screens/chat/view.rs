@@ -114,6 +114,10 @@ fn grouped_tool_activities(
         .filter(|activity| activity.title != "update_plan")
 }
 
+fn format_trajectory_raw_json(entry: &TrajectoryEntry) -> String {
+    serde_json::to_string_pretty(entry).unwrap_or_else(|_| entry.detail.clone())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TrajectoryCacheKey {
     revision: u64,
@@ -126,6 +130,7 @@ struct TrajectoryCacheKey {
 struct TrajectoryRenderCache {
     key: TrajectoryCacheKey,
     all_entries: Vec<TrajectoryEntry>,
+    raw_json: Vec<String>,
     categories: Arc<Vec<String>>,
     lanes: Arc<Vec<String>>,
     lane_latest: Arc<std::collections::BTreeMap<String, String>>,
@@ -905,6 +910,10 @@ impl ChatListView {
                 }
                 TrajectoryMode::Recovery => self.model.read(cx).active_recovery_diagnostics(),
             };
+            let raw_json = all_entries
+                .iter()
+                .map(format_trajectory_raw_json)
+                .collect::<Vec<_>>();
             let mut categories = all_entries
                 .iter()
                 .map(|entry| entry.category.clone())
@@ -945,6 +954,7 @@ impl ChatListView {
             self.trajectory_cache = Some(TrajectoryRenderCache {
                 key,
                 all_entries,
+                raw_json,
                 categories: Arc::new(categories),
                 lanes: Arc::new(lanes),
                 lane_latest: Arc::new(lane_latest),
@@ -969,9 +979,12 @@ impl ChatListView {
                 .child("No canonical trajectory events have been observed in this session yet.")
                 .into_any_element();
         }
-        let selected_entry = self
-            .selected_trajectory_index
+        let selected_index = self.selected_trajectory_index;
+        let selected_entry = selected_index
             .and_then(|index| all_entries.get(index))
+            .cloned();
+        let selected_raw_json = selected_index
+            .and_then(|index| cache.raw_json.get(index))
             .cloned();
         let mut rows = Vec::new();
         let mut previous_turn = None;
@@ -1451,7 +1464,7 @@ impl ChatListView {
                                 )
                                 .into_any_element(),
                             TrajectoryInspectorTab::Raw => {
-                                let raw_json = serde_json::to_string_pretty(&entry).unwrap_or_else(|_| entry.detail.clone());
+                                let raw_json = selected_raw_json.clone().unwrap_or_default();
                                 div()
                                     .flex()
                                     .flex_col()
@@ -3394,10 +3407,12 @@ impl Render for ChatListView {
 #[cfg(test)]
 mod hot_path_tests {
     use super::{
-        build_transcript_rows, grouped_tool_activities, should_use_markdown, TrajectoryCacheKey,
-        TrajectoryMode, TranscriptRow,
+        build_transcript_rows, format_trajectory_raw_json, grouped_tool_activities,
+        should_use_markdown, TrajectoryCacheKey, TrajectoryMode, TranscriptRow,
     };
-    use crate::state::{ChatMessageInfo, MessageRole, ToolActivityInfo};
+    use crate::state::{
+        ChatMessageInfo, MessageRole, ToolActivityInfo, TrajectoryDiagnostics, TrajectoryEntry,
+    };
 
     #[test]
     fn markdown_is_deferred_until_streaming_completes() {
@@ -3483,6 +3498,27 @@ mod hot_path_tests {
         );
     }
 
+
+    #[test]
+    fn trajectory_raw_json_is_prepared_for_the_revision_cache() {
+        let entry = TrajectoryEntry {
+            seq: Some(1),
+            run_id: None,
+            turn: None,
+            request: None,
+            category: "Tool".into(),
+            summary: "Read file".into(),
+            detail: "src/main.rs".into(),
+            lane: None,
+            correlation_id: None,
+            diagnostics: TrajectoryDiagnostics::default(),
+        };
+
+        let raw = format_trajectory_raw_json(&entry);
+
+        assert!(raw.contains("\"category\": \"Tool\""));
+        assert!(raw.contains("\"summary\": \"Read file\""));
+    }
     #[test]
     fn trajectory_cache_key_changes_with_data_or_filter() {
         let base = TrajectoryCacheKey {
