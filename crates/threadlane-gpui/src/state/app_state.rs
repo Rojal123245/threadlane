@@ -3323,7 +3323,15 @@ mod tests {
                 timestamp: 3,
                 message: AgentMessage::Assistant {
                     content: Some("after".into()),
-                    tool_calls: None,
+                    tool_calls: Some(vec![threadlane_provider::openai::ToolCall {
+                        id: "loop-1".into(),
+                        r#type: "function".into(),
+                        function: threadlane_provider::openai::ToolCallFunction {
+                            name: "reported_session_shape_tool".into(),
+                            arguments: r#"{"attempt":1}"#.into(),
+                        },
+                        thought_signature: None,
+                    }]),
                     stop_reason: None,
                     deferred_handle: None,
                 },
@@ -3332,11 +3340,29 @@ mod tests {
             })
             .unwrap();
         store
+            .append_entry(Entry {
+                id: "tool".into(),
+                parent_id: Some("assistant".into()),
+                lane: "main".into(),
+                seq: 4,
+                timestamp: 4,
+                message: AgentMessage::Tool {
+                    tool_call_id: "loop-1".into(),
+                    name: "reported_session_shape_tool".into(),
+                    content: "cached report output ".repeat(400),
+                    is_error: false,
+                    terminate: false,
+                },
+                surface_op: SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
+        store
             .append_record(Record::ProviderRequestStarted {
                 id: "provider".into(),
-                seq: 4,
+                seq: 5,
                 lane: "main".into(),
-                timestamp: 4,
+                timestamp: 5,
                 run_id: "run".into(),
                 attempt: 1,
                 provider: TraceString::new("openai").unwrap(),
@@ -3347,9 +3373,9 @@ mod tests {
         store
             .append_record(Record::ContextManifestCaptured {
                 id: "manifest".into(),
-                seq: 5,
+                seq: 6,
                 lane: "main".into(),
-                timestamp: 5,
+                timestamp: 6,
                 run_id: "run".into(),
                 attempt: 1,
                 request_id: TraceString::new("req").unwrap(),
@@ -3361,23 +3387,28 @@ mod tests {
                 items: Vec::new(),
             })
             .unwrap();
-        store
-            .append_record(Record::Usage {
-                id: "usage".into(),
-                seq: 6,
-                lane: "main".into(),
-                timestamp: 6,
-                run_id: Some("run".into()),
-                cause: UsageCause::Provider,
-                entry_id: None,
-                tool_call_id: None,
-                attempt: Some(1),
-                usage: TokenUsage {
-                    input_tokens: 11_734_912,
-                    ..Default::default()
-                },
-            })
-            .unwrap();
+        for attempt in 1..=102 {
+            store
+                .append_record(Record::Usage {
+                    id: format!("usage-{attempt}"),
+                    seq: 6 + u64::from(attempt),
+                    lane: "main".into(),
+                    timestamp: 6 + u64::from(attempt),
+                    run_id: Some("run".into()),
+                    cause: UsageCause::Provider,
+                    entry_id: None,
+                    tool_call_id: None,
+                    attempt: Some(attempt),
+                    usage: TokenUsage {
+                        input_tokens: if attempt == 102 { 15_064 } else { 15_048 },
+                        output_tokens: 20,
+                        cache_read_tokens: 100_000,
+                        cache_write_tokens: 0,
+                        total_tokens: if attempt == 102 { 115_084 } else { 115_068 },
+                    },
+                })
+                .unwrap();
+        }
         path
     }
 
@@ -3391,7 +3422,12 @@ mod tests {
 
         let projected_context = state.active_context_window().unwrap();
         let projected_metrics = state.active_session_metrics();
-        assert!(projected_metrics.billed_input_tokens() > projected_context.context_limit);
+        assert!(
+            projected_metrics
+                .billed_input_tokens()
+                .saturating_add(projected_metrics.output_tokens)
+                > projected_context.context_limit as u64
+        );
         assert!(projected_context.current_tokens < projected_context.context_limit);
         assert_eq!(projected_context.current_tokens, 103_732);
         assert_eq!(projected_context.context_limit, 1_000_000);
@@ -3408,6 +3444,11 @@ mod tests {
             .any(|message| { message.role == MessageRole::User && message.content == "before" }));
         assert!(reloaded.iter().any(|message| {
             message.role == MessageRole::Assistant && message.content == "after"
+        }));
+        assert!(reloaded.iter().any(|message| {
+            message.tool_activities.iter().any(|activity| {
+                activity.id == "loop-1" && activity.detail.starts_with("cached report output")
+            })
         }));
         std::fs::remove_file(path).ok();
     }

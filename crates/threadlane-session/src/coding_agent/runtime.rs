@@ -1208,7 +1208,8 @@ mod compaction_sync_tests {
     };
     use threadlane_runtime::{
         harness::{AgentHarness, CompactionReason, JsonlStore},
-        AgentConfig, AgentMessage, AgentRuntime, Record,
+        tool_executor::ToolExecutor,
+        AgentConfig, AgentMessage, AgentRuntime, AgentToolDefinition, Record,
     };
 
     fn summary() -> AgentMessage {
@@ -1319,10 +1320,49 @@ mod compaction_sync_tests {
             .all(|entry| entry.parent_id.as_deref() != Some("node_69")));
     }
 
+    const REPORTED_TOOL_NAME: &str = "reported_session_shape_tool";
+
+    struct ReportedShapeToolExecutor {
+        executions: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ToolExecutor for ReportedShapeToolExecutor {
+        fn executor_id(&self) -> &str {
+            "test.reported_session_shape"
+        }
+
+        fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
+            vec![AgentToolDefinition::new(
+                REPORTED_TOOL_NAME,
+                "Return a cached report segment",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "attempt": { "type": "integer" } },
+                    "required": ["attempt"]
+                }),
+            )]
+            .into()
+        }
+
+        async fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {
+            if name != REPORTED_TOOL_NAME {
+                return None;
+            }
+            let parsed: serde_json::Value = serde_json::from_str(args).unwrap();
+            assert!(parsed
+                .get("attempt")
+                .and_then(|value| value.as_u64())
+                .is_some());
+            assert!(args.len() < 64, "provider arguments must remain small");
+            self.executions.fetch_add(1, Ordering::SeqCst);
+            Some(Ok("cached report output ".repeat(400)))
+        }
+    }
+
     struct LongToolLoopProvider {
         attempts: AtomicUsize,
         max_request_estimate: AtomicUsize,
-        context_budget: usize,
     }
 
     impl LongToolLoopProvider {
@@ -1332,10 +1372,6 @@ mod compaction_sync_tests {
 
         fn max_request_estimate(&self) -> usize {
             self.max_request_estimate.load(Ordering::SeqCst)
-        }
-
-        fn context_budget(&self) -> usize {
-            self.context_budget
         }
     }
 
@@ -1356,12 +1392,8 @@ mod compaction_sync_tests {
                     id: format!("loop-{attempt}"),
                     r#type: "function".into(),
                     function: RuntimeToolCallFunction {
-                        name: "reported_session_shape_tool".into(),
-                        arguments: serde_json::json!({
-                            "cached_result": "x".repeat(8_192),
-                            "attempt": attempt,
-                        })
-                        .to_string(),
+                        name: REPORTED_TOOL_NAME.into(),
+                        arguments: serde_json::json!({ "attempt": attempt }).to_string(),
                     },
                     thought_signature: None,
                 }]
@@ -1373,11 +1405,16 @@ mod compaction_sync_tests {
                     .send(RuntimeStreamEvent::ContentToken("complete".into()))
                     .await;
             }
+            let input_tokens = if attempt == 102 { 15_064 } else { 15_048 };
+            let usage = RuntimeUsage {
+                input_tokens,
+                output_tokens: 20,
+                cache_read_tokens: 100_000,
+                cache_write_tokens: 0,
+                total_tokens: input_tokens + 100_020,
+            };
             let _ = events
-                .send(RuntimeStreamEvent::Finished {
-                    tool_calls,
-                    usage: RuntimeUsage::default(),
-                })
+                .send(RuntimeStreamEvent::Finished { tool_calls, usage })
                 .await;
         }
 
@@ -1417,7 +1454,9 @@ mod compaction_sync_tests {
         let provider = Arc::new(LongToolLoopProvider {
             attempts: AtomicUsize::new(0),
             max_request_estimate: AtomicUsize::new(0),
-            context_budget: 128_000,
+        });
+        let tool_executor = Arc::new(ReportedShapeToolExecutor {
+            executions: AtomicUsize::new(0),
         });
         let mut runtime = AgentRuntime::from_harness_with_provider(
             "",
@@ -1427,6 +1466,9 @@ mod compaction_sync_tests {
             AgentConfig::default(),
             provider.clone(),
         );
+        runtime
+            .register_tool_executor(tool_executor.clone())
+            .unwrap();
         let trace_harness = Arc::new(tokio::sync::Mutex::new(
             CodingSessionHarness::open(&path).unwrap(),
         ));
@@ -1448,7 +1490,17 @@ mod compaction_sync_tests {
         runtime.set_provider_trace_recorder(Some(Arc::new(move |event| {
             let harness = provider_harness.clone();
             let run_id = provider_run_id.clone();
-            Box::pin(async move { harness.lock().await.record_provider_trace(&run_id, event) })
+            Box::pin(async move {
+                let mut harness = harness.lock().await;
+                if let threadlane_runtime::provider::ProviderTraceEvent::Finished {
+                    usage: Some(usage),
+                    ..
+                } = &event
+                {
+                    harness.record_provider_usage(&run_id, usage.clone())?;
+                }
+                harness.record_provider_trace(&run_id, event)
+            })
         })));
         let message_harness = trace_harness.clone();
         runtime.set_message_recorder(Some(Arc::new(move |message| {
@@ -1462,7 +1514,34 @@ mod compaction_sync_tests {
 
         let store = JsonlStore::open(&path).unwrap();
         assert_eq!(provider.attempts(), 102);
-        assert!(provider.max_request_estimate() < provider.context_budget());
+        assert_eq!(tool_executor.executions.load(Ordering::SeqCst), 101);
+        let emitted_context_limit = store
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                Record::ContextManifestCaptured { context_limit, .. } => *context_limit,
+                _ => None,
+            })
+            .min()
+            .expect("provider manifests emit an effective context limit");
+        assert!(provider.max_request_estimate() < emitted_context_limit);
+        let cumulative_processed: u64 = store
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                Record::Usage { usage, .. } => Some(
+                    u64::from(usage.input_tokens)
+                        + u64::from(usage.cache_read_tokens)
+                        + u64::from(usage.cache_write_tokens)
+                        + u64::from(usage.output_tokens),
+                ),
+                _ => None,
+            })
+            .sum();
+        assert!(
+            cumulative_processed > emitted_context_limit as u64,
+            "processed={cumulative_processed}, limit={emitted_context_limit}"
+        );
         assert!(store.records().iter().any(|record| matches!(
             record,
             Record::ContextCompacted {
@@ -1489,5 +1568,21 @@ mod compaction_sync_tests {
             .next()
             .unwrap();
         assert!(compaction_seq < next_provider_start_seq);
+        assert!(store.entries().iter().any(|entry| matches!(
+            &entry.message,
+            AgentMessage::User { content } if content == "continue the cached tool loop"
+        )));
+        assert!(store.entries().iter().any(|entry| matches!(
+            &entry.message,
+            AgentMessage::Assistant { tool_calls: Some(calls), .. } if !calls.is_empty()
+        )));
+        assert!(store.entries().iter().any(|entry| matches!(
+            &entry.message,
+            AgentMessage::Tool { content, .. } if content.starts_with("cached report output")
+        )));
+        assert!(store
+            .records()
+            .iter()
+            .any(|record| matches!(record, Record::ContextCompacted { .. })));
     }
 }
