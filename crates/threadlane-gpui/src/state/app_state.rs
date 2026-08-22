@@ -56,7 +56,6 @@ pub struct ToolActivityInfo {
     pub(crate) id: String,
     pub(crate) category: String,
     pub(crate) title: String,
-    pub(crate) summary: String,
     pub(crate) display_summary: String,
     pub(crate) detail: String,
     pub(crate) is_expanded: bool,
@@ -519,7 +518,6 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                         id: act.id,
                         category: act.category,
                         title: act.title,
-                        summary: act.summary,
                         display_summary,
                         detail: act.detail,
                         is_expanded: false,
@@ -2581,7 +2579,6 @@ impl AppState {
                             let activity = ToolActivityInfo {
                                 id: tool_call_id,
                                 category: "Working".into(),
-                                summary,
                                 display_summary,
                                 title: name,
                                 detail: arguments,
