@@ -145,14 +145,97 @@ struct TrajectoryCacheKey {
     lane: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TrajectoryRow {
+    RequestHeader(u32),
+    Setup,
+    TurnHeader(u32),
+    Entry(usize),
+}
+
+fn build_trajectory_rows(
+    all_entries: &[TrajectoryEntry],
+    filtered_indices: &[usize],
+    mode: TrajectoryMode,
+) -> Vec<TrajectoryRow> {
+    let mut rows = Vec::with_capacity(filtered_indices.len());
+    let mut previous_turn = None;
+    let mut previous_request = None;
+    let mut request_input_seen = false;
+    for &all_index in filtered_indices {
+        let entry = &all_entries[all_index];
+        if mode == TrajectoryMode::Requests && entry.request != previous_request {
+            if let Some(request) = entry.request {
+                rows.push(TrajectoryRow::RequestHeader(request));
+                request_input_seen = false;
+            }
+            previous_request = entry.request;
+        }
+        if mode == TrajectoryMode::Requests && entry.request.is_some() && !request_input_seen {
+            if entry.category != "Input" {
+                rows.push(TrajectoryRow::Setup);
+            }
+            request_input_seen = true;
+        }
+        if mode != TrajectoryMode::Requests && entry.turn != previous_turn {
+            if let Some(turn) = entry.turn {
+                rows.push(TrajectoryRow::TurnHeader(turn));
+            }
+            previous_turn = entry.turn;
+        }
+        rows.push(TrajectoryRow::Entry(all_index));
+    }
+    rows
+}
+
+#[derive(Default)]
+struct TrajectorySummary {
+    overview_positions: [HashSet<usize>; 3],
+    tool_count: usize,
+    total_duration_ms: u64,
+    anomaly_count: usize,
+    max_turn: u32,
+}
+
+fn summarize_trajectory(entries: &[TrajectoryEntry]) -> TrajectorySummary {
+    let mut summary = TrajectorySummary::default();
+    for (index, entry) in entries.iter().enumerate() {
+        let position = index * 48 / entries.len().max(1);
+        if matches!(
+            entry.category.as_str(),
+            "Input" | "Context" | "Context Manifest" | "Queue" | "Request"
+        ) {
+            summary.overview_positions[0].insert(position);
+        }
+        if matches!(
+            entry.category.as_str(),
+            "Operation" | "Step" | "Retry" | "Turn" | "Error" | "Provider" | "Anomaly"
+        ) {
+            summary.overview_positions[1].insert(position);
+        }
+        if matches!(entry.category.as_str(), "Tool" | "Tool runtime") {
+            summary.overview_positions[2].insert(position);
+            summary.tool_count += 1;
+        }
+        summary.total_duration_ms = summary
+            .total_duration_ms
+            .saturating_add(entry.diagnostics.duration_ms.unwrap_or_default());
+        summary.anomaly_count +=
+            usize::from(entry.diagnostics.is_anomaly || entry.category == "Anomaly");
+        summary.max_turn = summary.max_turn.max(entry.turn.unwrap_or_default());
+    }
+    summary
+}
+
 struct TrajectoryRenderCache {
     key: TrajectoryCacheKey,
     all_entries: Vec<TrajectoryEntry>,
-    raw_json: Vec<String>,
     categories: Arc<Vec<String>>,
     lanes: Arc<Vec<String>>,
     lane_latest: Arc<std::collections::BTreeMap<String, String>>,
     filtered_indices: Vec<usize>,
+    rows: Vec<TrajectoryRow>,
+    summary: TrajectorySummary,
 }
 
 pub fn init(cx: &mut App) {
@@ -173,7 +256,7 @@ pub struct ChatListView {
     transcript_messages: Arc<Vec<ChatMessageInfo>>,
     transcript_rows: Vec<TranscriptRow>,
     transcript_generating: bool,
-    trajectory_scroll_handle: ScrollHandle,
+    trajectory_list_state: ListState,
     expanded_activity_groups: HashSet<String>,
     markdown_states: HashMap<String, MarkdownRenderState>,
     pasted_images: Vec<ImageAttachment>,
@@ -190,6 +273,7 @@ pub struct ChatListView {
     selected_trajectory_index: Option<usize>,
     trajectory_inspector_tab: TrajectoryInspectorTab,
     trajectory_cache: Option<TrajectoryRenderCache>,
+    trajectory_raw_json: Option<(u64, usize, String)>,
     slash_command_cache: Option<(
         Option<std::path::PathBuf>,
         std::time::Instant,
@@ -206,7 +290,7 @@ impl ChatListView {
     ) -> Self {
         let transcript_list_state = ListState::new(0, ListAlignment::Bottom, px(600.0));
         transcript_list_state.set_follow_mode(FollowMode::Tail);
-        let trajectory_scroll_handle = ScrollHandle::new();
+        let trajectory_list_state = ListState::new(0, ListAlignment::Top, px(400.0));
         let input_state = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder("Do anything...")
@@ -346,7 +430,7 @@ impl ChatListView {
             transcript_messages: Arc::new(Vec::new()),
             transcript_rows: Vec::new(),
             transcript_generating: false,
-            trajectory_scroll_handle,
+            trajectory_list_state,
             expanded_activity_groups: HashSet::new(),
             markdown_states: HashMap::new(),
             pasted_images: Vec::new(),
@@ -363,6 +447,7 @@ impl ChatListView {
             selected_trajectory_index: None,
             trajectory_inspector_tab: TrajectoryInspectorTab::Overview,
             trajectory_cache: None,
+            trajectory_raw_json: None,
             slash_command_cache: None,
             _subscriptions: vec![sub1, sub2, sub3, sub_editor],
         }
@@ -902,245 +987,133 @@ impl ChatListView {
             .into_any_element()
     }
 
-    fn render_trajectory(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let revision = self.model.read(cx).trajectory_revision();
-        let key = TrajectoryCacheKey {
-            revision,
-            mode: self.trajectory_mode,
-            query: self.trajectory_search.to_lowercase(),
-            category: self.trajectory_category.clone(),
-            lane: self.trajectory_lane.clone(),
-        };
-        if self
+    fn render_trajectory_row(
+        &mut self,
+        index: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(row) = self
             .trajectory_cache
             .as_ref()
-            .is_none_or(|cache| cache.key != key)
-        {
-            let all_entries = match self.trajectory_mode {
-                TrajectoryMode::Execution | TrajectoryMode::Requests => {
-                    self.model.read(cx).active_trajectory().to_vec()
-                }
-                TrajectoryMode::ModelContext => {
-                    self.model.read(cx).active_model_context_diagnostics()
-                }
-                TrajectoryMode::DurableEvents => {
-                    self.model.read(cx).active_durable_event_diagnostics()
-                }
-                TrajectoryMode::Recovery => self.model.read(cx).active_recovery_diagnostics(),
-            };
-            let raw_json = all_entries
-                .iter()
-                .map(format_trajectory_raw_json)
-                .collect::<Vec<_>>();
-            let mut categories = all_entries
-                .iter()
-                .map(|entry| entry.category.clone())
-                .collect::<Vec<_>>();
-            categories.sort();
-            categories.dedup();
-            let mut lane_latest = std::collections::BTreeMap::new();
-            for entry in &all_entries {
-                if let Some(lane) = &entry.lane {
-                    lane_latest.insert(lane.clone(), entry.summary.clone());
-                }
-            }
-            let lanes = lane_latest.keys().cloned().collect();
-            let filtered_indices = all_entries
-                .iter()
-                .enumerate()
-                .filter(|(_, entry)| {
-                    key.category
-                        .as_ref()
-                        .is_none_or(|category| &entry.category == category)
-                        && key
-                            .lane
-                            .as_ref()
-                            .is_none_or(|lane| entry.lane.as_ref() == Some(lane))
-                        && (key.query.is_empty()
-                            || [
-                                entry.category.as_str(),
-                                entry.summary.as_str(),
-                                entry.detail.as_str(),
-                                entry.lane.as_deref().unwrap_or(""),
-                                entry.correlation_id.as_deref().unwrap_or(""),
-                            ]
-                            .iter()
-                            .any(|value| value.to_lowercase().contains(&key.query)))
-                })
-                .map(|(index, _)| index)
-                .collect();
-            self.trajectory_cache = Some(TrajectoryRenderCache {
-                key,
-                all_entries,
-                raw_json,
-                categories: Arc::new(categories),
-                lanes: Arc::new(lanes),
-                lane_latest: Arc::new(lane_latest),
-                filtered_indices,
-            });
-        }
-        let cache = self.trajectory_cache.as_ref().expect("trajectory cache");
-        let all_entries = &cache.all_entries;
-        let categories = Arc::clone(&cache.categories);
-        let lanes = Arc::clone(&cache.lanes);
-        let lane_latest = Arc::clone(&cache.lane_latest);
-        let entries = &cache.filtered_indices;
+            .and_then(|cache| cache.rows.get(index))
+            .cloned()
+        else {
+            return Empty.into_any_element();
+        };
         let theme = cx.theme().colors;
-        if entries.is_empty() {
-            return div()
-                .flex_1()
+        match row {
+            TrajectoryRow::RequestHeader(request) => div()
+                .h(px(28.0))
+                .px_3()
                 .flex()
                 .items_center()
-                .justify_center()
+                .border_b_1()
+                .border_color(theme.border.opacity(0.65))
+                .bg(theme.muted.opacity(0.35))
                 .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.accent)
+                .child(format!("Request #{request}"))
+                .into_any_element(),
+            TrajectoryRow::Setup => div()
+                .h(px(20.0))
+                .px_3()
+                .flex()
+                .items_center()
+                .border_b_1()
+                .border_color(theme.border.opacity(0.35))
+                .text_xs()
+                .font_weight(FontWeight::MEDIUM)
                 .text_color(theme.muted_foreground)
-                .child("No canonical trajectory events have been observed in this session yet.")
-                .into_any_element();
-        }
-        let selected_index = self.selected_trajectory_index;
-        let selected_entry = selected_index
-            .and_then(|index| all_entries.get(index))
-            .cloned();
-        let selected_raw_json = selected_index
-            .and_then(|index| cache.raw_json.get(index))
-            .cloned();
-        let mut rows = Vec::new();
-        let mut previous_turn = None;
-        let mut previous_request = None;
-        let mut request_input_seen = false;
-        for &all_index in entries {
-            let entry = &all_entries[all_index];
-            if self.trajectory_mode == TrajectoryMode::Requests && entry.request != previous_request
-            {
-                if let Some(request) = entry.request {
-                    request_input_seen = false;
-                    rows.push(
-                        div()
-                            .h(px(28.0))
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .border_b_1()
-                            .border_color(theme.border.opacity(0.65))
-                            .bg(theme.muted.opacity(0.35))
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.accent)
-                            .child(format!("Request #{request}"))
-                            .into_any_element(),
-                    );
-                }
-                previous_request = entry.request;
-            }
-            if self.trajectory_mode == TrajectoryMode::Requests
-                && entry.request.is_some()
-                && !request_input_seen
-                && entry.category == "Input"
-            {
-                request_input_seen = true;
-            } else if self.trajectory_mode == TrajectoryMode::Requests
-                && entry.request.is_some()
-                && !request_input_seen
-            {
-                rows.push(
-                    div()
-                        .h(px(20.0))
-                        .px_3()
-                        .flex()
-                        .items_center()
-                        .border_b_1()
-                        .border_color(theme.border.opacity(0.35))
-                        .text_xs()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.muted_foreground)
-                        .child("Setup")
-                        .into_any_element(),
-                );
-                request_input_seen = true;
-            }
-            if self.trajectory_mode != TrajectoryMode::Requests && entry.turn != previous_turn {
-                if let Some(turn) = entry.turn {
-                    rows.push(
-                        div()
-                            .h(px(22.0))
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .border_b_1()
-                            .border_color(theme.border.opacity(0.5))
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(format!("Turn {turn}"))
-                            .into_any_element(),
-                    );
-                }
-                previous_turn = entry.turn;
-            }
-            let seq = entry.seq;
-            let selected = Some(all_index) == self.selected_trajectory_index;
-            let preview = if entry.detail.trim().is_empty() {
-                entry.summary.clone()
-            } else {
-                format!("{}  {}", entry.summary, entry.detail.replace('\n', " "))
-            };
-            let view = cx.entity().clone();
-            let (badge_bg, badge_fg, badge_label): (Hsla, Hsla, SharedString) =
-                match entry.category.as_str() {
-                    "Tool" | "Tool runtime" => {
-                        (theme.warning.opacity(0.18), theme.warning, "TOOL".into())
-                    }
-                    "Provider" => (
-                        theme.primary.opacity(0.18),
-                        theme.primary,
-                        "PROVIDER".into(),
-                    ),
-                    "Context Manifest" | "Manifest" => (
-                        theme.accent.opacity(0.14),
-                        theme.muted_foreground,
-                        "MANIFEST".into(),
-                    ),
-                    "Request" => (theme.primary.opacity(0.16), theme.accent, "REQUEST".into()),
-                    "Anomaly" => (theme.warning.opacity(0.20), theme.warning, "ANOMALY".into()),
-                    "Error" => (theme.danger.opacity(0.20), theme.danger, "ERROR".into()),
-                    "Input" => (theme.muted.opacity(0.8), theme.foreground, "INPUT".into()),
-                    "Assistant" => (
-                        theme.muted.opacity(0.8),
-                        theme.foreground,
-                        "ASSISTANT".into(),
-                    ),
-                    "Permission" => (
-                        theme.warning.opacity(0.18),
-                        theme.warning,
-                        "PERMISSION".into(),
-                    ),
-                    "Subagent" => (
-                        theme.primary.opacity(0.16),
-                        theme.primary,
-                        "SUBAGENT".into(),
-                    ),
-                    _ => (
-                        theme.muted.opacity(0.5),
-                        theme.muted_foreground,
-                        entry.category.clone().into(),
-                    ),
+                .child("Setup")
+                .into_any_element(),
+            TrajectoryRow::TurnHeader(turn) => div()
+                .h(px(22.0))
+                .px_3()
+                .flex()
+                .items_center()
+                .border_b_1()
+                .border_color(theme.border.opacity(0.5))
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(format!("Turn {turn}"))
+                .into_any_element(),
+            TrajectoryRow::Entry(all_index) => {
+                let entry = &self
+                    .trajectory_cache
+                    .as_ref()
+                    .expect("trajectory cache")
+                    .all_entries[all_index];
+                let selected = Some(all_index) == self.selected_trajectory_index;
+                let preview = if entry.detail.trim().is_empty() {
+                    entry.summary.clone()
+                } else {
+                    format!("{}  {}", entry.summary, entry.detail.replace('\n', " "))
                 };
-            let dot_color = if entry.diagnostics.is_anomaly || entry.category == "Anomaly" {
-                theme.warning
-            } else if entry.category == "Error"
-                || entry.detail.contains("Failed")
-                || entry.detail.contains("Error")
-                || entry.diagnostics.status.as_deref() == Some("Failed")
-                || entry.diagnostics.status.as_deref() == Some("failed")
-            {
-                theme.danger
-            } else if entry.category == "Tool" || entry.category == "Tool runtime" {
-                theme.warning
-            } else if entry.category == "Request" {
-                theme.primary
-            } else {
-                theme.muted_foreground
-            };
-            rows.push(
+                let (badge_bg, badge_fg, badge_label): (Hsla, Hsla, SharedString) =
+                    match entry.category.as_str() {
+                        "Tool" | "Tool runtime" => {
+                            (theme.warning.opacity(0.18), theme.warning, "TOOL".into())
+                        }
+                        "Provider" => (
+                            theme.primary.opacity(0.18),
+                            theme.primary,
+                            "PROVIDER".into(),
+                        ),
+                        "Context Manifest" | "Manifest" => (
+                            theme.accent.opacity(0.14),
+                            theme.muted_foreground,
+                            "MANIFEST".into(),
+                        ),
+                        "Request" => (theme.primary.opacity(0.16), theme.accent, "REQUEST".into()),
+                        "Anomaly" => (theme.warning.opacity(0.20), theme.warning, "ANOMALY".into()),
+                        "Error" => (theme.danger.opacity(0.20), theme.danger, "ERROR".into()),
+                        "Input" => (theme.muted.opacity(0.8), theme.foreground, "INPUT".into()),
+                        "Assistant" => (
+                            theme.muted.opacity(0.8),
+                            theme.foreground,
+                            "ASSISTANT".into(),
+                        ),
+                        "Permission" => (
+                            theme.warning.opacity(0.18),
+                            theme.warning,
+                            "PERMISSION".into(),
+                        ),
+                        "Subagent" => (
+                            theme.primary.opacity(0.16),
+                            theme.primary,
+                            "SUBAGENT".into(),
+                        ),
+                        _ => (
+                            theme.muted.opacity(0.5),
+                            theme.muted_foreground,
+                            entry.category.clone().into(),
+                        ),
+                    };
+                let dot_color = if entry.diagnostics.is_anomaly || entry.category == "Anomaly" {
+                    theme.warning
+                } else if entry.category == "Error"
+                    || entry.detail.contains("Failed")
+                    || entry.detail.contains("Error")
+                    || matches!(
+                        entry.diagnostics.status.as_deref(),
+                        Some("Failed" | "failed")
+                    )
+                {
+                    theme.danger
+                } else if entry.category == "Tool" || entry.category == "Tool runtime" {
+                    theme.warning
+                } else if entry.category == "Request" {
+                    theme.primary
+                } else {
+                    theme.muted_foreground
+                };
+                let seq = entry.seq;
+                let exit_code = entry.diagnostics.exit_code;
+                let duration_ms = entry.diagnostics.duration_ms;
+                let lane = entry.lane.clone();
+                let view = cx.entity().clone();
                 div()
                     .id(SharedString::from(format!("trajectory-{all_index}")))
                     .h(px(34.0))
@@ -1177,7 +1150,7 @@ impl ChatListView {
                             .child(badge_label),
                     )
                     .child(div().min_w_0().flex_1().text_sm().truncate().child(preview))
-                    .children(entry.diagnostics.exit_code.map(|code| {
+                    .children(exit_code.map(|code| {
                         let is_ok = code == 0;
                         div()
                             .px_1p5()
@@ -1193,12 +1166,7 @@ impl ChatListView {
                             .text_color(if is_ok { theme.success } else { theme.danger })
                             .child(format!("exit {code}"))
                     }))
-                    .children(entry.diagnostics.duration_ms.map(|dur| {
-                        let dur_str = if dur < 1000 {
-                            format!("{dur}ms")
-                        } else {
-                            format!("{:.1}s", dur as f64 / 1000.0)
-                        };
+                    .children(duration_ms.map(|duration| {
                         div()
                             .px_1p5()
                             .py_0p5()
@@ -1206,9 +1174,13 @@ impl ChatListView {
                             .bg(theme.muted.opacity(0.8))
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child(dur_str)
+                            .child(if duration < 1000 {
+                                format!("{duration}ms")
+                            } else {
+                                format!("{:.1}s", duration as f64 / 1000.0)
+                            })
                     }))
-                    .children(entry.lane.clone().map(|lane| {
+                    .children(lane.map(|lane| {
                         div()
                             .max_w(px(110.0))
                             .truncate()
@@ -1231,10 +1203,151 @@ impl ChatListView {
                             cx.notify();
                         })
                     })
-                    .into_any_element(),
-            );
+                    .into_any_element()
+            }
+        }
+    }
+
+    fn render_trajectory(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let revision = self.model.read(cx).trajectory_revision();
+        let key = TrajectoryCacheKey {
+            revision,
+            mode: self.trajectory_mode,
+            query: self.trajectory_search.to_lowercase(),
+            category: self.trajectory_category.clone(),
+            lane: self.trajectory_lane.clone(),
+        };
+        if self
+            .trajectory_cache
+            .as_ref()
+            .is_none_or(|cache| cache.key != key)
+        {
+            let all_entries = match self.trajectory_mode {
+                TrajectoryMode::Execution | TrajectoryMode::Requests => {
+                    self.model.read(cx).active_trajectory().to_vec()
+                }
+                TrajectoryMode::ModelContext => {
+                    self.model.read(cx).active_model_context_diagnostics()
+                }
+                TrajectoryMode::DurableEvents => {
+                    self.model.read(cx).active_durable_event_diagnostics()
+                }
+                TrajectoryMode::Recovery => self.model.read(cx).active_recovery_diagnostics(),
+            };
+            let mut categories = all_entries
+                .iter()
+                .map(|entry| entry.category.clone())
+                .collect::<Vec<_>>();
+            categories.sort();
+            categories.dedup();
+            let mut lane_latest = std::collections::BTreeMap::new();
+            for entry in &all_entries {
+                if let Some(lane) = &entry.lane {
+                    lane_latest.insert(lane.clone(), entry.summary.clone());
+                }
+            }
+            let lanes = lane_latest.keys().cloned().collect();
+            let filtered_indices = all_entries
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| {
+                    key.category
+                        .as_ref()
+                        .is_none_or(|category| &entry.category == category)
+                        && key
+                            .lane
+                            .as_ref()
+                            .is_none_or(|lane| entry.lane.as_ref() == Some(lane))
+                        && (key.query.is_empty()
+                            || [
+                                entry.category.as_str(),
+                                entry.summary.as_str(),
+                                entry.detail.as_str(),
+                                entry.lane.as_deref().unwrap_or(""),
+                                entry.correlation_id.as_deref().unwrap_or(""),
+                            ]
+                            .iter()
+                            .any(|value| value.to_lowercase().contains(&key.query)))
+                })
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            let rows = build_trajectory_rows(&all_entries, &filtered_indices, self.trajectory_mode);
+            let summary = summarize_trajectory(&all_entries);
+            let previous_row_count = self
+                .trajectory_cache
+                .as_ref()
+                .map_or(0, |cache| cache.rows.len());
+            let extends_previous = self
+                .trajectory_cache
+                .as_ref()
+                .is_some_and(|cache| rows.starts_with(&cache.rows));
+            if extends_previous {
+                self.trajectory_list_state.splice(
+                    previous_row_count..previous_row_count,
+                    rows.len() - previous_row_count,
+                );
+            } else {
+                self.trajectory_list_state.reset(rows.len());
+            }
+            self.trajectory_raw_json = None;
+            self.trajectory_cache = Some(TrajectoryRenderCache {
+                key,
+                all_entries,
+                categories: Arc::new(categories),
+                lanes: Arc::new(lanes),
+                lane_latest: Arc::new(lane_latest),
+                filtered_indices,
+                rows,
+                summary,
+            });
         }
         let inspector_tab = self.trajectory_inspector_tab;
+        let selected_index = self.selected_trajectory_index;
+        if let Some(index) = (inspector_tab == TrajectoryInspectorTab::Raw)
+            .then_some(selected_index)
+            .flatten()
+        {
+            let needs_raw = self.trajectory_raw_json.as_ref().is_none_or(
+                |(cached_revision, cached_index, _)| {
+                    *cached_revision != revision || *cached_index != index
+                },
+            );
+            if needs_raw {
+                self.trajectory_raw_json = self
+                    .trajectory_cache
+                    .as_ref()
+                    .and_then(|cache| cache.all_entries.get(index))
+                    .map(|entry| (revision, index, format_trajectory_raw_json(entry)));
+            }
+        }
+        let cache = self.trajectory_cache.as_ref().expect("trajectory cache");
+        let all_entries = &cache.all_entries;
+        let categories = Arc::clone(&cache.categories);
+        let lanes = Arc::clone(&cache.lanes);
+        let lane_latest = Arc::clone(&cache.lane_latest);
+        let entries = &cache.filtered_indices;
+        let theme = cx.theme().colors;
+        if entries.is_empty() {
+            return div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child("No canonical trajectory events have been observed in this session yet.")
+                .into_any_element();
+        }
+        let selected_entry = selected_index
+            .and_then(|index| all_entries.get(index))
+            .cloned();
+        let selected_raw_json = (inspector_tab == TrajectoryInspectorTab::Raw)
+            .then(|| {
+                self.trajectory_raw_json
+                    .as_ref()
+                    .map(|(_, _, raw)| raw.clone())
+            })
+            .flatten();
         let inspector = selected_entry.map(|entry| {
             let close_view = cx.entity().clone();
             let inspector_view = cx.entity().clone();
@@ -1522,26 +1635,7 @@ impl ChatListView {
                         }),
                 )
         });
-        let overview_lane = |label: &'static str, category: &'static str, color: Hsla| {
-            let markers = all_entries
-                .iter()
-                .enumerate()
-                .filter(|(_, entry)| match category {
-                    "Input" => matches!(
-                        entry.category.as_str(),
-                        "Input" | "Context" | "Context Manifest" | "Queue" | "Request"
-                    ),
-                    "Model" => matches!(
-                        entry.category.as_str(),
-                        "Operation" | "Step" | "Retry" | "Turn" | "Error" | "Provider" | "Anomaly"
-                    ),
-                    _ => matches!(entry.category.as_str(), "Tool" | "Tool runtime"),
-                })
-                .map(|(index, _)| {
-                    let position = index * 48 / all_entries.len().max(1);
-                    (position, color)
-                })
-                .collect::<HashMap<_, _>>();
+        let overview_lane = |label: &'static str, markers: &HashSet<usize>, color: Hsla| {
             div()
                 .h(px(18.0))
                 .flex()
@@ -1565,16 +1659,17 @@ impl ChatListView {
                         .children((0..48).map(|index| {
                             div()
                                 .flex_1()
-                                .h(if markers.contains_key(&index) {
+                                .h(if markers.contains(&index) {
                                     px(10.0)
                                 } else {
                                     px(2.0)
                                 })
                                 .rounded_sm()
-                                .bg(markers
-                                    .get(&index)
-                                    .copied()
-                                    .unwrap_or(theme.border.opacity(0.35)))
+                                .bg(if markers.contains(&index) {
+                                    color
+                                } else {
+                                    theme.border.opacity(0.35)
+                                })
                         })),
                 )
         };
@@ -1588,9 +1683,21 @@ impl ChatListView {
             .border_b_1()
             .border_color(theme.border)
             .bg(theme.background)
-            .child(overview_lane("Input", "Input", theme.success))
-            .child(overview_lane("Model", "Model", theme.primary))
-            .child(overview_lane("Tools", "Tools", theme.warning));
+            .child(overview_lane(
+                "Input",
+                &cache.summary.overview_positions[0],
+                theme.success,
+            ))
+            .child(overview_lane(
+                "Model",
+                &cache.summary.overview_positions[1],
+                theme.primary,
+            ))
+            .child(overview_lane(
+                "Tools",
+                &cache.summary.overview_positions[2],
+                theme.warning,
+            ));
         let category_label = self
             .trajectory_category
             .clone()
@@ -1725,24 +1832,15 @@ impl ChatListView {
                     .bg(theme.background)
                     .child(Input::new(&self.trajectory_search_input).appearance(false)),
             );
-        let tool_count = all_entries
-            .iter()
-            .filter(|e| e.category == "Tool" || e.category == "Tool runtime")
-            .count();
-        let total_dur_ms: u64 = all_entries
-            .iter()
-            .filter_map(|e| e.diagnostics.duration_ms)
-            .sum();
+        let tool_count = cache.summary.tool_count;
+        let total_dur_ms = cache.summary.total_duration_ms;
         let dur_label = if total_dur_ms < 1000 {
             format!("{total_dur_ms}ms total")
         } else {
             format!("{:.2}s total", total_dur_ms as f64 / 1000.0)
         };
-        let anomaly_count = all_entries
-            .iter()
-            .filter(|e| e.diagnostics.is_anomaly || e.category == "Anomaly")
-            .count();
-        let max_turn = all_entries.iter().filter_map(|e| e.turn).max().unwrap_or(0);
+        let anomaly_count = cache.summary.anomaly_count;
+        let max_turn = cache.summary.max_turn;
 
         let stats_bar = div()
             .h(px(26.0))
@@ -1826,16 +1924,16 @@ impl ChatListView {
                             .min_w_0()
                             .min_h_0()
                             .child(
-                                div()
-                                    .id("trajectory-events-scroll")
-                                    .size_full()
-                                    .track_scroll(&self.trajectory_scroll_handle)
-                                    .overflow_y_scroll()
-                                    .child(div().w_full().children(rows)),
+                                list(
+                                    self.trajectory_list_state.clone(),
+                                    cx.processor(Self::render_trajectory_row),
+                                )
+                                .size_full()
+                                .with_sizing_behavior(ListSizingBehavior::Auto),
                             )
                             .child(div().absolute().inset_0().child(
                                 gpui_component::scroll::Scrollbar::vertical(
-                                    &self.trajectory_scroll_handle,
+                                    &self.trajectory_list_state,
                                 ),
                             )),
                     )
@@ -3289,6 +3387,7 @@ impl Render for ChatListView {
             self.trajectory_search.clear();
             self.markdown_states.clear();
             self.trajectory_cache = None;
+            self.trajectory_raw_json = None;
             self.trajectory_search_input.update(cx, |state, cx| {
                 state.set_value("", window, cx);
             });
@@ -3412,8 +3511,9 @@ impl Render for ChatListView {
 #[cfg(test)]
 mod hot_path_tests {
     use super::{
-        build_transcript_rows, classify_markdown_update, format_trajectory_raw_json,
-        grouped_tool_activities, MarkdownUpdate, TrajectoryCacheKey, TrajectoryMode, TranscriptRow,
+        build_trajectory_rows, build_transcript_rows, classify_markdown_update,
+        format_trajectory_raw_json, grouped_tool_activities, summarize_trajectory, MarkdownUpdate,
+        TrajectoryCacheKey, TrajectoryMode, TrajectoryRow, TranscriptRow,
     };
     use crate::state::{
         ChatMessageInfo, MessageRole, ToolActivityInfo, TrajectoryDiagnostics, TrajectoryEntry,
@@ -3536,7 +3636,7 @@ mod hot_path_tests {
     }
 
     #[test]
-    fn trajectory_raw_json_is_prepared_for_the_revision_cache() {
+    fn selected_trajectory_entry_formats_as_raw_json() {
         let entry = TrajectoryEntry {
             seq: Some(1),
             run_id: None,
@@ -3554,6 +3654,62 @@ mod hot_path_tests {
 
         assert!(raw.contains("\"category\": \"Tool\""));
         assert!(raw.contains("\"summary\": \"Read file\""));
+    }
+
+    fn trajectory_entry(
+        category: &str,
+        request: Option<u32>,
+        turn: Option<u32>,
+    ) -> TrajectoryEntry {
+        TrajectoryEntry {
+            seq: None,
+            run_id: None,
+            turn,
+            request,
+            category: category.into(),
+            summary: category.into(),
+            detail: String::new(),
+            lane: None,
+            correlation_id: None,
+            diagnostics: TrajectoryDiagnostics::default(),
+        }
+    }
+
+    #[test]
+    fn trajectory_rows_preserve_request_headers_and_setup_boundaries() {
+        let entries = vec![
+            trajectory_entry("Provider", Some(1), Some(1)),
+            trajectory_entry("Input", Some(1), Some(1)),
+            trajectory_entry("Input", Some(2), Some(2)),
+        ];
+
+        assert_eq!(
+            build_trajectory_rows(&entries, &[0, 1, 2], TrajectoryMode::Requests),
+            vec![
+                TrajectoryRow::RequestHeader(1),
+                TrajectoryRow::Setup,
+                TrajectoryRow::Entry(0),
+                TrajectoryRow::Entry(1),
+                TrajectoryRow::RequestHeader(2),
+                TrajectoryRow::Entry(2),
+            ]
+        );
+    }
+
+    #[test]
+    fn trajectory_summary_is_computed_once_from_canonical_entries() {
+        let mut tool = trajectory_entry("Tool", Some(1), Some(3));
+        tool.diagnostics.duration_ms = Some(25);
+        let mut anomaly = trajectory_entry("Anomaly", Some(1), Some(4));
+        anomaly.diagnostics.duration_ms = Some(75);
+        anomaly.diagnostics.is_anomaly = true;
+
+        let summary = summarize_trajectory(&[tool, anomaly]);
+
+        assert_eq!(summary.tool_count, 1);
+        assert_eq!(summary.total_duration_ms, 100);
+        assert_eq!(summary.anomaly_count, 1);
+        assert_eq!(summary.max_turn, 4);
     }
     #[test]
     fn trajectory_cache_key_changes_with_data_or_filter() {
