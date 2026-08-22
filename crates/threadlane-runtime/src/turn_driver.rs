@@ -279,11 +279,20 @@ impl<'a> TurnDriver<'a> {
             }
 
             let provider = self.provider_client.provider_kind(&model).to_string();
+            let provider_attempt = boundary_result
+                .as_ref()
+                .and_then(|prepared| prepared.provider_attempt)
+                .unwrap_or(turn_number as u32);
             static PROVIDER_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
-            let request_id = format!(
-                "provider-request-{}",
-                PROVIDER_REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed)
-            );
+            let request_id = boundary_result
+                .as_ref()
+                .and_then(|prepared| prepared.provider_request_id.clone())
+                .unwrap_or_else(|| {
+                    format!(
+                        "provider-request-{}",
+                        PROVIDER_REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed)
+                    )
+                });
             let (stream_tx, mut stream_rx) = mpsc::channel(100);
             let client = self.provider_client.clone();
             let payload_cache_key = self.prompt_cache_key.clone();
@@ -302,18 +311,29 @@ impl<'a> TurnDriver<'a> {
             let manifest_items = {
                 let mut items = Vec::new();
                 for (idx, message) in request_messages.iter().enumerate() {
-                    let serialized = crate::compaction::serialized_message(message);
+                    let normalized = crate::compaction::provider_normalized_message(message);
+                    let accounted_message = normalized.as_ref().unwrap_or(message);
+                    let serialized = crate::compaction::serialized_message(accounted_message);
                     let digest = format!("{:x}", Sha256::digest(&serialized));
-                    let token_estimate =
-                        crate::compaction::estimate_message_tokens(message, &self.config)
-                            .min(u32::MAX as usize) as u32;
+                    let token_estimate = normalized
+                        .as_ref()
+                        .map(|message| {
+                            crate::compaction::estimate_message_tokens(message, &self.config)
+                                .min(u32::MAX as usize) as u32
+                        })
+                        .unwrap_or(0);
+                    let status = if normalized.is_some() {
+                        ContextItemStatus::Active
+                    } else {
+                        ContextItemStatus::Omitted
+                    };
                     let source = match message {
                         AgentMessage::System { .. } => ContextItemSource::SystemPrompt,
                         AgentMessage::Tool { .. } => ContextItemSource::ToolResult,
                         _ => ContextItemSource::Message,
                     };
                     if let (Ok(role), Ok(digest_sha256)) = (
-                        TraceString::new(message.role_str()),
+                        TraceString::new(accounted_message.role_str()),
                         TraceString::new(digest),
                     ) {
                         items.push(ContextManifestItem {
@@ -322,7 +342,7 @@ impl<'a> TurnDriver<'a> {
                             entry_id: None,
                             role,
                             token_estimate,
-                            status: ContextItemStatus::Active,
+                            status,
                             digest_sha256,
                             label: None,
                         });
@@ -371,7 +391,7 @@ impl<'a> TurnDriver<'a> {
             // context manifest, and only then provider I/O.
             if let Err(error) = self
                 .record_provider_trace(ProviderTraceEvent::Started {
-                    attempt: turn_number as u32,
+                    attempt: provider_attempt,
                     request_id: request_id.clone(),
                     model: model.clone(),
                     provider,
@@ -386,7 +406,7 @@ impl<'a> TurnDriver<'a> {
 
             if let Err(error) = self
                 .record_provider_trace(ProviderTraceEvent::ContextManifest {
-                    attempt: turn_number as u32,
+                    attempt: provider_attempt,
                     request_id: request_id.clone(),
                     model: model.clone(),
                     context_limit,
@@ -399,7 +419,7 @@ impl<'a> TurnDriver<'a> {
             {
                 let terminal_result = self
                     .record_provider_trace(ProviderTraceEvent::Finished {
-                        attempt: turn_number as u32,
+                        attempt: provider_attempt,
                         request_id: request_id.clone(),
                         outcome: ProviderOutcome::Failed,
                         error: Some(ProviderErrorSummary {
@@ -469,7 +489,7 @@ impl<'a> TurnDriver<'a> {
                             checkpoint_index = checkpoint_index.saturating_add(1);
                             if let Err(error) = self
                                 .record_provider_trace(ProviderTraceEvent::Checkpoint {
-                                    attempt: turn_number as u32,
+                                    attempt: provider_attempt,
                                     request_id: request_id.clone(),
                                     checkpoint_index,
                                     text: current_text.clone(),
@@ -510,7 +530,7 @@ impl<'a> TurnDriver<'a> {
                                 checkpoint_index = checkpoint_index.saturating_add(1);
                                 let _ = self
                                     .record_provider_trace(ProviderTraceEvent::Checkpoint {
-                                        attempt: turn_number as u32,
+                                        attempt: provider_attempt,
                                         request_id: request_id.clone(),
                                         checkpoint_index,
                                         text: current_text.clone(),
@@ -520,7 +540,7 @@ impl<'a> TurnDriver<'a> {
                             }
                             let _ = self
                                 .record_provider_trace(ProviderTraceEvent::Finished {
-                                    attempt: turn_number as u32,
+                                    attempt: provider_attempt,
                                     request_id: request_id.clone(),
                                     outcome: ProviderOutcome::Aborted,
                                     error: Some(ProviderErrorSummary {
@@ -587,7 +607,7 @@ impl<'a> TurnDriver<'a> {
                         );
                         if let Err(error) = self
                             .record_provider_trace(ProviderTraceEvent::Finished {
-                                attempt: turn_number as u32,
+                                attempt: provider_attempt,
                                 request_id: request_id.clone(),
                                 outcome: ProviderOutcome::Completed,
                                 error: None,
@@ -612,7 +632,7 @@ impl<'a> TurnDriver<'a> {
                             checkpoint_index = checkpoint_index.saturating_add(1);
                             if let Err(error) = self
                                 .record_provider_trace(ProviderTraceEvent::Checkpoint {
-                                    attempt: turn_number as u32,
+                                    attempt: provider_attempt,
                                     request_id: request_id.clone(),
                                     checkpoint_index,
                                     text: current_text.clone(),
@@ -640,7 +660,7 @@ impl<'a> TurnDriver<'a> {
                             TraceString::new(err.chars().take(2048).collect::<String>()).ok();
                         if let Err(error) = self
                             .record_provider_trace(ProviderTraceEvent::Finished {
-                                attempt: turn_number as u32,
+                                attempt: provider_attempt,
                                 request_id: request_id.clone(),
                                 outcome: ProviderOutcome::Failed,
                                 error: Some(ProviderErrorSummary {
@@ -700,7 +720,7 @@ impl<'a> TurnDriver<'a> {
             if !provider_terminal_recorded {
                 if let Err(error) = self
                     .record_provider_trace(ProviderTraceEvent::Finished {
-                        attempt: turn_number as u32,
+                        attempt: provider_attempt,
                         request_id: request_id.clone(),
                         outcome: ProviderOutcome::Failed,
                         error: Some(ProviderErrorSummary {
@@ -790,7 +810,7 @@ impl<'a> TurnDriver<'a> {
             }
             if let Err(error) = self
                 .record_provider_trace(ProviderTraceEvent::AssistantReady {
-                    attempt: turn_number as u32,
+                    attempt: provider_attempt,
                     request_id: request_id.clone(),
                     reasoning: (!current_reasoning.trim().is_empty())
                         .then(|| current_reasoning.clone()),
@@ -854,7 +874,7 @@ impl<'a> TurnDriver<'a> {
                 checkpoint_index = checkpoint_index.saturating_add(1);
                 if let Err(error) = self
                     .record_provider_trace(ProviderTraceEvent::Checkpoint {
-                        attempt: turn_number as u32,
+                        attempt: provider_attempt,
                         request_id: request_id.clone(),
                         checkpoint_index,
                         text: current_text.clone(),

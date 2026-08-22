@@ -42,6 +42,20 @@ pub(crate) fn serialized_message(message: &AgentMessage) -> Vec<u8> {
     serde_json::to_vec(message).unwrap_or_default()
 }
 
+/// Returns the model-visible equivalent of a canonical message. Providers
+/// intentionally omit arbitrary custom records, while durable compaction
+/// summaries are converted to an ordinary user checkpoint message.
+pub(crate) fn provider_normalized_message(message: &AgentMessage) -> Option<AgentMessage> {
+    match message {
+        AgentMessage::Custom { .. } => {
+            compaction_summary_text(message).map(|summary| AgentMessage::User {
+                content: format!("<context-checkpoint>\n{summary}\n</context-checkpoint>"),
+            })
+        }
+        _ => Some(message.clone()),
+    }
+}
+
 pub(crate) fn estimate_message_tokens(message: &AgentMessage, config: &AgentConfig) -> usize {
     let serialized_tokens = serialized_message(message).len().div_ceil(4);
     let image_tokens = match message {
@@ -56,7 +70,8 @@ pub(crate) fn estimate_message_tokens(message: &AgentMessage, config: &AgentConf
 fn estimate_context_tokens(messages: &[AgentMessage], config: &AgentConfig) -> usize {
     messages
         .iter()
-        .map(|m| estimate_message_tokens(m, config))
+        .filter_map(provider_normalized_message)
+        .map(|message| estimate_message_tokens(&message, config))
         .sum()
 }
 

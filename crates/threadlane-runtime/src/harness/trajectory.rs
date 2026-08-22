@@ -739,6 +739,29 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
         requests.push(req);
     }
 
+    // Canonical journals append ProviderRequestStarted before the manifest.
+    // Backfill the join after the scan; the eager lookup above remains useful
+    // for legacy manifest-before-start journals.
+    for (request_id, provider) in &mut providers_by_req_id {
+        if provider.context_manifest_ref.is_none() {
+            provider.context_manifest_ref =
+                context_manifests_by_req_id
+                    .get(request_id)
+                    .map(|manifest| TrajectoryRef {
+                        seq: manifest.seq,
+                        entry_id: None,
+                        run_id: manifest
+                            .parent_ref
+                            .as_ref()
+                            .and_then(|reference| reference.run_id.clone()),
+                        lane: manifest
+                            .parent_ref
+                            .as_ref()
+                            .map_or_else(|| "main".to_owned(), |reference| reference.lane.clone()),
+                    });
+        }
+    }
+
     // Populate joined items
     for (_, manifest) in context_manifests_by_req_id {
         items.push(TrajectoryItem::ContextManifest(manifest));
@@ -1068,6 +1091,20 @@ mod tests {
             })
             .unwrap();
 
+        // Current canonical order: request start is durable before its manifest.
+        store
+            .append_record(Record::ProviderRequestStarted {
+                id: "provider-start-canonical".into(),
+                seq: store.next_sequence(),
+                lane: "main".into(),
+                timestamp: 75,
+                run_id: "run-1".into(),
+                attempt: 1,
+                provider: TraceString::new("test").unwrap(),
+                model: TraceString::new("model").unwrap(),
+                request_id: Some(TraceString::new("req-123").unwrap()),
+            })
+            .unwrap();
         let items = vec![ContextManifestItem {
             position: 0,
             source: ContextItemSource::SystemPrompt,
@@ -1097,6 +1134,38 @@ mod tests {
             })
             .unwrap();
 
+        // Legacy order remains joinable as well.
+        store
+            .append_record(Record::ContextManifestCaptured {
+                id: "context-manifest-legacy".into(),
+                seq: store.next_sequence(),
+                lane: "main".into(),
+                timestamp: 110,
+                run_id: "run-1".into(),
+                attempt: 2,
+                request_id: TraceString::new("req-legacy").unwrap(),
+                total_estimated_tokens: Some(1),
+                effective_model: None,
+                context_limit: None,
+                context_limit_is_estimate: false,
+                compaction_generation: 0,
+                items: Vec::new(),
+            })
+            .unwrap();
+        store
+            .append_record(Record::ProviderRequestStarted {
+                id: "provider-start-legacy".into(),
+                seq: store.next_sequence(),
+                lane: "main".into(),
+                timestamp: 120,
+                run_id: "run-1".into(),
+                attempt: 2,
+                provider: TraceString::new("test").unwrap(),
+                model: TraceString::new("model").unwrap(),
+                request_id: Some(TraceString::new("req-legacy").unwrap()),
+            })
+            .unwrap();
+
         let traj = project_trajectory(&store);
         let manifests: Vec<_> = traj
             .items
@@ -1107,10 +1176,33 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(manifests.len(), 1);
-        assert_eq!(manifests[0].request_id, "req-123");
-        assert_eq!(manifests[0].total_estimated_tokens, Some(50));
-        assert_eq!(manifests[0].items.len(), 1);
+        assert_eq!(manifests.len(), 2);
+        let canonical = manifests
+            .iter()
+            .find(|manifest| manifest.request_id == "req-123")
+            .unwrap();
+        assert_eq!(canonical.total_estimated_tokens, Some(50));
+        assert_eq!(canonical.items.len(), 1);
+        let providers: Vec<_> = traj
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                TrajectoryItem::Provider(provider) => Some(provider),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(providers.len(), 2);
+        for provider in providers {
+            let manifest = provider
+                .context_manifest_ref
+                .as_ref()
+                .expect("manifest join");
+            let expected = manifests
+                .iter()
+                .find(|candidate| candidate.request_id == provider.request_id)
+                .unwrap();
+            assert_eq!(manifest.seq, expected.seq);
+        }
     }
 
     #[test]

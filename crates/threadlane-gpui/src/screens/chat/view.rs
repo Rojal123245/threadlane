@@ -3739,8 +3739,9 @@ mod hot_path_tests {
                 cache_hit_percent: projected_metrics.cache_hit_percent(),
             },
         );
-        assert_eq!(view.percent, Some(29.925));
-        assert_eq!(view.bar_percent, 29.925);
+        let percent = view.percent.expect("known context percentage");
+        assert!((percent - 29.904_687_5).abs() < 1e-12);
+        assert!((view.bar_percent - 29.904_687_5).abs() < 1e-12);
         assert_eq!(view.current_label, "38.3k / 128.0k");
         assert_eq!(view.total_processed_label, "11.9M");
         assert_eq!(view.cache_hit_label.as_deref(), Some("91%"));

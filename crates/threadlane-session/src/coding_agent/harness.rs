@@ -136,6 +136,8 @@ fn boundary_result(
     budget: ContextBudget,
     compaction_generation: u64,
     provisional_estimated_tokens: Option<usize>,
+    provider_attempt: u32,
+    provider_request_id: String,
 ) -> ProviderBoundaryResult {
     ProviderBoundaryResult {
         messages,
@@ -143,6 +145,8 @@ fn boundary_result(
         context_limit_is_estimate: budget.limit_is_estimate,
         compaction_generation,
         provisional_estimated_tokens,
+        provider_attempt: Some(provider_attempt),
+        provider_request_id: Some(provider_request_id),
     }
 }
 #[allow(dead_code)]
@@ -305,6 +309,23 @@ impl CodingSessionHarness {
             return Err("context preparation cancelled".into());
         }
         let budget = context_budget(&request.model, config);
+        let provider_attempt = self
+            .store
+            .store()
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                HarnessRecord::ProviderRequestStarted {
+                    run_id: record_run_id,
+                    attempt,
+                    ..
+                } if record_run_id == run_id => Some(*attempt),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let provider_request_id = format!("provider-request-{run_id}-{provider_attempt}");
         let mut current = self.model_context("main")?.messages();
         let pre_tokens =
             estimate_request_tokens(&current, request.tool_schema_json.as_deref(), config);
@@ -314,6 +335,8 @@ impl CodingSessionHarness {
                 budget,
                 self.compaction_generation(),
                 None,
+                provider_attempt,
+                provider_request_id,
             ));
         }
         let reason = if request.overflow_recovery {
@@ -352,6 +375,8 @@ impl CodingSessionHarness {
                     budget,
                     self.compaction_generation(),
                     Some(post_tokens),
+                    provider_attempt,
+                    provider_request_id,
                 ));
             }
             if index == 1 {
@@ -3073,6 +3098,81 @@ mod tests {
         }
     }
 
+    #[test]
+    fn provider_identity_survives_reopen_of_same_open_run() {
+        let (_dir, path) = temp_session();
+        let accepted = {
+            let mut harness = CodingSessionHarness::open(&path).unwrap();
+            let accepted = harness
+                .begin_run("restart-run", AgentMessage::user("hello", vec![]))
+                .unwrap();
+            let first = harness
+                .prepare_provider_boundary(
+                    "restart-run",
+                    boundary_request(false),
+                    &AgentConfig::default(),
+                )
+                .unwrap();
+            let attempt = first.provider_attempt.unwrap();
+            let request_id = first.provider_request_id.unwrap();
+            harness
+                .record_provider_trace(
+                    "restart-run",
+                    ProviderTraceEvent::Started {
+                        attempt,
+                        request_id,
+                        model: "unknown/test-model".into(),
+                        provider: "fake".into(),
+                    },
+                )
+                .unwrap();
+            accepted
+        };
+
+        let mut resumed = CodingSessionHarness::open(&path).unwrap();
+        resumed.validate_accepted_run(&accepted).unwrap();
+        let second = resumed
+            .prepare_provider_boundary(
+                "restart-run",
+                boundary_request(false),
+                &AgentConfig::default(),
+            )
+            .unwrap();
+        assert_eq!(second.provider_attempt, Some(2));
+        let second_request_id = second.provider_request_id.clone().unwrap();
+        resumed
+            .record_provider_trace(
+                "restart-run",
+                ProviderTraceEvent::Started {
+                    attempt: second.provider_attempt.unwrap(),
+                    request_id: second_request_id,
+                    model: "unknown/test-model".into(),
+                    provider: "fake".into(),
+                },
+            )
+            .unwrap();
+
+        let starts: Vec<_> = resumed
+            .store
+            .store()
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                HarnessRecord::ProviderRequestStarted {
+                    id,
+                    attempt,
+                    request_id: Some(request_id),
+                    ..
+                } => Some((id, *attempt, request_id.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(starts.len(), 2);
+        assert_eq!((starts[0].1, starts[1].1), (1, 2));
+        assert_ne!(starts[0].0, starts[1].0);
+        assert_ne!(starts[0].2, starts[1].2);
+        assert!(Reducer::reduce(resumed.store.store()).is_ok());
+    }
     #[test]
     fn adaptive_compaction_commits_before_next_provider_attempt() {
         let (_dir, path) = temp_session();

@@ -1012,6 +1012,8 @@ mod tests {
                         context_limit_is_estimate: true,
                         compaction_generation: 0,
                         provisional_estimated_tokens: None,
+                        provider_attempt: None,
+                        provider_request_id: None,
                     })
                 })
             },
@@ -1066,6 +1068,18 @@ mod tests {
                     data_url: "data:image/png;base64,AA==".into(),
                 }],
             },
+            AgentMessage::Custom {
+                custom_type: "thinking".into(),
+                payload: serde_json::json!({ "text": "private reasoning" }),
+            },
+            AgentMessage::Custom {
+                custom_type: "extension_note".into(),
+                payload: serde_json::json!({ "text": "not provider-visible" }),
+            },
+            AgentMessage::Custom {
+                custom_type: "compaction_summary".into(),
+                payload: serde_json::json!({ "summary": "durable checkpoint" }),
+            },
         ];
         let mut runtime =
             AgentRuntime::new_with_provider("", None, "test-model", None, config.clone(), provider)
@@ -1088,16 +1102,41 @@ mod tests {
                         .collect::<Vec<_>>();
                     assert_eq!(message_items.len(), expected.len());
                     for (item, message) in message_items.iter().zip(&expected) {
-                        let serialized = serde_json::to_vec(message).unwrap();
+                        let normalized = crate::compaction::provider_normalized_message(message);
+                        let accounted = normalized.as_ref().unwrap_or(message);
+                        let serialized = serde_json::to_vec(accounted).unwrap();
                         assert_eq!(
                             item.digest_sha256.as_str(),
                             format!("{:x}", sha2::Sha256::digest(&serialized))
                         );
                         assert_eq!(
+                            item.status,
+                            if normalized.is_some() {
+                                crate::harness::ContextItemStatus::Active
+                            } else {
+                                crate::harness::ContextItemStatus::Omitted
+                            }
+                        );
+                        assert_eq!(
                             item.token_estimate as usize,
-                            crate::compaction::estimate_message_tokens(message, &config)
+                            normalized.as_ref().map_or(0, |message| {
+                                crate::compaction::estimate_message_tokens(message, &config)
+                            })
                         );
                     }
+                    assert_eq!(
+                        message_items
+                            .iter()
+                            .filter(|item| {
+                                item.status == crate::harness::ContextItemStatus::Omitted
+                            })
+                            .count(),
+                        2
+                    );
+                    assert!(message_items.last().is_some_and(|item| {
+                        item.status == crate::harness::ContextItemStatus::Active
+                            && item.token_estimate > 0
+                    }));
                     assert_eq!(
                         message_items[1].source,
                         crate::harness::ContextItemSource::ToolResult
@@ -1287,6 +1326,8 @@ mod tests {
                     context_limit_is_estimate: budget.limit_is_estimate,
                     compaction_generation: 0,
                     provisional_estimated_tokens: None,
+                    provider_attempt: None,
+                    provider_request_id: None,
                 })
             })
         })));
@@ -1411,6 +1452,8 @@ mod tests {
                     context_limit_is_estimate: false,
                     compaction_generation: 0,
                     provisional_estimated_tokens: None,
+                    provider_attempt: None,
+                    provider_request_id: None,
                 })
             })
         })));

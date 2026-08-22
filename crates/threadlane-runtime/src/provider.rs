@@ -532,6 +532,10 @@ pub struct ProviderBoundaryResult {
     pub context_limit_is_estimate: bool,
     pub compaction_generation: u64,
     pub provisional_estimated_tokens: Option<usize>,
+    /// Durable sessions allocate these from the journal so a reopened driver
+    /// cannot reuse process-local attempt/request identity.
+    pub provider_attempt: Option<u32>,
+    pub provider_request_id: Option<String>,
 }
 
 pub type ProviderBoundaryPreparer = Arc<

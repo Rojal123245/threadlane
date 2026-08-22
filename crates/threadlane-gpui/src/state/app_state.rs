@@ -3437,7 +3437,7 @@ mod tests {
                 > projected_context.context_limit as u64
         );
         assert!(projected_context.current_tokens < projected_context.context_limit);
-        assert_eq!(projected_context.current_tokens, 38_304);
+        assert_eq!(projected_context.current_tokens, 38_278);
         assert_eq!(projected_context.context_limit, 128_000);
         assert_eq!(projected_context.effective_model, "gpt-4o");
         assert!(!projected_context.context_limit_is_estimate);
