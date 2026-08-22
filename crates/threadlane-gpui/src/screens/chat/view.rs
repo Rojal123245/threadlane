@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use std::time::Duration;
@@ -200,6 +201,36 @@ fn classify_markdown_update<'a>(current: &str, next: &'a str) -> MarkdownUpdate<
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ChatLinkTarget {
+    Web,
+    ProjectFile(String),
+    Rejected,
+}
+
+fn classify_chat_link(link: &str) -> ChatLinkTarget {
+    if link.starts_with("http://") || link.starts_with("https://") {
+        return ChatLinkTarget::Web;
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in Path::new(link).components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {}
+            Component::ParentDir if normalized.pop() => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return ChatLinkTarget::Rejected;
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        ChatLinkTarget::Rejected
+    } else {
+        ChatLinkTarget::ProjectFile(normalized.to_string_lossy().into_owned())
+    }
+}
 struct MarkdownRenderState {
     source: String,
     state: Entity<TextViewState>,
@@ -2228,6 +2259,35 @@ impl ChatListView {
         entry.state.clone()
     }
 
+    fn chat_markdown_view(&self, state: &Entity<TextViewState>) -> TextView {
+        let model = self.model.clone();
+        TextView::new(state)
+            .selectable(true)
+            .on_link_click(move |url, event, _window, cx| {
+                let activate = match event {
+                    ClickEvent::Mouse(click) => {
+                        matches!(click.up.button, MouseButton::Left | MouseButton::Middle)
+                    }
+                    ClickEvent::Keyboard(_) => true,
+                    ClickEvent::Touch(click) => !click.long_press,
+                };
+                if !activate {
+                    return;
+                }
+
+                match classify_chat_link(url) {
+                    ChatLinkTarget::Web => cx.open_url(url),
+                    ChatLinkTarget::ProjectFile(path) => {
+                        model.update(cx, |state, cx| {
+                            state.request_open_file(path);
+                            cx.notify();
+                        });
+                    }
+                    ChatLinkTarget::Rejected => {}
+                }
+            })
+    }
+
     fn render_reasoning_block(
         &mut self,
         msg: &ChatMessageInfo,
@@ -2363,7 +2423,7 @@ impl ChatListView {
                         .child({
                             let markdown_state =
                                 self.markdown_state(msg.id.clone(), &msg.content, cx);
-                            TextView::new(&markdown_state).selectable(true)
+                            self.chat_markdown_view(&markdown_state)
                         })
                         .context_menu({
                             let content = msg.content.clone();
@@ -2414,7 +2474,7 @@ impl ChatListView {
                                     .w_full()
                                     .text_sm()
                                     .text_color(theme.foreground)
-                                    .child(TextView::new(&markdown_state).selectable(true))
+                                    .child(self.chat_markdown_view(&markdown_state))
                                     .into_any_element();
 
                                 Some(if msg.streaming {
@@ -3677,16 +3737,60 @@ impl Render for ChatListView {
 #[cfg(test)]
 mod hot_path_tests {
     use super::{
-        build_trajectory_rows, build_transcript_rows, classify_markdown_update,
+        build_trajectory_rows, build_transcript_rows, classify_chat_link, classify_markdown_update,
         context_meter_view_model, format_trajectory_raw_json, grouped_tool_activities,
-        summarize_trajectory, ContextMeterContext, ContextMeterMetrics, MarkdownUpdate,
-        TrajectoryCacheKey, TrajectoryMode, TrajectoryRow, TranscriptRow,
+        summarize_trajectory, ChatLinkTarget, ContextMeterContext, ContextMeterMetrics,
+        MarkdownUpdate, TrajectoryCacheKey, TrajectoryMode, TrajectoryRow, TranscriptRow,
     };
     use crate::state::{
         reported_session_shape_state, ChatMessageInfo, MessageRole, ToolActivityInfo,
         TrajectoryDiagnostics, TrajectoryEntry,
     };
 
+    #[test]
+    fn chat_link_classifies_web_urls_as_external() {
+        assert_eq!(
+            classify_chat_link("https://example.com/spec"),
+            ChatLinkTarget::Web
+        );
+        assert_eq!(
+            classify_chat_link("http://example.com/spec"),
+            ChatLinkTarget::Web
+        );
+    }
+
+    #[test]
+    fn chat_link_normalizes_safe_project_relative_paths() {
+        assert_eq!(
+            classify_chat_link("docs/spec.md"),
+            ChatLinkTarget::ProjectFile("docs/spec.md".into())
+        );
+        assert_eq!(
+            classify_chat_link("docs/design/../spec.md"),
+            ChatLinkTarget::ProjectFile("docs/spec.md".into())
+        );
+    }
+
+    #[test]
+    fn chat_link_rejects_absolute_and_escaping_paths() {
+        assert_eq!(classify_chat_link("/tmp/spec.md"), ChatLinkTarget::Rejected);
+        assert_eq!(
+            classify_chat_link("../../outside.md"),
+            ChatLinkTarget::Rejected
+        );
+    }
+
+    #[test]
+    fn chat_link_does_not_parse_line_or_fragment_suffixes() {
+        assert_eq!(
+            classify_chat_link("src/main.rs:42"),
+            ChatLinkTarget::ProjectFile("src/main.rs:42".into())
+        );
+        assert_eq!(
+            classify_chat_link("src/main.rs#L42"),
+            ChatLinkTarget::ProjectFile("src/main.rs#L42".into())
+        );
+    }
     fn metrics_with_usage(
         input_tokens: u64,
         output_tokens: u64,
