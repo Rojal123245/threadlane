@@ -126,11 +126,15 @@ impl WorkspaceView {
                     .spawn(async move { compute_session_messages(&history_file) })
                     .await;
                 let _ = model.update(cx, |state, cx| {
-                    if state.active_session_id.as_deref() != Some(&request.session_id) {
+                    if !state.active_session_matches(&request.session_id, &request.session_file) {
                         return;
                     }
                     match history {
-                        Ok(messages) => state.apply_session_messages(&request.session_id, messages),
+                        Ok(messages) => state.apply_session_messages(
+                            &request.session_id,
+                            &request.session_file,
+                            messages,
+                        ),
                         Err(error) => {
                             state.session_status = Some(format!("Could not load session: {error}"))
                         }
@@ -144,7 +148,7 @@ impl WorkspaceView {
                 .spawn(async move { compute_full_session_projection(&session_file) })
                 .await;
             let _ = model.update(cx, |state, cx| {
-                if state.active_session_id.as_deref() != Some(&request.session_id) {
+                if !state.active_session_matches(&request.session_id, &request.session_file) {
                     return;
                 }
                 match result {

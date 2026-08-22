@@ -149,6 +149,12 @@ pub(crate) struct ContextWindowInfo {
     pub(crate) estimating: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct SessionProjectionKey {
+    session_id: String,
+    session_file: PathBuf,
+}
+
 #[derive(Clone, Debug)]
 pub struct ChatMessageInfo {
     pub(crate) id: String,
@@ -223,12 +229,13 @@ pub struct AppState {
     composer_text: String,
     pub(crate) session_status: Option<String>,
     pending_composer_messages: HashMap<String, String>,
-    session_token_usage: HashMap<String, TokenUsage>,
-    trajectory_by_session: HashMap<String, Vec<TrajectoryEntry>>,
+    session_token_usage: HashMap<SessionProjectionKey, TokenUsage>,
+    trajectory_by_session: HashMap<SessionProjectionKey, Vec<TrajectoryEntry>>,
     trajectory_revision: u64,
-    diagnostics_by_session: HashMap<String, threadlane_session::harness::SessionDiagnostics>,
-    session_metrics: HashMap<String, SessionMetricsInfo>,
-    context_windows: HashMap<String, ContextWindowInfo>,
+    diagnostics_by_session:
+        HashMap<SessionProjectionKey, threadlane_session::harness::SessionDiagnostics>,
+    session_metrics: HashMap<SessionProjectionKey, SessionMetricsInfo>,
+    context_windows: HashMap<SessionProjectionKey, ContextWindowInfo>,
     stashed_prompts: HashMap<String, String>,
     pub(crate) pending_permissions: HashMap<String, threadlane_session::PermissionRequest>,
     pub(crate) pending_hydrations: Vec<SessionHydrationRequest>,
@@ -841,8 +848,8 @@ impl AppState {
     }
 
     pub(crate) fn current_session_token_usage(&self) -> TokenUsage {
-        if let Some(session_id) = &self.active_session_id {
-            if let Some(usage) = self.session_token_usage.get(session_id) {
+        if let Some(key) = self.active_session_projection_key() {
+            if let Some(usage) = self.session_token_usage.get(&key) {
                 return usage.clone();
             }
         }
@@ -1227,6 +1234,28 @@ impl AppState {
             })
     }
 
+    fn projection_key(session_id: &str, session_file: &Path) -> SessionProjectionKey {
+        SessionProjectionKey {
+            session_id: session_id.to_owned(),
+            session_file: session_file.to_path_buf(),
+        }
+    }
+
+    fn session_projection_key(&self, work_dir: &Path, session_id: &str) -> SessionProjectionKey {
+        Self::projection_key(session_id, &self.session_file(work_dir, session_id))
+    }
+
+    fn active_session_projection_key(&self) -> Option<SessionProjectionKey> {
+        let work_dir = self.active_work_dir.as_deref()?;
+        let session_id = self.active_session_id.as_deref()?;
+        Some(self.session_projection_key(work_dir, session_id))
+    }
+
+    pub(crate) fn active_session_matches(&self, session_id: &str, session_file: &Path) -> bool {
+        self.active_session_projection_key()
+            .is_some_and(|active| active == Self::projection_key(session_id, session_file))
+    }
+
     fn finish_session_removal(&mut self, work_dir: &Path, session_id: &str) {
         let session_file = self.session_file(work_dir, session_id);
         self.session_runtimes.remove(&session_file);
@@ -1351,21 +1380,19 @@ impl AppState {
         session_file: &Path,
     ) -> Result<(), String> {
         let result = compute_full_session_projection(session_file)?;
+        let key = Self::projection_key(session_id, session_file);
         self.diagnostics_by_session
-            .insert(session_id.to_owned(), result.diagnostics);
+            .insert(key.clone(), result.diagnostics);
         self.trajectory_by_session
-            .insert(session_id.into(), result.trajectory);
+            .insert(key.clone(), result.trajectory);
         self.trajectory_revision = self.trajectory_revision.wrapping_add(1);
-        self.session_metrics
-            .insert(session_id.into(), result.metrics);
+        self.session_metrics.insert(key.clone(), result.metrics);
         if let Some(context_window) = result.context_window {
-            self.context_windows
-                .insert(session_id.into(), context_window);
+            self.context_windows.insert(key.clone(), context_window);
         } else {
-            self.context_windows.remove(session_id);
+            self.context_windows.remove(&key);
         }
-        self.session_token_usage
-            .insert(session_id.into(), result.token_usage);
+        self.session_token_usage.insert(key, result.token_usage);
         Ok(())
     }
 
@@ -2305,6 +2332,7 @@ impl AppState {
                 info.effective_model = model.to_owned();
                 info.compaction_generation = generation;
                 info.provisional = true;
+                info.estimating = false;
             }
         }
         Some(info)
@@ -2320,9 +2348,10 @@ impl AppState {
     pub(crate) fn apply_session_messages(
         &mut self,
         session_id: &str,
+        session_file: &Path,
         messages: Vec<ChatMessageInfo>,
     ) {
-        if self.active_session_id.as_deref() == Some(session_id) {
+        if self.active_session_matches(session_id, session_file) {
             self.messages = Arc::new(messages);
         }
     }
@@ -2330,28 +2359,26 @@ impl AppState {
     pub(crate) fn apply_session_hydration(
         &mut self,
         session_id: &str,
-        _session_file: &Path,
+        session_file: &Path,
         result: SessionProjectionResult,
     ) {
-        if self.active_session_id.as_deref() != Some(session_id) {
+        if !self.active_session_matches(session_id, session_file) {
             return;
         }
+        let key = Self::projection_key(session_id, session_file);
         self.active_plan = result.plan;
         self.trajectory_by_session
-            .insert(session_id.to_owned(), result.trajectory);
+            .insert(key.clone(), result.trajectory);
         self.trajectory_revision = self.trajectory_revision.wrapping_add(1);
         self.diagnostics_by_session
-            .insert(session_id.to_owned(), result.diagnostics);
-        self.session_metrics
-            .insert(session_id.to_owned(), result.metrics);
+            .insert(key.clone(), result.diagnostics);
+        self.session_metrics.insert(key.clone(), result.metrics);
         if let Some(context_window) = result.context_window {
-            self.context_windows
-                .insert(session_id.to_owned(), context_window);
+            self.context_windows.insert(key.clone(), context_window);
         } else {
-            self.context_windows.remove(session_id);
+            self.context_windows.remove(&key);
         }
-        self.session_token_usage
-            .insert(session_id.to_owned(), result.token_usage);
+        self.session_token_usage.insert(key, result.token_usage);
     }
 
     fn record_trajectory(&mut self, session_id: &str, event: &AgentEvent) {
@@ -2438,8 +2465,14 @@ impl AppState {
             _ => None,
         };
         if let Some((category, summary, detail, lane)) = entry {
+            let Some(key) = self
+                .active_session_projection_key()
+                .filter(|key| key.session_id == session_id)
+            else {
+                return;
+            };
             self.trajectory_by_session
-                .entry(session_id.into())
+                .entry(key)
                 .or_default()
                 .push(TrajectoryEntry {
                     seq: None,
@@ -2465,9 +2498,8 @@ impl AppState {
 
     pub(crate) fn active_model_context_diagnostics(&self) -> Vec<TrajectoryEntry> {
         let Some(projection) = self
-            .active_session_id
-            .as_ref()
-            .and_then(|id| self.diagnostics_by_session.get(id))
+            .active_session_projection_key()
+            .and_then(|key| self.diagnostics_by_session.get(&key))
         else {
             return Vec::new();
         };
@@ -2506,9 +2538,8 @@ impl AppState {
 
     pub(crate) fn active_durable_event_diagnostics(&self) -> Vec<TrajectoryEntry> {
         let Some(projection) = self
-            .active_session_id
-            .as_ref()
-            .and_then(|id| self.diagnostics_by_session.get(id))
+            .active_session_projection_key()
+            .and_then(|key| self.diagnostics_by_session.get(&key))
         else {
             return Vec::new();
         };
@@ -2555,9 +2586,8 @@ impl AppState {
 
     pub(crate) fn active_recovery_diagnostics(&self) -> Vec<TrajectoryEntry> {
         let Some(projection) = self
-            .active_session_id
-            .as_ref()
-            .and_then(|id| self.diagnostics_by_session.get(id))
+            .active_session_projection_key()
+            .and_then(|key| self.diagnostics_by_session.get(&key))
         else {
             return Vec::new();
         };
@@ -2565,9 +2595,8 @@ impl AppState {
     }
 
     pub(crate) fn active_trajectory(&self) -> &[TrajectoryEntry] {
-        self.active_session_id
-            .as_ref()
-            .and_then(|id| self.trajectory_by_session.get(id))
+        self.active_session_projection_key()
+            .and_then(|key| self.trajectory_by_session.get(&key))
             .map(Vec::as_slice)
             .unwrap_or(&[])
     }
@@ -2577,24 +2606,26 @@ impl AppState {
     }
 
     pub(crate) fn session_trajectory(&self, session_id: &str) -> &[TrajectoryEntry] {
-        self.trajectory_by_session
-            .get(session_id)
+        let key = self
+            .active_work_dir
+            .as_deref()
+            .map(|work_dir| self.session_projection_key(work_dir, session_id));
+        key.as_ref()
+            .and_then(|key| self.trajectory_by_session.get(key))
             .map(Vec::as_slice)
             .unwrap_or(&[])
     }
 
     pub(crate) fn active_session_metrics(&self) -> SessionMetricsInfo {
-        self.active_session_id
-            .as_ref()
-            .and_then(|id| self.session_metrics.get(id))
+        self.active_session_projection_key()
+            .and_then(|key| self.session_metrics.get(&key))
             .cloned()
             .unwrap_or_default()
     }
 
     pub(crate) fn active_context_window(&self) -> Option<&ContextWindowInfo> {
-        self.active_session_id
-            .as_ref()
-            .and_then(|id| self.context_windows.get(id))
+        self.active_session_projection_key()
+            .and_then(|key| self.context_windows.get(&key))
     }
 
     pub(crate) fn chat_stream_pending(&self) -> bool {
@@ -2652,7 +2683,10 @@ impl AppState {
                         }
                     }
                     self.record_trajectory(&session_id, &event);
-                    let metrics = self.session_metrics.entry(session_id.clone()).or_default();
+                    let key = self
+                        .active_session_projection_key()
+                        .expect("active stream event must have a projection key");
+                    let metrics = self.session_metrics.entry(key.clone()).or_default();
                     match &event {
                         AgentEvent::AgentStart => metrics.turns = metrics.turns.saturating_add(1),
                         AgentEvent::ToolExecutionStart { .. } => {
@@ -2805,10 +2839,7 @@ impl AppState {
                             self.model_roles = roles;
                         }
                         ChatAgentUpdate::Usage(usage) => {
-                            let entry = self
-                                .session_token_usage
-                                .entry(session_id.clone())
-                                .or_default();
+                            let entry = self.session_token_usage.entry(key.clone()).or_default();
                             entry.accumulate(&usage);
                         }
                         ChatAgentUpdate::PermissionRequested(request) => {
@@ -3068,7 +3099,7 @@ impl AppState {
             format!("{text}\n[{} image attachment(s)]", images.len())
         };
         self.trajectory_by_session
-            .entry(session_id.clone())
+            .entry(Self::projection_key(&session_id, &session_file))
             .or_default()
             .push(TrajectoryEntry {
                 seq: None,
@@ -3346,7 +3377,7 @@ mod tests {
         let path = context_fixture_path();
         let projection = compute_full_session_projection(&path).unwrap();
         let mut state = AppState::load_from_registry(Vec::new());
-        state.active_session_id = Some("context-session".into());
+        activate_test_session(&mut state, "context-session", &path);
         state.apply_session_hydration("context-session", &path, projection);
         let context = state.active_context_window().unwrap();
         assert_eq!(context.current_tokens, 103_732);
@@ -3357,6 +3388,146 @@ mod tests {
             state.active_session_metrics().billed_input_tokens(),
             11_734_912
         );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn durable_projections_and_hydration_are_scoped_by_session_file() {
+        use threadlane_session::harness::UsageCause;
+
+        let root = std::env::temp_dir().join(format!(
+            "threadlane-same-session-projects-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let project_a = root.join("a");
+        let project_b = root.join("b");
+        std::fs::create_dir_all(&project_a).unwrap();
+        std::fs::create_dir_all(&project_b).unwrap();
+        let file_a = project_a.join("same-session.jsonl");
+        let file_b = project_b.join("same-session.jsonl");
+        std::fs::rename(context_fixture_path(), &file_a).unwrap();
+        std::fs::rename(context_fixture_path(), &file_b).unwrap();
+        let mut store_b = JsonlStore::open(&file_b).unwrap();
+        store_b
+            .append_record(Record::ContextManifestCaptured {
+                id: "project-b-manifest".into(),
+                seq: 7,
+                lane: "main".into(),
+                timestamp: 7,
+                run_id: "run".into(),
+                attempt: 1,
+                request_id: TraceString::new("req").unwrap(),
+                total_estimated_tokens: Some(222_222),
+                effective_model: Some(TraceString::new("project-b-model").unwrap()),
+                context_limit: Some(333_333),
+                context_limit_is_estimate: false,
+                compaction_generation: 1,
+                items: Vec::new(),
+            })
+            .unwrap();
+        store_b
+            .append_record(Record::Usage {
+                id: "project-b-usage".into(),
+                seq: 8,
+                lane: "main".into(),
+                timestamp: 8,
+                run_id: Some("run".into()),
+                cause: UsageCause::Provider,
+                entry_id: None,
+                tool_call_id: None,
+                attempt: Some(1),
+                usage: TokenUsage {
+                    input_tokens: 123,
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        drop(store_b);
+
+        let projection_a = compute_full_session_projection(&file_a).unwrap();
+        let projection_b = compute_full_session_projection(&file_b).unwrap();
+        let mut state = AppState::load_from_registry(Vec::new());
+        activate_test_session(&mut state, "same-session", &file_a);
+        state.apply_session_hydration("same-session", &file_a, projection_a);
+        activate_test_session(&mut state, "same-session", &file_b);
+        state.apply_session_hydration("same-session", &file_b, projection_b);
+
+        assert_eq!(state.context_windows.len(), 2);
+        assert_eq!(state.session_metrics.len(), 2);
+        assert_eq!(
+            state.active_context_window().unwrap().current_tokens,
+            222_222
+        );
+        assert_eq!(
+            state.active_session_metrics().billed_input_tokens(),
+            11_735_035
+        );
+
+        let stale = compute_full_session_projection(&file_a).unwrap();
+        state.apply_session_hydration("same-session", &file_a, stale);
+        assert_eq!(
+            state.active_context_window().unwrap().current_tokens,
+            222_222
+        );
+        assert_eq!(
+            state.active_session_metrics().billed_input_tokens(),
+            11_735_035
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn newer_provisional_compaction_clears_manifest_estimation() {
+        use threadlane_session::harness::CompactionReason;
+
+        let path = context_fixture_path();
+        let mut store = JsonlStore::open(&path).unwrap();
+        store
+            .append_record(Record::ProviderRequestStarted {
+                id: "newer-request".into(),
+                seq: 7,
+                lane: "main".into(),
+                timestamp: 7,
+                run_id: "run".into(),
+                attempt: 2,
+                provider: TraceString::new("openai").unwrap(),
+                model: TraceString::new("newer-model").unwrap(),
+                request_id: Some(TraceString::new("newer-request").unwrap()),
+            })
+            .unwrap();
+        store
+            .append_record(Record::ContextCompacted {
+                id: "newer-compaction".into(),
+                seq: 8,
+                lane: "main".into(),
+                timestamp: 8,
+                run_id: "run".into(),
+                generation: 2,
+                reason: CompactionReason::AdaptiveBudget,
+                effective_model: TraceString::new("newer-model").unwrap(),
+                context_limit: 500_000,
+                context_limit_is_estimate: true,
+                pre_tokens: 400_000,
+                post_tokens: 111_111,
+                retained_tail_target: 0,
+                retained_tail_tokens: 0,
+                compacted_messages: 1,
+            })
+            .unwrap();
+        drop(store);
+
+        let context = compute_full_session_projection(&path)
+            .unwrap()
+            .context_window
+            .unwrap();
+        assert!(context.provisional);
+        assert_eq!(context.compaction_generation, 2);
+        assert_eq!(context.current_tokens, 111_111);
+        assert!(!context.estimating);
         std::fs::remove_file(path).ok();
     }
 
@@ -3453,6 +3624,39 @@ mod tests {
             None
         );
         std::fs::remove_file(path).ok();
+    }
+
+    fn cached_key(state: &AppState, session_id: &str) -> SessionProjectionKey {
+        state
+            .trajectory_by_session
+            .keys()
+            .chain(state.session_metrics.keys())
+            .chain(state.session_token_usage.keys())
+            .find(|key| key.session_id == session_id)
+            .cloned()
+            .expect("session projection must be cached")
+    }
+
+    fn activate_test_session(state: &mut AppState, session_id: &str, session_file: &Path) {
+        let work_dir = session_file
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        state.projects.push(ProjectInfo {
+            name: session_id.into(),
+            work_dir: work_dir.clone(),
+            sessions: vec![SessionInfo {
+                id: session_id.into(),
+                title: session_id.into(),
+                work_dir: work_dir.clone(),
+                session_file: session_file.to_path_buf(),
+                updated_at: 0,
+                health: SessionHealth::Healthy,
+            }],
+            is_expanded: true,
+        });
+        state.active_work_dir = Some(work_dir);
+        state.active_session_id = Some(session_id.into());
     }
 
     fn apply_pending_hydration(state: &mut AppState) {
@@ -3794,13 +3998,17 @@ mod tests {
         assert_eq!(state.pending_hydrations.len(), 1);
 
         apply_pending_hydration(&mut state);
-        assert!(state.trajectory_by_session["hydration-test"]
-            .iter()
-            .any(|entry| entry.summary == "User input"));
-        assert!(state.trajectory_by_session["hydration-test"]
-            .iter()
-            .any(|entry| entry.summary == "read_file finished"));
-        let trace = &state.trajectory_by_session["hydration-test"];
+        assert!(
+            state.trajectory_by_session[&cached_key(&state, "hydration-test")]
+                .iter()
+                .any(|entry| entry.summary == "User input")
+        );
+        assert!(
+            state.trajectory_by_session[&cached_key(&state, "hydration-test")]
+                .iter()
+                .any(|entry| entry.summary == "read_file finished")
+        );
+        let trace = &state.trajectory_by_session[&cached_key(&state, "hydration-test")];
         let context_index = trace
             .iter()
             .position(|entry| entry.category == "Context")
@@ -3816,9 +4024,15 @@ mod tests {
         assert!(
             context_index < provider_start_index && provider_start_index < provider_finish_index
         );
-        assert_eq!(state.session_metrics["hydration-test"].turns, 1);
-        assert_eq!(state.session_metrics["hydration-test"].tool_calls, 1);
-        let metrics = &state.session_metrics["hydration-test"];
+        assert_eq!(
+            state.session_metrics[&cached_key(&state, "hydration-test")].turns,
+            1
+        );
+        assert_eq!(
+            state.session_metrics[&cached_key(&state, "hydration-test")].tool_calls,
+            1
+        );
+        let metrics = &state.session_metrics[&cached_key(&state, "hydration-test")];
         assert_eq!(metrics.input_tokens, 17);
         assert_eq!(metrics.output_tokens, 9);
         assert_eq!(metrics.cache_read_tokens, 4);
@@ -4089,8 +4303,11 @@ mod tests {
         let mut state = AppState::load_from_registry(Vec::new());
         state.hydrate_session_projection("session", &path).unwrap();
 
-        assert_eq!(state.session_token_usage["session"], usage);
-        let diagnostics = &state.diagnostics_by_session["session"];
+        assert_eq!(
+            state.session_token_usage[&cached_key(&state, "session")],
+            usage
+        );
+        let diagnostics = &state.diagnostics_by_session[&cached_key(&state, "session")];
         assert!(!diagnostics.model_context.is_empty());
         assert_eq!(
             diagnostics
@@ -4109,7 +4326,7 @@ mod tests {
             }
         );
         assert_eq!(diagnostics.recovery.len(), 1);
-        let tool_rows = state.trajectory_by_session["session"]
+        let tool_rows = state.trajectory_by_session[&cached_key(&state, "session")]
             .iter()
             .filter(|entry| entry.correlation_id.as_deref() == Some("call-1"))
             .collect::<Vec<_>>();
@@ -4198,7 +4415,7 @@ mod tests {
             is_expanded: true,
         });
         state.trajectory_by_session.insert(
-            session_id.clone(),
+            AppState::projection_key(&session_id, &session_file),
             vec![
                 TrajectoryEntry {
                     seq: None,
@@ -4242,7 +4459,7 @@ mod tests {
 
         state.select_session(work_dir, session_id.clone());
 
-        let trajectory = &state.trajectory_by_session[&session_id];
+        let trajectory = &state.trajectory_by_session[&cached_key(&state, &session_id)];
         assert_eq!(trajectory.len(), 2);
         assert_eq!(trajectory[0].summary, "read_file running");
         assert_eq!(trajectory[1].summary, "read_file finished");
@@ -4292,7 +4509,7 @@ mod tests {
             .hydrate_session_projection("old-session", &path)
             .unwrap();
 
-        let trajectory = &state.trajectory_by_session["old-session"];
+        let trajectory = &state.trajectory_by_session[&cached_key(&state, "old-session")];
         assert!(trajectory.iter().any(|entry| entry.category == "Operation"));
         assert!(trajectory
             .iter()
@@ -4308,6 +4525,8 @@ mod tests {
     #[test]
     fn trajectory_projection_is_session_scoped_and_preserves_tool_details() {
         let mut state = AppState::load_from_registry(Vec::new());
+        state.active_work_dir = Some(std::env::temp_dir().join("threadlane-trajectory-scope"));
+        state.active_session_id = Some("session-a".into());
         state.record_trajectory(
             "session-a",
             &AgentEvent::ToolExecutionStart {
@@ -4316,6 +4535,7 @@ mod tests {
                 arguments: r#"{"path":"src/lib.rs"}"#.into(),
             },
         );
+        state.active_session_id = Some("session-b".into());
         state.record_trajectory(
             "session-b",
             &AgentEvent::SubagentQueued {
@@ -4325,29 +4545,44 @@ mod tests {
                 task: "Review the patch".into(),
             },
         );
-        assert_eq!(state.trajectory_by_session["session-a"].len(), 1);
-        assert_eq!(state.trajectory_by_session["session-a"][0].category, "Tool");
-        assert!(state.trajectory_by_session["session-a"][0]
-            .detail
-            .contains("src/lib.rs"));
         assert_eq!(
-            state.trajectory_by_session["session-a"][0]
+            state.trajectory_by_session[&cached_key(&state, "session-a")].len(),
+            1
+        );
+        assert_eq!(
+            state.trajectory_by_session[&cached_key(&state, "session-a")][0].category,
+            "Tool"
+        );
+        assert!(
+            state.trajectory_by_session[&cached_key(&state, "session-a")][0]
+                .detail
+                .contains("src/lib.rs")
+        );
+        assert_eq!(
+            state.trajectory_by_session[&cached_key(&state, "session-a")][0]
                 .correlation_id
                 .as_deref(),
             Some("call-1")
         );
         assert_eq!(
-            state.trajectory_by_session["session-b"][0].lane.as_deref(),
+            state.trajectory_by_session[&cached_key(&state, "session-b")][0]
+                .lane
+                .as_deref(),
             Some("reviewer")
         );
+        state.active_session_id = Some("session-a".into());
         state.record_trajectory("session-a", &AgentEvent::TurnStart { turn_number: 12 });
-        assert_eq!(state.trajectory_by_session["session-a"].len(), 1);
+        assert_eq!(
+            state.trajectory_by_session[&cached_key(&state, "session-a")].len(),
+            1
+        );
     }
 
     #[test]
     fn inactive_session_stream_events_replay_after_switching_back() {
         let mut state = AppState::load_from_registry(Vec::new());
         state.messages_mut().clear();
+        state.active_work_dir = Some(std::env::temp_dir().join("threadlane-stream-replay"));
         state.active_session_id = Some("foreground-session".into());
         state.is_new_task = false;
 
@@ -4406,6 +4641,7 @@ mod tests {
     fn stream_drain_preserves_events_beyond_one_frame_budget() {
         let mut state = AppState::load_from_registry(Vec::new());
         state.messages_mut().clear();
+        state.active_work_dir = Some(std::env::temp_dir().join("threadlane-stream-budget"));
         state.active_session_id = Some("session".into());
         state.is_new_task = false;
 
@@ -4576,7 +4812,7 @@ mod tests {
 
         let trajectory = state
             .trajectory_by_session
-            .get("session_1001")
+            .get(&cached_key(&state, "session_1001"))
             .expect("trajectory must be hydrated on startup");
         assert!(!trajectory.is_empty());
         assert!(trajectory.iter().any(|t| t.category == "Operation"));
@@ -4584,13 +4820,13 @@ mod tests {
 
         let usage = state
             .session_token_usage
-            .get("session_1001")
+            .get(&cached_key(&state, "session_1001"))
             .expect("token usage must be hydrated on startup");
         assert_eq!(usage.total_tokens, 50);
 
         let metrics = state
             .session_metrics
-            .get("session_1001")
+            .get(&cached_key(&state, "session_1001"))
             .expect("session metrics must be hydrated on startup");
         assert_eq!(metrics.input_tokens, 20);
         assert_eq!(metrics.output_tokens, 12);
@@ -4723,7 +4959,10 @@ mod tests {
             AgentMessage::Assistant { content, .. } if content.as_deref() == Some("Branch B alternative answer")
         ));
 
-        let trajectory = state.trajectory_by_session.get("branch-session").unwrap();
+        let trajectory = state
+            .trajectory_by_session
+            .get(&cached_key(&state, "branch-session"))
+            .unwrap();
         assert!(trajectory
             .iter()
             .any(|t| t.run_id.as_deref() == Some("run-branch-a")));

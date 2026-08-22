@@ -61,3 +61,25 @@ The state suite includes existing complete-history/paging and exact cumulative-u
 
 - Task 7 still owns the dedicated visual treatment. The compile-only role arm currently shares the existing system-row presentation.
 - Existing unrelated dead-code warnings remain unchanged.
+
+
+## Focused state fix
+
+Resolved both review findings:
+
+- Durable trajectory, diagnostics, usage, metrics, and context-window caches now use a composite session identity containing both session ID and the stable session file path. Active lookups and hydration acceptance derive that identity through the existing project/session-file resolution path.
+- Message and full-projection hydration now reject stale in-flight results when the active project has the same session ID but a different session file.
+- Added a two-project/same-session-ID regression proving distinct metrics and context projections remain isolated and that stale hydration cannot replace the active project's projection.
+- A newer compaction generation used as provisional fallback now explicitly clears `estimating`, because the compaction supersedes post-manifest request uncertainty. Added an exact precedence regression.
+- Existing complete-history paging and stable compaction-marker tests remain in the focused state suite and pass unchanged.
+
+Validation:
+
+```text
+cargo test -p threadlane-gpui state::app_state::tests -- --nocapture  # 20 passed
+cargo check -p threadlane-gpui                                        # passed
+cargo fmt --all -- --check                                            # passed
+git diff --check                                                      # passed
+```
+
+Concern: existing unrelated dead-code warnings remain unchanged.
