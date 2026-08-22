@@ -1600,26 +1600,17 @@ impl CodingSessionHarness {
                 }
             }
         }
-        let state = Reducer::reduce(&self.store).ok();
-        let latest_main_entry = || {
-            self.store
-                .entries()
-                .iter()
-                .rev()
-                .find(|entry| entry.lane == "main")
-                .map(|entry| entry.id.clone())
-        };
-        let parent_id = state
-            .as_ref()
-            .and_then(|state| state.lane("main"))
-            .and_then(|lane| {
-                if lane.open_operation.is_some() {
-                    latest_main_entry().or_else(|| lane.leaf_id.clone())
-                } else {
-                    lane.leaf_id.clone()
-                }
-            })
-            .or_else(|| latest_main_entry());
+        let parent_id = Reducer::reduce(&self.store)
+            .ok()
+            .and_then(|state| state.lane("main").and_then(|lane| lane.leaf_id.clone()))
+            .or_else(|| {
+                self.store
+                    .entries()
+                    .iter()
+                    .rev()
+                    .find(|entry| entry.lane == "main")
+                    .map(|entry| entry.id.clone())
+            });
         let seq = self.next_seq();
         let terminate = matches!(
             &message,
@@ -3252,66 +3243,6 @@ mod tests {
                 .iter()
                 .any(|e| matches!(&e.message, AgentMessage::Assistant { .. })),
             "assistant entry should be present"
-        );
-    }
-
-    #[test]
-    fn main_tool_result_stays_on_the_active_branch() {
-        let (_dir, path) = temp_session();
-        let mut harness = CodingSessionHarness::open(&path).unwrap();
-        let run_id = harness.unique_run_id("test").unwrap();
-        harness
-            .begin_run(&run_id, AgentMessage::user("inspect", vec![]))
-            .unwrap();
-        harness.prepare_assistant_attempt(&run_id).unwrap();
-        harness
-            .append_message(AgentMessage::Assistant {
-                content: None,
-                tool_calls: Some(vec![threadlane_provider::openai::ToolCall {
-                    id: "call-1".into(),
-                    r#type: "function".into(),
-                    function: threadlane_provider::openai::ToolCallFunction {
-                        name: "read_file".into(),
-                        arguments: "{}".into(),
-                    },
-                    thought_signature: None,
-                }]),
-                stop_reason: None,
-                deferred_handle: None,
-            })
-            .unwrap();
-        harness
-            .append_message(AgentMessage::Tool {
-                tool_call_id: "call-1".into(),
-                name: "read_file".into(),
-                content: "done".into(),
-                is_error: false,
-                terminate: false,
-            })
-            .unwrap();
-        harness
-            .append_message(AgentMessage::Assistant {
-                content: Some("finished".into()),
-                tool_calls: None,
-                stop_reason: Some("end_turn".into()),
-                deferred_handle: None,
-            })
-            .unwrap();
-
-        let store = threadlane_runtime::harness::JsonlStore::open_read_only(&path).unwrap();
-        let branch = store.model_context("main").unwrap().messages();
-        assert!(matches!(
-            branch.get(1),
-            Some(AgentMessage::Assistant {
-                tool_calls: Some(_),
-                ..
-            })
-        ));
-        assert!(
-            matches!(branch.get(2), Some(AgentMessage::Tool { tool_call_id, .. }) if tool_call_id == "call-1")
-        );
-        assert!(
-            matches!(branch.get(3), Some(AgentMessage::Assistant { content: Some(content), .. }) if content == "finished")
         );
     }
 

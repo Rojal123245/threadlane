@@ -34,7 +34,7 @@ use crate::screens::sidebar::SidebarView;
 use crate::screens::terminal::TerminalView;
 use crate::services::updater::{self, UpdaterEvent};
 use crate::state::{
-    compute_full_session_projection, compute_message_page, AppState, SessionHydrationRequest,
+    compute_full_session_projection, compute_session_messages, AppState, SessionHydrationRequest,
     WorkspacePage,
 };
 use threadlane_updater::UpdateStatus;
@@ -123,18 +123,14 @@ impl WorkspaceView {
                 let history_file = request.session_file.clone();
                 let history = cx
                     .background_executor()
-                    .spawn(async move { compute_message_page(&history_file, None, 0) })
+                    .spawn(async move { compute_session_messages(&history_file) })
                     .await;
                 let _ = model.update(cx, |state, cx| {
                     if state.active_session_id.as_deref() != Some(&request.session_id) {
                         return;
                     }
                     match history {
-                        Ok(page) => state.apply_initial_message_page(
-                            &request.session_id,
-                            &request.session_file,
-                            page,
-                        ),
+                        Ok(messages) => state.apply_session_messages(&request.session_id, messages),
                         Err(error) => {
                             state.session_status = Some(format!("Could not load session: {error}"))
                         }

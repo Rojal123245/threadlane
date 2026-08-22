@@ -22,9 +22,7 @@ use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable, WindowExt
 
 use crate::app::{actions::AppAction, controller};
 use crate::screens::editor::EditorView;
-use crate::state::{
-    compute_message_page, AppState, ChatMessageInfo, MessageRole, ToolActivityInfo, TrajectoryEntry,
-};
+use crate::state::{AppState, ChatMessageInfo, MessageRole, ToolActivityInfo, TrajectoryEntry};
 use threadlane_session::commands::{available_slash_commands, SlashCommandInfo};
 use threadlane_session::{ImageAttachment, PlanItemStatus, ReasoningEffort, SessionPlan};
 
@@ -262,7 +260,6 @@ pub struct ChatListView {
     pasted_images: Vec<ImageAttachment>,
     last_session_key: Option<(std::path::PathBuf, String)>,
     initial_scroll_frames: u8,
-    older_load_pending: bool,
     current_tab: CentralTab,
     editor: Entity<EditorView>,
     trajectory_mode: TrajectoryMode,
@@ -436,7 +433,6 @@ impl ChatListView {
             pasted_images: Vec::new(),
             last_session_key: None,
             initial_scroll_frames: 0,
-            older_load_pending: false,
             current_tab: CentralTab::Chat,
             editor,
             trajectory_mode: TrajectoryMode::Execution,
@@ -3363,7 +3359,7 @@ impl ChatListView {
 
 impl Render for ChatListView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (messages, is_new_task, active_plan, session_key, has_older, is_generating) = {
+        let (messages, is_new_task, active_plan, session_key, is_generating) = {
             let state = self.model.read(cx);
             (
                 state.messages.clone(),
@@ -3373,7 +3369,6 @@ impl Render for ChatListView {
                     .active_work_dir
                     .clone()
                     .zip(state.active_session_id.clone()),
-                state.has_older_messages(),
                 state.is_generating,
             )
         };
@@ -3405,39 +3400,6 @@ impl Render for ChatListView {
         if self.initial_scroll_frames > 0 {
             self.transcript_list_state.scroll_to_end();
             self.initial_scroll_frames = self.initial_scroll_frames.saturating_sub(1);
-        }
-        if has_older
-            && self.initial_scroll_frames == 0
-            && !self.older_load_pending
-            && self.transcript_list_state.logical_scroll_top().item_ix <= 1
-        {
-            self.older_load_pending = true;
-            let model = self.model.clone();
-            cx.spawn(async move |this, cx| {
-                let request = model.update(cx, |state, _cx| state.history_page_request());
-                if let Some((session_file, cursor, page_serial)) = request {
-                    let page_file = session_file.clone();
-                    let page = cx
-                        .background_executor()
-                        .spawn(async move {
-                            compute_message_page(&page_file, Some(cursor), page_serial)
-                        })
-                        .await;
-                    model.update(cx, |state, cx| {
-                        let added = page
-                            .map(|page| state.apply_older_message_page(&session_file, page))
-                            .unwrap_or_default();
-                        if added > 0 {
-                            cx.notify();
-                        }
-                    });
-                }
-                let _ = this.update(cx, |view, cx| {
-                    view.older_load_pending = false;
-                    cx.notify();
-                });
-            })
-            .detach();
         }
         let theme = cx.theme().colors;
 

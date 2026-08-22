@@ -3,9 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use threadlane_session::harness::{
-    read_transcript_page, JsonlStore, SessionStore, TranscriptCursor, TranscriptItem,
-};
+use threadlane_session::harness::{JsonlStore, SessionStore};
 use threadlane_session::{
     AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, SessionPlan, TokenUsage,
 };
@@ -14,7 +12,6 @@ use crate::adapters::agent_events::{adapt_agent_event, ChatAgentUpdate};
 use crate::persistence::load_project_registry;
 use crate::services::sessions::{ExecutionMode, SessionRuntime, SessionRuntimeStatus};
 
-const CHAT_HISTORY_PAGE_SIZE: usize = 40;
 pub type AttachedProject = threadlane_session::ProjectRecord;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -199,12 +196,6 @@ pub(crate) struct SessionProjectionResult {
     pub(crate) token_usage: TokenUsage,
 }
 
-#[derive(Default)]
-pub(crate) struct HistoryPageResult {
-    pub(crate) messages: Vec<ChatMessageInfo>,
-    pub(crate) next_cursor: Option<TranscriptCursor>,
-}
-
 pub struct AppState {
     pub(crate) projects: Vec<ProjectInfo>,
     pub(crate) active_work_dir: Option<PathBuf>,
@@ -213,9 +204,6 @@ pub struct AppState {
     pub(crate) search_query: String,
     pub(crate) messages: Arc<Vec<ChatMessageInfo>>,
     pub(crate) available_models: Vec<crate::model_catalog::ModelOption>,
-    history_session_file: Option<PathBuf>,
-    history_cursor: Option<TranscriptCursor>,
-    history_page_serial: u64,
     pub(crate) active_plan: SessionPlan,
     pub(crate) is_generating: bool,
     composer_text: String,
@@ -401,34 +389,16 @@ pub fn load_session_plan(session_file: &Path) -> SessionPlan {
 }
 
 pub fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
-    compute_message_page(session_file, None, 0)
-        .map(|page| page.messages)
-        .unwrap_or_default()
+    compute_session_messages(session_file).unwrap_or_default()
 }
 
-pub(crate) fn compute_message_page(
+pub(crate) fn compute_session_messages(
     session_file: &Path,
-    cursor: Option<TranscriptCursor>,
-    page_serial: u64,
-) -> Result<HistoryPageResult, String> {
-    let page = read_transcript_page(session_file, cursor, CHAT_HISTORY_PAGE_SIZE)
-        .map_err(|error| error.to_string())?;
-    let messages = page
-        .items
-        .into_iter()
-        .filter_map(|item| match item {
-            TranscriptItem::Message(message) => Some(message),
-            TranscriptItem::ContextCompacted(_) => None,
-        })
-        .collect();
-    let mut messages = project_agent_messages(messages);
-    for message in &mut messages {
-        message.id = format!("history-{page_serial}-{}", message.id);
-    }
-    Ok(HistoryPageResult {
-        messages,
-        next_cursor: page.next_cursor,
-    })
+) -> Result<Vec<ChatMessageInfo>, String> {
+    let store = JsonlStore::open_read_only(session_file).map_err(|error| error.to_string())?;
+    // UI history remains the complete durable chronological transcript. It is
+    // distinct from the compacted branch used as model context.
+    Ok(project_agent_messages(store.transcript("main").messages()))
 }
 
 /// Opens a session JSONL once and builds every UI projection required after hydration.
@@ -449,7 +419,6 @@ pub(crate) fn compute_full_session_projection(
 }
 
 fn tool_activity_summary(name: &str, arguments: &str) -> String {
-
     let display_name = name.replace('_', " ");
     let Ok(arguments) = serde_json::from_str::<serde_json::Value>(arguments) else {
         return display_name;
@@ -690,12 +659,10 @@ impl AppState {
         let model_roles = threadlane_session::ModelRoles::default();
         let mut session_runtimes = HashMap::new();
         let mut session_status = None;
-        let initial_history = active_session_file
+        let initial_messages = active_session_file
             .as_deref()
-            .and_then(|path| compute_message_page(path, None, 0).ok())
+            .map(load_session_messages)
             .unwrap_or_default();
-        let history_cursor = initial_history.next_cursor;
-        let initial_messages = initial_history.messages;
         let messages = match (active_work_dir.as_ref(), active_session_file.as_ref()) {
             (Some(work_dir), Some(session_file)) => {
                 let runtime = SessionRuntime::new(
@@ -727,9 +694,6 @@ impl AppState {
             search_query: String::new(),
             messages: Arc::new(messages),
             available_models,
-            history_session_file: active_session_file.clone(),
-            history_cursor,
-            history_page_serial: 0,
             active_plan: SessionPlan::default(),
             is_generating: false,
             composer_text: String::new(),
@@ -973,9 +937,6 @@ impl AppState {
         self.active_session_id = None;
         self.is_new_task = true;
         self.messages = Arc::new(Vec::new());
-        self.history_session_file = None;
-        self.history_cursor = None;
-        self.history_page_serial = 0;
         self.active_plan = SessionPlan::default();
         self.is_generating = false;
         self.session_status = None;
@@ -1003,9 +964,6 @@ impl AppState {
             self.active_session_id = None;
             self.is_new_task = true;
             self.messages = Arc::new(Vec::new());
-            self.history_session_file = None;
-            self.history_cursor = None;
-            self.history_page_serial = 0;
             self.active_plan = SessionPlan::default();
             self.is_generating = false;
             self.session_status = None;
@@ -1013,17 +971,6 @@ impl AppState {
             self.refresh_available_models();
             self.request_session_refresh(&work_dir);
         }
-    }
-
-    pub(crate) fn has_older_messages(&self) -> bool {
-        self.history_cursor.is_some()
-    }
-
-    pub(crate) fn history_page_request(&self) -> Option<(PathBuf, TranscriptCursor, u64)> {
-        self.history_session_file
-            .clone()
-            .zip(self.history_cursor)
-            .map(|(file, cursor)| (file, cursor, self.history_page_serial.wrapping_add(1)))
     }
 
     pub(crate) fn request_open_file(&mut self, relative_path: String) {
@@ -1071,9 +1018,6 @@ impl AppState {
             }
         }
         self.messages = Arc::new(Vec::new());
-        self.history_session_file = Some(session_file.clone());
-        self.history_cursor = None;
-        self.history_page_serial = 0;
         self.active_plan = SessionPlan::default();
         self.is_generating = runtime.is_generating();
         self.selected_model = runtime.selected_model.clone();
@@ -2170,19 +2114,14 @@ impl AppState {
             .and_then(|runtime| runtime_status_text(runtime.status()))
     }
 
-    pub(crate) fn apply_initial_message_page(
+    pub(crate) fn apply_session_messages(
         &mut self,
         session_id: &str,
-        session_file: &Path,
-        page: HistoryPageResult,
+        messages: Vec<ChatMessageInfo>,
     ) {
-        if self.active_session_id.as_deref() != Some(session_id) {
-            return;
+        if self.active_session_id.as_deref() == Some(session_id) {
+            self.messages = Arc::new(messages);
         }
-        self.messages = Arc::new(page.messages);
-        self.history_session_file = Some(session_file.to_path_buf());
-        self.history_cursor = page.next_cursor;
-        self.history_page_serial = 0;
     }
 
     pub(crate) fn apply_session_hydration(
@@ -2204,26 +2143,6 @@ impl AppState {
             .insert(session_id.to_owned(), result.metrics);
         self.session_token_usage
             .insert(session_id.to_owned(), result.token_usage);
-    }
-
-    /// Applies an older page that was computed off the UI thread.
-    pub(crate) fn apply_older_message_page(
-        &mut self,
-        session_file: &Path,
-        page: HistoryPageResult,
-    ) -> usize {
-        if self.history_session_file.as_deref() != Some(session_file) {
-            return 0;
-        }
-        let added = page.messages.len();
-        if added > 0 {
-            self.messages_mut().splice(0..0, page.messages);
-            self.history_cursor = page.next_cursor;
-            self.history_page_serial = self.history_page_serial.wrapping_add(1);
-        } else {
-            self.history_cursor = None;
-        }
-        added
     }
 
     fn record_trajectory(&mut self, session_id: &str, event: &AgentEvent) {
@@ -4063,20 +3982,21 @@ mod tests {
     }
 
     #[test]
-    fn session_message_page_uses_byte_cursor_and_unique_page_ids() {
+    fn session_messages_include_complete_durable_history() {
+        const CHAT_HISTORY_PAGE_SIZE_FOR_TEST: usize = 45;
         let unique = std::time::SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "threadlane-gpui-history-page-{}-{unique}",
+            "threadlane-gpui-complete-history-{}-{unique}",
             std::process::id()
         ));
         let path = root.join("session.jsonl");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let mut store = threadlane_session::harness::JsonlStore::open(&path).unwrap();
         let mut parent_id = None;
-        for index in 0..45 {
+        for index in 0..CHAT_HISTORY_PAGE_SIZE_FOR_TEST {
             let id = format!("node_{index}");
             store
                 .append_entry(threadlane_session::harness::Entry {
@@ -4096,20 +4016,10 @@ mod tests {
         }
         drop(store);
 
-        let newest = compute_message_page(&path, None, 0).unwrap();
-        assert_eq!(newest.messages.len(), CHAT_HISTORY_PAGE_SIZE);
-        assert_eq!(newest.messages.first().unwrap().content, "message-5");
-        assert_eq!(newest.messages.last().unwrap().content, "message-44");
-        assert!(newest.next_cursor.is_some());
-
-        let older = compute_message_page(&path, newest.next_cursor, 1).unwrap();
-        assert_eq!(older.messages.len(), 5);
-        assert_eq!(older.messages.first().unwrap().content, "message-0");
-        assert!(older.next_cursor.is_none());
-        assert!(newest
-            .messages
-            .iter()
-            .all(|newest| older.messages.iter().all(|older| newest.id != older.id)));
+        let messages = load_session_messages(&path);
+        assert_eq!(messages.len(), CHAT_HISTORY_PAGE_SIZE_FOR_TEST);
+        assert_eq!(messages.first().unwrap().content, "message-0");
+        assert_eq!(messages.last().unwrap().content, "message-44");
 
         let _ = std::fs::remove_dir_all(root);
     }
