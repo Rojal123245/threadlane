@@ -477,10 +477,14 @@ pub fn try_execute_tool_in_workspace(
             let mut entries = Vec::new();
             for entry in fs::read_dir(&validated_path)
                 .map_err(|e| format!("Error reading directory '{raw_path}': {e}"))?
-                .flatten()
             {
+                let entry = entry.map_err(|e| {
+                    format!("Error reading directory entry in '{raw_path}': {e}")
+                })?;
                 let name = entry.file_name().to_string_lossy().to_string();
-                let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                let is_dir = entry.file_type().map_err(|e| {
+                    format!("Error reading file type for '{raw_path}/{name}': {e}")
+                })?.is_dir();
                 let kind = if is_dir { "[DIR] " } else { "[FILE]" };
                 entries.push(format!("{kind} {name}"));
             }
@@ -704,7 +708,7 @@ fn get_repo_map_impl(workspace_root: &Path, rel_path: Option<&str>) -> Result<St
     };
 
     let mut lines = Vec::new();
-    walk_repo_skeleton(&target_dir, workspace_root, 0, &mut lines);
+    walk_repo_skeleton(&target_dir, workspace_root, 0, &mut lines)?;
 
     if lines.is_empty() {
         Ok("No source code definitions found in repository map.".to_string())
@@ -713,20 +717,32 @@ fn get_repo_map_impl(workspace_root: &Path, rel_path: Option<&str>) -> Result<St
     }
 }
 
-fn walk_repo_skeleton(dir: &Path, root: &Path, depth: usize, out: &mut Vec<String>) {
+fn walk_repo_skeleton(
+    dir: &Path,
+    root: &Path,
+    depth: usize,
+    out: &mut Vec<String>,
+) -> Result<(), String> {
     if depth > 4 {
-        return;
+        return Ok(());
     }
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    let mut sorted_entries: Vec<_> = entries.flatten().collect();
+    let entries = fs::read_dir(dir)
+        .map_err(|e| format!("Error reading directory '{}': {e}", dir.display()))?;
+    let mut sorted_entries = Vec::new();
+    for entry in entries {
+        sorted_entries.push(
+            entry.map_err(|e| {
+                format!("Error reading directory entry in '{}': {e}", dir.display())
+            })?,
+        );
+    }
     sorted_entries.sort_by_key(|e| e.file_name());
 
     for entry in sorted_entries {
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("Error reading file type for '{}': {e}", path.display()))?;
         if file_type.is_symlink() {
             continue;
         }
@@ -740,16 +756,14 @@ fn walk_repo_skeleton(dir: &Path, root: &Path, depth: usize, out: &mut Vec<Strin
             continue;
         }
 
-        let path = entry.path();
         if file_type.is_dir() {
-            walk_repo_skeleton(&path, root, depth + 1, out);
+            walk_repo_skeleton(&path, root, depth + 1, out)?;
         } else if file_type.is_file() {
             let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
             if matches!(ext, "rs" | "py" | "js" | "ts" | "go" | "toml") {
                 let rel = path.strip_prefix(root).unwrap_or(&path);
-                let Ok(content) = fs::read_to_string(&path) else {
-                    continue;
-                };
+                let content = fs::read_to_string(&path)
+                    .map_err(|e| format!("Error reading source file '{}': {e}", path.display()))?;
 
                 let mut symbols = Vec::new();
                 for (idx, line) in content.lines().enumerate() {
@@ -787,6 +801,7 @@ fn walk_repo_skeleton(dir: &Path, root: &Path, depth: usize, out: &mut Vec<Strin
             }
         }
     }
+    Ok(())
 }
 
 fn path_matches(file_name: &str, target_path: &str) -> bool {
@@ -1010,6 +1025,31 @@ mod tests {
         let res = execute_tool("list_dir", r#"{"path": "."}"#);
         assert!(res.contains("Cargo.toml"));
     }
+
+    #[test]
+    fn list_dir_returns_typed_error_for_regular_file() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("file.txt"), "content").unwrap();
+
+        let result =
+            try_execute_tool_in_workspace("list_dir", r#"{"path":"file.txt"}"#, dir.path());
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn list_dir_preserves_successful_output() {
+        let dir = tempdir().unwrap();
+        fs::create_dir(dir.path().join("alpha")).unwrap();
+        fs::write(dir.path().join("beta.txt"), "content").unwrap();
+
+        let typed =
+            try_execute_tool_in_workspace("list_dir", r#"{"path":"."}"#, dir.path()).unwrap();
+        let wrapped = execute_tool_in_workspace("list_dir", r#"{"path":"."}"#, dir.path());
+
+        assert_eq!(typed, "[DIR]  alpha\n[FILE] beta.txt");
+        assert_eq!(wrapped, typed);
+    }
     #[test]
     fn test_edit_file_hashline_schema_description() {
         let tools = get_available_tools();
@@ -1120,6 +1160,55 @@ mod tests {
         assert!(map_res.contains("src/main.rs"));
         assert!(map_res.contains("pub struct AppState"));
         assert!(map_res.contains("pub fn main()"));
+    }
+
+    #[test]
+    fn get_repo_map_returns_typed_error_for_regular_file() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("not-a-directory.rs"),
+            "pub fn visible() {}\n",
+        )
+        .unwrap();
+
+        let args = r#"{"path":"not-a-directory.rs"}"#;
+        let error = try_execute_tool_in_workspace("get_repo_map", args, dir.path())
+            .expect_err("regular files must not produce a successful map");
+
+        assert_eq!(
+            execute_tool_in_workspace("get_repo_map", args, dir.path()),
+            error
+        );
+    }
+
+    #[test]
+    fn get_repo_map_returns_typed_error_when_source_file_cannot_be_read_as_text() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("invalid.rs"), [0xff, 0xfe]).unwrap();
+
+        let result = try_execute_tool_in_workspace("get_repo_map", "{}", dir.path());
+
+        assert!(result.is_err(), "source read failures must not be skipped");
+    }
+
+    #[test]
+    fn get_repo_map_preserves_successful_output() {
+        let dir = tempdir().unwrap();
+        fs::create_dir(dir.path().join("src")).unwrap();
+        fs::write(
+            dir.path().join("src/lib.rs"),
+            "pub struct App {}\nfn helper() {}\n",
+        )
+        .unwrap();
+
+        let typed = try_execute_tool_in_workspace("get_repo_map", "{}", dir.path()).unwrap();
+        let wrapped = execute_tool_in_workspace("get_repo_map", "{}", dir.path());
+
+        assert_eq!(
+            typed,
+            "src/lib.rs\n  L1: pub struct App {}\n  L2: fn helper() {}"
+        );
+        assert_eq!(wrapped, typed);
     }
 
     #[test]
