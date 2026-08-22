@@ -4,7 +4,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use threadlane_session::harness::{
-    read_transcript_page, JsonlStore, SessionStore, TranscriptCursor,
+    read_transcript_page, JsonlStore, SessionStore, TranscriptCursor, TranscriptItem,
 };
 use threadlane_session::{
     AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, SessionPlan, TokenUsage,
@@ -413,7 +413,15 @@ pub(crate) fn compute_message_page(
 ) -> Result<HistoryPageResult, String> {
     let page = read_transcript_page(session_file, cursor, CHAT_HISTORY_PAGE_SIZE)
         .map_err(|error| error.to_string())?;
-    let mut messages = project_agent_messages(page.messages);
+    let messages = page
+        .items
+        .into_iter()
+        .filter_map(|item| match item {
+            TranscriptItem::Message(message) => Some(message),
+            TranscriptItem::ContextCompacted(_) => None,
+        })
+        .collect();
+    let mut messages = project_agent_messages(messages);
     for message in &mut messages {
         message.id = format!("history-{page_serial}-{}", message.id);
     }

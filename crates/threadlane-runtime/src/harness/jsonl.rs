@@ -135,15 +135,45 @@ impl TranscriptCursor {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct ContextCompactedMarker {
+    pub seq: u64,
+    pub timestamp: u64,
+    pub pre_tokens: usize,
+    pub post_tokens: usize,
+    pub reason: super::types::CompactionReason,
+    pub effective_model: String,
+    pub context_limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TranscriptItem {
+    Message(crate::types::AgentMessage),
+    ContextCompacted(ContextCompactedMarker),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct TranscriptPage {
-    pub messages: Vec<crate::types::AgentMessage>,
+    pub items: Vec<TranscriptItem>,
     pub next_cursor: Option<TranscriptCursor>,
     pub has_older: bool,
 }
 
+#[cfg(test)]
+impl TranscriptPage {
+    fn messages(&self) -> Vec<crate::types::AgentMessage> {
+        self.items
+            .iter()
+            .filter_map(|item| match item {
+                TranscriptItem::Message(message) => Some(message.clone()),
+                TranscriptItem::ContextCompacted(_) => None,
+            })
+            .collect()
+    }
+}
+
 const TRANSCRIPT_READ_CHUNK_BYTES: usize = 64 * 1024;
 
-/// Reads one chronological page of main-lane transcript messages by scanning
+/// Reads one chronological page of main-lane transcript items by scanning
 /// backward from an opaque byte cursor. This deliberately avoids opening a
 /// `JsonlStore`: UI transcript order depends only on durable entry order.
 pub fn read_transcript_page(
@@ -153,7 +183,7 @@ pub fn read_transcript_page(
 ) -> io::Result<TranscriptPage> {
     if minimum_messages == 0 {
         return Ok(TranscriptPage {
-            messages: Vec::new(),
+            items: Vec::new(),
             next_cursor: cursor,
             has_older: cursor.is_some(),
         });
@@ -163,7 +193,7 @@ pub fn read_transcript_page(
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(TranscriptPage {
-                messages: Vec::new(),
+                items: Vec::new(),
                 next_cursor: None,
                 has_older: false,
             });
@@ -179,7 +209,8 @@ pub fn read_transcript_page(
         requested_end
     };
     let mut suffix = Vec::new();
-    let mut messages = Vec::new();
+    let mut items = Vec::new();
+    let mut message_count = 0;
     let mut next_offset = 0;
 
     'chunks: while scan_end > 0 {
@@ -206,10 +237,14 @@ pub fn read_transcript_page(
             }
             let line_start = chunk_start + newline as u64 + 1;
             next_offset = line_start.saturating_sub(1);
-            if let Some(message) = transcript_message(path, line_start, &line)? {
-                let starts_turn = message.is_user();
-                messages.push(message);
-                if messages.len() >= minimum_messages && starts_turn {
+            if let Some(item) = transcript_item(path, line_start, &line)? {
+                let starts_turn =
+                    matches!(&item, TranscriptItem::Message(message) if message.is_user());
+                if matches!(item, TranscriptItem::Message(_)) {
+                    message_count += 1;
+                }
+                items.push(item);
+                if message_count >= minimum_messages && starts_turn {
                     break 'chunks;
                 }
             }
@@ -223,15 +258,15 @@ pub fn read_transcript_page(
 
     if scan_end == 0 && !suffix.is_empty() {
         next_offset = 0;
-        if let Some(message) = transcript_message(path, 0, &suffix)? {
-            messages.push(message);
+        if let Some(item) = transcript_item(path, 0, &suffix)? {
+            items.push(item);
         }
     }
 
-    messages.reverse();
+    items.reverse();
     let next_cursor = (next_offset > 0).then(|| TranscriptCursor::new(next_offset));
     Ok(TranscriptPage {
-        messages,
+        items,
         next_cursor,
         has_older: next_cursor.is_some(),
     })
@@ -261,11 +296,7 @@ fn complete_jsonl_end(file: &mut fs::File, end: u64) -> io::Result<u64> {
     Ok(0)
 }
 
-fn transcript_message(
-    path: &Path,
-    offset: u64,
-    line: &[u8],
-) -> io::Result<Option<crate::types::AgentMessage>> {
+fn transcript_item(path: &Path, offset: u64, line: &[u8]) -> io::Result<Option<TranscriptItem>> {
     let invalid = |error: &dyn std::fmt::Display| {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -275,8 +306,32 @@ fn transcript_message(
     let line = std::str::from_utf8(line).map_err(|error| invalid(&error))?;
     let parsed: SessionLine = serde_json::from_str(line).map_err(|error| invalid(&error))?;
     Ok(match parsed {
-        SessionLine::Entry(entry) if entry.lane == "main" => Some(entry.message),
-        SessionLine::Legacy(node) => Some(node.message),
+        SessionLine::Entry(entry) if entry.lane == "main" => match entry.message {
+            crate::types::AgentMessage::Custom {
+                ref custom_type, ..
+            } if custom_type == "compaction_summary" => None,
+            message => Some(TranscriptItem::Message(message)),
+        },
+        SessionLine::Legacy(node) => Some(TranscriptItem::Message(node.message)),
+        SessionLine::Record(Record::ContextCompacted {
+            seq,
+            lane,
+            timestamp,
+            pre_tokens,
+            post_tokens,
+            reason,
+            effective_model,
+            context_limit,
+            ..
+        }) if lane == "main" => Some(TranscriptItem::ContextCompacted(ContextCompactedMarker {
+            seq,
+            timestamp,
+            pre_tokens,
+            post_tokens,
+            reason,
+            effective_model: effective_model.as_str().to_owned(),
+            context_limit,
+        })),
         _ => None,
     })
 }
@@ -767,6 +822,7 @@ impl Record {
     fn sync_policy(&self) -> SyncPolicy {
         match self {
             Self::ContextManifestCaptured { .. }
+            | Self::ContextCompacted { .. }
             | Self::RunContextCaptured { .. }
             | Self::ProviderRequestStarted { .. }
             | Self::ProviderRequestFinished { .. }
@@ -1021,10 +1077,10 @@ fn invalid_line(path: &Path, line: usize, error: impl std::fmt::Display) -> io::
 
 #[cfg(test)]
 mod tests {
-    use super::{read_entries, read_transcript_page, SyncPolicy, TranscriptCursor};
+    use super::{read_entries, read_transcript_page, SyncPolicy, TranscriptCursor, TranscriptItem};
     use crate::harness::{
-        AgentHarness, ContextItemSource, ContextItemStatus, ContextManifestItem, HarnessEventHub,
-        JsonlStore, Record, Reducer, SessionStore, TraceString,
+        AgentHarness, CompactionReason, ContextItemSource, ContextItemStatus, ContextManifestItem,
+        HarnessEventHub, JsonlStore, Record, Reducer, SessionStore, TraceString,
     };
     use crate::types::AgentMessage;
 
@@ -1093,7 +1149,7 @@ mod tests {
 
         let newest = read_transcript_page(&path, None, 4).unwrap();
         assert_eq!(
-            newest.messages,
+            newest.messages(),
             vec![
                 AgentMessage::user("user-4", Vec::new()),
                 assistant("assistant-4"),
@@ -1105,7 +1161,7 @@ mod tests {
 
         let older = read_transcript_page(&path, newest.next_cursor, 4).unwrap();
         assert_eq!(
-            older.messages,
+            older.messages(),
             vec![
                 AgentMessage::user("user-2", Vec::new()),
                 assistant("assistant-2"),
@@ -1136,8 +1192,11 @@ mod tests {
 
         let page = read_transcript_page(&path, None, 2).unwrap();
 
-        assert_eq!(page.messages.len(), 3);
-        assert_eq!(page.messages[0], AgentMessage::user("current", Vec::new()));
+        assert_eq!(page.messages().len(), 3);
+        assert_eq!(
+            page.messages()[0],
+            AgentMessage::user("current", Vec::new())
+        );
     }
 
     #[test]
@@ -1155,7 +1214,7 @@ mod tests {
         let page = read_transcript_page(&path, None, 1).unwrap();
 
         assert_eq!(
-            page.messages,
+            page.messages(),
             vec![AgentMessage::user("legacy", Vec::new())]
         );
         assert!(!page.has_older);
@@ -1172,7 +1231,7 @@ mod tests {
 
         let page = read_transcript_page(&path, Some(TranscriptCursor::new(u64::MAX)), 2).unwrap();
 
-        assert_eq!(page.messages.len(), 2);
+        assert_eq!(page.messages().len(), 2);
     }
 
     #[test]
@@ -1199,7 +1258,7 @@ mod tests {
 
         let page = read_transcript_page(&path, None, 2).unwrap();
 
-        assert_eq!(page.messages.len(), 2);
+        assert_eq!(page.messages().len(), 2);
         assert!(page.has_older);
     }
 
@@ -1609,6 +1668,10 @@ mod tests {
             attempt: 1,
             request_id: TraceString::new("provider-req-1").unwrap(),
             total_estimated_tokens: Some(177),
+            effective_model: None,
+            context_limit: None,
+            context_limit_is_estimate: false,
+            compaction_generation: 0,
             items,
         };
 
@@ -1650,5 +1713,99 @@ mod tests {
         let reduced = Reducer::reduce(&reloaded).unwrap();
         assert_eq!(reduced.lanes.len(), 1);
         assert_eq!(reduced.lanes[0].name, "main");
+    }
+
+    #[test]
+    fn legacy_context_manifest_deserializes_without_new_metadata() {
+        let json = r#"{"ContextManifestCaptured":{"id":"manifest","seq":2,"lane":"main","timestamp":2,"run_id":"run","attempt":1,"request_id":"request","items":[]}}"#;
+        let record: Record = serde_json::from_str(json).unwrap();
+        let Record::ContextManifestCaptured {
+            effective_model,
+            context_limit,
+            context_limit_is_estimate,
+            compaction_generation,
+            ..
+        } = record
+        else {
+            panic!("expected manifest")
+        };
+        assert_eq!(effective_model, None);
+        assert_eq!(context_limit, None);
+        assert!(!context_limit_is_estimate);
+        assert_eq!(compaction_generation, 0);
+    }
+
+    #[test]
+    fn compaction_telemetry_round_trips() {
+        let record = Record::ContextCompacted {
+            id: "compaction-42".into(),
+            seq: 42,
+            lane: "main".into(),
+            timestamp: 42,
+            run_id: "run".into(),
+            generation: 2,
+            reason: CompactionReason::AdaptiveBudget,
+            effective_model: TraceString::new("model").unwrap(),
+            context_limit: 128_000,
+            context_limit_is_estimate: true,
+            pre_tokens: 742_000,
+            post_tokens: 118_000,
+            retained_tail_target: 32_000,
+            retained_tail_tokens: 30_000,
+            compacted_messages: 40,
+        };
+        let encoded = serde_json::to_string(&record).unwrap();
+        assert_eq!(serde_json::from_str::<Record>(&encoded).unwrap(), record);
+    }
+
+    #[test]
+    fn transcript_page_orders_compaction_marker_without_exposing_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let lines = vec![
+            serde_json::to_string(&transcript_entry(
+                0,
+                AgentMessage::User {
+                    content: "before".into(),
+                },
+            ))
+            .unwrap(),
+            serde_json::to_string(&transcript_entry(
+                1,
+                AgentMessage::Custom {
+                    custom_type: "compaction_summary".into(),
+                    payload: serde_json::json!({"summary": "internal"}),
+                },
+            ))
+            .unwrap(),
+            serde_json::to_string(&Record::ContextCompacted {
+                id: "compaction-marker".into(),
+                seq: 3,
+                lane: "main".into(),
+                timestamp: 3,
+                run_id: "run".into(),
+                generation: 1,
+                reason: CompactionReason::AdaptiveBudget,
+                effective_model: TraceString::new("model").unwrap(),
+                context_limit: 128_000,
+                context_limit_is_estimate: false,
+                pre_tokens: 130_000,
+                post_tokens: 30_000,
+                retained_tail_target: 32_000,
+                retained_tail_tokens: 25_000,
+                compacted_messages: 10,
+            })
+            .unwrap(),
+            serde_json::to_string(&transcript_entry(3, assistant("after"))).unwrap(),
+        ];
+        std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+
+        let page = read_transcript_page(&path, None, 2).unwrap();
+        assert!(matches!(page.items[0], TranscriptItem::Message(_)));
+        assert!(matches!(page.items[1], TranscriptItem::ContextCompacted(_)));
+        assert!(matches!(page.items[2], TranscriptItem::Message(_)));
+        assert!(!page.items.iter().any(|item| matches!(item,
+            TranscriptItem::Message(AgentMessage::Custom { custom_type, .. }) if custom_type == "compaction_summary"
+        )));
     }
 }

@@ -31,7 +31,10 @@ pub use events::{
 pub use hooks::{
     HookContext, HookEffect, HookFailure, HookHandler, HookKind, HookRegistry, HookRun,
 };
-pub use jsonl::{read_transcript_page, JsonlStore, TranscriptCursor, TranscriptPage};
+pub use jsonl::{
+    read_transcript_page, ContextCompactedMarker, JsonlStore, TranscriptCursor, TranscriptItem,
+    TranscriptPage,
+};
 pub use memory::MemoryStore;
 pub use procedure::{
     AbortProcedure, AssistantAttemptProcedure, CompactionProcedure, DeferredProcedure,
@@ -56,11 +59,12 @@ pub use trajectory::{
 };
 pub use types::{
     sanitize_tool_args, AbortInitiator, AbortObservation, AbortTarget, AcceptedRun,
-    BoundedPromptText, BoundedText, CapabilitySnapshot, ContextItemSource, ContextItemStatus,
-    ContextManifestItem, Entry, ErrorCategory, InterruptedSubagentLane, LaneState, LaneStatus,
-    OperationIntent, OperationOutcome, PermissionTraceDecision, PermissionTraceScope,
-    PermissionTraceSource, PromptSnapshot, ProviderErrorSummary, ProviderOutcome, ProvisionedEntry,
-    QueueKind, QueuedEntry, Record, RecoveryResult, ReduceError, ReducedState, RetryState,
-    StreamCheckpointKind, SubagentLifecyclePhase, SurfaceOperation, ToolExecutionOutcome,
-    ToolExecutionPhase, ToolReplaySafety, ToolResult, ToolSpec, ToolState, TraceString, UsageCause,
+    BoundedPromptText, BoundedText, CapabilitySnapshot, CompactionReason, ContextItemSource,
+    ContextItemStatus, ContextManifestItem, Entry, ErrorCategory, InterruptedSubagentLane,
+    LaneState, LaneStatus, OperationIntent, OperationOutcome, PermissionTraceDecision,
+    PermissionTraceScope, PermissionTraceSource, PromptSnapshot, ProviderErrorSummary,
+    ProviderOutcome, ProvisionedEntry, QueueKind, QueuedEntry, Record, RecoveryResult, ReduceError,
+    ReducedState, RetryState, StreamCheckpointKind, SubagentLifecyclePhase, SurfaceOperation,
+    ToolExecutionOutcome, ToolExecutionPhase, ToolReplaySafety, ToolResult, ToolSpec, ToolState,
+    TraceString, UsageCause,
 };

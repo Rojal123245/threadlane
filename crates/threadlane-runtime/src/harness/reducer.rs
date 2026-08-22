@@ -691,6 +691,7 @@ impl ReductionContext {
             }
             Record::RunContextCaptured { run_id, .. }
             | Record::ContextManifestCaptured { run_id, .. }
+            | Record::ContextCompacted { run_id, .. }
             | Record::ProviderRequestStarted { run_id, .. }
             | Record::ProviderRequestFinished { run_id, .. }
             | Record::ProviderResponseAttached { run_id, .. }
@@ -1053,6 +1054,7 @@ impl ReductionContext {
             }
             Record::RunContextCaptured { .. }
             | Record::ContextManifestCaptured { .. }
+            | Record::ContextCompacted { .. }
             | Record::ProviderRequestStarted { .. }
             | Record::ProviderRequestFinished { .. }
             | Record::ProviderResponseAttached { .. }

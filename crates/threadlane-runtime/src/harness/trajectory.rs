@@ -1089,6 +1089,10 @@ mod tests {
                 attempt: 1,
                 request_id: TraceString::new("req-123").unwrap(),
                 total_estimated_tokens: Some(50),
+                effective_model: None,
+                context_limit: None,
+                context_limit_is_estimate: false,
+                compaction_generation: 0,
                 items,
             })
             .unwrap();

@@ -374,9 +374,12 @@ impl CodingSessionHarness {
             ProviderTraceEvent::ContextManifest {
                 attempt,
                 request_id,
+                model,
+                context_limit,
+                context_limit_is_estimate,
+                compaction_generation,
                 total_estimated_tokens,
                 items,
-                ..
             } => HarnessRecord::ContextManifestCaptured {
                 id: format!("context-manifest-{run_id}-{request_id}"),
                 seq,
@@ -386,6 +389,10 @@ impl CodingSessionHarness {
                 attempt,
                 request_id: TraceString::new(request_id)?,
                 total_estimated_tokens,
+                effective_model: Some(TraceString::new(model)?),
+                context_limit,
+                context_limit_is_estimate,
+                compaction_generation,
                 items,
             },
             ProviderTraceEvent::Checkpoint {
