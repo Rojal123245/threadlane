@@ -114,9 +114,22 @@ struct LegacySessionNode {
     message: crate::types::AgentMessage,
 }
 
+#[derive(Debug, serde::Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AtomicBatchItem {
+    Entry(Entry),
+    Record(Record),
+}
+
+#[derive(Debug, serde::Serialize, Deserialize)]
+struct AtomicBatchLine {
+    atomic_batch: Vec<AtomicBatchItem>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum SessionLine {
+    AtomicBatch(AtomicBatchLine),
     Record(Record),
     Entry(Entry),
     Known(KnownSessionRecord),
@@ -306,6 +319,44 @@ fn transcript_item(path: &Path, offset: u64, line: &[u8]) -> io::Result<Option<T
     let line = std::str::from_utf8(line).map_err(|error| invalid(&error))?;
     let parsed: SessionLine = serde_json::from_str(line).map_err(|error| invalid(&error))?;
     Ok(match parsed {
+        SessionLine::AtomicBatch(batch) => batch
+            .atomic_batch
+            .iter()
+            .find_map(|item| match item {
+                AtomicBatchItem::Record(Record::ContextCompacted {
+                    seq,
+                    lane,
+                    timestamp,
+                    pre_tokens,
+                    post_tokens,
+                    reason,
+                    effective_model,
+                    context_limit,
+                    ..
+                }) if lane == "main" => {
+                    Some(TranscriptItem::ContextCompacted(ContextCompactedMarker {
+                        seq: *seq,
+                        timestamp: *timestamp,
+                        pre_tokens: *pre_tokens,
+                        post_tokens: *post_tokens,
+                        reason: *reason,
+                        effective_model: effective_model.as_str().to_owned(),
+                        context_limit: *context_limit,
+                    }))
+                }
+                _ => None,
+            })
+            .or_else(|| {
+                batch.atomic_batch.into_iter().find_map(|item| match item {
+                    AtomicBatchItem::Entry(entry) if entry.lane == "main" => match entry.message {
+                        crate::types::AgentMessage::Custom {
+                            ref custom_type, ..
+                        } if custom_type == "compaction_summary" => None,
+                        message => Some(TranscriptItem::Message(message)),
+                    },
+                    _ => None,
+                })
+            }),
         SessionLine::Entry(entry) if entry.lane == "main" => match entry.message {
             crate::types::AgentMessage::Custom {
                 ref custom_type, ..
@@ -575,6 +626,91 @@ impl SessionStore for JsonlStore {
 
     fn records(&self) -> &[Record] {
         &self.records
+    }
+
+    fn append_actions_atomically(
+        &mut self,
+        actions: &[super::EffectAction],
+    ) -> Result<(), ReduceError> {
+        if !self.writable {
+            return Err(ReduceError::Storage("session store is read-only".into()));
+        }
+        let claim = self.claim.clone();
+        let _guard = claim
+            .gate
+            .lock()
+            .map_err(|error| ReduceError::Storage(error.to_string()))?;
+        if !self
+            .is_fresh()
+            .map_err(|error| ReduceError::Storage(error.to_string()))?
+        {
+            self.reload_unlocked()?;
+        }
+
+        // Validate and sequence the complete group against a disposable reducer.
+        // Nothing reaches disk or observable in-memory state until every logical
+        // checkpoint/tail/telemetry boundary has passed validation.
+        let mut reduction = self.reduction.clone();
+        let mut next_seq = self.next_seq();
+        let mut items = Vec::with_capacity(actions.len());
+        let final_main_leaf = actions.iter().rev().find_map(|action| match action {
+            super::EffectAction::AppendEntry { entry } if entry.lane == "main" => {
+                Some(entry.id.clone())
+            }
+            _ => None,
+        });
+        // Entries establish the complete parent chain before the lane move makes
+        // that chain canonical; operational/telemetry records follow it.
+        for action in actions
+            .iter()
+            .filter(|action| matches!(action, super::EffectAction::AppendEntry { .. }))
+            .chain(
+                actions
+                    .iter()
+                    .filter(|action| matches!(action, super::EffectAction::AppendRecord { .. })),
+            )
+        {
+            match action {
+                super::EffectAction::AppendEntry { entry } => {
+                    let mut entry = entry.clone();
+                    entry.seq = next_seq;
+                    next_seq += 1;
+                    reduction.entry_guard(&entry)?;
+                    if entry.lane == "main" {
+                        reduction.set_preferred_leaf_main(entry.id.clone());
+                    }
+                    reduction.commit_entry(&entry);
+                    items.push(AtomicBatchItem::Entry(entry));
+                }
+                super::EffectAction::AppendRecord { record, .. } => {
+                    let mut record = record.clone().with_seq(next_seq);
+                    if let (Record::LaneMoved { target_leaf_id, .. }, Some(leaf)) =
+                        (&mut record, &final_main_leaf)
+                    {
+                        *target_leaf_id = leaf.clone();
+                    }
+                    next_seq += 1;
+                    reduction.record_guard(&record)?;
+                    reduction.commit_record(&record);
+                    items.push(AtomicBatchItem::Record(record));
+                }
+            }
+        }
+
+        // A batch is serialized as one JSONL frame and synced before success is
+        // reported. The leading newline is intentional: after a crash leaves a
+        // partial final frame, the next append quarantines that frame instead of
+        // concatenating onto it. Recovery recognizes only that reserved torn
+        // atomic-frame prefix; existing canonical bytes are never truncated or
+        // rewritten.
+        append_atomic_batch_line(
+            &self.path,
+            &AtomicBatchLine {
+                atomic_batch: items,
+            },
+        )?;
+        self.reload_unlocked()?;
+        Ok(())
     }
 
     fn append_entry(&mut self, mut entry: Entry) -> Result<(), ReduceError> {
@@ -869,6 +1005,9 @@ fn append_session_json_line_with_policy<T: serde::Serialize>(
         .create(true)
         .append(true)
         .open(path)?;
+    // The separator also quarantines a crash-torn atomic batch if ordinary
+    // session traffic is the first append after recovery.
+    file.write_all(b"\n")?;
     serde_json::to_writer(&mut file, value).map_err(io::Error::other)?;
     file.write_all(b"\n")?;
     match sync_policy {
@@ -894,6 +1033,26 @@ fn append_json_line<T: serde::Serialize>(
         .map_err(|error| ReduceError::Storage(error.to_string()))
 }
 
+fn append_atomic_batch_line(path: &Path, value: &AtomicBatchLine) -> Result<(), ReduceError> {
+    let encoded =
+        serde_json::to_vec(value).map_err(|error| ReduceError::Storage(error.to_string()))?;
+    static APPEND_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = APPEND_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|error| ReduceError::Storage(error.to_string()))?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| ReduceError::Storage(error.to_string()))?;
+    file.write_all(b"\n")
+        .and_then(|_| file.write_all(&encoded))
+        .and_then(|_| file.write_all(b"\n"))
+        .and_then(|_| file.sync_all())
+        .map_err(|error| ReduceError::Storage(error.to_string()))
+}
+
 /// Typed classification entry point retained for focused compatibility tests.
 #[cfg(test)]
 fn read_entries(path: &Path) -> io::Result<(String, Option<String>, Vec<Entry>, Vec<Record>)> {
@@ -914,6 +1073,19 @@ fn classify_lines(
     let mut records = Vec::new();
     for (index, line) in lines.into_iter().enumerate() {
         match line {
+            SessionLine::AtomicBatch(batch) => {
+                for item in batch.atomic_batch {
+                    match item {
+                        AtomicBatchItem::Entry(entry) => {
+                            if entry.lane == "main" {
+                                preferred_leaf = Some(entry.id.clone());
+                            }
+                            entries.push(entry);
+                        }
+                        AtomicBatchItem::Record(record) => records.push(record),
+                    }
+                }
+            }
             SessionLine::Record(record) => records.push(record),
             SessionLine::Entry(entry) => {
                 if entry.lane == "main" {
@@ -1062,6 +1234,10 @@ fn read_strict<T: DeserializeOwned>(path: &Path) -> io::Result<Vec<T>> {
         match serde_json::from_str(line) {
             Ok(value) => values.push(value),
             Err(_error) if is_torn_tail => break,
+            // Atomic batches reserve this prefix specifically so a subsequent
+            // append can quarantine a crash-torn frame without truncating the
+            // canonical journal. Other malformed complete lines remain fatal.
+            Err(_error) if line.starts_with("{\"atomic_batch\":[") => continue,
             Err(error) => return Err(invalid_line(path, index + 1, error)),
         }
     }
@@ -1807,5 +1983,52 @@ mod tests {
         assert!(!page.items.iter().any(|item| matches!(item,
             TranscriptItem::Message(AgentMessage::Custom { custom_type, .. }) if custom_type == "compaction_summary"
         )));
+    }
+
+    #[test]
+    fn torn_atomic_frame_is_quarantined_without_truncating_canonical_bytes() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("atomic-torn.jsonl");
+        let mut store = JsonlStore::open(&path).unwrap();
+        store.append_entry(user_entry("root", "main")).unwrap();
+        drop(store);
+
+        let canonical = std::fs::read(&path).unwrap();
+        let torn = b"{\"atomic_batch\":[{\"Entry\":{";
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(torn).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        let mut recovered = JsonlStore::open(&path).unwrap();
+        recovered
+            .append_record(Record::FactSet {
+                id: "fact-after-crash".into(),
+                seq: 0,
+                lane: "main".into(),
+                timestamp: 1,
+                run_id: None,
+                key: "recovered".into(),
+                value: "true".into(),
+            })
+            .unwrap();
+        drop(recovered);
+
+        let durable = std::fs::read(&path).unwrap();
+        assert!(durable.starts_with(&canonical));
+        assert_eq!(
+            &durable[canonical.len()..canonical.len() + torn.len()],
+            torn
+        );
+        let reopened = JsonlStore::open(&path).unwrap();
+        assert!(reopened
+            .records()
+            .iter()
+            .any(|record| record.id() == "fact-after-crash"));
     }
 }

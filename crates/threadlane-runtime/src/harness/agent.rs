@@ -484,6 +484,13 @@ impl<S: SessionStore> AgentHarness<S> {
         )
     }
 
+    pub fn drive_to_completion_atomically(&mut self) -> Result<(), ProcedureError> {
+        self.effects
+            .run_to_completion_atomically(&mut self.store)
+            .map(|_| ())
+            .map_err(ProcedureError::Effects)
+    }
+
     pub fn accept_compaction_on_lane(
         &mut self,
         lane: &str,

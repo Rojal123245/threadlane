@@ -806,19 +806,20 @@ impl<'a> TurnDriver<'a> {
                 });
 
                 if !self.steering_queue.is_empty() {
-                    let items: Vec<_> = self.steering_queue.drain(..).collect();
+                    let items = self.steering_queue.clone();
                     if let Err(error) = self.persist_messages(&items).await {
                         self.emit_event(AgentEvent::AgentError {
                             error: format!("failed to persist steering before retry: {error}"),
                         });
                         return;
                     }
+                    self.steering_queue.clear();
                     self.turn.lock().await.messages.extend(items);
                     continue;
                 }
 
                 if !self.follow_up_queue.is_empty() {
-                    let items: Vec<_> = self.follow_up_queue.drain(..).collect();
+                    let items = self.follow_up_queue.clone();
                     if let Err(error) = self.persist_messages(&items).await {
                         self.emit_event(AgentEvent::AgentError {
                             error: format!(
@@ -827,6 +828,7 @@ impl<'a> TurnDriver<'a> {
                         });
                         return;
                     }
+                    self.follow_up_queue.clear();
                     self.turn.lock().await.messages.extend(items);
                     continue;
                 }

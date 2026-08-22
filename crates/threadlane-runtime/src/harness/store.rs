@@ -104,6 +104,16 @@ pub trait SessionStore {
     fn reduced_state(&self) -> Option<ReducedState> {
         None
     }
+    /// Commits a related group as one durable unit. Stores that do not support
+    /// atomic append groups reject the operation rather than exposing a prefix.
+    fn append_actions_atomically(
+        &mut self,
+        _actions: &[super::EffectAction],
+    ) -> Result<(), ReduceError> {
+        Err(ReduceError::Storage(
+            "atomic append groups are not supported by this store".into(),
+        ))
+    }
     fn next_sequence(&self) -> u64 {
         self.entries()
             .iter()

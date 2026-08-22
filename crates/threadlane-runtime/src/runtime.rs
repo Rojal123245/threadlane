@@ -1076,7 +1076,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preparation_failure_starts_no_provider_activity() {
+    async fn compaction_persistence_failure_sends_zero_fake_provider_requests() {
         let order = Arc::new(std::sync::Mutex::new(Vec::new()));
         let provider = Arc::new(RecordingProvider {
             order: order.clone(),
@@ -1108,8 +1108,11 @@ mod tests {
                 Ok(())
             })
         })));
+        // The session layer installs this boundary hook around the durable
+        // checkpoint+tail+telemetry commit. Its error must stop the attempt
+        // before either provider tracing or ProviderPort::stream_request.
         runtime.set_provider_boundary_preparer(Some(Arc::new(|_| {
-            Box::pin(async { Err("preparation failed".into()) })
+            Box::pin(async { Err("compaction persistence failed: disk full".into()) })
         })));
 
         runtime.run_turns().await;
@@ -1236,5 +1239,59 @@ mod tests {
         runtime.run_turns().await;
 
         assert!(message_counts.lock().unwrap()[0] < original_count);
+    }
+
+    #[tokio::test]
+    async fn terminal_queue_persistence_failure_retains_steering_and_follow_up() {
+        for steering in [true, false] {
+            let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let provider = Arc::new(RecordingProvider {
+                order: order.clone(),
+                message_counts: Arc::new(std::sync::Mutex::new(Vec::new())),
+                request_tools: Arc::new(std::sync::Mutex::new(Vec::new())),
+            });
+            let mut runtime = AgentRuntime::new_with_provider(
+                "",
+                None,
+                "test-model",
+                None,
+                AgentConfig::default(),
+                provider,
+            )
+            .unwrap();
+            runtime.turn.lock().await.messages = vec![AgentMessage::user("initial", Vec::new())];
+            let queued = AgentMessage::user(
+                if steering {
+                    "queued steer"
+                } else {
+                    "queued follow-up"
+                },
+                Vec::new(),
+            );
+            if steering {
+                runtime.steering_queue.push(queued.clone());
+            } else {
+                runtime.follow_up_queue.push(queued.clone());
+            }
+            runtime.set_message_recorder(Some(Arc::new(move |message| {
+                let queued = queued.clone();
+                Box::pin(async move {
+                    if message == queued {
+                        Err("injected queue persistence failure".into())
+                    } else {
+                        Ok(())
+                    }
+                })
+            })));
+
+            runtime.run_turns().await;
+
+            assert_eq!(order.lock().unwrap().len(), usize::from(!steering));
+            if steering {
+                assert_eq!(runtime.steering_queue.len(), 1);
+            } else {
+                assert_eq!(runtime.follow_up_queue.len(), 1);
+            }
+        }
     }
 }

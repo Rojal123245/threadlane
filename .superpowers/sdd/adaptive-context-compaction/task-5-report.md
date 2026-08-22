@@ -106,3 +106,22 @@ Full verification:
 - `git diff --check` — PASS.
 
 The pre-existing `threadlane-session::supervisor` unused-import warning and five GPUI dead-code warnings remain unrelated. The earlier manual-telemetry concern is superseded: pre, post, retained-tail, and compacted-message metrics are now all measured from their actual contexts.
+
+## Final durability recovery (2026-03-18)
+
+Closed the four final review findings without broadening scope:
+
+1. **Append-only atomic checkpoint + tail + telemetry.** Compaction now stages the complete procedure and crosses the persistence gate once through `SessionStore::append_actions_atomically`. `JsonlStore` validates and sequences against a disposable reducer, emits one synced atomic-batch frame, and only then reloads observable state. The writer never truncates or rewrites canonical bytes. Atomic frames start behind a newline barrier, so a crash/disk failure that leaves a partial final frame is ignored on recovery and quarantined by the next append rather than concatenated with it. `torn_atomic_frame_is_quarantined_without_truncating_canonical_bytes` injects a synced partial frame, reopens, appends, proves the prior byte prefix is unchanged, and proves the later record reloads.
+2. **Full accepted-run proof on adoption.** `CodingAgent::adopt_harness_run` now calls the harness's complete `validate_accepted_run` proof after freshness and before accepting open-operation/context evidence; lane, run id, accepted prefix, acceptance record, and current reduced state are no longer inferred from a compact subset.
+3. **Terminal queue durability.** Steering and follow-up terminal paths clone their queued messages, persist first, and clear/extend only after success. The focused runtime fixture covers both queues and proves persistence failure retains the original queued item and does not inject it into volatile turn context.
+4. **Real zero-send provider fixture.** `compaction_persistence_failure_sends_zero_fake_provider_requests` runs the actual runtime turn path with `RecordingProvider`, injects failure at the durable compaction boundary, and proves neither provider-start tracing nor `ProviderPort::stream_request` occurs. This replaces reliance on file-mode behavior as the zero-send proof.
+
+Final verification:
+
+- `cargo test -p threadlane-runtime` — PASS, 89 unit tests; 2 performance and 2 doc tests ignored.
+- `cargo test -p threadlane-session` — PASS, 119 tests.
+- `cargo check -p threadlane-gpui` — PASS.
+- `cargo fmt --all -- --check` — PASS.
+- `git diff --check` — PASS.
+
+Known unrelated warnings remain unchanged: the session test target's unused `Duration` import and five GPUI dead-code warnings.

@@ -274,6 +274,34 @@ impl GatedEffects {
         Ok(completed)
     }
 
+    /// Crosses the persistence gate once for the complete pending procedure.
+    /// The queue is retained unchanged if the store rejects the durable unit.
+    pub fn run_to_completion_atomically<S: SessionStore>(
+        &mut self,
+        store: &mut S,
+    ) -> Result<Vec<EffectAction>, EffectsError> {
+        if self.closed {
+            return Err(EffectsError::Closed);
+        }
+        if let Some(error) = &self.fault {
+            return Err(EffectsError::Faulted(error.clone()));
+        }
+        if self.pending.is_empty() {
+            return Ok(Vec::new());
+        }
+        let actions = self.pending.iter().cloned().collect::<Vec<_>>();
+        if let Err(error) = store.append_actions_atomically(&actions) {
+            self.fault = Some(error.clone());
+            return Err(EffectsError::Faulted(error));
+        }
+        self.pending.clear();
+        for action in &actions {
+            self.committed_sequences.push(action.seq());
+            self.notify_committed(action);
+        }
+        Ok(actions)
+    }
+
     pub fn run_to_completion_on_lane<S: SessionStore>(
         &mut self,
         store: &mut S,

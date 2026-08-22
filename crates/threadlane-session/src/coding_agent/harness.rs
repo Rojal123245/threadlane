@@ -386,11 +386,20 @@ impl CodingSessionHarness {
         summary: &str,
         reason: CompactionReason,
     ) -> Result<(), String> {
-        self.store
-            .checkpoint_open_run_compaction("main", run_id, summary, reason)
-            .map_err(|error| error.to_string())?;
+        self.stage_open_run_compaction(run_id, summary, reason)?;
         self.store
             .drive_to_completion()
+            .map_err(|error| error.to_string())
+    }
+
+    fn stage_open_run_compaction(
+        &mut self,
+        run_id: &str,
+        summary: &str,
+        reason: CompactionReason,
+    ) -> Result<(), String> {
+        self.store
+            .checkpoint_open_run_compaction("main", run_id, summary, reason)
             .map_err(|error| error.to_string())
     }
 
@@ -410,21 +419,41 @@ impl CodingSessionHarness {
                 .iter()
                 .find_map(threadlane_runtime::compaction_summary_text)
                 .ok_or_else(|| "context preparation produced no durable summary".to_string())?;
-            self.checkpoint_open_run_compaction(parent_run_id, summary, reason)?;
-            for message in super::durable::compaction_retained_tail(&prepared.messages) {
-                // Every retained occurrence is significant, including adjacent
-                // messages with equal serialized values.
-                self.append_message_inner(message, false)?;
+            let first_seq = self.next_seq();
+            let summary_id = format!("compaction-{parent_run_id}-{first_seq}-summary");
+            self.stage_open_run_compaction(parent_run_id, summary, reason)?;
+
+            let retained = super::durable::compaction_retained_tail(&prepared.messages);
+            let mut parent_id = summary_id;
+            for (index, message) in retained.into_iter().enumerate() {
+                let id = format!("compaction-{parent_run_id}-{first_seq}-tail-{index}");
+                let terminate = matches!(
+                    &message,
+                    AgentMessage::Tool {
+                        terminate: true,
+                        ..
+                    }
+                );
+                self.store
+                    .append_entry_gated(HarnessEntry {
+                        id: id.clone(),
+                        parent_id: Some(parent_id),
+                        lane: "main".into(),
+                        seq: first_seq + 2 + index as u64,
+                        timestamp: timestamp(),
+                        message,
+                        surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
+                        terminate,
+                    })
+                    .map_err(|error| error.to_string())?;
+                parent_id = id;
             }
-            // Re-project after all checkpoint effects and retained occurrences
-            // are durable; telemetry must describe that canonical projection.
-            let canonical = self.model_context("main")?.messages();
-            let post_tokens = estimate_request_tokens(&canonical, tool_schema_json, config);
+
+            let post_tokens = estimate_request_tokens(&prepared.messages, tool_schema_json, config);
             let generation = self.compaction_generation().saturating_add(1);
-            let seq = self.next_seq();
             let record = HarnessRecord::ContextCompacted {
                 id: format!("context-compacted-{parent_run_id}-{generation}"),
-                seq,
+                seq: first_seq + 2 + prepared.messages.len() as u64,
                 lane: "main".into(),
                 timestamp: timestamp(),
                 run_id: parent_run_id.into(),
@@ -443,7 +472,7 @@ impl CodingSessionHarness {
                 .append_record_gated(record)
                 .map_err(|error| error.to_string())?;
             self.store
-                .drive_to_completion()
+                .drive_to_completion_atomically()
                 .map_err(|error| error.to_string())
         })();
         if result.is_err() {
@@ -3107,12 +3136,13 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn compaction_persistence_failure_blocks_provider() {
+    fn compaction_persistence_failure_appends_no_checkpoint_prefix() {
         use std::os::unix::fs::PermissionsExt;
 
         let (_dir, path) = temp_session();
         let mut harness = open_long_run(&path);
         let original = fs::metadata(&path).unwrap().permissions();
+        let canonical = fs::read(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
         let result = harness.prepare_provider_boundary(
             "run-compact",
@@ -3121,6 +3151,7 @@ mod tests {
         );
         fs::set_permissions(&path, original).unwrap();
         assert!(result.is_err());
+        assert_eq!(fs::read(&path).unwrap(), canonical);
         assert!(!harness
             .store
             .records()

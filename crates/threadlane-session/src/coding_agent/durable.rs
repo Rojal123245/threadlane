@@ -440,6 +440,10 @@ impl CodingAgent {
             return Ok(());
         };
         journal.ensure_fresh()?;
+        journal
+            .store
+            .validate_accepted_run(accepted)
+            .map_err(|error| error.to_string())?;
         let state = Reducer::reduce(&journal.store).map_err(|error| error.to_string())?;
         let Some(open_run) = state
             .lane("main")
