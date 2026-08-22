@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use threadlane_mcp::McpManager;
+use threadlane_protocol::ProviderPort;
 use threadlane_provider::openai::fetch_available_models;
 use threadlane_provider::router::ProviderClient;
 use threadlane_runtime::harness::{OperationOutcome, QueueKind, Reducer, SessionStore, Snapshot};
@@ -257,6 +258,14 @@ impl CodingAgent {
     }
 
     pub fn new(options: CodingAgentOptions) -> Self {
+        let provider = Arc::new(ProviderClient::new(
+            &options.api_key,
+            options.account_id.clone(),
+        ));
+        Self::new_with_provider(options, provider)
+    }
+
+    fn new_with_provider(options: CodingAgentOptions, provider: Arc<dyn ProviderPort>) -> Self {
         let coding_config = options.coding_config.unwrap_or_default();
         let agent_config = options.agent_config.unwrap_or_default();
         let project_context = ProjectContext::discover(&options.work_dir);
@@ -323,10 +332,7 @@ impl CodingAgent {
                 &effective_model,
                 runtime_harness,
                 agent_config.clone(),
-                Arc::new(ProviderClient::new(
-                    &options.api_key,
-                    options.account_id.clone(),
-                )),
+                provider.clone(),
             )
         } else {
             AgentRuntime::new_with_provider(
@@ -335,10 +341,7 @@ impl CodingAgent {
                 &effective_model,
                 options.session_file.as_deref(),
                 agent_config.clone(),
-                Arc::new(ProviderClient::new(
-                    &options.api_key,
-                    options.account_id.clone(),
-                )),
+                provider,
             )
             .unwrap_or_else(|error| {
                 panic!("Failed to create agent runtime: {error}");
@@ -1196,20 +1199,24 @@ mod compaction_sync_tests {
         MAX_PERSISTED_SYSTEM_PROMPT_BYTES,
     };
     use crate::system_prompt::SystemPromptConfig;
-    use crate::CodingSessionHarness;
     use async_trait::async_trait;
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
+    use std::{
+        collections::BTreeMap,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        },
     };
     use threadlane_protocol::{
         DeferredResponse, ProviderPort, RuntimeRequest, RuntimeStreamEvent, RuntimeToolCall,
         RuntimeToolCallFunction, RuntimeUsage,
     };
     use threadlane_runtime::{
-        harness::{AgentHarness, CompactionReason, JsonlStore},
+        harness::{
+            read_transcript_page, CompactionReason, JsonlStore, SessionStore, TranscriptItem,
+        },
         tool_executor::ToolExecutor,
-        AgentConfig, AgentMessage, AgentRuntime, AgentToolDefinition, Record,
+        AgentConfig, AgentMessage, AgentToolDefinition, Record,
     };
 
     fn summary() -> AgentMessage {
@@ -1350,19 +1357,23 @@ mod compaction_sync_tests {
                 return None;
             }
             let parsed: serde_json::Value = serde_json::from_str(args).unwrap();
-            assert!(parsed
+            let attempt = parsed
                 .get("attempt")
                 .and_then(|value| value.as_u64())
-                .is_some());
+                .expect("provider attempt argument");
             assert!(args.len() < 64, "provider arguments must remain small");
             self.executions.fetch_add(1, Ordering::SeqCst);
-            Some(Ok("cached report output ".repeat(400)))
+            Some(Ok(format!(
+                "cached report output {attempt} {}",
+                "segment ".repeat(1_000)
+            )))
         }
     }
 
     struct LongToolLoopProvider {
         attempts: AtomicUsize,
         max_request_estimate: AtomicUsize,
+        previous_serialized_request: Mutex<Option<String>>,
     }
 
     impl LongToolLoopProvider {
@@ -1382,8 +1393,23 @@ mod compaction_sync_tests {
             request: RuntimeRequest,
             events: tokio::sync::mpsc::Sender<RuntimeStreamEvent>,
         ) {
-            let estimate = request.messages.to_string().len().div_ceil(4)
-                + request.tools.to_string().len().div_ceil(4);
+            let serialized_request = format!("{}\n{}", request.messages, request.tools);
+            let estimate = serialized_request.len().div_ceil(4);
+            let cache_read_tokens = {
+                let mut previous = self.previous_serialized_request.lock().unwrap();
+                let repeated_prefix_bytes = previous
+                    .as_ref()
+                    .map(|prior| {
+                        prior
+                            .bytes()
+                            .zip(serialized_request.bytes())
+                            .take_while(|(left, right)| left == right)
+                            .count()
+                    })
+                    .unwrap_or(0);
+                *previous = Some(serialized_request);
+                repeated_prefix_bytes / 4
+            };
             self.max_request_estimate
                 .fetch_max(estimate, Ordering::SeqCst);
             let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1405,13 +1431,17 @@ mod compaction_sync_tests {
                     .send(RuntimeStreamEvent::ContentToken("complete".into()))
                     .await;
             }
-            let input_tokens = if attempt == 102 { 15_064 } else { 15_048 };
+            let estimated_tokens = u32::try_from(estimate).expect("test request fits u32");
+            let cache_read_tokens =
+                u32::try_from(cache_read_tokens).expect("test cache prefix fits u32");
+            let input_tokens = estimated_tokens.saturating_sub(cache_read_tokens);
+            let output_tokens = 20;
             let usage = RuntimeUsage {
                 input_tokens,
-                output_tokens: 20,
-                cache_read_tokens: 100_000,
+                output_tokens,
+                cache_read_tokens,
                 cache_write_tokens: 0,
-                total_tokens: input_tokens + 100_020,
+                total_tokens: estimated_tokens.saturating_add(output_tokens),
             };
             let _ = events
                 .send(RuntimeStreamEvent::Finished { tool_calls, usage })
@@ -1439,150 +1469,202 @@ mod compaction_sync_tests {
     async fn long_cached_tool_loop_compacts_before_budget() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("reported-session-shape.jsonl");
-        let durable_harness = CodingSessionHarness::open(&path).unwrap();
-        let run_id = format!(
-            "foreground-{}",
-            durable_harness.store.store().next_sequence()
-        );
-        let runtime_harness = AgentHarness::with_events_and_hooks(
-            durable_harness.store.store().clone(),
-            durable_harness.events.clone(),
-            durable_harness.hooks.clone(),
-        );
-        drop(durable_harness);
-
         let provider = Arc::new(LongToolLoopProvider {
             attempts: AtomicUsize::new(0),
             max_request_estimate: AtomicUsize::new(0),
+            previous_serialized_request: Mutex::new(None),
         });
         let tool_executor = Arc::new(ReportedShapeToolExecutor {
             executions: AtomicUsize::new(0),
         });
-        let mut runtime = AgentRuntime::from_harness_with_provider(
-            "",
-            None,
-            "reported-session-shape-model",
-            runtime_harness,
-            AgentConfig::default(),
+        let mut agent = CodingAgent::new_with_provider(
+            CodingAgentOptions {
+                api_key: "test-key".into(),
+                account_id: None,
+                model: "reported-session-shape-model".into(),
+                work_dir: dir.path().to_path_buf(),
+                session_file: Some(path.clone()),
+                system_prompt: SystemPromptConfig::default(),
+                agent_config: Some(AgentConfig::default()),
+                coding_config: None,
+            },
             provider.clone(),
         );
-        runtime
+        agent
+            .agent
             .register_tool_executor(tool_executor.clone())
             .unwrap();
-        let trace_harness = Arc::new(tokio::sync::Mutex::new(
-            CodingSessionHarness::open(&path).unwrap(),
-        ));
-        let boundary_harness = trace_harness.clone();
-        let boundary_run_id = run_id.clone();
-        runtime.set_provider_boundary_preparer(Some(Arc::new(move |request| {
-            let harness = boundary_harness.clone();
-            let run_id = boundary_run_id.clone();
-            Box::pin(async move {
-                harness.lock().await.prepare_provider_boundary(
-                    &run_id,
-                    request,
-                    &AgentConfig::default(),
-                )
-            })
-        })));
-        let provider_harness = trace_harness.clone();
-        let provider_run_id = run_id.clone();
-        runtime.set_provider_trace_recorder(Some(Arc::new(move |event| {
-            let harness = provider_harness.clone();
-            let run_id = provider_run_id.clone();
-            Box::pin(async move {
-                let mut harness = harness.lock().await;
-                if let threadlane_runtime::provider::ProviderTraceEvent::Finished {
-                    usage: Some(usage),
-                    ..
-                } = &event
-                {
-                    harness.record_provider_usage(&run_id, usage.clone())?;
-                }
-                harness.record_provider_trace(&run_id, event)
-            })
-        })));
-        let message_harness = trace_harness.clone();
-        runtime.set_message_recorder(Some(Arc::new(move |message| {
-            let harness = message_harness.clone();
-            Box::pin(async move { harness.lock().await.append_message(message).map(|_| ()) })
-        })));
 
-        runtime.prompt("continue the cached tool loop").await;
-        drop(runtime);
-        drop(trace_harness);
-
-        let store = JsonlStore::open(&path).unwrap();
+        let result = agent
+            .handle_input_with_images("continue the cached tool loop", vec![])
+            .await;
+        assert!(result.is_none(), "foreground run failed: {result:?}");
         assert_eq!(provider.attempts(), 102);
         assert_eq!(tool_executor.executions.load(Ordering::SeqCst), 101);
-        let emitted_context_limit = store
-            .records()
+
+        // Reopen the durable journal rather than relying on in-memory runtime state.
+        drop(agent);
+        let store = JsonlStore::open(&path).unwrap();
+        let records = store.records();
+        let emitted_context_limit = records
             .iter()
             .filter_map(|record| match record {
                 Record::ContextManifestCaptured { context_limit, .. } => *context_limit,
                 _ => None,
             })
-            .min()
-            .expect("provider manifests emit an effective context limit");
+            .next_back()
+            .unwrap();
         assert!(provider.max_request_estimate() < emitted_context_limit);
-        let cumulative_processed: u64 = store
-            .records()
+
+        let cumulative_processed = records
             .iter()
             .filter_map(|record| match record {
                 Record::Usage { usage, .. } => Some(
                     u64::from(usage.input_tokens)
-                        + u64::from(usage.cache_read_tokens)
-                        + u64::from(usage.cache_write_tokens)
-                        + u64::from(usage.output_tokens),
+                        .saturating_add(u64::from(usage.cache_read_tokens))
+                        .saturating_add(u64::from(usage.output_tokens)),
                 ),
                 _ => None,
             })
-            .sum();
+            .sum::<u64>();
         assert!(
             cumulative_processed > emitted_context_limit as u64,
             "processed={cumulative_processed}, limit={emitted_context_limit}"
         );
-        assert!(store.records().iter().any(|record| matches!(
-            record,
-            Record::ContextCompacted {
-                reason: CompactionReason::AdaptiveBudget,
-                ..
-            }
-        )));
-        let compaction_seq = store
-            .records()
+
+        let (compaction_seq, generation) = records
+            .iter()
+            .find_map(|record| match record {
+                Record::ContextCompacted {
+                    seq,
+                    generation,
+                    reason: CompactionReason::AdaptiveBudget,
+                    ..
+                } => Some((*seq, *generation)),
+                _ => None,
+            })
+            .expect("adaptive compaction telemetry");
+        let (manifest_seq, manifest_generation, manifest_tokens) = records
             .iter()
             .filter_map(|record| match record {
-                Record::ContextCompacted { seq, .. } => Some(*seq),
+                Record::ContextManifestCaptured {
+                    seq,
+                    compaction_generation,
+                    total_estimated_tokens,
+                    ..
+                } if *seq > compaction_seq => {
+                    Some((*seq, *compaction_generation, *total_estimated_tokens))
+                }
                 _ => None,
             })
             .next()
-            .unwrap();
-        let next_provider_start_seq = store
-            .records()
+            .expect("post-compaction context manifest");
+        let next_provider_start_seq = records
             .iter()
             .filter_map(|record| match record {
                 Record::ProviderRequestStarted { seq, .. } if *seq > compaction_seq => Some(*seq),
                 _ => None,
             })
             .next()
-            .unwrap();
-        assert!(compaction_seq < next_provider_start_seq);
-        assert!(store.entries().iter().any(|entry| matches!(
-            &entry.message,
-            AgentMessage::User { content } if content == "continue the cached tool loop"
-        )));
-        assert!(store.entries().iter().any(|entry| matches!(
-            &entry.message,
-            AgentMessage::Assistant { tool_calls: Some(calls), .. } if !calls.is_empty()
-        )));
-        assert!(store.entries().iter().any(|entry| matches!(
-            &entry.message,
-            AgentMessage::Tool { content, .. } if content.starts_with("cached report output")
-        )));
-        assert!(store
-            .records()
+            .expect("post-compaction provider request");
+        assert_eq!(manifest_generation, generation);
+        assert!(manifest_tokens.unwrap() < emitted_context_limit as u32);
+
+        // The checkpoint summary, compaction telemetry, request manifest, and
+        // provider start are all recovered from the durable journal in order.
+        let checkpoint_seq = store
+            .entries()
             .iter()
-            .any(|record| matches!(record, Record::ContextCompacted { .. })));
+            .filter_map(|entry| match &entry.message {
+                AgentMessage::Custom { custom_type, .. }
+                    if custom_type == "compaction_summary" && entry.seq < compaction_seq =>
+                {
+                    Some(entry.seq)
+                }
+                _ => None,
+            })
+            .next_back()
+            .expect("durable checkpoint preceding adaptive compaction");
+        assert!(
+            checkpoint_seq < compaction_seq
+                && compaction_seq < manifest_seq
+                && manifest_seq < next_provider_start_seq,
+            "checkpoint={checkpoint_seq}, compaction={compaction_seq}, manifest={manifest_seq}, provider_start={next_provider_start_seq}"
+        );
+
+        // The reopened branch selects the latest durable checkpoint and a descendant leaf.
+        let model_context = store.model_context("main").unwrap();
+        let checkpoint = model_context.checkpoint.expect("durable checkpoint");
+        assert!(model_context
+            .leaf_id
+            .as_deref()
+            .is_some_and(|leaf| leaf != checkpoint.entry_id));
+        assert!(model_context
+            .entries
+            .iter()
+            .any(|entry| entry.id == checkpoint.entry_id));
+
+        let page = read_transcript_page(&path, None, 1_000).unwrap();
+        assert!(!page.has_older);
+        assert!(page.items.iter().any(|item| matches!(
+            item,
+            TranscriptItem::ContextCompacted(marker)
+                if marker.reason == CompactionReason::AdaptiveBudget
+        )));
+        let messages = page
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                TranscriptItem::Message(message) => Some(message),
+                TranscriptItem::ContextCompacted(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            messages.first(),
+            Some(AgentMessage::User { content }) if content == "continue the cached tool loop"
+        ));
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            AgentMessage::Assistant { content: Some(content), .. } if content == "complete"
+        )));
+
+        let mut correlated_results = BTreeMap::new();
+        for pair in messages.windows(2) {
+            let AgentMessage::Assistant {
+                tool_calls: Some(calls),
+                ..
+            } = pair[0]
+            else {
+                continue;
+            };
+            let [call] = calls.as_slice() else {
+                continue;
+            };
+            let AgentMessage::Tool {
+                tool_call_id,
+                content,
+                ..
+            } = pair[1]
+            else {
+                panic!("tool call {} was not followed by its result", call.id);
+            };
+            assert_eq!(tool_call_id, &call.id);
+            let attempt = call
+                .id
+                .strip_prefix("loop-")
+                .and_then(|value| value.parse::<usize>().ok())
+                .expect("fixture call id contains its attempt");
+            assert!(content.starts_with(&format!("cached report output {attempt} ")));
+            if let Some(previous) = correlated_results.insert(call.id.clone(), content.clone()) {
+                assert_eq!(
+                    previous, *content,
+                    "replayed checkpoint changed tool result"
+                );
+            }
+        }
+        assert_eq!(correlated_results.len(), 101);
+        for attempt in 1..=101 {
+            assert!(correlated_results.contains_key(&format!("loop-{attempt}")));
+        }
     }
 }

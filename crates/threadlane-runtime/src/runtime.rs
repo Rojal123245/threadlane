@@ -383,19 +383,15 @@ impl AgentRuntime {
             return;
         }
         let _ = self.event_tx.send(AgentEvent::AgentStart);
-        self.run_turns().await;
-        let _ = self.event_tx.send(AgentEvent::AgentEnd {
-            usage: TokenUsage::default(),
-        });
+        let usage = self.run_turns().await;
+        let _ = self.event_tx.send(AgentEvent::AgentEnd { usage });
     }
 
     /// Resumes provider/tool execution without appending a duplicate prompt.
     pub async fn resume_pending_turn(&mut self) {
         let _ = self.event_tx.send(AgentEvent::AgentStart);
-        self.run_turns().await;
-        let _ = self.event_tx.send(AgentEvent::AgentEnd {
-            usage: TokenUsage::default(),
-        });
+        let usage = self.run_turns().await;
+        let _ = self.event_tx.send(AgentEvent::AgentEnd { usage });
     }
 
     pub fn set_credentials(&mut self, api_key: String, account_id: Option<String>) {
@@ -739,7 +735,7 @@ impl AgentRuntime {
     }
 
     /// Runs the main turn loop.
-    async fn run_turns(&mut self) {
+    async fn run_turns(&mut self) -> TokenUsage {
         let tool_dispatcher = self.synced_dispatcher();
         let mut driver = crate::turn_driver::TurnDriver {
             turn: self.turn.clone(),
@@ -756,7 +752,7 @@ impl AgentRuntime {
             steering_queue: &mut self.steering_queue,
             follow_up_queue: &mut self.follow_up_queue,
         };
-        driver.run_turns().await;
+        driver.run_turns().await
     }
 }
 
@@ -1022,7 +1018,7 @@ mod tests {
 
         assert_eq!(
             &*order.lock().unwrap(),
-            &["prepared", "started", "manifest", "sent"]
+            &["prepared", "manifest", "started", "sent"]
         );
         assert_eq!(
             *prepared_tools.lock().unwrap(),
@@ -1072,7 +1068,7 @@ mod tests {
 
         runtime.run_turns().await;
 
-        assert_eq!(&*order.lock().unwrap(), &["started"]);
+        assert!(order.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -173,8 +173,9 @@ impl<'a> TurnDriver<'a> {
         persist_messages_with(self.message_recorder.as_ref(), messages).await
     }
 
-    pub(crate) async fn run_turns(&mut self) {
+    pub(crate) async fn run_turns(&mut self) -> TokenUsage {
         let mut turn_number = 0;
+        let mut total_usage = TokenUsage::default();
         let mut overflow_recovery_attempted = false;
         let mut stream_rule_recovery_attempted = false;
         let mut provider_fallback_attempted = false;
@@ -190,7 +191,7 @@ impl<'a> TurnDriver<'a> {
                     self.emit_event(AgentEvent::AgentError {
                         error: format!("failed to persist steering before provider work: {error}"),
                     });
-                    return;
+                    return total_usage;
                 }
                 self.steering_queue.clear();
                 let mut turn = self.turn.lock().await;
@@ -274,7 +275,7 @@ impl<'a> TurnDriver<'a> {
                     }
                     Err(error) => {
                         self.emit_event(AgentEvent::AgentError { error });
-                        return;
+                        return total_usage;
                     }
                 }
             }
@@ -285,22 +286,6 @@ impl<'a> TurnDriver<'a> {
                 "provider-request-{}",
                 PROVIDER_REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed)
             );
-            if let Err(error) = self
-                .record_provider_trace(ProviderTraceEvent::Started {
-                    attempt: turn_number as u32,
-                    request_id: request_id.clone(),
-                    model: model.clone(),
-                    provider,
-                })
-                .await
-            {
-                self.emit_event(AgentEvent::AgentError {
-                    error: format!("failed to persist provider request start: {error}"),
-                });
-                return;
-            }
-            let request_started_at = Instant::now();
-            let mut provider_terminal_recorded = false;
             let (stream_tx, mut stream_rx) = mpsc::channel(100);
             let client = self.provider_client.clone();
             let payload_cache_key = self.prompt_cache_key.clone();
@@ -408,8 +393,27 @@ impl<'a> TurnDriver<'a> {
                 self.emit_event(AgentEvent::AgentError {
                     error: format!("failed to persist request context manifest: {error}"),
                 });
-                return;
+                return total_usage;
             }
+
+            // The manifest describes the exact canonical request and is durable
+            // before the request-start marker permits provider I/O to begin.
+            if let Err(error) = self
+                .record_provider_trace(ProviderTraceEvent::Started {
+                    attempt: turn_number as u32,
+                    request_id: request_id.clone(),
+                    model: model.clone(),
+                    provider,
+                })
+                .await
+            {
+                self.emit_event(AgentEvent::AgentError {
+                    error: format!("failed to persist provider request start: {error}"),
+                });
+                return total_usage;
+            }
+            let request_started_at = Instant::now();
+            let mut provider_terminal_recorded = false;
 
             let _stream_task = AbortOnDrop::new(tokio::spawn(async move {
                 client.stream_request(request, stream_tx).await;
@@ -466,7 +470,7 @@ impl<'a> TurnDriver<'a> {
                                 self.emit_event(AgentEvent::AgentError {
                                     error: format!("failed to persist stream checkpoint: {error}"),
                                 });
-                                return;
+                                return total_usage;
                             }
                             checkpointed_bytes = current_text.len();
                         }
@@ -564,6 +568,7 @@ impl<'a> TurnDriver<'a> {
                             cache_write_tokens: usage.cache_write_tokens,
                             total_tokens: usage.total_tokens,
                         };
+                        total_usage.accumulate(&usage);
                         tracing::info!(
                             turn = turn_number,
                             tool_calls = captured_tool_calls.len(),
@@ -586,7 +591,7 @@ impl<'a> TurnDriver<'a> {
                                     "failed to persist provider request finish: {error}"
                                 ),
                             });
-                            return;
+                            return total_usage;
                         }
                         provider_terminal_recorded = true;
                         break;
@@ -608,7 +613,7 @@ impl<'a> TurnDriver<'a> {
                                 self.emit_event(AgentEvent::AgentError {
                                     error: format!("failed to persist error checkpoint: {error}"),
                                 });
-                                return;
+                                return total_usage;
                             }
                         }
                         let category = classify_provider_error(&err);
@@ -643,7 +648,7 @@ impl<'a> TurnDriver<'a> {
                                     "failed to persist provider request failure: {error}"
                                 ),
                             });
-                            return;
+                            return total_usage;
                         }
                         if !overflow_recovery_attempted
                             && is_context_overflow_error(&err)
@@ -678,7 +683,7 @@ impl<'a> TurnDriver<'a> {
                             continue 'turns;
                         }
                         self.emit_event(AgentEvent::AgentError { error: err });
-                        return;
+                        return total_usage;
                     }
                 }
             }
@@ -702,7 +707,7 @@ impl<'a> TurnDriver<'a> {
                     self.emit_event(AgentEvent::AgentError {
                         error: format!("failed to persist incomplete provider request: {error}"),
                     });
-                    return;
+                    return total_usage;
                 }
             }
 
@@ -711,7 +716,7 @@ impl<'a> TurnDriver<'a> {
                     self.emit_event(AgentEvent::AgentError {
                         error: "stream rule matched again after corrective retry".into(),
                     });
-                    return;
+                    return total_usage;
                 }
                 stream_rule_recovery_attempted = true;
                 // Do not persist or emit the partial completion. The injected reminder
@@ -735,7 +740,7 @@ impl<'a> TurnDriver<'a> {
                 };
                 tracing::warn!(turn = turn_number, error = %error, "provider returned no usable response");
                 self.emit_event(AgentEvent::AgentError { error });
-                return;
+                return total_usage;
             }
 
             // Record assistant message in turn state.
@@ -772,7 +777,7 @@ impl<'a> TurnDriver<'a> {
                 self.emit_event(AgentEvent::AgentError {
                     error: format!("failed to persist assistant step before continuation: {error}"),
                 });
-                return;
+                return total_usage;
             }
             if let Err(error) = self
                 .record_provider_trace(ProviderTraceEvent::AssistantReady {
@@ -787,7 +792,7 @@ impl<'a> TurnDriver<'a> {
                 self.emit_event(AgentEvent::AgentError {
                     error: format!("failed to persist provider assistant result: {error}"),
                 });
-                return;
+                return total_usage;
             }
             self.turn
                 .lock()
@@ -811,7 +816,7 @@ impl<'a> TurnDriver<'a> {
                         self.emit_event(AgentEvent::AgentError {
                             error: format!("failed to persist steering before retry: {error}"),
                         });
-                        return;
+                        return total_usage;
                     }
                     self.steering_queue.clear();
                     self.turn.lock().await.messages.extend(items);
@@ -826,7 +831,7 @@ impl<'a> TurnDriver<'a> {
                                 "failed to persist follow-up before provider work: {error}"
                             ),
                         });
-                        return;
+                        return total_usage;
                     }
                     self.follow_up_queue.clear();
                     self.turn.lock().await.messages.extend(items);
@@ -851,7 +856,7 @@ impl<'a> TurnDriver<'a> {
                     self.emit_event(AgentEvent::AgentError {
                         error: format!("failed to persist pre-tool checkpoint: {error}"),
                     });
-                    return;
+                    return total_usage;
                 }
             }
 
@@ -878,7 +883,7 @@ impl<'a> TurnDriver<'a> {
                 self.emit_event(AgentEvent::AgentError {
                     error: format!("failed to persist tool results before continuation: {error}"),
                 });
-                return;
+                return total_usage;
             }
             self.turn.lock().await.messages.extend(tool_messages);
 
@@ -891,5 +896,6 @@ impl<'a> TurnDriver<'a> {
                 break;
             }
         }
+        total_usage
     }
 }

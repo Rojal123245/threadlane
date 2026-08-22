@@ -3243,6 +3243,9 @@ fn project_recovery_diagnostics(
 }
 
 #[cfg(test)]
+pub(crate) use tests::reported_session_shape_state;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use threadlane_session::harness::{
@@ -3412,13 +3415,18 @@ mod tests {
         path
     }
 
-    #[test]
-    fn reported_session_shape_keeps_total_processed_separate() {
+    pub(crate) fn reported_session_shape_state() -> (PathBuf, AppState) {
         let path = context_fixture_path();
         let projection = compute_full_session_projection(&path).unwrap();
         let mut state = AppState::load_from_registry(Vec::new());
         activate_test_session(&mut state, "context-session", &path);
         state.apply_session_hydration("context-session", &path, projection);
+        (path, state)
+    }
+
+    #[test]
+    fn reported_session_shape_keeps_total_processed_separate() {
+        let (path, state) = reported_session_shape_state();
 
         let projected_context = state.active_context_window().unwrap();
         let projected_metrics = state.active_session_metrics();

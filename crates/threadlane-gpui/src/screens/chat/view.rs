@@ -868,14 +868,13 @@ impl ChatListView {
                     div()
                         .w(px(520.0))
                         .max_w(px(CHAT_CONTENT_MAX_WIDTH - 32.0))
-                        .max_h(px(360.0))
-                        .overflow_y_scrollbar()
                         .p_2()
                         .flex()
                         .flex_col()
                         .gap_2()
                         .children(content_plan.explanation.clone().map(|explanation| {
                             div()
+                                .flex_none()
                                 .pb_2()
                                 .border_b_1()
                                 .border_color(colors.border)
@@ -883,7 +882,16 @@ impl ChatListView {
                                 .text_color(colors.muted_foreground)
                                 .child(explanation)
                         }))
-                        .children(rows)
+                        .child(
+                            div()
+                                .w_full()
+                                .max_h(px(280.0))
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .overflow_y_scrollbar()
+                                .children(rows),
+                        )
                 })
                 .into_any_element(),
         )
@@ -3675,7 +3683,8 @@ mod hot_path_tests {
         TrajectoryCacheKey, TrajectoryMode, TrajectoryRow, TranscriptRow,
     };
     use crate::state::{
-        ChatMessageInfo, MessageRole, ToolActivityInfo, TrajectoryDiagnostics, TrajectoryEntry,
+        reported_session_shape_state, ChatMessageInfo, MessageRole, ToolActivityInfo,
+        TrajectoryDiagnostics, TrajectoryEntry,
     };
 
     fn metrics_with_usage(
@@ -3711,24 +3720,32 @@ mod hot_path_tests {
 
     #[test]
     fn meter_separates_current_context_from_total_processed() {
+        let (path, state) = reported_session_shape_state();
+        let projected_context = state.active_context_window().unwrap();
+        let projected_metrics = state.active_session_metrics();
         let view = context_meter_view_model(
             Some(&ContextMeterContext {
-                current_tokens: 103_732,
-                context_limit: 1_000_000,
-                context_limit_is_estimate: false,
-                effective_model: "gpt-5.6-sol".into(),
-                last_compacted_at: None,
-                provisional: false,
-                estimating: false,
+                current_tokens: projected_context.current_tokens,
+                context_limit: projected_context.context_limit,
+                context_limit_is_estimate: projected_context.context_limit_is_estimate,
+                effective_model: projected_context.effective_model.clone(),
+                last_compacted_at: projected_context.last_compacted_at,
+                provisional: projected_context.provisional,
+                estimating: projected_context.estimating,
             }),
-            &metrics_with_usage(266_614, 30_285, 11_734_912, 0),
+            &ContextMeterMetrics {
+                billed_input_tokens: projected_metrics.billed_input_tokens(),
+                output_tokens: projected_metrics.output_tokens,
+                cache_hit_percent: projected_metrics.cache_hit_percent(),
+            },
         );
         assert_eq!(view.percent, Some(10.3732));
         assert_eq!(view.bar_percent, 10.3732);
         assert_eq!(view.current_label, "103.7k / 1.0M");
-        assert_eq!(view.total_processed_label, "12.0M");
-        assert_eq!(view.cache_hit_label.as_deref(), Some("98%"));
+        assert_eq!(view.total_processed_label, "11.7M");
+        assert_eq!(view.cache_hit_label.as_deref(), Some("87%"));
         assert_eq!(view.detail_label, "Context usage details, 10% used");
+        std::fs::remove_file(path).ok();
     }
 
     #[test]
