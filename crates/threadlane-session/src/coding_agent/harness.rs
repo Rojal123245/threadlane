@@ -376,6 +376,7 @@ impl CodingSessionHarness {
                 request_id,
                 total_estimated_tokens,
                 items,
+                ..
             } => HarnessRecord::ContextManifestCaptured {
                 id: format!("context-manifest-{run_id}-{request_id}"),
                 seq,

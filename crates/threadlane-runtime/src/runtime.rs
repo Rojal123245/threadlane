@@ -776,6 +776,7 @@ mod tests {
     struct RecordingProvider {
         order: Arc<std::sync::Mutex<Vec<&'static str>>>,
         message_counts: Arc<std::sync::Mutex<Vec<usize>>>,
+        request_tools: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
     }
 
     #[async_trait]
@@ -790,6 +791,10 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(request.messages.as_array().map_or(0, Vec::len));
+            self.request_tools
+                .lock()
+                .unwrap()
+                .push(request.tools.clone());
             let _ = events
                 .send(RuntimeStreamEvent::ContentToken("done".into()))
                 .await;
@@ -821,9 +826,11 @@ mod tests {
     #[tokio::test]
     async fn preparation_finishes_before_provider_started_and_network_send() {
         let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let request_tools = Arc::new(std::sync::Mutex::new(Vec::new()));
         let provider = Arc::new(RecordingProvider {
             order: order.clone(),
             message_counts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            request_tools: request_tools.clone(),
         });
         let dir = tempfile::tempdir().unwrap();
         let mut runtime = AgentRuntime::new_with_provider(
@@ -853,19 +860,23 @@ mod tests {
             })
         })));
         let preparer_order = order.clone();
+        let prepared_tools = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let preparer_tools = prepared_tools.clone();
         runtime.set_provider_boundary_preparer(Some(Arc::new(
             move |request: ProviderBoundaryRequest| {
                 let preparer_order = preparer_order.clone();
+                let preparer_tools = preparer_tools.clone();
                 Box::pin(async move {
                     assert_eq!(request.model, "effective-model");
-                    let tools: Vec<AgentToolDefinition> = serde_json::from_str(
+                    let tools: serde_json::Value = serde_json::from_str(
                         request
                             .tool_schema_json
                             .as_deref()
                             .expect("shortlisted schema"),
                     )
                     .unwrap();
-                    assert!(!tools.is_empty());
+                    assert!(tools.as_array().is_some_and(|tools| !tools.is_empty()));
+                    preparer_tools.lock().unwrap().push(tools);
                     preparer_order.lock().unwrap().push("prepared");
                     Ok(ProviderBoundaryResult {
                         messages: request.messages,
@@ -881,6 +892,138 @@ mod tests {
         runtime.run_turns().await;
 
         assert_eq!(&*order.lock().unwrap(), &["prepared", "started", "sent"]);
+        assert_eq!(
+            *prepared_tools.lock().unwrap(),
+            *request_tools.lock().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn preparation_failure_starts_no_provider_activity() {
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = Arc::new(RecordingProvider {
+            order: order.clone(),
+            message_counts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            request_tools: Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+        let mut runtime = AgentRuntime::new_with_provider(
+            "",
+            None,
+            "test-model",
+            None,
+            AgentConfig::default(),
+            provider,
+        )
+        .unwrap();
+        runtime
+            .turn
+            .lock()
+            .await
+            .messages
+            .push(AgentMessage::user("test", Vec::new()));
+        let started_order = order.clone();
+        runtime.set_provider_trace_recorder(Some(Arc::new(move |event| {
+            let started_order = started_order.clone();
+            Box::pin(async move {
+                if matches!(event, crate::provider::ProviderTraceEvent::Started { .. }) {
+                    started_order.lock().unwrap().push("started");
+                }
+                Ok(())
+            })
+        })));
+        runtime.set_provider_boundary_preparer(Some(Arc::new(|_| {
+            Box::pin(async { Err("preparation failed".into()) })
+        })));
+
+        runtime.run_turns().await;
+
+        assert!(order.lock().unwrap().is_empty());
+    }
+
+    struct OverflowOnceProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ProviderPort for OverflowOnceProvider {
+        async fn stream_request(
+            &self,
+            _request: RuntimeRequest,
+            events: tokio::sync::mpsc::Sender<RuntimeStreamEvent>,
+        ) {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let event = if call == 0 {
+                RuntimeStreamEvent::Error("maximum context length exceeded".into())
+            } else {
+                RuntimeStreamEvent::Finished {
+                    tool_calls: Vec::new(),
+                    usage: RuntimeUsage::default(),
+                }
+            };
+            let _ = events.send(event).await;
+        }
+
+        async fn fetch_deferred(
+            &self,
+            _model: &str,
+            _handle_id: &str,
+        ) -> Result<DeferredResponse, String> {
+            Ok(DeferredResponse::Pending)
+        }
+
+        async fn cancel_deferred(&self, _model: &str, _handle_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn provider_kind(&self, _model: &str) -> &'static str {
+            "test"
+        }
+    }
+
+    #[tokio::test]
+    async fn overflow_recovery_is_true_only_on_overflow_retry() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = Arc::new(OverflowOnceProvider {
+            calls: calls.clone(),
+        });
+        let mut runtime = AgentRuntime::new_with_provider(
+            "",
+            None,
+            "test-model",
+            None,
+            AgentConfig::default(),
+            provider,
+        )
+        .unwrap();
+        runtime
+            .turn
+            .lock()
+            .await
+            .messages
+            .push(AgentMessage::user("test", Vec::new()));
+        let recovery_values = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed_values = recovery_values.clone();
+        runtime.set_provider_boundary_preparer(Some(Arc::new(move |request| {
+            let observed_values = observed_values.clone();
+            Box::pin(async move {
+                observed_values
+                    .lock()
+                    .unwrap()
+                    .push(request.overflow_recovery);
+                Ok(ProviderBoundaryResult {
+                    messages: request.messages,
+                    context_limit: 128_000,
+                    context_limit_is_estimate: false,
+                    compaction_generation: 0,
+                    provisional_estimated_tokens: None,
+                })
+            })
+        })));
+
+        runtime.run_turns().await;
+
+        assert_eq!(&*recovery_values.lock().unwrap(), &[false, true]);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -890,6 +1033,7 @@ mod tests {
         let provider = Arc::new(RecordingProvider {
             order,
             message_counts: message_counts.clone(),
+            request_tools: Arc::new(std::sync::Mutex::new(Vec::new())),
         });
         let config = AgentConfig::builder()
             .auto_compaction_threshold_tokens(1)

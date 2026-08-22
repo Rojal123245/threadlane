@@ -246,8 +246,12 @@ impl<'a> TurnDriver<'a> {
                 self.config.needle_enabled,
             )
             .await;
-            let tool_schema_json = (!tool_definitions.is_empty())
-                .then(|| serde_json::to_string(&tool_definitions).unwrap_or_default());
+            let provider_tools = tool_definitions
+                .iter()
+                .map(|tool| tool.to_chat_completions_tool())
+                .collect::<Vec<_>>();
+            let tool_schema_json = (!provider_tools.is_empty())
+                .then(|| serde_json::to_string(&provider_tools).unwrap_or_default());
 
             let mut boundary_result: Option<ProviderBoundaryResult> = None;
             if let Some(preparer) = &self.provider_boundary_preparer {
@@ -304,12 +308,7 @@ impl<'a> TurnDriver<'a> {
                 RuntimeRequest {
                     model: model.clone(),
                     messages: serde_json::to_value(&request_messages).unwrap_or_default(),
-                    tools: serde_json::Value::Array(
-                        tool_definitions
-                            .iter()
-                            .map(|tool| tool.to_chat_completions_tool())
-                            .collect(),
-                    ),
+                    tools: serde_json::Value::Array(provider_tools),
                     prompt_cache_key: payload_cache_key,
                     reasoning_effort: turn.reasoning_effort.as_api_str().map(str::to_owned),
                 }
