@@ -107,15 +107,11 @@ pub fn parse_slash_command(input: &str) -> Option<CommandAction> {
     }
 }
 
-pub async fn execute_slash_command(
-    action: CommandAction,
-    agent: &mut AgentRuntime,
-) -> String {
+pub async fn execute_slash_command(action: CommandAction, agent: &mut AgentRuntime) -> String {
     match action {
         CommandAction::SwitchModel(new_model) => {
             if new_model.is_empty() {
-                let st = agent.get_state().await;
-                format!("Current model: {}", st.model)
+                format!("Current model: {}", agent.model())
             } else {
                 let _ = agent
                     .harness_mut()
@@ -136,7 +132,7 @@ pub async fn execute_slash_command(
         }
         CommandAction::Roles(_) => {
             let roles = agent.model_roles().clone();
-            let main_model = agent.get_state().await.model;
+            let main_model = agent.model();
             let fallbacks = if roles.fallback_chain.is_empty() {
                 "None".to_string()
             } else {

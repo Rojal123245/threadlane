@@ -28,6 +28,14 @@ pub struct AgentConfig {
     /// Estimated tokens per image attachment (used for token counting).
     pub(crate) estimated_image_tokens: usize,
 
+    pub(crate) unknown_model_context_limit: usize,
+    pub(crate) context_minimum_headroom_tokens: usize,
+    pub(crate) context_headroom_percent: usize,
+    pub(crate) context_repeated_input_ceiling_tokens: usize,
+    pub(crate) context_minimum_retained_tail_tokens: usize,
+    pub(crate) context_maximum_retained_tail_tokens: usize,
+    pub(crate) context_retained_tail_percent: usize,
+
     // ── Stream Rules ────────────────────────────────────────────────────
     /// Maximum bytes of accumulated streaming text to retain for regex
     /// matching. Text beyond this window is discarded.
@@ -66,6 +74,13 @@ impl Default for AgentConfig {
             auto_compaction_keep_recent_tokens: 20_000,
             max_checkpoint_chars: 12_000,
             estimated_image_tokens: 1_200,
+            unknown_model_context_limit: 128_000,
+            context_minimum_headroom_tokens: 32_000,
+            context_headroom_percent: 20,
+            context_repeated_input_ceiling_tokens: 256_000,
+            context_minimum_retained_tail_tokens: 20_000,
+            context_maximum_retained_tail_tokens: 64_000,
+            context_retained_tail_percent: 25,
             stream_rule_max_window_bytes: 4096,
             default_system_prompt: "You are threadlane AI coding agent.".into(),
             model_roles: ModelRoles::default(),
@@ -121,6 +136,41 @@ impl AgentConfigBuilder {
 
     pub fn estimated_image_tokens(mut self, value: usize) -> Self {
         self.config.estimated_image_tokens = value;
+        self
+    }
+
+    pub fn unknown_model_context_limit(mut self, value: usize) -> Self {
+        self.config.unknown_model_context_limit = value;
+        self
+    }
+
+    pub fn context_minimum_headroom_tokens(mut self, value: usize) -> Self {
+        self.config.context_minimum_headroom_tokens = value;
+        self
+    }
+
+    pub fn context_headroom_percent(mut self, value: usize) -> Self {
+        self.config.context_headroom_percent = value;
+        self
+    }
+
+    pub fn context_repeated_input_ceiling_tokens(mut self, value: usize) -> Self {
+        self.config.context_repeated_input_ceiling_tokens = value;
+        self
+    }
+
+    pub fn context_minimum_retained_tail_tokens(mut self, value: usize) -> Self {
+        self.config.context_minimum_retained_tail_tokens = value;
+        self
+    }
+
+    pub fn context_maximum_retained_tail_tokens(mut self, value: usize) -> Self {
+        self.config.context_maximum_retained_tail_tokens = value;
+        self
+    }
+
+    pub fn context_retained_tail_percent(mut self, value: usize) -> Self {
+        self.config.context_retained_tail_percent = value;
         self
     }
 

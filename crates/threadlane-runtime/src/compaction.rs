@@ -1,4 +1,5 @@
 use crate::config::AgentConfig;
+use crate::model_metadata::ContextBudget;
 use crate::types::AgentMessage;
 
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,18 @@ pub struct CompactionOptions {
     pub preserve_recent: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct PreparedCompaction {
+    pub messages: Vec<AgentMessage>,
+    pub pre_tokens: usize,
+    pub post_tokens: usize,
+    pub compacted_messages: usize,
+    /// Policy input used to choose the retained tail.
+    pub retained_tail_target: usize,
+    /// Measured serialized tokens actually retained after boundary adjustment.
+    pub retained_tail_tokens: usize,
+}
+
 impl Default for CompactionOptions {
     fn default() -> Self {
         Self {
@@ -25,42 +38,99 @@ impl Default for CompactionOptions {
     }
 }
 
-fn estimate_message_tokens(message: &AgentMessage, config: &AgentConfig) -> usize {
-    let chars = match message {
-        AgentMessage::System { content } | AgentMessage::User { content } => content.len(),
-        AgentMessage::UserWithImages { content, images } => {
-            return content.len().div_ceil(4) + images.len() * config.estimated_image_tokens;
+pub(crate) fn serialized_message(message: &AgentMessage) -> Vec<u8> {
+    serde_json::to_vec(message).unwrap_or_default()
+}
+
+/// Returns the model-visible equivalent of a canonical message. Providers
+/// intentionally omit arbitrary custom records, while durable compaction
+/// summaries are converted to an ordinary user checkpoint message.
+pub(crate) fn provider_normalized_message(message: &AgentMessage) -> Option<AgentMessage> {
+    match message {
+        AgentMessage::Custom { .. } => {
+            compaction_summary_text(message).map(|summary| AgentMessage::User {
+                content: format!("<context-checkpoint>\n{summary}\n</context-checkpoint>"),
+            })
         }
-        AgentMessage::Assistant {
-            content,
-            tool_calls,
-            ..
-        } => {
-            content.as_deref().map_or(0, str::len)
-                + tool_calls.as_ref().map_or(0, |calls| {
-                    calls
-                        .iter()
-                        .map(|call| {
-                            call.id.len()
-                                + call.r#type.len()
-                                + call.function.name.len()
-                                + call.function.arguments.len()
-                                + call.thought_signature.as_deref().map_or(0, str::len)
-                        })
-                        .sum()
-                })
+        _ => Some(message.clone()),
+    }
+}
+
+pub(crate) fn estimate_message_tokens(message: &AgentMessage, config: &AgentConfig) -> usize {
+    let serialized_tokens = serialized_message(message).len().div_ceil(4);
+    let image_tokens = match message {
+        AgentMessage::UserWithImages { images, .. } => {
+            images.len().saturating_mul(config.estimated_image_tokens)
         }
-        AgentMessage::Tool { name, content, .. } => name.len() + content.len(),
-        AgentMessage::Custom { payload, .. } => payload.to_string().len(),
+        _ => 0,
     };
-    chars.div_ceil(4)
+    serialized_tokens.saturating_add(image_tokens)
 }
 
 fn estimate_context_tokens(messages: &[AgentMessage], config: &AgentConfig) -> usize {
     messages
         .iter()
-        .map(|m| estimate_message_tokens(m, config))
+        .filter_map(provider_normalized_message)
+        .map(|message| estimate_message_tokens(&message, config))
         .sum()
+}
+
+pub fn estimate_request_tokens(
+    messages: &[AgentMessage],
+    tool_schema_json: Option<&str>,
+    config: &AgentConfig,
+) -> usize {
+    estimate_context_tokens(messages, config)
+        .saturating_add(tool_schema_json.map_or(0, |tools| tools.len().div_ceil(4)))
+}
+
+pub fn compact_for_budget(
+    messages: &[AgentMessage],
+    tool_schema_json: Option<&str>,
+    retained_tail_target: usize,
+    config: &AgentConfig,
+) -> Option<PreparedCompaction> {
+    let pre_tokens = estimate_request_tokens(messages, tool_schema_json, config);
+    let compacted =
+        compact_messages_to_token_budget_with_config(messages, retained_tail_target, config);
+    if compacted.len() == messages.len() {
+        return None;
+    }
+    let post_tokens = estimate_request_tokens(&compacted, tool_schema_json, config);
+    let compacted_messages = messages
+        .len()
+        .saturating_sub(compacted.len().saturating_sub(1));
+    let retained_tail_tokens = compacted
+        .iter()
+        .skip_while(|message| compaction_summary_text(message).is_none())
+        .skip(1)
+        .map(|message| estimate_message_tokens(message, config))
+        .sum();
+    Some(PreparedCompaction {
+        messages: compacted,
+        pre_tokens,
+        post_tokens,
+        compacted_messages,
+        retained_tail_target,
+        retained_tail_tokens,
+    })
+}
+
+pub fn compact_for_context_budget(
+    messages: &[AgentMessage],
+    tool_schema_json: Option<&str>,
+    budget: &ContextBudget,
+    config: &AgentConfig,
+) -> Option<PreparedCompaction> {
+    if estimate_request_tokens(messages, tool_schema_json, config) <= budget.trigger_tokens {
+        return None;
+    }
+    compact_for_budget(
+        messages,
+        tool_schema_json,
+        budget.retained_tail_tokens,
+        config,
+    )
 }
 
 pub(crate) fn should_auto_compact(messages: &[AgentMessage], config: &AgentConfig) -> bool {
@@ -99,39 +169,137 @@ pub fn compact_messages(
     }
 
     let keep_count = options.preserve_recent.min(messages.len());
-    compact_from_index(messages, messages.len().saturating_sub(keep_count))
+    compact_from_index(
+        messages,
+        messages.len().saturating_sub(keep_count),
+        &AgentConfig::default(),
+    )
 }
 
 pub(crate) fn compact_messages_to_token_budget(
     messages: &[AgentMessage],
     keep_recent_tokens: usize,
 ) -> Vec<AgentMessage> {
+    compact_messages_to_token_budget_with_config(
+        messages,
+        keep_recent_tokens,
+        &AgentConfig::default(),
+    )
+}
+
+fn compact_messages_to_token_budget_with_config(
+    messages: &[AgentMessage],
+    keep_recent_tokens: usize,
+    config: &AgentConfig,
+) -> Vec<AgentMessage> {
     if messages.len() <= 2 {
         return messages.to_vec();
     }
 
-    let mut tokens = 0;
+    let mut tokens: usize = 0;
     let mut start = messages.len();
     for (index, message) in messages.iter().enumerate().rev() {
         if matches!(message, AgentMessage::System { .. }) {
             continue;
         }
-        tokens += estimate_message_tokens(message, &AgentConfig::default());
+        tokens = tokens.saturating_add(estimate_message_tokens(message, config));
         start = index;
         if tokens >= keep_recent_tokens {
             break;
         }
     }
 
-    // A tool result must never be sent without the assistant tool call that created it.
-    while start > 0 && matches!(messages[start], AgentMessage::Tool { .. }) {
-        start -= 1;
-    }
+    start = tool_boundary_safe_start(messages, start);
 
-    compact_from_index(messages, start)
+    compact_from_index(messages, start, config)
 }
 
-fn compact_from_index(messages: &[AgentMessage], mut start: usize) -> Vec<AgentMessage> {
+fn tool_boundary_safe_start(messages: &[AgentMessage], start: usize) -> usize {
+    if start >= messages.len() {
+        return start;
+    }
+
+    if matches!(messages[start], AgentMessage::Tool { .. }) {
+        let mut tool_block_start = start;
+        while tool_block_start > 0
+            && matches!(messages[tool_block_start - 1], AgentMessage::Tool { .. })
+        {
+            tool_block_start -= 1;
+        }
+        if tool_block_start > 0
+            && is_complete_tool_exchange(messages, tool_block_start - 1, tool_block_start)
+        {
+            return tool_block_start - 1;
+        }
+
+        let mut after_tools = start;
+        while after_tools < messages.len()
+            && matches!(messages[after_tools], AgentMessage::Tool { .. })
+        {
+            after_tools += 1;
+        }
+        return after_tools;
+    }
+
+    if has_tool_calls(&messages[start]) && !is_complete_tool_exchange(messages, start, start + 1) {
+        let mut after_exchange = start + 1;
+        while after_exchange < messages.len()
+            && matches!(messages[after_exchange], AgentMessage::Tool { .. })
+        {
+            after_exchange += 1;
+        }
+        return after_exchange;
+    }
+
+    start
+}
+
+fn has_tool_calls(message: &AgentMessage) -> bool {
+    matches!(
+        message,
+        AgentMessage::Assistant {
+            tool_calls: Some(calls),
+            ..
+        } if !calls.is_empty()
+    )
+}
+
+fn is_complete_tool_exchange(
+    messages: &[AgentMessage],
+    assistant_index: usize,
+    first_tool_index: usize,
+) -> bool {
+    let AgentMessage::Assistant {
+        tool_calls: Some(calls),
+        ..
+    } = &messages[assistant_index]
+    else {
+        return false;
+    };
+    if calls.is_empty() || first_tool_index >= messages.len() {
+        return false;
+    }
+
+    let tool_results = messages[first_tool_index..]
+        .iter()
+        .take_while(|message| matches!(message, AgentMessage::Tool { .. }));
+    let result_ids: Vec<&str> = tool_results
+        .filter_map(|message| match message {
+            AgentMessage::Tool { tool_call_id, .. } => Some(tool_call_id.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    result_ids.len() == calls.len()
+        && calls
+            .iter()
+            .all(|call| result_ids.contains(&call.id.as_str()))
+}
+fn compact_from_index(
+    messages: &[AgentMessage],
+    mut start: usize,
+    config: &AgentConfig,
+) -> Vec<AgentMessage> {
     while start < messages.len() && matches!(messages[start], AgentMessage::System { .. }) {
         start += 1;
     }
@@ -157,7 +325,7 @@ fn compact_from_index(messages: &[AgentMessage], mut start: usize) -> Vec<AgentM
         custom_type: "compaction_summary".to_string(),
         payload: serde_json::json!({
             "schema_version": 1,
-            "summary": build_checkpoint(&dropped, &AgentConfig::default()),
+            "summary": build_checkpoint(&dropped, config),
             "compacted_messages": dropped.len(),
             "checkpoint_kind": "token_budget",
         }),
@@ -394,7 +562,170 @@ fn extract_session_insights(messages: &[AgentMessage]) -> (Vec<String>, Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ImageAttachment;
+    use std::collections::HashSet;
+    use threadlane_protocol::{
+        RuntimeToolCall as ToolCall, RuntimeToolCallFunction as ToolCallFunction,
+    };
 
+    fn tool_exchange_fixture(historical_chars: usize) -> Vec<AgentMessage> {
+        vec![
+            AgentMessage::System {
+                content: "system".into(),
+            },
+            AgentMessage::User {
+                content: "older request".into(),
+            },
+            AgentMessage::User {
+                content: "x".repeat(historical_chars),
+            },
+            AgentMessage::Assistant {
+                content: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: "call_1".into(),
+                    r#type: "function".into(),
+                    function: ToolCallFunction {
+                        name: "read_file".into(),
+                        arguments: "{}".into(),
+                    },
+                    thought_signature: None,
+                }]),
+                stop_reason: None,
+                deferred_handle: None,
+            },
+            AgentMessage::Tool {
+                tool_call_id: "call_1".into(),
+                name: "read_file".into(),
+                content: "result".repeat(1_000),
+                is_error: false,
+                terminate: false,
+            },
+            AgentMessage::User {
+                content: "continue".into(),
+            },
+        ]
+    }
+
+    fn assert_valid_tool_pairs(messages: &[AgentMessage]) {
+        let mut pending = HashSet::new();
+        for message in messages {
+            match message {
+                AgentMessage::Assistant {
+                    tool_calls: Some(calls),
+                    ..
+                } if !calls.is_empty() => {
+                    assert!(pending.is_empty(), "tool call missing its result");
+                    pending.extend(calls.iter().map(|call| call.id.as_str()));
+                }
+                AgentMessage::Tool { tool_call_id, .. } => {
+                    assert!(
+                        pending.remove(tool_call_id.as_str()),
+                        "tool result missing its assistant tool call"
+                    );
+                }
+                _ => assert!(pending.is_empty(), "tool call missing its result"),
+            }
+        }
+        assert!(pending.is_empty(), "tool call missing its result");
+    }
+
+    #[test]
+    fn request_estimator_includes_serialized_messages_tool_schema_and_configured_images() {
+        let config = AgentConfig::builder().estimated_image_tokens(77).build();
+        let messages = vec![AgentMessage::UserWithImages {
+            content: "x".repeat(400),
+            images: vec![ImageAttachment {
+                display_name: "image.png".into(),
+                data_url: "data:image/png;base64,AA==".into(),
+            }],
+        }];
+        let serialized_message_tokens = serde_json::to_vec(&messages[0]).unwrap().len().div_ceil(4);
+        assert_eq!(
+            estimate_request_tokens(&messages, Some(&"t".repeat(400)), &config),
+            serialized_message_tokens + 100 + 77
+        );
+    }
+
+    #[test]
+    fn context_budget_compacts_strictly_above_trigger() {
+        let config = AgentConfig::default();
+        let messages = tool_exchange_fixture(12_000);
+        let request_tokens = estimate_request_tokens(&messages, None, &config);
+        let budget = crate::model_metadata::ContextBudget {
+            limit: request_tokens + 1,
+            limit_is_estimate: false,
+            trigger_tokens: request_tokens,
+            retained_tail_tokens: 1_000,
+            strict_retained_tail_tokens: 500,
+        };
+
+        assert!(compact_for_context_budget(&messages, None, &budget, &config).is_none());
+
+        let above_trigger = crate::model_metadata::ContextBudget {
+            trigger_tokens: request_tokens - 1,
+            ..budget
+        };
+        assert!(compact_for_context_budget(&messages, None, &above_trigger, &config).is_some());
+    }
+
+    #[test]
+    fn budget_compaction_uses_caller_config_for_tail_and_checkpoint() {
+        let config = AgentConfig::builder()
+            .estimated_image_tokens(1)
+            .max_checkpoint_chars(0)
+            .build();
+        let messages = vec![
+            AgentMessage::System {
+                content: "system".into(),
+            },
+            AgentMessage::User {
+                content: "old request that must not appear in the checkpoint".into(),
+            },
+            AgentMessage::Assistant {
+                content: Some("older response".into()),
+                tool_calls: None,
+                stop_reason: None,
+                deferred_handle: None,
+            },
+            AgentMessage::Assistant {
+                content: Some("a".repeat(2_000)),
+                tool_calls: None,
+                stop_reason: None,
+                deferred_handle: None,
+            },
+            AgentMessage::UserWithImages {
+                content: "latest".into(),
+                images: vec![ImageAttachment {
+                    display_name: "small.png".into(),
+                    data_url: "data:image/png;base64,AA==".into(),
+                }],
+            },
+        ];
+
+        let result = compact_for_budget(&messages, None, 500, &config).unwrap();
+        assert!(matches!(
+            result.messages.last(),
+            Some(AgentMessage::UserWithImages { .. })
+        ));
+        assert!(matches!(
+            result.messages.get(result.messages.len() - 2),
+            Some(AgentMessage::Assistant { .. })
+        ));
+        let checkpoint = compaction_summary_text(&result.messages[1]).unwrap();
+        assert!(!checkpoint.contains("old request"));
+    }
+
+    #[test]
+    fn budget_compaction_retains_complete_tool_exchange() {
+        let messages = tool_exchange_fixture(12_000);
+        let result = compact_for_budget(&messages, None, 1_000, &AgentConfig::default()).unwrap();
+        assert!(compaction_summary_text(&result.messages[1]).is_some());
+        assert_valid_tool_pairs(&result.messages);
+        assert!(result.post_tokens < result.pre_tokens);
+        assert!(result.compacted_messages > 0);
+        assert_eq!(result.retained_tail_target, 1_000);
+        assert_ne!(result.retained_tail_tokens, result.retained_tail_target);
+    }
     #[test]
     fn test_compact_messages() {
         let mut msgs = vec![AgentMessage::System {
@@ -428,7 +759,15 @@ mod tests {
         });
         msgs.push(AgentMessage::Assistant {
             content: None,
-            tool_calls: Some(vec![]),
+            tool_calls: Some(vec![ToolCall {
+                id: "call_1".into(),
+                r#type: "function".into(),
+                function: ToolCallFunction {
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                },
+                thought_signature: None,
+            }]),
             stop_reason: None,
             deferred_handle: None,
         });
@@ -443,6 +782,7 @@ mod tests {
         let compacted = compact_messages_to_token_budget(&msgs, 1);
         assert!(matches!(compacted[2], AgentMessage::Assistant { .. }));
         assert!(matches!(compacted[3], AgentMessage::Tool { .. }));
+        assert_valid_tool_pairs(&compacted);
     }
 
     #[test]

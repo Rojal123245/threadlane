@@ -7,6 +7,7 @@ pub mod events;
 pub mod harness;
 pub mod local_tool_router;
 pub(crate) mod loop_engine;
+pub mod model_metadata;
 pub mod provider;
 pub mod rules;
 pub mod tool_dispatcher;
@@ -34,19 +35,20 @@ pub use error::AgentError;
 pub use events::{
     AgentEvent, HarnessMetrics, PermissionRequest, PermissionScope, SubagentRecoveryStatus,
 };
-pub use local_tool_router::LocalToolRouter;
 pub use harness::{
     has_open_subagent_lanes, interrupted_subagent_lanes, AcceptedRun, DurableEvent, DurablePayload,
     InterruptedSubagentLane, LaneQueue, OperationOutcome, QueueKind, Record, RecoveryResult,
     SteerItem, SteerPriority, ToolReplaySafety,
 };
+pub use local_tool_router::LocalToolRouter;
 pub use loop_engine::repair_interrupted_tool_turn;
 pub use provider::{
     convert_to_codex_llm, convert_to_llm, AssistantMessageRecorder, ChatCompletionsAdapter,
-    CodexResponsesAdapter, ProviderAdapter, ProviderDiscardedUsageRecorder, ProviderHookRecorder,
-    ProviderMessages, ProviderRouter, ProviderTraceEvent, ProviderTraceRecorder,
-    ProviderUsageRecorder, StreamingStateRecorder, ToolCompletionRecorder,
-    ToolExecutionTraceEvent, ToolExecutionTraceRecorder, ToolIntentRecorder,
+    CodexResponsesAdapter, ProviderAdapter, ProviderBoundaryPreparer, ProviderBoundaryRequest,
+    ProviderBoundaryResult, ProviderDiscardedUsageRecorder, ProviderHookRecorder, ProviderMessages,
+    ProviderRouter, ProviderTraceEvent, ProviderTraceRecorder, ProviderUsageRecorder,
+    StreamingStateRecorder, ToolCompletionRecorder, ToolExecutionTraceEvent,
+    ToolExecutionTraceRecorder, ToolIntentRecorder,
 };
 pub use rules::*;
 pub use tool_dispatcher::ToolDispatcher;

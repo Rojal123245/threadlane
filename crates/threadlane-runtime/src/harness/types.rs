@@ -443,6 +443,7 @@ pub enum ContextItemSource {
     Skill,
     Memory,
     Message,
+    ToolResult,
     ToolSchema,
     Other,
 }
@@ -470,6 +471,32 @@ pub struct ContextManifestItem {
     pub label: Option<TraceString>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionReason {
+    Manual,
+    AdaptiveBudget,
+    OverflowRecovery,
+}
+
+impl CompactionReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::AdaptiveBudget => "adaptive_budget",
+            Self::OverflowRecovery => "overflow_recovery",
+        }
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Record {
     OperationStarted {
@@ -490,7 +517,32 @@ pub enum Record {
         request_id: TraceString,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         total_estimated_tokens: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effective_model: Option<TraceString>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_limit: Option<usize>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        context_limit_is_estimate: bool,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        compaction_generation: u64,
         items: Vec<ContextManifestItem>,
+    },
+    ContextCompacted {
+        id: String,
+        seq: u64,
+        lane: String,
+        timestamp: u64,
+        run_id: String,
+        generation: u64,
+        reason: CompactionReason,
+        effective_model: TraceString,
+        context_limit: usize,
+        context_limit_is_estimate: bool,
+        pre_tokens: usize,
+        post_tokens: usize,
+        retained_tail_target: usize,
+        retained_tail_tokens: usize,
+        compacted_messages: usize,
     },
     AbortRequested {
         id: String,
@@ -1117,6 +1169,12 @@ impl Record {
                 }
                 record
             }
+            mut record @ Self::ContextCompacted { .. } => {
+                if let Self::ContextCompacted { seq: current, .. } = &mut record {
+                    *current = seq;
+                }
+                record
+            }
             mut record @ Self::ProviderRequestFinished { .. } => {
                 if let Self::ProviderRequestFinished { seq: current, .. } = &mut record {
                     *current = seq;
@@ -1189,6 +1247,7 @@ impl Record {
             | Self::Usage { id, .. }
             | Self::RunContextCaptured { id, .. }
             | Self::ContextManifestCaptured { id, .. }
+            | Self::ContextCompacted { id, .. }
             | Self::ProviderRequestStarted { id, .. }
             | Self::ProviderRequestFinished { id, .. }
             | Self::ProviderResponseAttached { id, .. }
@@ -1222,6 +1281,7 @@ impl Record {
             | Self::Usage { seq, .. }
             | Self::RunContextCaptured { seq, .. }
             | Self::ContextManifestCaptured { seq, .. }
+            | Self::ContextCompacted { seq, .. }
             | Self::ProviderRequestStarted { seq, .. }
             | Self::ProviderRequestFinished { seq, .. }
             | Self::ProviderResponseAttached { seq, .. }
@@ -1255,6 +1315,7 @@ impl Record {
             | Self::Usage { lane, .. }
             | Self::RunContextCaptured { lane, .. }
             | Self::ContextManifestCaptured { lane, .. }
+            | Self::ContextCompacted { lane, .. }
             | Self::ProviderRequestStarted { lane, .. }
             | Self::ProviderRequestFinished { lane, .. }
             | Self::ProviderResponseAttached { lane, .. }
@@ -1284,6 +1345,7 @@ impl Record {
             | Self::WriteApplied { run_id, .. } => Some(run_id),
             Self::RunContextCaptured { run_id, .. }
             | Self::ContextManifestCaptured { run_id, .. }
+            | Self::ContextCompacted { run_id, .. }
             | Self::ProviderRequestStarted { run_id, .. }
             | Self::ProviderRequestFinished { run_id, .. }
             | Self::ProviderResponseAttached { run_id, .. }

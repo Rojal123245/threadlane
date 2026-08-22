@@ -4,8 +4,40 @@
 //! so existing credential helpers, SSH keys, remotes, hooks, and repository
 //! configuration continue to work unchanged.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+#[cfg(test)]
+thread_local! {
+    static COMMAND_SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+const REPOSITORY_METADATA_TTL: Duration = Duration::from_secs(60);
+const PR_INSPECTION_TTL: Duration = Duration::from_secs(30);
+
+#[derive(Clone)]
+struct RepositoryMetadata {
+    remote: Option<String>,
+    default_branch: Option<String>,
+}
+
+type TimedCache<T> = HashMap<PathBuf, (Instant, T)>;
+
+static REPOSITORY_METADATA_CACHE: OnceLock<Mutex<TimedCache<RepositoryMetadata>>> = OnceLock::new();
+static PR_CACHE: OnceLock<Mutex<TimedCache<Option<GitHubPrInfo>>>> = OnceLock::new();
+
+fn fresh_cache_value<T: Clone>(entry: &(Instant, T), now: Instant, ttl: Duration) -> Option<T> {
+    (now.duration_since(entry.0) <= ttl).then(|| entry.1.clone())
+}
+
+fn repository_key(work_dir: &Path) -> PathBuf {
+    work_dir
+        .canonicalize()
+        .unwrap_or_else(|_| work_dir.to_path_buf())
+}
 
 const GIT_FIELD_SEPARATOR: char = '\u{1f}';
 
@@ -152,6 +184,8 @@ fn command(work_dir: &Path, args: &[&str]) -> Result<String, GitError> {
     let mut attempts = 0;
     loop {
         attempts += 1;
+        #[cfg(test)]
+        COMMAND_SPAWNS.set(COMMAND_SPAWNS.get() + 1);
         let output = Command::new("git")
             .args(args)
             .current_dir(work_dir)
@@ -312,6 +346,30 @@ pub fn sync_remote(work_dir: &Path) -> Result<(), GitError> {
     Ok(())
 }
 
+fn repository_metadata(work_dir: &Path) -> RepositoryMetadata {
+    let key = repository_key(work_dir);
+    let now = Instant::now();
+    let cache = REPOSITORY_METADATA_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(metadata) = cache.lock().ok().and_then(|cache| {
+        cache
+            .get(&key)
+            .and_then(|entry| fresh_cache_value(entry, now, REPOSITORY_METADATA_TTL))
+    }) {
+        return metadata;
+    }
+    let metadata = RepositoryMetadata {
+        remote: command(work_dir, &["config", "--get", "remote.origin.url"])
+            .ok()
+            .map(|remote| remote.trim().to_owned())
+            .filter(|remote| !remote.is_empty()),
+        default_branch: discover_default_branch(work_dir),
+    };
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(key, (now, metadata.clone()));
+    }
+    metadata
+}
+
 pub fn fetch(work_dir: &Path) -> Result<(), GitError> {
     sync_remote(work_dir)
 }
@@ -322,7 +380,7 @@ pub fn list_branches_detailed(
 ) -> Result<Vec<GitBranchInfo>, GitError> {
     let def_branch = provided_default_branch
         .map(str::to_owned)
-        .or_else(|| default_branch(work_dir));
+        .or_else(|| discover_default_branch(work_dir));
     let output = command(
         work_dir,
         &[
@@ -408,32 +466,24 @@ pub fn inspect(work_dir: &Path) -> Result<GitStatus, GitError> {
             status.branches.push(current_branch.clone());
         }
     }
-    status.default_branch = default_branch(work_dir);
-    status.branch_details = list_branches_detailed(work_dir, status.default_branch.as_deref()).unwrap_or_else(|_| {
-        status
-            .branches
-            .iter()
-            .map(|name| GitBranchInfo {
-                name: name.clone(),
-                is_current: status.branch.as_deref() == Some(name),
-                is_default: status.default_branch.as_deref() == Some(name),
-                ..GitBranchInfo::default()
-            })
-            .collect()
-    });
-    status.remote = command(work_dir, &["config", "--get", "remote.origin.url"])
-        .ok()
-        .map(|remote| remote.trim().to_owned())
-        .filter(|remote| !remote.is_empty());
+    let metadata = repository_metadata(work_dir);
+    status.default_branch = metadata.default_branch.clone();
+    status.branch_details = list_branches_detailed(work_dir, status.default_branch.as_deref())
+        .unwrap_or_else(|_| {
+            status
+                .branches
+                .iter()
+                .map(|name| GitBranchInfo {
+                    name: name.clone(),
+                    is_current: status.branch.as_deref() == Some(name),
+                    is_default: status.default_branch.as_deref() == Some(name),
+                    ..GitBranchInfo::default()
+                })
+                .collect()
+        });
+    status.remote = metadata.remote;
     if status.remote.is_some() && status.branch.is_some() {
-        let has_upstream = command(
-            work_dir,
-            &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
-        )
-        .ok()
-        .map(|upstream| !upstream.trim().is_empty())
-        .unwrap_or(false);
-        if !has_upstream && status.ahead == 0 {
+        if !status.has_upstream && status.ahead == 0 {
             status.ahead = command(work_dir, &["rev-list", "--count", "HEAD"])
                 .ok()
                 .and_then(|count| count.trim().parse().ok())
@@ -887,7 +937,7 @@ pub fn parse_gh_pr_json(json_str: &str) -> Result<GitHubPrInfo, String> {
     })
 }
 
-pub fn inspect_pr(work_dir: &Path) -> Result<Option<GitHubPrInfo>, GitError> {
+fn inspect_pr_uncached(work_dir: &Path) -> Result<Option<GitHubPrInfo>, GitError> {
     let output = Command::new("gh")
         .args([
             "pr",
@@ -953,6 +1003,24 @@ pub fn inspect_pr(work_dir: &Path) -> Result<Option<GitHubPrInfo>, GitError> {
     }
 
     Ok(None)
+}
+
+pub fn inspect_pr(work_dir: &Path) -> Result<Option<GitHubPrInfo>, GitError> {
+    let key = repository_key(work_dir);
+    let now = Instant::now();
+    let cache = PR_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(info) = cache.lock().ok().and_then(|cache| {
+        cache
+            .get(&key)
+            .and_then(|entry| fresh_cache_value(entry, now, PR_INSPECTION_TTL))
+    }) {
+        return Ok(info);
+    }
+    let info = inspect_pr_uncached(work_dir)?;
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(key, (now, info.clone()));
+    }
+    Ok(info)
 }
 
 pub fn create_branch(work_dir: &Path, name: &str) -> Result<(), GitError> {
@@ -1039,9 +1107,7 @@ pub fn checkout_carrying_changes(work_dir: &Path, name: &str) -> Result<(), GitE
 /// Describe changed paths in dependency-friendly groups for atomic commit planning.
 /// Source files are emitted before generated/lock files, and lock files are excluded.
 pub fn atomic_commit_groups(work_dir: &Path) -> Result<Vec<Vec<String>>, GitError> {
-    let status = inspect(work_dir)?;
-    let mut paths = status
-        .files
+    let mut paths = inspect_files(work_dir)?
         .into_iter()
         .map(|file| file.path)
         .filter(|path| !path.ends_with("Cargo.lock") && !path.ends_with("package-lock.json"))
@@ -1226,7 +1292,8 @@ pub fn diff_file(work_dir: &Path, path: &str) -> Result<String, GitError> {
     }
 
     // 3. If untracked or new file, show whole file as additions via git diff --no-index
-    if command(work_dir, &["ls-files", "--error-unmatch", "--", path]).is_err() {
+    let is_untracked = command(work_dir, &["ls-files", "--error-unmatch", "--", path]).is_err();
+    if is_untracked {
         let null_source = if cfg!(windows) { "NUL" } else { "/dev/null" };
         if let Ok(output) = Command::new("git")
             .args([
@@ -1248,7 +1315,7 @@ pub fn diff_file(work_dir: &Path, path: &str) -> Result<String, GitError> {
     }
 
     // 4. Fallback: if file exists on disk and is untracked, synthesize additions
-    if command(work_dir, &["ls-files", "--error-unmatch", "--", path]).is_err() {
+    if is_untracked {
         let full_path = work_dir.join(path);
         if full_path.is_file() {
             if let Ok(content) = std::fs::read_to_string(&full_path) {
@@ -1277,20 +1344,11 @@ pub fn commit_message_diff(work_dir: &Path) -> Result<String, GitError> {
         return Ok(staged);
     }
 
-    let mut diff = command(work_dir, &["diff", "--"])?;
-    let untracked = command(
-        work_dir,
-        &["ls-files", "--others", "--exclude-standard", "-z"],
-    )?;
-    for path in untracked.split('\0').filter(|path| !path.is_empty()) {
-        let file_diff = diff_file(work_dir, path)?;
-        if !file_diff.trim().is_empty() {
-            if !diff.is_empty() {
-                diff.push('\n');
-            }
-            diff.push_str(&file_diff);
-        }
-    }
+    command(work_dir, &["add", "--intent-to-add", "--", "."])?;
+    let diff = command(work_dir, &["diff", "--no-ext-diff", "--"]);
+    let reset = command(work_dir, &["reset", "--quiet", "--", "."]);
+    reset?;
+    let diff = diff?;
     if diff.trim().is_empty() {
         return Err(GitError {
             work_dir: work_dir.to_path_buf(),
@@ -1300,7 +1358,7 @@ pub fn commit_message_diff(work_dir: &Path) -> Result<String, GitError> {
     Ok(diff)
 }
 
-fn default_branch(work_dir: &Path) -> Option<String> {
+fn discover_default_branch(work_dir: &Path) -> Option<String> {
     if let Some(branch) = command(
         work_dir,
         &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
@@ -1457,6 +1515,25 @@ mod tests {
     }
 
     #[test]
+    fn cache_entry_expires_after_ttl() {
+        let started = std::time::Instant::now();
+        let fresh = (started, "cached".to_string());
+
+        assert_eq!(
+            fresh_cache_value(&fresh, started, std::time::Duration::from_secs(30)),
+            Some("cached".to_string())
+        );
+        assert_eq!(
+            fresh_cache_value(
+                &fresh,
+                started + std::time::Duration::from_secs(31),
+                std::time::Duration::from_secs(30),
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn parses_detached_head() {
         let status = parse_status(Path::new("/tmp/project"), "## HEAD\n");
         assert!(status.detached);
@@ -1564,6 +1641,40 @@ mod tests {
         assert!(working_tree.contains("+unstaged"));
         assert!(working_tree.contains("new.txt"));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn commit_message_diff_process_count_is_constant_for_untracked_files() {
+        let dir = tempdir().unwrap();
+        run_git(dir.path(), &["init", "-q"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Threadlane"]);
+        fs::write(dir.path().join("tracked.txt"), "initial\n").unwrap();
+        run_git(dir.path(), &["add", "tracked.txt"]);
+        run_git(dir.path(), &["commit", "-qm", "initial"]);
+        for index in 0..8 {
+            fs::write(dir.path().join(format!("new-{index}.txt")), "new\n").unwrap();
+        }
+
+        COMMAND_SPAWNS.set(0);
+        let diff = commit_message_diff(dir.path()).unwrap();
+        let spawn_count = COMMAND_SPAWNS.get();
+
+        assert!(diff.contains("new-0.txt"));
+        assert!(diff.contains("new-7.txt"));
+        assert_eq!(spawn_count, 4);
+    }
+
+    #[test]
+    fn commit_message_diff_includes_untracked_files_before_first_commit() {
+        let dir = tempdir().unwrap();
+        run_git(dir.path(), &["init", "-q"]);
+        fs::write(dir.path().join("new.txt"), "new\n").unwrap();
+
+        let diff = commit_message_diff(dir.path()).unwrap();
+
+        assert!(diff.contains("new.txt"));
+        assert!(diff.contains("+new"));
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
@@ -284,7 +285,7 @@ pub struct McpManager {
     global_dir: Option<PathBuf>,
     project_root: Option<PathBuf>,
     servers: TokioMutex<Vec<McpServerRecord>>,
-    cached_tool_defs: RwLock<Vec<AgentToolDefinition>>,
+    cached_tool_defs: RwLock<Arc<[AgentToolDefinition]>>,
     /// Live sessions keyed by server id, reused across tool calls.
     ///
     /// Each session carries its own lock so a call to one server never blocks a
@@ -299,7 +300,7 @@ impl McpManager {
             global_dir,
             project_root,
             servers: TokioMutex::new(Vec::new()),
-            cached_tool_defs: RwLock::new(Vec::new()),
+            cached_tool_defs: RwLock::new(Arc::from([])),
             sessions: TokioMutex::new(HashMap::new()),
         }
     }
@@ -330,29 +331,68 @@ impl McpManager {
             }
         }
 
-        let mut records = Vec::new();
-        let mut tool_defs = Vec::new();
+        let previous = self
+            .servers
+            .lock()
+            .await
+            .iter()
+            .cloned()
+            .map(|record| (record.config.id.clone(), record))
+            .collect::<HashMap<_, _>>();
+        let live_ids = self
+            .sessions
+            .lock()
+            .await
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let records = join_all(all_configs.into_iter().map(|config| async {
+            let tools = if !config.enabled {
+                Vec::new()
+            } else if live_ids.contains(&config.id)
+                && previous
+                    .get(&config.id)
+                    .is_some_and(|record| record.config == config)
+            {
+                previous[&config.id].tools.clone()
+            } else {
+                self.connect_server(&config).await
+            };
+            McpServerRecord { config, tools }
+        }))
+        .await;
 
-        for config in all_configs {
-            if !config.enabled {
-                records.push(McpServerRecord {
-                    config,
-                    tools: Vec::new(),
-                });
-                continue;
-            }
+        let retained_ids = records
+            .iter()
+            .filter(|record| record.config.enabled)
+            .map(|record| record.config.id.clone())
+            .collect::<BTreeSet<_>>();
+        let retired = {
+            let mut sessions = self.sessions.lock().await;
+            let stale_ids = sessions
+                .keys()
+                .filter(|id| !retained_ids.contains(*id))
+                .cloned()
+                .collect::<Vec<_>>();
+            stale_ids
+                .into_iter()
+                .filter_map(|id| sessions.remove(&id))
+                .collect::<Vec<_>>()
+        };
+        join_all(retired.into_iter().map(|session| async move {
+            session.lock().await.kill().await;
+        }))
+        .await;
 
-            let tools = self.connect_server(&config).await;
-            for t in &tools {
-                tool_defs.push(t.definition.clone());
-            }
-            records.push(McpServerRecord { config, tools });
-        }
+        let tool_defs: Vec<_> = records
+            .iter()
+            .flat_map(|record| record.tools.iter().map(|tool| tool.definition.clone()))
+            .collect();
 
         let mut guard = self.servers.lock().await;
         *guard = records.clone();
         if let Ok(mut cached) = self.cached_tool_defs.write() {
-            *cached = tool_defs;
+            *cached = tool_defs.into();
         }
         records
     }
@@ -363,8 +403,7 @@ impl McpManager {
             return Vec::new();
         }
 
-        // A previous session may be stale after a config change, so discovery
-        // always starts a fresh one and retires the old process.
+        // This path is reached only for a new or changed configuration.
         let previous = self.sessions.lock().await.remove(&config.id);
         if let Some(previous) = previous {
             previous.lock().await.kill().await;
@@ -418,14 +457,18 @@ impl McpManager {
         mcp_tools
     }
 
-    pub fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
+    pub fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
         self.cached_tool_defs
             .read()
             .map(|defs| defs.clone())
             .unwrap_or_default()
     }
 
-    pub async fn execute_tool(&self, full_name: &str, args: &str) -> Option<Result<String, String>> {
+    pub async fn execute_tool(
+        &self,
+        full_name: &str,
+        args: &str,
+    ) -> Option<Result<String, String>> {
         let target = {
             let servers = self.servers.lock().await;
             servers.iter().find_map(|server| {
@@ -518,7 +561,7 @@ impl ToolExecutor for McpManager {
         "threadlane.mcp_tools"
     }
 
-    fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
+    fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
         McpManager::tool_definitions(self)
     }
 
@@ -545,7 +588,7 @@ impl ToolExecutor for McpToolExecutor {
         "threadlane.mcp_tools.adapter"
     }
 
-    fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
+    fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
         self.manager.tool_definitions()
     }
 
@@ -557,6 +600,22 @@ impl ToolExecutor for McpToolExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_definition_slice_is_reused() {
+        let manager = McpManager::new(None, None);
+        *manager.cached_tool_defs.write().unwrap() = vec![AgentToolDefinition::new(
+            "mcp__stub__echo",
+            "echo",
+            serde_json::json!({"type": "object"}),
+        )]
+        .into();
+
+        let first = manager.tool_definitions();
+        let second = manager.tool_definitions();
+
+        assert!(Arc::ptr_eq(&first, &second));
+    }
 
     #[test]
     fn test_mcp_server_config_serialization() {

@@ -84,6 +84,12 @@ async fn tool_calls_reuse_one_server_process() {
         1,
         "discovery should start the server exactly once"
     );
+    manager.discover_and_connect().await;
+    assert_eq!(
+        spawn_count(&spawn_log),
+        1,
+        "unchanged discovery should reuse the live server"
+    );
 
     let executor = McpToolExecutor::new(Arc::clone(&manager));
     for call in 0..5 {
@@ -101,6 +107,33 @@ async fn tool_calls_reuse_one_server_process() {
         "tool calls must reuse the running server rather than respawning it"
     );
 
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn changed_config_restarts_server_process() {
+    let dir = tempfile::tempdir().unwrap();
+    let spawn_log = dir.path().join("spawns.log");
+    let script = stub_server(dir.path(), &spawn_log);
+    let config = |name: &str| McpServerConfig {
+        id: "stub".to_string(),
+        name: name.to_string(),
+        transport: McpTransport::Stdio {
+            command: script.to_string_lossy().to_string(),
+            args: Vec::new(),
+            env: HashMap::new(),
+        },
+        enabled: true,
+        scope: McpScope::Global,
+    };
+    McpSettings::save_global(dir.path(), &[config("Before")]).unwrap();
+    let manager = McpManager::new(Some(dir.path().to_path_buf()), None);
+    manager.discover_and_connect().await;
+
+    McpSettings::save_global(dir.path(), &[config("After")]).unwrap();
+    manager.discover_and_connect().await;
+
+    assert_eq!(spawn_count(&spawn_log), 2);
     manager.shutdown().await;
 }
 

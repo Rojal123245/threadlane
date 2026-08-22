@@ -206,6 +206,10 @@ impl GatedEffects {
         self.closed
     }
 
+    pub(crate) fn has_executor(&self) -> bool {
+        self.executor.is_some()
+    }
+
     fn execute_pending<S: SessionStore>(
         &mut self,
         store: &mut S,
@@ -270,6 +274,34 @@ impl GatedEffects {
         Ok(completed)
     }
 
+    /// Crosses the persistence gate once for the complete pending procedure.
+    /// The queue is retained unchanged if the store rejects the durable unit.
+    pub fn run_to_completion_atomically<S: SessionStore>(
+        &mut self,
+        store: &mut S,
+    ) -> Result<Vec<EffectAction>, EffectsError> {
+        if self.closed {
+            return Err(EffectsError::Closed);
+        }
+        if let Some(error) = &self.fault {
+            return Err(EffectsError::Faulted(error.clone()));
+        }
+        if self.pending.is_empty() {
+            return Ok(Vec::new());
+        }
+        let actions = self.pending.iter().cloned().collect::<Vec<_>>();
+        if let Err(error) = store.append_actions_atomically(&actions) {
+            self.fault = Some(error.clone());
+            return Err(EffectsError::Faulted(error));
+        }
+        self.pending.clear();
+        for action in &actions {
+            self.committed_sequences.push(action.seq());
+            self.notify_committed(action);
+        }
+        Ok(actions)
+    }
+
     pub fn run_to_completion_on_lane<S: SessionStore>(
         &mut self,
         store: &mut S,
@@ -299,31 +331,7 @@ impl GatedEffects {
                 return Err(error);
             }
         };
-        let payload = match &action {
-            EffectAction::AppendEntry { entry } => EventPayload::EntryCommitted(entry.clone()),
-            EffectAction::AppendRecord { record, .. } => {
-                EventPayload::RecordCommitted(record.clone())
-            }
-        };
-        let run_id = match &action {
-            EffectAction::AppendRecord { record, .. } => record.run_id().map(str::to_owned),
-            EffectAction::AppendEntry { .. } => None,
-        };
-        let turn = match &action {
-            EffectAction::AppendRecord { record, .. } => record.turn(),
-            EffectAction::AppendEntry { .. } => None,
-        };
-        if matches!(&action, EffectAction::AppendRecord { .. }) {
-            hub.publish_identified_with_turn(
-                payload,
-                Some(action.lane().to_owned()),
-                run_id,
-                turn,
-                None,
-            );
-        } else {
-            hub.publish_identified(payload, Some(action.lane().to_owned()), None, None);
-        }
+        publish_committed(hub, &action);
         Ok(action)
     }
 
@@ -381,6 +389,24 @@ impl GatedEffects {
 
     pub fn fault(&self) -> Option<&ReduceError> {
         self.fault.as_ref()
+    }
+}
+
+fn publish_committed(hub: &HarnessEventHub, action: &EffectAction) {
+    let payload = match action {
+        EffectAction::AppendEntry { entry } => EventPayload::EntryCommitted(entry.clone()),
+        EffectAction::AppendRecord { record, .. } => EventPayload::RecordCommitted(record.clone()),
+    };
+    if let EffectAction::AppendRecord { record, .. } = action {
+        hub.publish_identified_with_turn(
+            payload,
+            Some(action.lane().to_owned()),
+            record.run_id().map(str::to_owned),
+            record.turn(),
+            None,
+        );
+    } else {
+        hub.publish_identified(payload, Some(action.lane().to_owned()), None, None);
     }
 }
 

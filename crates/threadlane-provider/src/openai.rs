@@ -3,9 +3,10 @@ use futures_util::{SinkExt, StreamExt};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
-    Arc,
+    Arc, Mutex as StdMutex, OnceLock,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpStream;
@@ -27,15 +28,40 @@ const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const WS_RESPONSE_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const WS_MAX_AGE: Duration = Duration::from_secs(55 * 60);
+const MODEL_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 use crate::title_generator::{
     title_payload, title_response_text, title_stream_text, TITLE_REQUEST_TIMEOUT,
 };
 
 static CLIENT_SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
+static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static MODEL_CACHE: OnceLock<StdMutex<HashMap<u64, ModelCacheEntry>>> = OnceLock::new();
+
+struct ModelCacheEntry {
+    stored_at: Instant,
+    models: Arc<[String]>,
+}
+
+fn http_client() -> &'static reqwest::Client {
+    HTTP_CLIENT.get_or_init(reqwest::Client::new)
+}
+
+fn model_cache_key(api_key: &str, account_id: Option<&str>) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    api_key.hash(&mut hasher);
+    account_id.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn fresh_models(entry: &ModelCacheEntry, now: Instant) -> Option<Arc<[String]>> {
+    (now.duration_since(entry.stored_at) <= MODEL_CACHE_TTL).then(|| entry.models.clone())
+}
 
 type CodexSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-pub use threadlane_protocol::{RuntimeToolCall as ToolCall, RuntimeToolCallFunction as ToolCallFunction};
+pub use threadlane_protocol::{
+    RuntimeToolCall as ToolCall, RuntimeToolCallFunction as ToolCallFunction,
+};
 
 pub(crate) const OPENAI_PROMPT_CACHE_KEY_MAX_CHARS: usize = 64;
 
@@ -551,8 +577,17 @@ impl ResponseAccumulator {
 }
 
 pub async fn fetch_available_models(api_key: &str, account_id: Option<&str>) -> Vec<String> {
-    let client = reqwest::Client::new();
-    let mut req = client
+    let cache_key = model_cache_key(api_key, account_id);
+    let now = Instant::now();
+    let cache = MODEL_CACHE.get_or_init(|| StdMutex::new(HashMap::new()));
+    if let Some(models) = cache.lock().ok().and_then(|cache| {
+        cache
+            .get(&cache_key)
+            .and_then(|entry| fresh_models(entry, now))
+    }) {
+        return models.iter().cloned().collect();
+    }
+    let mut req = http_client()
         .get("https://api.openai.com/v1/models")
         .header(AUTHORIZATION, format!("Bearer {api_key}"));
     if let Some(account_id) = account_id {
@@ -575,6 +610,15 @@ pub async fn fetch_available_models(api_key: &str, account_id: Option<&str>) -> 
                         .collect();
                     if !models.is_empty() {
                         models.sort();
+                        if let Ok(mut cache) = cache.lock() {
+                            cache.insert(
+                                cache_key,
+                                ModelCacheEntry {
+                                    stored_at: now,
+                                    models: models.clone().into(),
+                                },
+                            );
+                        }
                         return models;
                     }
                 }
@@ -617,7 +661,7 @@ impl OpenAIClient {
         Self {
             api_key,
             account_id,
-            client: reqwest::Client::new(),
+            client: http_client().clone(),
             codex_ws: Arc::new(Mutex::new(CodexWsState::new())),
         }
     }
@@ -1240,10 +1284,11 @@ fn extract_deferred_text(value: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        api_error_details, clamp_prompt_cache_key, continuation_payload, parse_chat_usage,
-        parse_responses_text_delta, parse_responses_usage, title_payload, title_response_text,
-        title_stream_text, CodexWsState, Continuation, OpenAIClient, ProviderUsage,
-        ResponseAccumulator, StreamEvent, OPENAI_PROMPT_CACHE_KEY_MAX_CHARS,
+        api_error_details, clamp_prompt_cache_key, continuation_payload, fresh_models,
+        parse_chat_usage, parse_responses_text_delta, parse_responses_usage, title_payload,
+        title_response_text, title_stream_text, CodexWsState, Continuation, ModelCacheEntry,
+        OpenAIClient, ProviderUsage, ResponseAccumulator, StreamEvent, MODEL_CACHE_TTL,
+        OPENAI_PROMPT_CACHE_KEY_MAX_CHARS,
     };
     use serde_json::json;
     use std::time::{Duration, Instant};
@@ -1264,6 +1309,17 @@ mod tests {
                 "content":[{"type":"output_text","text":"answer"}]
             })],
         }
+    }
+
+    #[test]
+    fn model_cache_returns_only_fresh_successes() {
+        let now = Instant::now();
+        let entry = ModelCacheEntry {
+            stored_at: now,
+            models: std::sync::Arc::from(["gpt-test".to_string()]),
+        };
+        assert_eq!(fresh_models(&entry, now).unwrap().as_ref(), ["gpt-test"]);
+        assert!(fresh_models(&entry, now + MODEL_CACHE_TTL + Duration::from_secs(1)).is_none());
     }
 
     #[test]

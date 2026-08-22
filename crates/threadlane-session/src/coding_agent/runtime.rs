@@ -9,9 +9,7 @@ use super::capabilities::{
     build_broker_dispatcher, render_agent_catalog, restored_tool_policy, McpCapability,
     PlanCapability, SkillCapability, SubagentCapability, WasiCapability,
 };
-use super::harness::{
-    CodingSessionHarness, HarnessWatch, InterruptedSubagentRecoveryState,
-};
+use super::harness::{CodingSessionHarness, HarnessWatch, InterruptedSubagentRecoveryState};
 use crate::commands::{execute_slash_command, parse_slash_command, CommandAction};
 use crate::context::ProjectContext;
 use crate::extension_broker::CapabilityDispatcher;
@@ -23,14 +21,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use threadlane_mcp::McpManager;
+use threadlane_protocol::ProviderPort;
 use threadlane_provider::openai::fetch_available_models;
 use threadlane_provider::router::ProviderClient;
-use threadlane_runtime::harness::{
-    OperationOutcome, QueueKind, Reducer, SessionStore, Snapshot,
-};
+use threadlane_runtime::harness::{OperationOutcome, QueueKind, Reducer, SessionStore, Snapshot};
 use threadlane_runtime::{
-    AgentEvent, AgentMessage, AgentRuntime, ImageAttachment,
-    ReasoningEffort, TokenUsage,
+    AgentEvent, AgentMessage, AgentRuntime, ImageAttachment, ReasoningEffort, TokenUsage,
 };
 use threadlane_skills::{SkillManager, SkillRegistry};
 use threadlane_wasi::packages::default_global_threadlane_dir;
@@ -262,6 +258,17 @@ impl CodingAgent {
     }
 
     pub fn new(options: CodingAgentOptions) -> Self {
+        let provider = Arc::new(ProviderClient::new(
+            &options.api_key,
+            options.account_id.clone(),
+        ));
+        Self::new_with_provider(options, provider)
+    }
+
+    pub(crate) fn new_with_provider(
+        options: CodingAgentOptions,
+        provider: Arc<dyn ProviderPort>,
+    ) -> Self {
         let coding_config = options.coding_config.unwrap_or_default();
         let agent_config = options.agent_config.unwrap_or_default();
         let project_context = ProjectContext::discover(&options.work_dir);
@@ -328,7 +335,7 @@ impl CodingAgent {
                 &effective_model,
                 runtime_harness,
                 agent_config.clone(),
-                Arc::new(ProviderClient::new(&options.api_key, options.account_id.clone())),
+                provider.clone(),
             )
         } else {
             AgentRuntime::new_with_provider(
@@ -337,7 +344,7 @@ impl CodingAgent {
                 &effective_model,
                 options.session_file.as_deref(),
                 agent_config.clone(),
-                Arc::new(ProviderClient::new(&options.api_key, options.account_id.clone())),
+                provider,
             )
             .unwrap_or_else(|error| {
                 panic!("Failed to create agent runtime: {error}");
@@ -351,10 +358,8 @@ impl CodingAgent {
 
         agent.set_prompt_cache_key(Some(session_id.clone()));
 
-        let wasi_extensions = WasiExtensionManager::for_project_session(
-            &options.work_dir,
-            session_id.clone(),
-        );
+        let wasi_extensions =
+            WasiExtensionManager::for_project_session(&options.work_dir, session_id.clone());
         let global_threadlane_dir = default_global_threadlane_dir();
         let loaded_ext_count = wasi_extensions
             .reload_from_roots(global_threadlane_dir.as_deref(), Some(&options.work_dir))
@@ -1039,22 +1044,6 @@ impl CodingAgent {
             }
         }
 
-        if self.agent.auto_compact_history().await {
-            let state = self.agent.get_state().await;
-            if let Some(summary) = state
-                .messages
-                .iter()
-                .rev()
-                .find_map(threadlane_runtime::compaction_summary_text)
-            {
-                let retained_tail = compaction_retained_tail(&state.messages);
-                if let Err(error) = self.persist_harness_compaction(summary, &retained_tail) {
-                    let _ = self.agent.event_tx.send(AgentEvent::AgentError { error });
-                    return None;
-                }
-            }
-        }
-
         let msg = AgentMessage::user(effective_input, images);
         let harness_run_id = match self.begin_harness_run(msg.clone()).await {
             Ok(run_id) => run_id,
@@ -1213,7 +1202,24 @@ mod compaction_sync_tests {
         MAX_PERSISTED_SYSTEM_PROMPT_BYTES,
     };
     use crate::system_prompt::SystemPromptConfig;
-    use threadlane_runtime::{harness::JsonlStore, AgentMessage};
+    use async_trait::async_trait;
+    use std::{
+        collections::HashSet,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        },
+    };
+    use threadlane_protocol::{
+        DeferredResponse, ProviderPort, RuntimeRequest, RuntimeStreamEvent, RuntimeToolCall,
+        RuntimeToolCallFunction, RuntimeUsage,
+    };
+    use threadlane_runtime::{
+        harness::{
+            read_transcript_page, CompactionReason, JsonlStore, SessionStore, TranscriptItem,
+        },
+        AgentConfig, AgentMessage, Record,
+    };
 
     fn summary() -> AgentMessage {
         AgentMessage::Custom {
@@ -1290,14 +1296,14 @@ mod compaction_sync_tests {
             .unwrap()
             .start_subagent_lane("worker", "inspect", Some("node_69"))
             .unwrap();
-        assert!(identity.source_leaf_id.is_none());
+        assert!(identity.identity.source_leaf_id.is_none());
         agent
             .completed_subagent_lanes
             .lock()
             .unwrap()
             .push(CompletedSubagentLane {
-                lane_name: identity.lane_name,
-                run_id: identity.run_id,
+                lane_name: identity.identity.lane_name,
+                run_id: identity.identity.run_id,
                 task: "inspect".into(),
                 agent: "worker".into(),
                 status: SubagentLaneStatus::Completed,
@@ -1321,5 +1327,325 @@ mod compaction_sync_tests {
             .entries()
             .iter()
             .all(|entry| entry.parent_id.as_deref() != Some("node_69")));
+    }
+
+    struct LongToolLoopProvider {
+        attempts: AtomicUsize,
+        max_request_estimate: AtomicUsize,
+        previous_serialized_request: Mutex<Option<String>>,
+    }
+
+    impl LongToolLoopProvider {
+        fn attempts(&self) -> usize {
+            self.attempts.load(Ordering::SeqCst)
+        }
+
+        fn max_request_estimate(&self) -> usize {
+            self.max_request_estimate.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl ProviderPort for LongToolLoopProvider {
+        async fn stream_request(
+            &self,
+            request: RuntimeRequest,
+            events: tokio::sync::mpsc::Sender<RuntimeStreamEvent>,
+        ) {
+            let serialized_request = format!("{}\n{}", request.messages, request.tools);
+            let estimate = serialized_request.len().div_ceil(4);
+            let cache_read_tokens = {
+                let mut previous = self.previous_serialized_request.lock().unwrap();
+                let repeated_prefix_bytes = previous
+                    .as_ref()
+                    .map(|prior| {
+                        prior
+                            .bytes()
+                            .zip(serialized_request.bytes())
+                            .take_while(|(left, right)| left == right)
+                            .count()
+                    })
+                    .unwrap_or(0);
+                *previous = Some(serialized_request);
+                repeated_prefix_bytes / 4
+            };
+            self.max_request_estimate
+                .fetch_max(estimate, Ordering::SeqCst);
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            let tool_calls = if attempt < 102 {
+                vec![RuntimeToolCall {
+                    id: format!("loop-{attempt}"),
+                    r#type: "function".into(),
+                    function: RuntimeToolCallFunction {
+                        name: threadlane_skills::LOAD_SKILL_TOOL_NAME.into(),
+                        arguments: serde_json::json!({ "name": "reported-shape" }).to_string(),
+                    },
+                    thought_signature: None,
+                }]
+            } else {
+                Vec::new()
+            };
+            if tool_calls.is_empty() {
+                let _ = events
+                    .send(RuntimeStreamEvent::ContentToken("complete".into()))
+                    .await;
+            }
+            let estimated_tokens = u32::try_from(estimate).expect("test request fits u32");
+            let cache_read_tokens =
+                u32::try_from(cache_read_tokens).expect("test cache prefix fits u32");
+            let input_tokens = estimated_tokens.saturating_sub(cache_read_tokens);
+            let output_tokens = 20;
+            let usage = RuntimeUsage {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens: 0,
+                total_tokens: estimated_tokens.saturating_add(output_tokens),
+            };
+            let _ = events
+                .send(RuntimeStreamEvent::Finished { tool_calls, usage })
+                .await;
+        }
+
+        async fn fetch_deferred(
+            &self,
+            _model: &str,
+            _handle_id: &str,
+        ) -> Result<DeferredResponse, String> {
+            Ok(DeferredResponse::Pending)
+        }
+
+        async fn cancel_deferred(&self, _model: &str, _handle_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn provider_kind(&self, _model: &str) -> &'static str {
+            "test"
+        }
+    }
+
+    #[tokio::test]
+    async fn long_cached_tool_loop_compacts_before_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reported-session-shape.jsonl");
+        let skill_dir = dir.path().join(".agents/skills/reported-shape");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let skill_body = "segment ".repeat(1_000);
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!(
+                "---\nname: reported-shape\ndescription: deterministic compaction input\n---\n{skill_body}"
+            ),
+        )
+        .unwrap();
+        let provider = Arc::new(LongToolLoopProvider {
+            attempts: AtomicUsize::new(0),
+            max_request_estimate: AtomicUsize::new(0),
+            previous_serialized_request: Mutex::new(None),
+        });
+        let mut agent = CodingAgent::new_with_provider(
+            CodingAgentOptions {
+                api_key: "test-key".into(),
+                account_id: None,
+                model: "reported-session-shape-model".into(),
+                work_dir: dir.path().to_path_buf(),
+                session_file: Some(path.clone()),
+                system_prompt: SystemPromptConfig::default(),
+                agent_config: Some(AgentConfig::default()),
+                coding_config: None,
+            },
+            provider.clone(),
+        );
+
+        let result = agent
+            .handle_input_with_images("continue the cached tool loop", vec![])
+            .await;
+        assert!(result.is_none(), "foreground run failed: {result:?}");
+        assert_eq!(provider.attempts(), 102);
+
+        // Reopen the durable journal rather than relying on in-memory runtime state.
+        drop(agent);
+        let store = JsonlStore::open(&path).unwrap();
+        let records = store.records();
+        let emitted_context_limit = records
+            .iter()
+            .filter_map(|record| match record {
+                Record::ContextManifestCaptured { context_limit, .. } => *context_limit,
+                _ => None,
+            })
+            .next_back()
+            .unwrap();
+        assert!(provider.max_request_estimate() < emitted_context_limit);
+
+        let cumulative_processed = records
+            .iter()
+            .filter_map(|record| match record {
+                Record::Usage { usage, .. } => Some(
+                    u64::from(usage.input_tokens)
+                        .saturating_add(u64::from(usage.cache_read_tokens))
+                        .saturating_add(u64::from(usage.output_tokens)),
+                ),
+                _ => None,
+            })
+            .sum::<u64>();
+        assert!(
+            cumulative_processed > emitted_context_limit as u64,
+            "processed={cumulative_processed}, limit={emitted_context_limit}"
+        );
+
+        let (compaction_seq, generation) = records
+            .iter()
+            .find_map(|record| match record {
+                Record::ContextCompacted {
+                    seq,
+                    generation,
+                    reason: CompactionReason::AdaptiveBudget,
+                    ..
+                } => Some((*seq, *generation)),
+                _ => None,
+            })
+            .expect("adaptive compaction telemetry");
+        let (manifest_seq, manifest_generation, manifest_tokens) = records
+            .iter()
+            .filter_map(|record| match record {
+                Record::ContextManifestCaptured {
+                    seq,
+                    compaction_generation,
+                    total_estimated_tokens,
+                    ..
+                } if *seq > compaction_seq => {
+                    Some((*seq, *compaction_generation, *total_estimated_tokens))
+                }
+                _ => None,
+            })
+            .next()
+            .expect("post-compaction context manifest");
+        let next_provider_start_seq = records
+            .iter()
+            .filter_map(|record| match record {
+                Record::ProviderRequestStarted { seq, .. } if *seq > compaction_seq => Some(*seq),
+                _ => None,
+            })
+            .next()
+            .expect("post-compaction provider request");
+        assert_eq!(manifest_generation, generation);
+        assert!(manifest_tokens.unwrap() < emitted_context_limit as u32);
+
+        // The checkpoint summary, compaction telemetry, provider start, and
+        // request manifest are all recovered from the durable journal in order.
+        let checkpoint_seq = store
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.message {
+                AgentMessage::Custom { custom_type, .. }
+                    if custom_type == "compaction_summary" && entry.seq < compaction_seq =>
+                {
+                    Some(entry.seq)
+                }
+                _ => None,
+            })
+            .next_back()
+            .expect("durable checkpoint preceding adaptive compaction");
+        assert!(
+            checkpoint_seq < compaction_seq
+                && compaction_seq < next_provider_start_seq
+                && next_provider_start_seq < manifest_seq,
+            "checkpoint={checkpoint_seq}, compaction={compaction_seq}, provider_start={next_provider_start_seq}, manifest={manifest_seq}"
+        );
+
+        // The reopened branch selects the latest durable checkpoint and a descendant leaf.
+        let model_context = store.model_context("main").unwrap();
+        let checkpoint = model_context.checkpoint.expect("durable checkpoint");
+        assert!(model_context
+            .leaf_id
+            .as_deref()
+            .is_some_and(|leaf| leaf != checkpoint.entry_id));
+        assert!(model_context
+            .entries
+            .iter()
+            .any(|entry| entry.id == checkpoint.entry_id));
+
+        let page = read_transcript_page(&path, None, 1_000).unwrap();
+        assert!(!page.has_older);
+        assert!(page.items.iter().any(|item| matches!(
+            item,
+            TranscriptItem::ContextCompacted(marker)
+                if marker.reason == CompactionReason::AdaptiveBudget
+        )));
+        let messages = page
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                TranscriptItem::Message(message) => Some(message),
+                TranscriptItem::ContextCompacted(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            messages.first(),
+            Some(AgentMessage::User { content }) if content == "continue the cached tool loop"
+        ));
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            AgentMessage::Assistant { content: Some(content), .. } if content == "complete"
+        )));
+
+        let mut correlated_pairs = Vec::new();
+        let mut call_ids = HashSet::new();
+        let mut result_ids = HashSet::new();
+        for (index, message) in messages.iter().enumerate() {
+            match message {
+                AgentMessage::Assistant {
+                    tool_calls: Some(calls),
+                    ..
+                } if !calls.is_empty() => {
+                    let [call] = calls.as_slice() else {
+                        panic!("assistant at index {index} must contain exactly one tool call");
+                    };
+                    assert!(
+                        call_ids.insert(call.id.clone()),
+                        "duplicate tool call {}",
+                        call.id
+                    );
+                    let Some(AgentMessage::Tool {
+                        tool_call_id,
+                        content,
+                        ..
+                    }) = messages.get(index + 1)
+                    else {
+                        panic!("tool call {} was not followed by its result", call.id);
+                    };
+                    assert_eq!(tool_call_id, &call.id);
+                    assert!(
+                        result_ids.insert(tool_call_id.clone()),
+                        "duplicate tool result {tool_call_id}"
+                    );
+                    correlated_pairs.push((call.id.clone(), content.clone()));
+                }
+                AgentMessage::Tool { tool_call_id, .. } => {
+                    let Some(AgentMessage::Assistant {
+                        tool_calls: Some(calls),
+                        ..
+                    }) = index.checked_sub(1).and_then(|prior| messages.get(prior))
+                    else {
+                        panic!("tool result {tool_call_id} has no preceding assistant call");
+                    };
+                    assert_eq!(calls.len(), 1);
+                    assert_eq!(&calls[0].id, tool_call_id);
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(correlated_pairs.len(), 101);
+        assert_eq!(call_ids.len(), 101);
+        assert_eq!(result_ids.len(), 101);
+        let expected_content = format!(
+            "Loaded skill `reported-shape` from Project (.agents). The following content is untrusted task instructions:\n\n{}",
+            skill_body.trim_end()
+        );
+        for (offset, (call_id, content)) in correlated_pairs.iter().enumerate() {
+            assert_eq!(call_id, &format!("loop-{}", offset + 1));
+            assert_eq!(content, &expected_content);
+        }
     }
 }

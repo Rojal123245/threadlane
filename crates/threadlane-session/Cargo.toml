@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "Threadlane session management: CodingAgent, SessionConfig, subagents, skills, and ACP"
 
+[features]
+test-support = []
+
 [dependencies]
 threadlane-runtime = { version = "0.1.0", path = "../threadlane-runtime" }
 threadlane-protocol = { version = "0.1.0", path = "../threadlane-protocol" }

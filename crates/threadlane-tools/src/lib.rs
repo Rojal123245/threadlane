@@ -2,18 +2,12 @@ pub mod hashline;
 pub mod search;
 mod virtual_read;
 
-fn read_virtual_skill(root: &Path, name: &str) -> String {
-    virtual_read::skill(root, name)
-}
-
-fn read_virtual_agent(root: &Path, name: &str) -> String {
-    virtual_read::agent(root, name)
-}
-
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 
 fn tool_definitions() -> Vec<Value> {
     vec![
@@ -188,13 +182,30 @@ pub fn get_codex_tools() -> Vec<Value> {
 ///
 /// Accepts absolute and relative inputs, and tolerates paths that do not exist
 /// yet so callers can validate a write destination before creating it.
+fn canonical_workspace_root(workspace_root: &Path) -> Result<PathBuf, String> {
+    static ROOTS: OnceLock<Mutex<HashMap<PathBuf, PathBuf>>> = OnceLock::new();
+    let roots = ROOTS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(canonical) = roots
+        .lock()
+        .ok()
+        .and_then(|roots| roots.get(workspace_root).cloned())
+    {
+        return Ok(canonical);
+    }
+    let canonical = workspace_root
+        .canonicalize()
+        .map_err(|e| format!("Invalid workspace root '{}': {e}", workspace_root.display()))?;
+    if let Ok(mut roots) = roots.lock() {
+        roots.insert(workspace_root.to_path_buf(), canonical.clone());
+    }
+    Ok(canonical)
+}
+
 pub fn validate_path_in_workspace(
     path_input: &str,
     workspace_root: &Path,
 ) -> Result<PathBuf, String> {
-    let canonical_root = workspace_root
-        .canonicalize()
-        .map_err(|e| format!("Invalid workspace root '{}': {e}", workspace_root.display()))?;
+    let canonical_root = canonical_workspace_root(workspace_root)?;
 
     let p = Path::new(path_input);
     let absolute_path = if p.is_absolute() {
@@ -280,9 +291,11 @@ fn validate_cwd_in_workspace(
     cwd_input: Option<&str>,
     workspace_root: &Path,
 ) -> Result<PathBuf, String> {
-    let canonical_root = workspace_root
-        .canonicalize()
-        .map_err(|e| format!("Invalid workspace root '{}': {e}", workspace_root.display()))?;
+    let canonical_root = canonical_workspace_root(workspace_root)?;
+
+    if cwd_input.is_none() {
+        return Ok(canonical_root);
+    }
 
     let target_dir = match cwd_input {
         Some(dir) => {
@@ -293,7 +306,7 @@ fn validate_cwd_in_workspace(
                 canonical_root.join(p)
             }
         }
-        None => canonical_root.clone(),
+        None => unreachable!("handled above"),
     };
 
     let canonical_target = target_dir
@@ -311,37 +324,45 @@ fn validate_cwd_in_workspace(
 }
 
 pub fn execute_tool(name: &str, args_json: &str) -> String {
-    execute_tool_in_workspace(name, args_json, Path::new("."))
+    try_execute_tool(name, args_json).unwrap_or_else(|error| error)
 }
 
 pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &Path) -> String {
-    let args: Value = match serde_json::from_str(args_json) {
-        Ok(v) => v,
-        Err(e) => return format!("Error parsing tool arguments JSON: {e}"),
-    };
+    try_execute_tool_in_workspace(name, args_json, workspace_root).unwrap_or_else(|error| error)
+}
+
+pub fn try_execute_tool(name: &str, args_json: &str) -> Result<String, String> {
+    try_execute_tool_in_workspace(name, args_json, Path::new("."))
+}
+
+pub fn try_execute_tool_in_workspace(
+    name: &str,
+    args_json: &str,
+    workspace_root: &Path,
+) -> Result<String, String> {
+    let args: Value = serde_json::from_str(args_json)
+        .map_err(|error| format!("Error parsing tool arguments JSON: {error}"))?;
 
     match name {
-        "accept_edit" => {
-            "Error: accept_edit is deprecated; edits are applied directly via edit_file_hashline or write_file.".to_string()
-        }
+        "accept_edit" => Err("Error: accept_edit is deprecated; edits are applied directly via edit_file_hashline or write_file.".to_string()),
         "grep_search" => {
-            let pattern = match args.get("pattern").and_then(Value::as_str) {
-                Some(pattern) => pattern,
-                None => return "Error: 'pattern' parameter is required".into(),
-            };
+            let pattern = args
+                .get("pattern")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "Error: 'pattern' parameter is required".to_string())?;
             let glob = args.get("glob").and_then(Value::as_str);
-            match search::grep_search(workspace_root, pattern, glob) {
-                Ok(result) => result,
-                Err(error) => format!("Error searching workspace: {error}"),
-            }
+            search::grep_search(workspace_root, pattern, glob)
+                .map_err(|error| format!("Error searching workspace: {error}"))
         }
         "read_file" => {
             let raw_path = match args.get("path").and_then(|v| v.as_str()) {
-                Some(path) if path.starts_with("skill://") => {
-                    return read_virtual_skill(workspace_root, &path[8..]);
+                Some(path) if path.strip_prefix("skill://").is_some() => {
+                    let name = path.strip_prefix("skill://").expect("prefix checked");
+                    return virtual_read::try_skill(workspace_root, name);
                 }
-                Some(path) if path.starts_with("agent://") => {
-                    return read_virtual_agent(workspace_root, &path[8..]);
+                Some(path) if path.strip_prefix("agent://").is_some() => {
+                    let name = path.strip_prefix("agent://").expect("prefix checked");
+                    return virtual_read::try_agent(workspace_root, name);
                 }
                 Some(path)
                     if path.starts_with("pr://")
@@ -352,68 +373,53 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
                         || path.starts_with("https://gitlab.com/")
                         || path.starts_with("http://gitlab.com/") =>
                 {
-                    return virtual_read::remote_ref_path(workspace_root, path);
+                    return virtual_read::try_remote_ref_path(workspace_root, path);
                 }
                 Some(p) => p,
-                None => return "Error: 'path' parameter is required".into(),
+                None => return Err("Error: 'path' parameter is required".into()),
             };
-            let validated_path = match validate_path_in_workspace(raw_path, workspace_root) {
-                Ok(p) => p,
-                Err(err) => return err,
-            };
+            let validated_path = validate_path_in_workspace(raw_path, workspace_root)?;
 
-            let start = args
-                .get("start_line")
-                .and_then(|v| v.as_u64())
-                .map(|n| n as usize);
-            let end = args
-                .get("end_line")
-                .and_then(|v| v.as_u64())
-                .map(|n| n as usize);
+            let start = args.get("start_line").and_then(|v| v.as_u64()).map(|n| n as usize);
+            let end = args.get("end_line").and_then(|v| v.as_u64()).map(|n| n as usize);
 
-            match fs::read_to_string(&validated_path) {
-                Ok(content) => {
-                    let lines: Vec<&str> = content.lines().collect();
-                    let start_idx = start.unwrap_or(1).saturating_sub(1);
-                    let end_idx = end.unwrap_or(lines.len()).min(lines.len());
-                    if start_idx >= lines.len() {
-                        return format!("File only has {} lines.", lines.len());
-                    }
-                    if end_idx <= start_idx {
-                        return format!(
-                            "Invalid line range: end_line ({}) must not be before start_line ({}).",
-                            end.unwrap_or(lines.len()),
-                            start.unwrap_or(1),
-                        );
-                    }
-                    let selected = &lines[start_idx..end_idx];
-                    let formatted_lines: Vec<String> = selected
-                        .iter()
-                        .enumerate()
-                        .map(|(idx, line)| {
-                            let line_no = start_idx + idx + 1;
-                            hashline::format_line_hashline(line_no, line)
-                        })
-                        .collect();
-                    truncate_tool_output(&formatted_lines.join("\n"))
-                }
-                Err(e) => format!("Error reading file '{raw_path}': {e}"),
+            let content = fs::read_to_string(&validated_path)
+                .map_err(|e| format!("Error reading file '{raw_path}': {e}"))?;
+            let lines: Vec<&str> = content.lines().collect();
+            let start_idx = start.unwrap_or(1).saturating_sub(1);
+            let end_idx = end.unwrap_or(lines.len()).min(lines.len());
+            if start_idx >= lines.len() {
+                return Err(format!("File only has {} lines.", lines.len()));
             }
+            if end_idx <= start_idx {
+                return Err(format!(
+                    "Invalid line range: end_line ({}) must not be before start_line ({}).",
+                    end.unwrap_or(lines.len()),
+                    start.unwrap_or(1),
+                ));
+            }
+            let selected = &lines[start_idx..end_idx];
+            let formatted_lines: Vec<String> = selected
+                .iter()
+                .enumerate()
+                .map(|(idx, line)| {
+                    let line_no = start_idx + idx + 1;
+                    hashline::format_line_hashline(line_no, line)
+                })
+                .collect();
+            Ok(truncate_tool_output(&formatted_lines.join("\n")))
         }
         "write_file" => {
-            let raw_path = match args.get("path").and_then(|v| v.as_str()) {
-                Some(p) => p,
-                None => return "Error: 'path' parameter is required".into(),
-            };
-            let validated_path = match validate_path_in_workspace(raw_path, workspace_root) {
-                Ok(p) => p,
-                Err(err) => return err,
-            };
+            let raw_path = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "Error: 'path' parameter is required".to_string())?;
+            let validated_path = validate_path_in_workspace(raw_path, workspace_root)?;
 
-            let content = match args.get("content").and_then(|v| v.as_str()) {
-                Some(c) => c,
-                None => return "Error: 'content' parameter is required".into(),
-            };
+            let content = args
+                .get("content")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "Error: 'content' parameter is required".to_string())?;
 
             if let Some(parent) = validated_path.parent() {
                 if !parent.as_os_str().is_empty() {
@@ -421,98 +427,77 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
                 }
             }
 
-            match fs::write(&validated_path, content) {
-                Ok(_) => {
-                    let diag = run_post_edit_diagnostics(workspace_root, raw_path);
-                    format!(
-                        "Successfully wrote {} bytes to '{raw_path}'{diag}",
-                        content.len()
-                    )
-                }
-                Err(e) => format!("Error writing to file '{raw_path}': {e}"),
-            }
+            fs::write(&validated_path, content)
+                .map_err(|e| format!("Error writing to file '{raw_path}': {e}"))?;
+            let diag = run_post_edit_diagnostics(workspace_root, raw_path);
+            Ok(format!(
+                "Successfully wrote {} bytes to '{raw_path}'{diag}",
+                content.len()
+            ))
         }
-
         "edit_file_hashline" => {
-            let raw_path = match args.get("path").and_then(|v| v.as_str()) {
-                Some(p) => p,
-                None => return "Error: 'path' parameter is required".into(),
-            };
-            let validated_path = match validate_path_in_workspace(raw_path, workspace_root) {
-                Ok(p) => p,
-                Err(err) => return err,
-            };
+            let raw_path = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "Error: 'path' parameter is required".to_string())?;
+            let validated_path = validate_path_in_workspace(raw_path, workspace_root)?;
 
-            let edits_value = match args.get("edits") {
-                Some(e) => e,
-                None => return "Error: 'edits' parameter is required".into(),
+            let edits_value = args
+                .get("edits")
+                .ok_or_else(|| "Error: 'edits' parameter is required".to_string())?;
+            let edits: Vec<hashline::HashlineEdit> = serde_json::from_value(edits_value.clone())
+                .map_err(|err| format!("Error parsing 'edits' argument: {err}"))?;
+
+            let content = fs::read_to_string(&validated_path)
+                .map_err(|e| format!("Error reading file '{raw_path}': {e}"))?;
+            let result = hashline::apply_hashline_edits_detailed(&content, &edits, 5)
+                .map_err(|e| format!("Error applying hashline edits to '{raw_path}': {e}"))?;
+            fs::write(&validated_path, result.new_content)
+                .map_err(|e| format!("Error writing file '{raw_path}': {e}"))?;
+            let diag = run_post_edit_diagnostics(workspace_root, raw_path);
+            let diff_section = if !result.diff.is_empty() {
+                format!("\n\nDiff:\n{}", result.diff)
+            } else {
+                String::new()
             };
-
-            let edits: Vec<hashline::HashlineEdit> =
-                match serde_json::from_value(edits_value.clone()) {
-                    Ok(e) => e,
-                    Err(err) => return format!("Error parsing 'edits' argument: {err}"),
-                };
-
-            match fs::read_to_string(&validated_path) {
-                Ok(content) => match hashline::apply_hashline_edits_detailed(&content, &edits, 5) {
-                    Ok(result) => match fs::write(&validated_path, result.new_content) {
-                        Ok(_) => {
-                            let diag = run_post_edit_diagnostics(workspace_root, raw_path);
-                            let diff_section = if !result.diff.is_empty() {
-                                format!("\n\nDiff:\n{}", result.diff)
-                            } else {
-                                String::new()
-                            };
-                            let anchors_section = if !result.updated_context.is_empty() {
-                                format!("\n\nUpdated Line Hashes:\n{}", result.updated_context)
-                            } else {
-                                String::new()
-                            };
-                            format!(
-                                "Successfully applied {} hashline edit(s) to '{raw_path}'{diag}{diff_section}{anchors_section}",
-                                edits.len()
-                            )
-                        }
-                        Err(e) => format!("Error writing file '{raw_path}': {e}"),
-                    },
-                    Err(e) => format!("Error applying hashline edits to '{raw_path}': {e}"),
-                },
-                Err(e) => format!("Error reading file '{raw_path}': {e}"),
-            }
+            let anchors_section = if !result.updated_context.is_empty() {
+                format!("\n\nUpdated Line Hashes:\n{}", result.updated_context)
+            } else {
+                String::new()
+            };
+            Ok(format!(
+                "Successfully applied {} hashline edit(s) to '{raw_path}'{diag}{diff_section}{anchors_section}",
+                edits.len()
+            ))
         }
         "list_dir" => {
             let raw_path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-            let validated_path = match validate_path_in_workspace(raw_path, workspace_root) {
-                Ok(p) => p,
-                Err(err) => return err,
-            };
+            let validated_path = validate_path_in_workspace(raw_path, workspace_root)?;
 
-            match fs::read_dir(&validated_path) {
-                Ok(entries) => {
-                    let mut items = Vec::new();
-                    for entry in entries.flatten() {
-                        let name = entry.file_name().to_string_lossy().to_string();
-                        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                        let kind = if is_dir { "[DIR] " } else { "[FILE]" };
-                        items.push(format!("{kind} {name}"));
-                    }
-                    items.sort();
-                    truncate_tool_output(&items.join("\n"))
-                }
-                Err(e) => format!("Error reading directory '{raw_path}': {e}"),
+            let mut entries = Vec::new();
+            for entry in fs::read_dir(&validated_path)
+                .map_err(|e| format!("Error reading directory '{raw_path}': {e}"))?
+            {
+                let entry = entry.map_err(|e| {
+                    format!("Error reading directory entry in '{raw_path}': {e}")
+                })?;
+                let name = entry.file_name().to_string_lossy().to_string();
+                let is_dir = entry.file_type().map_err(|e| {
+                    format!("Error reading file type for '{raw_path}/{name}': {e}")
+                })?.is_dir();
+                let kind = if is_dir { "[DIR] " } else { "[FILE]" };
+                entries.push(format!("{kind} {name}"));
             }
+            entries.sort();
+            Ok(truncate_tool_output(&entries.join("\n")))
         }
         "run_command" => {
-            let cmd_str = match args.get("command").and_then(|v| v.as_str()) {
-                Some(c) => c,
-                None => return "Error: 'command' parameter is required".into(),
-            };
+            let cmd_str = args
+                .get("command")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "Error: 'command' parameter is required".to_string())?;
             let raw_cwd = args.get("cwd").and_then(|v| v.as_str());
-            let validated_cwd = match validate_cwd_in_workspace(raw_cwd, workspace_root) {
-                Ok(p) => p,
-                Err(err) => return err,
-            };
+            let validated_cwd = validate_cwd_in_workspace(raw_cwd, workspace_root)?;
 
             let mut cmd = Command::new("sh");
             cmd.arg("-c").arg(cmd_str);
@@ -522,13 +507,17 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
                 Ok(output) => {
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    let exit = output.status;
-
-                    truncate_tool_output(&format!(
-                        "Exit Status: {exit}\n--- STDOUT ---\n{stdout}\n--- STDERR ---\n{stderr}"
-                    ))
+                    let rendered = truncate_tool_output(&format!(
+                        "Exit Status: {}\n--- STDOUT ---\n{}\n--- STDERR ---\n{}",
+                        output.status, stdout, stderr
+                    ));
+                    if output.status.success() {
+                        Ok(rendered)
+                    } else {
+                        Err(rendered)
+                    }
                 }
-                Err(e) => format!("Error executing command '{cmd_str}': {e}"),
+                Err(e) => Err(format!("Error executing command '{cmd_str}': {e}")),
             }
         }
         "get_repo_map" => {
@@ -537,24 +526,23 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
         }
 
         "manage_memory" => {
-            let action = match args.get("action").and_then(|v| v.as_str()) {
-                Some(a) => a,
-                None => {
-                    return "Error: 'action' parameter is required ('read', 'save', 'consolidate')"
-                        .into()
-                }
-            };
+            let action = args
+                .get("action")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    "Error: 'action' parameter is required ('read', 'save', 'consolidate')".to_string()
+                })?;
             match action {
                 "read" => read_memory_impl(workspace_root),
                 "save" => save_memory_impl(workspace_root, &args),
                 "consolidate" => consolidate_memory_impl(workspace_root, &args),
-                unknown => format!("Error: Unknown action '{unknown}' for manage_memory"),
+                unknown => Err(format!("Error: Unknown action '{unknown}' for manage_memory")),
             }
         }
         "read_memory" => read_memory_impl(workspace_root),
         "save_memory" => save_memory_impl(workspace_root, &args),
         "consolidate_memory" => consolidate_memory_impl(workspace_root, &args),
-        unknown => format!("Error: Unknown tool '{unknown}'"),
+        unknown => Err(format!("Error: Unknown tool '{unknown}'")),
     }
 }
 
@@ -577,48 +565,45 @@ fn truncate_tool_output(output: &str) -> String {
     }
 }
 
-fn read_memory_impl(workspace_root: &Path) -> String {
+fn read_memory_impl(workspace_root: &Path) -> Result<String, String> {
     let mem_file = workspace_root.join(".threadlane").join("memory.md");
     if mem_file.is_file() {
-        match fs::read_to_string(&mem_file) {
-            Ok(content) => truncate_tool_output(&content),
-            Err(e) => format!("Error reading .threadlane/memory.md: {e}"),
-        }
+        fs::read_to_string(&mem_file)
+            .map(|content| truncate_tool_output(&content))
+            .map_err(|e| format!("Error reading .threadlane/memory.md: {e}"))
     } else {
-        "No persistent memory found in .threadlane/memory.md yet.".to_string()
+        Ok("No persistent memory found in .threadlane/memory.md yet.".to_string())
     }
 }
 
-fn save_memory_impl(workspace_root: &Path, args: &Value) -> String {
-    let content = match args.get("content").and_then(|v| v.as_str()) {
-        Some(c) => c,
-        None => return "Error: 'content' parameter is required".into(),
-    };
+fn save_memory_impl(workspace_root: &Path, args: &Value) -> Result<String, String> {
+    let content = args
+        .get("content")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Error: 'content' parameter is required".to_string())?;
     let mode = args
         .get("mode")
         .and_then(|v| v.as_str())
         .unwrap_or("append");
 
     let dir = workspace_root.join(".threadlane");
-    if let Err(e) = fs::create_dir_all(&dir) {
-        return format!("Error creating .threadlane directory: {e}");
-    }
+    fs::create_dir_all(&dir).map_err(|e| format!("Error creating .threadlane directory: {e}"))?;
     let mem_file = dir.join("memory.md");
 
     let new_content = if mode == "overwrite" || !mem_file.exists() {
         content.trim().to_string()
     } else {
-        let existing = fs::read_to_string(&mem_file).unwrap_or_default();
+        let existing = fs::read_to_string(&mem_file)
+            .map_err(|e| format!("Error reading .threadlane/memory.md: {e}"))?;
         format!("{}\n\n{}", existing.trim(), content.trim())
     };
 
-    match fs::write(&mem_file, new_content) {
-        Ok(_) => "Successfully saved memory to .threadlane/memory.md".to_string(),
-        Err(e) => format!("Error writing to .threadlane/memory.md: {e}"),
-    }
+    fs::write(&mem_file, new_content)
+        .map(|_| "Successfully saved memory to .threadlane/memory.md".to_string())
+        .map_err(|e| format!("Error writing to .threadlane/memory.md: {e}"))
 }
 
-fn consolidate_memory_impl(workspace_root: &Path, args: &Value) -> String {
+fn consolidate_memory_impl(workspace_root: &Path, args: &Value) -> Result<String, String> {
     let parse_array = |key: &str| -> Vec<String> {
         args.get(key)
             .and_then(|v| v.as_array())
@@ -635,18 +620,20 @@ fn consolidate_memory_impl(workspace_root: &Path, args: &Value) -> String {
     let verification = parse_array("verification");
 
     let dir = workspace_root.join(".threadlane");
-    if let Err(e) = fs::create_dir_all(&dir) {
-        return format!("Error creating .threadlane directory: {e}");
-    }
+    fs::create_dir_all(&dir).map_err(|e| format!("Error creating .threadlane directory: {e}"))?;
     let mem_file = dir.join("memory.md");
 
-    let existing = fs::read_to_string(&mem_file).unwrap_or_default();
+    let existing = if mem_file.is_file() {
+        fs::read_to_string(&mem_file)
+            .map_err(|e| format!("Error reading .threadlane/memory.md: {e}"))?
+    } else {
+        String::new()
+    };
     let merged = consolidate_memory_entries(&existing, &architecture, &gotchas, &verification);
 
-    match fs::write(&mem_file, merged) {
-        Ok(_) => "Successfully consolidated memory entries in .threadlane/memory.md".to_string(),
-        Err(e) => format!("Error writing to .threadlane/memory.md: {e}"),
-    }
+    fs::write(&mem_file, merged)
+        .map(|_| "Successfully consolidated memory entries in .threadlane/memory.md".to_string())
+        .map_err(|e| format!("Error writing to .threadlane/memory.md: {e}"))
 }
 
 fn consolidate_memory_entries(
@@ -715,39 +702,48 @@ fn consolidate_memory_entries(
     append_section(&out, "## Verification Commands", verification)
 }
 
-fn get_repo_map_impl(workspace_root: &Path, rel_path: Option<&str>) -> String {
+fn get_repo_map_impl(workspace_root: &Path, rel_path: Option<&str>) -> Result<String, String> {
     let target_dir = match rel_path {
-        Some(path) => match validate_path_in_workspace(path, workspace_root) {
-            Ok(p) => p,
-            Err(err) => return err,
-        },
+        Some(path) => validate_path_in_workspace(path, workspace_root)?,
         None => workspace_root.to_path_buf(),
     };
 
     let mut lines = Vec::new();
-    walk_repo_skeleton(&target_dir, workspace_root, 0, &mut lines);
+    walk_repo_skeleton(&target_dir, workspace_root, 0, &mut lines)?;
 
     if lines.is_empty() {
-        "No source code definitions found in repository map.".to_string()
+        Ok("No source code definitions found in repository map.".to_string())
     } else {
-        truncate_tool_output(&lines.join("\n"))
+        Ok(truncate_tool_output(&lines.join("\n")))
     }
 }
 
-fn walk_repo_skeleton(dir: &Path, root: &Path, depth: usize, out: &mut Vec<String>) {
+fn walk_repo_skeleton(
+    dir: &Path,
+    root: &Path,
+    depth: usize,
+    out: &mut Vec<String>,
+) -> Result<(), String> {
     if depth > 4 {
-        return;
+        return Ok(());
     }
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    let mut sorted_entries: Vec<_> = entries.flatten().collect();
+    let entries = fs::read_dir(dir)
+        .map_err(|e| format!("Error reading directory '{}': {e}", dir.display()))?;
+    let mut sorted_entries = Vec::new();
+    for entry in entries {
+        sorted_entries.push(
+            entry.map_err(|e| {
+                format!("Error reading directory entry in '{}': {e}", dir.display())
+            })?,
+        );
+    }
     sorted_entries.sort_by_key(|e| e.file_name());
 
     for entry in sorted_entries {
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("Error reading file type for '{}': {e}", path.display()))?;
         if file_type.is_symlink() {
             continue;
         }
@@ -761,16 +757,14 @@ fn walk_repo_skeleton(dir: &Path, root: &Path, depth: usize, out: &mut Vec<Strin
             continue;
         }
 
-        let path = entry.path();
         if file_type.is_dir() {
-            walk_repo_skeleton(&path, root, depth + 1, out);
+            walk_repo_skeleton(&path, root, depth + 1, out)?;
         } else if file_type.is_file() {
             let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
             if matches!(ext, "rs" | "py" | "js" | "ts" | "go" | "toml") {
                 let rel = path.strip_prefix(root).unwrap_or(&path);
-                let Ok(content) = fs::read_to_string(&path) else {
-                    continue;
-                };
+                let content = fs::read_to_string(&path)
+                    .map_err(|e| format!("Error reading source file '{}': {e}", path.display()))?;
 
                 let mut symbols = Vec::new();
                 for (idx, line) in content.lines().enumerate() {
@@ -808,6 +802,7 @@ fn walk_repo_skeleton(dir: &Path, root: &Path, depth: usize, out: &mut Vec<Strin
             }
         }
     }
+    Ok(())
 }
 
 fn path_matches(file_name: &str, target_path: &str) -> bool {
@@ -929,6 +924,16 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn canonical_workspace_root_reuses_successful_resolution() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let expected = root.canonicalize().unwrap();
+        assert_eq!(canonical_workspace_root(&root).unwrap(), expected);
+        std::fs::remove_dir(&root).unwrap();
+        assert_eq!(canonical_workspace_root(&root).unwrap(), expected);
+    }
+
+    #[test]
     fn validate_path_allows_a_new_absolute_destination_under_a_symlinked_root() {
         // `tempdir()` lives under a symlinked prefix on macOS (`/var` ->
         // `/private/var`), which is exactly the shape a caller sends back after
@@ -1020,6 +1025,31 @@ mod tests {
     fn test_list_dir_tool() {
         let res = execute_tool("list_dir", r#"{"path": "."}"#);
         assert!(res.contains("Cargo.toml"));
+    }
+
+    #[test]
+    fn list_dir_returns_typed_error_for_regular_file() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("file.txt"), "content").unwrap();
+
+        let result =
+            try_execute_tool_in_workspace("list_dir", r#"{"path":"file.txt"}"#, dir.path());
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn list_dir_preserves_successful_output() {
+        let dir = tempdir().unwrap();
+        fs::create_dir(dir.path().join("alpha")).unwrap();
+        fs::write(dir.path().join("beta.txt"), "content").unwrap();
+
+        let typed =
+            try_execute_tool_in_workspace("list_dir", r#"{"path":"."}"#, dir.path()).unwrap();
+        let wrapped = execute_tool_in_workspace("list_dir", r#"{"path":"."}"#, dir.path());
+
+        assert_eq!(typed, "[DIR]  alpha\n[FILE] beta.txt");
+        assert_eq!(wrapped, typed);
     }
     #[test]
     fn test_edit_file_hashline_schema_description() {
@@ -1114,6 +1144,29 @@ mod tests {
     }
 
     #[test]
+    fn test_save_memory_fails_on_existing_non_utf8_file_and_preserves_bytes() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        let memory_dir = root.join(".threadlane");
+        fs::create_dir_all(&memory_dir).unwrap();
+        let memory_file = memory_dir.join("memory.md");
+        let original_bytes: Vec<u8> = vec![0xff, 0x00, 0xfe, b'a', b'b'];
+        fs::write(&memory_file, &original_bytes).unwrap();
+
+        let payload = json!({"content": "## Append Attempt"}).to_string();
+        let typed = try_execute_tool_in_workspace("save_memory", &payload, root)
+            .expect_err("Expected invalid UTF-8 memory file to produce read error");
+        assert!(typed.starts_with("Error reading .threadlane/memory.md:"));
+
+        let wrapped = execute_tool_in_workspace("save_memory", &payload, root);
+        assert_eq!(wrapped, typed);
+
+        let on_disk = fs::read(&memory_file).unwrap();
+        assert_eq!(on_disk, original_bytes);
+    }
+
+    #[test]
     fn test_get_repo_map_tool() {
         let dir = tempdir().unwrap();
         let root = dir.path();
@@ -1131,6 +1184,55 @@ mod tests {
         assert!(map_res.contains("src/main.rs"));
         assert!(map_res.contains("pub struct AppState"));
         assert!(map_res.contains("pub fn main()"));
+    }
+
+    #[test]
+    fn get_repo_map_returns_typed_error_for_regular_file() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("not-a-directory.rs"),
+            "pub fn visible() {}\n",
+        )
+        .unwrap();
+
+        let args = r#"{"path":"not-a-directory.rs"}"#;
+        let error = try_execute_tool_in_workspace("get_repo_map", args, dir.path())
+            .expect_err("regular files must not produce a successful map");
+
+        assert_eq!(
+            execute_tool_in_workspace("get_repo_map", args, dir.path()),
+            error
+        );
+    }
+
+    #[test]
+    fn get_repo_map_returns_typed_error_when_source_file_cannot_be_read_as_text() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("invalid.rs"), [0xff, 0xfe]).unwrap();
+
+        let result = try_execute_tool_in_workspace("get_repo_map", "{}", dir.path());
+
+        assert!(result.is_err(), "source read failures must not be skipped");
+    }
+
+    #[test]
+    fn get_repo_map_preserves_successful_output() {
+        let dir = tempdir().unwrap();
+        fs::create_dir(dir.path().join("src")).unwrap();
+        fs::write(
+            dir.path().join("src/lib.rs"),
+            "pub struct App {}\nfn helper() {}\n",
+        )
+        .unwrap();
+
+        let typed = try_execute_tool_in_workspace("get_repo_map", "{}", dir.path()).unwrap();
+        let wrapped = execute_tool_in_workspace("get_repo_map", "{}", dir.path());
+
+        assert_eq!(
+            typed,
+            "src/lib.rs\n  L1: pub struct App {}\n  L2: fn helper() {}"
+        );
+        assert_eq!(wrapped, typed);
     }
 
     #[test]
@@ -1255,6 +1357,197 @@ mod tests {
             mr_res.contains("mr://99")
                 || mr_res.contains("GitLab mr #99")
                 || mr_res.contains("gitlab.com")
+        );
+    }
+    #[test]
+    fn typed_execution_marks_hashline_mismatch_as_error() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("sample.txt"), "original\n").unwrap();
+        let result = try_execute_tool_in_workspace(
+            "edit_file_hashline",
+            &serde_json::json!({
+                "path": "sample.txt",
+                "edits": [{
+                    "start_anchor": "1:bad",
+                    "action": "replace",
+                    "new_content": "changed"
+                }]
+            })
+            .to_string(),
+            dir.path(),
+        );
+
+        let error = result.expect_err("a stale hashline anchor must fail");
+        assert!(error.contains("Error applying hashline edits"), "{error}");
+        assert!(error.contains("Hashline mismatch"), "{error}");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("sample.txt")).unwrap(),
+            "original\n"
+        );
+    }
+
+    #[test]
+    fn typed_execution_marks_invalid_arguments_as_error() {
+        let result = try_execute_tool("read_file", "{}");
+        assert_eq!(result, Err("Error: 'path' parameter is required".into()));
+    }
+
+    #[test]
+    fn typed_execution_marks_nonzero_command_exit_as_error() {
+        let dir = tempdir().unwrap();
+        let result = try_execute_tool_in_workspace(
+            "run_command",
+            r#"{"command":"printf 'out'; printf 'err' >&2; exit 7"}"#,
+            dir.path(),
+        );
+
+        let error = result.expect_err("a non-zero command exit must fail");
+        assert!(error.contains("Exit Status: exit status: 7"), "{error}");
+        assert!(error.contains(&format!("--- STDOUT ---\nout")), "{error}");
+        assert!(error.contains(&format!("--- STDERR ---\nerr")), "{error}");
+    }
+
+    #[test]
+    fn typed_execution_keeps_successful_calls_successful() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("sample.txt"), "contents").unwrap();
+
+        let read =
+            try_execute_tool_in_workspace("read_file", r#"{"path":"sample.txt"}"#, dir.path());
+        assert!(read.is_ok(), "{read:?}");
+
+        let command =
+            try_execute_tool_in_workspace("run_command", r#"{"command":"printf ok"}"#, dir.path());
+        assert!(command.is_ok(), "{command:?}");
+    }
+
+    #[test]
+    fn typed_execution_marks_unavailable_virtual_skill_as_error_without_changing_output() {
+        let dir = tempdir().unwrap();
+        let args = r#"{"path":"skill://definitely-not-installed-review-fixture"}"#;
+        let expected = "Unknown skill reference 'definitely-not-installed-review-fixture': No skill file found in workspace or user skills directories";
+
+        assert_eq!(
+            try_execute_tool_in_workspace("read_file", args, dir.path()),
+            Err(expected.to_string())
+        );
+        assert_eq!(
+            execute_tool_in_workspace("read_file", args, dir.path()),
+            expected
+        );
+    }
+
+    #[test]
+    fn typed_execution_marks_malformed_virtual_skill_as_error_without_changing_output() {
+        let dir = tempdir().unwrap();
+        let args = r#"{"path":"skill://"}"#;
+        let expected = "Error: 'skill://' reference requires a skill name";
+
+        assert_eq!(
+            try_execute_tool_in_workspace("read_file", args, dir.path()),
+            Err(expected.to_string())
+        );
+        assert_eq!(
+            execute_tool_in_workspace("read_file", args, dir.path()),
+            expected
+        );
+    }
+
+    #[test]
+    fn typed_execution_marks_unavailable_virtual_agent_as_error_without_changing_output() {
+        let dir = tempdir().unwrap();
+        let args = r#"{"path":"agent://definitely-not-installed-review-fixture"}"#;
+        let expected = "Unknown agent reference 'definitely-not-installed-review-fixture': No agent file found in workspace or user agent directories";
+
+        assert_eq!(
+            try_execute_tool_in_workspace("read_file", args, dir.path()),
+            Err(expected.to_string())
+        );
+        assert_eq!(
+            execute_tool_in_workspace("read_file", args, dir.path()),
+            expected
+        );
+    }
+
+    #[test]
+    fn typed_execution_marks_malformed_virtual_agent_as_error_without_changing_output() {
+        let dir = tempdir().unwrap();
+        let args = r#"{"path":"agent://"}"#;
+        let expected = "Error: 'agent://' reference requires an agent name";
+
+        assert_eq!(
+            try_execute_tool_in_workspace("read_file", args, dir.path()),
+            Err(expected.to_string())
+        );
+        assert_eq!(
+            execute_tool_in_workspace("read_file", args, dir.path()),
+            expected
+        );
+    }
+
+    #[test]
+    fn typed_execution_marks_unavailable_virtual_remote_refs_as_errors_without_changing_output() {
+        let dir = tempdir().unwrap();
+
+        for path in ["pr://7", "mr://7", "issue://7"] {
+            let args = json!({ "path": path }).to_string();
+            let kind = path.split_once("://").unwrap().0;
+            let expected = format!(
+                "{kind}://7 requires a git origin remote or an explicit repository URL (e.g. pr://owner/repo/7)"
+            );
+
+            assert_eq!(
+                try_execute_tool_in_workspace("read_file", &args, dir.path()),
+                Err(expected.clone()),
+                "typed result for {path}"
+            );
+            assert_eq!(
+                execute_tool_in_workspace("read_file", &args, dir.path()),
+                expected,
+                "compatibility output for {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_execution_marks_malformed_virtual_remote_refs_as_errors_without_changing_output() {
+        let dir = tempdir().unwrap();
+
+        for path in [
+            "pr://not-a-number",
+            "mr://not-a-number",
+            "issue://not-a-number",
+        ] {
+            let args = json!({ "path": path }).to_string();
+            let expected = format!(
+                "Invalid repository reference '{path}': expected pr://<num>, issue://<num>, mr://<num>, or GitHub/GitLab URL"
+            );
+
+            assert_eq!(
+                try_execute_tool_in_workspace("read_file", &args, dir.path()),
+                Err(expected.clone()),
+                "typed result for {path}"
+            );
+            assert_eq!(
+                execute_tool_in_workspace("read_file", &args, dir.path()),
+                expected,
+                "compatibility output for {path}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn typed_execution_marks_signal_terminated_command_as_error_without_changing_output() {
+        let dir = tempdir().unwrap();
+        let args = r#"{"command":"kill -TERM $$"}"#;
+
+        let typed = try_execute_tool_in_workspace("run_command", args, dir.path());
+        let error = typed.expect_err("signal termination must fail");
+        assert!(error.starts_with("Exit Status: signal:"), "{error}");
+        assert_eq!(
+            execute_tool_in_workspace("run_command", args, dir.path()),
+            error
         );
     }
 }

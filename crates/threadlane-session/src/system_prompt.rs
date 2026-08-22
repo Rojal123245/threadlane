@@ -161,7 +161,9 @@ pub(crate) fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> Stri
             add_tool_guideline("FAST-PATH EXECUTION: For localized fixes, UI styling, or single-file edits (<50 lines), proceed directly with read -> edit -> test. Do not create spec files, plan files, or plan overhead for small tasks.");
             add_tool_guideline("Whenever the user asks to plan, formulate an architecture, or start complex multi-step work, generate structured steps using `generate_plan`. Once the plan is created, execute the steps using your implementation tools and keep progress updated with `update_plan`.");
         }
-        if available_tool_names.contains("update_plan") && !available_tool_names.contains("generate_plan") {
+        if available_tool_names.contains("update_plan")
+            && !available_tool_names.contains("generate_plan")
+        {
             add_tool_guideline("For multi-step work, maintain a concise plan with `update_plan`; keep at most one item in progress and skip plans for simple requests.");
             add_tool_guideline("Update the plan throughout the work, not only at the end: mark a step in_progress when you start it, mark it completed immediately after it succeeds, and update the next step before continuing. Keep the plan statuses accurate after every meaningful milestone.");
         }

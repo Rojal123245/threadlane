@@ -2,7 +2,7 @@ use crate::types::{AgentToolCall, AgentToolDefinition};
 use async_trait::async_trait;
 use std::sync::Arc;
 use threadlane_tools::{
-    execute_tool, execute_tool_in_workspace, get_available_tools, get_codex_tools,
+    get_available_tools, get_codex_tools, try_execute_tool, try_execute_tool_in_workspace,
 };
 
 /// Executor for the built-in Threadlane tools.
@@ -24,18 +24,19 @@ impl ToolExecutor for BuiltinToolExecutor {
         "threadlane.builtin_tools"
     }
 
-    fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
+    fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
         let mut seen = std::collections::HashSet::new();
         get_available_tools()
             .into_iter()
             .chain(get_codex_tools())
             .filter_map(|schema| AgentToolDefinition::from_provider_schema(&schema).ok())
             .filter(|definition| seen.insert(definition.name.clone()))
-            .collect()
+            .collect::<Vec<_>>()
+            .into()
     }
 
     async fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {
-        Some(Ok(execute_tool(name, args)))
+        Some(try_execute_tool(name, args))
     }
 
     async fn execute_tool_in_workspace(
@@ -44,10 +45,10 @@ impl ToolExecutor for BuiltinToolExecutor {
         args: &str,
         work_dir: Option<&std::path::Path>,
     ) -> Option<Result<String, String>> {
-        Some(Ok(match work_dir {
-            Some(work_dir) => execute_tool_in_workspace(name, args, work_dir),
-            None => execute_tool(name, args),
-        }))
+        Some(match work_dir {
+            Some(work_dir) => try_execute_tool_in_workspace(name, args, work_dir),
+            None => try_execute_tool(name, args),
+        })
     }
 }
 
@@ -63,11 +64,12 @@ pub trait ToolExecutor: Send + Sync {
     }
 
     /// Provider-neutral definitions for tools handled by this executor.
-    fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
+    fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
         self.get_tool_schemas()
             .iter()
             .filter_map(|schema| AgentToolDefinition::from_provider_schema(schema).ok())
-            .collect()
+            .collect::<Vec<_>>()
+            .into()
     }
 
     /// Legacy Chat Completions schemas. Prefer `tool_definitions` for new executors.
@@ -94,5 +96,39 @@ pub trait ToolExecutor: Send + Sync {
         args: &str,
     ) -> Option<Result<String, String>> {
         self.execute_tool(&call.name, args).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BuiltinToolExecutor, ToolExecutor};
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn builtin_executor_preserves_tool_failure_status() {
+        let executor = BuiltinToolExecutor::new();
+        let result = executor
+            .execute_tool("read_file", "{}")
+            .await
+            .expect("the built-in executor handles read_file");
+
+        assert_eq!(result, Err("Error: 'path' parameter is required".into()));
+    }
+
+    #[tokio::test]
+    async fn builtin_executor_preserves_nonzero_command_status() {
+        let dir = tempdir().unwrap();
+        let executor = BuiltinToolExecutor::new();
+        let result = executor
+            .execute_tool_in_workspace(
+                "run_command",
+                r#"{"command":"exit 9"}"#,
+                Some(dir.path()),
+            )
+            .await
+            .expect("the built-in executor handles run_command");
+
+        let error = result.expect_err("a non-zero command exit must remain failed");
+        assert!(error.contains("Exit Status: exit status: 9"), "{error}");
     }
 }

@@ -141,6 +141,7 @@ pub struct WasiExtension {
     file_path: Option<PathBuf>,
     wasm_bytes: Vec<u8>,
     engine: Engine,
+    module: Arc<Module>,
 }
 
 impl WasiExtension {
@@ -264,6 +265,7 @@ impl WasiExtension {
             file_path: None,
             wasm_bytes,
             engine,
+            module: Arc::new(module),
         })
     }
 
@@ -297,7 +299,6 @@ impl WasiExtension {
         invocation: &WasiExtensionInvocation,
         policy: CapabilityPolicy,
     ) -> Result<WasiExtensionInvocationResult, String> {
-        let module = Module::new(&self.engine, &self.wasm_bytes[..]).map_err(|e| e.to_string())?;
         let mut store = Store::new(
             &self.engine,
             WasiStoreData {
@@ -307,7 +308,7 @@ impl WasiExtension {
         );
         let linker = Self::create_linker(&self.engine, &mut store);
         let instance = linker
-            .instantiate(&mut store, &module)
+            .instantiate(&mut store, &self.module)
             .map_err(|e| e.to_string())?
             .start(&mut store)
             .map_err(|e| e.to_string())?;
@@ -474,6 +475,7 @@ type PendingExtensionEvents = HashMap<Option<String>, HashMap<String, Vec<WasiEx
 #[derive(Default)]
 pub struct WasiExtensionManager {
     extensions: RwLock<HashMap<String, Arc<WasiExtension>>>,
+    tool_definitions: RwLock<Arc<[threadlane_runtime::AgentToolDefinition]>>,
     states: Mutex<HashMap<String, Value>>,
     host_state: Mutex<HashMap<String, Value>>,
     subscriptions: Mutex<HashMap<String, HashSet<String>>>,
@@ -481,7 +483,6 @@ pub struct WasiExtensionManager {
     pending_broker_requests: Mutex<HashMap<Option<String>, Vec<HostBrokerRequest>>>,
     capability_grant_policy: Mutex<HostCapabilityGrantPolicy>,
     state_dir: Option<PathBuf>,
-    project_dir: Option<PathBuf>,
     /// Stateful conversational extensions are isolated by the active session.
     /// `None` retains the project-wide scope for callers that explicitly need it.
     session_id: Mutex<Option<String>>,
@@ -520,11 +521,13 @@ impl WasiExtensionManager {
     }
 
     pub fn register_extension(&self, extension: WasiExtension) -> Result<(), String> {
-        self.extensions
-            .write()
-            .map_err(|_| "Extension registry lock poisoned".to_string())?
-            .insert(extension.manifest.name.clone(), Arc::new(extension));
-        Ok(())
+        {
+            self.extensions
+                .write()
+                .map_err(|_| "Extension registry lock poisoned".to_string())?
+                .insert(extension.manifest.name.clone(), Arc::new(extension));
+        }
+        self.rebuild_tool_definitions()
     }
 
     pub fn reload_from_roots(
@@ -600,13 +603,14 @@ impl WasiExtensionManager {
             }
         }
         *extensions = loaded;
+        drop(extensions);
+        self.rebuild_tool_definitions()?;
         Ok(loaded_count)
     }
 
     pub fn for_project(project_dir: &Path) -> Self {
         Self {
             state_dir: Some(project_dir.join(".threadlane/state/extensions")),
-            project_dir: Some(project_dir.to_path_buf()),
             ..Self::default()
         }
     }
@@ -629,7 +633,6 @@ impl WasiExtensionManager {
     pub fn for_project_session(project_dir: &Path, session_id: impl Into<String>) -> Self {
         Self {
             state_dir: Some(project_dir.join(".threadlane/state/extensions")),
-            project_dir: Some(project_dir.to_path_buf()),
             session_id: Mutex::new(Some(session_id.into())),
             ..Self::default()
         }
@@ -1002,15 +1005,7 @@ impl WasiExtensionManager {
     }
 
     fn find_response_extension(&self, kind: &str, name: &str) -> Option<Arc<WasiExtension>> {
-        if let Some(extension) = self.find_response_extension_cached(kind, name) {
-            return Some(extension);
-        }
-        if let Some(project_dir) = &self.project_dir {
-            let global_dir = default_global_threadlane_dir();
-            let _ = self.reload_from_roots(global_dir.as_deref(), Some(project_dir));
-            return self.find_response_extension_cached(kind, name);
-        }
-        None
+        self.find_response_extension_cached(kind, name)
     }
 
     fn find_hook_extensions(&self, name: &str) -> Vec<Arc<WasiExtension>> {
@@ -1145,9 +1140,9 @@ fn persist_json_state(path: &Path, state: &Value) -> Result<(), String> {
 }
 
 impl WasiExtensionManager {
-    pub fn tool_definitions(&self) -> Vec<threadlane_runtime::AgentToolDefinition> {
+    fn rebuild_tool_definitions(&self) -> Result<(), String> {
         let Ok(extensions) = self.extensions.read() else {
-            return Vec::new();
+            return Err("Extension registry lock poisoned".to_string());
         };
         let mut tools: Vec<_> = extensions
             .values()
@@ -1161,7 +1156,18 @@ impl WasiExtensionManager {
             })
             .collect();
         tools.sort_by(|left, right| left.name.cmp(&right.name));
-        tools
+        *self
+            .tool_definitions
+            .write()
+            .map_err(|_| "Extension tool definitions lock poisoned".to_string())? = tools.into();
+        Ok(())
+    }
+
+    pub fn tool_definitions(&self) -> Arc<[threadlane_runtime::AgentToolDefinition]> {
+        self.tool_definitions
+            .read()
+            .map(|tools| tools.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -1169,6 +1175,23 @@ impl WasiExtensionManager {
 mod reload_tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn tool_definition_slice_is_reused() {
+        let manager = WasiExtensionManager::new();
+        let mut extension = WasiExtension::load_from_bytes(b"\0asm\x01\0\0\0".to_vec()).unwrap();
+        extension.manifest.tools.push(WasiToolDefinition {
+            name: "echo".into(),
+            description: "echo".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        });
+        manager.register_extension(extension).unwrap();
+
+        let first = manager.tool_definitions();
+        let second = manager.tool_definitions();
+
+        assert!(Arc::ptr_eq(&first, &second));
+    }
 
     #[test]
     fn invocation_selection_owns_extensions_without_holding_registry_read_lock() {
@@ -1192,6 +1215,40 @@ mod reload_tests {
             .expect("selected invocations must not retain a registry read guard");
         assert_eq!(command.manifest.name, "unnamed_wasi_ext");
         assert_eq!(hooks.len(), 1);
+    }
+
+    #[test]
+    fn invocation_uses_module_compiled_at_load() {
+        let mut extension = WasiExtension::load_from_bytes(b"\0asm\x01\0\0\0".to_vec()).unwrap();
+        extension.wasm_bytes = vec![0xff];
+        let invocation = WasiExtensionInvocation {
+            api_version: 1,
+            kind: "command".into(),
+            name: "missing".into(),
+            arguments: serde_json::json!({}),
+            state: Value::Null,
+            events: Vec::new(),
+        };
+
+        let error = extension
+            .call_with_policy("execute_command", &invocation, CapabilityPolicy::default())
+            .unwrap_err();
+
+        assert_eq!(error, "Memory export not found");
+    }
+
+    #[test]
+    fn response_lookup_miss_does_not_reload_registry() {
+        let project = tempdir().unwrap();
+        let manager = WasiExtensionManager::for_project(project.path());
+        let extension = WasiExtension::load_from_bytes(b"\0asm\x01\0\0\0".to_vec()).unwrap();
+        let extension_name = extension.manifest.name.clone();
+        manager.register_extension(extension).unwrap();
+
+        assert!(manager
+            .find_response_extension("command", "missing")
+            .is_none());
+        assert!(manager.extension_manifest(&extension_name).is_some());
     }
 
     #[test]

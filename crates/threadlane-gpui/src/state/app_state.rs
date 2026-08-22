@@ -12,7 +12,6 @@ use crate::adapters::agent_events::{adapt_agent_event, ChatAgentUpdate};
 use crate::persistence::load_project_registry;
 use crate::services::sessions::{ExecutionMode, SessionRuntime, SessionRuntimeStatus};
 
-const CHAT_HISTORY_PAGE_SIZE: usize = 40;
 pub type AttachedProject = threadlane_session::ProjectRecord;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,6 +46,7 @@ pub enum MessageRole {
     System,
     Advisor(threadlane_session::AdvisorSeverity),
     Error,
+    ContextMarker,
 }
 
 #[derive(Clone, Debug)]
@@ -54,7 +54,7 @@ pub struct ToolActivityInfo {
     pub(crate) id: String,
     pub(crate) category: String,
     pub(crate) title: String,
-    pub(crate) summary: String,
+    pub(crate) display_summary: String,
     pub(crate) detail: String,
     pub(crate) is_expanded: bool,
 }
@@ -114,10 +114,8 @@ impl SessionMetricsInfo {
     pub(crate) fn cache_hit_percent(&self) -> Option<u64> {
         let billed_input = self.billed_input_tokens();
         (billed_input > 0).then(|| {
-            self.cache_read_tokens
-                .saturating_mul(100)
-                .saturating_add(billed_input / 2)
-                / billed_input
+            (((self.cache_read_tokens as u128) * 100 + (billed_input as u128) / 2)
+                / billed_input as u128) as u64
         })
     }
 
@@ -135,6 +133,24 @@ impl SessionMetricsInfo {
             .cache_write_tokens
             .saturating_add(u64::from(usage.cache_write_tokens));
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ContextWindowInfo {
+    pub(crate) current_tokens: u64,
+    pub(crate) context_limit: u64,
+    pub(crate) context_limit_is_estimate: bool,
+    pub(crate) effective_model: String,
+    pub(crate) compaction_generation: u64,
+    pub(crate) last_compaction_seq: Option<u64>,
+    pub(crate) provisional: bool,
+    pub(crate) estimating: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct SessionProjectionKey {
+    session_id: String,
+    session_file: PathBuf,
 }
 
 #[derive(Clone, Debug)]
@@ -185,18 +201,17 @@ pub enum WorkspacePage {
 pub(crate) struct SessionHydrationRequest {
     pub(crate) session_id: String,
     pub(crate) session_file: PathBuf,
+    pub(crate) reload_messages: bool,
 }
 
 /// The complete durable UI projection built from one JSONL store parse.
 pub(crate) struct SessionProjectionResult {
-    pub(crate) messages: Vec<ChatMessageInfo>,
-    pub(crate) history_start: usize,
-    pub(crate) history_has_older: bool,
     pub(crate) plan: SessionPlan,
     pub(crate) trajectory: Vec<TrajectoryEntry>,
     pub(crate) diagnostics: threadlane_session::harness::SessionDiagnostics,
     pub(crate) metrics: SessionMetricsInfo,
     pub(crate) token_usage: TokenUsage,
+    pub(crate) context_window: Option<ContextWindowInfo>,
 }
 
 pub struct AppState {
@@ -207,18 +222,18 @@ pub struct AppState {
     pub(crate) search_query: String,
     pub(crate) messages: Arc<Vec<ChatMessageInfo>>,
     pub(crate) available_models: Vec<crate::model_catalog::ModelOption>,
-    history_session_file: Option<PathBuf>,
-    history_start: usize,
-    history_has_older: bool,
     pub(crate) active_plan: SessionPlan,
     pub(crate) is_generating: bool,
     composer_text: String,
     pub(crate) session_status: Option<String>,
     pending_composer_messages: HashMap<String, String>,
-    session_token_usage: HashMap<String, TokenUsage>,
-    trajectory_by_session: HashMap<String, Vec<TrajectoryEntry>>,
-    diagnostics_by_session: HashMap<String, threadlane_session::harness::SessionDiagnostics>,
-    session_metrics: HashMap<String, SessionMetricsInfo>,
+    session_token_usage: HashMap<SessionProjectionKey, TokenUsage>,
+    trajectory_by_session: HashMap<SessionProjectionKey, Vec<TrajectoryEntry>>,
+    trajectory_revision: u64,
+    diagnostics_by_session:
+        HashMap<SessionProjectionKey, threadlane_session::harness::SessionDiagnostics>,
+    session_metrics: HashMap<SessionProjectionKey, SessionMetricsInfo>,
+    context_windows: HashMap<SessionProjectionKey, ContextWindowInfo>,
     stashed_prompts: HashMap<String, String>,
     pub(crate) pending_permissions: HashMap<String, threadlane_session::PermissionRequest>,
     pub(crate) pending_hydrations: Vec<SessionHydrationRequest>,
@@ -394,56 +409,70 @@ pub fn load_session_plan(session_file: &Path) -> SessionPlan {
 }
 
 pub fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
-    load_session_message_page(session_file, usize::MAX).0
+    compute_session_messages(session_file).unwrap_or_default()
 }
 
-fn load_session_projection(
+pub(crate) fn compute_session_messages(
     session_file: &Path,
-) -> (SessionPlan, Vec<ChatMessageInfo>, usize, bool) {
-    let Ok(store) = JsonlStore::open_read_only(session_file) else {
-        return (SessionPlan::default(), Vec::new(), 0, false);
+) -> Result<Vec<ChatMessageInfo>, String> {
+    use threadlane_session::harness::{read_transcript_page, TranscriptItem};
+
+    // The durable pager is the single transcript source, but exhaust it here:
+    // GPUI state continues to expose complete chronological history.
+    let mut cursor = None;
+    let mut pages = Vec::new();
+    loop {
+        let page =
+            read_transcript_page(session_file, cursor, 40).map_err(|error| error.to_string())?;
+        let has_older = page.has_older;
+        cursor = page.next_cursor;
+        pages.push(page.items);
+        if !has_older {
+            break;
+        }
+    }
+    pages.reverse();
+    let items = pages.into_iter().flatten().collect::<Vec<_>>();
+    let mut rows = Vec::new();
+    let mut messages = Vec::new();
+    let mut segment_start = 0usize;
+    let flush = |messages: &mut Vec<AgentMessage>, rows: &mut Vec<ChatMessageInfo>, start| {
+        for (index, mut row) in project_agent_messages(std::mem::take(messages))
+            .into_iter()
+            .enumerate()
+        {
+            row.id = format!("history-{start}-{index}-{}", row.id);
+            rows.push(row);
+        }
     };
-    // UI history is the durable chronological transcript projection, distinct
-    // from the active model-context branch used for provider requests.
-    let agent_messages = store.transcript("main").messages();
-    let projected = project_agent_messages(agent_messages);
-    let end = projected.len();
-    let start = end.saturating_sub(CHAT_HISTORY_PAGE_SIZE);
-    (
-        store.plan(),
-        projected[start..end].to_vec(),
-        start,
-        start > 0,
-    )
-}
-
-fn load_session_message_page(
-    session_file: &Path,
-    end: usize,
-) -> (Vec<ChatMessageInfo>, usize, bool) {
-    let Ok(store) = JsonlStore::open_read_only(session_file) else {
-        return (Vec::new(), 0, false);
-    };
-    project_message_page_from_store(&store, end)
-}
-
-fn project_message_page_from_store(
-    store: &JsonlStore,
-    end: usize,
-) -> (Vec<ChatMessageInfo>, usize, bool) {
-    let agent_messages = store.transcript("main").messages();
-    let projected = project_agent_messages(agent_messages);
-    let end = end.min(projected.len());
-    let start = end.saturating_sub(CHAT_HISTORY_PAGE_SIZE);
-    (projected[start..end].to_vec(), start, start > 0)
-}
-
-/// Computes an older transcript page from disk. Call this on GPUI's background executor.
-pub(crate) fn compute_older_message_page(
-    session_file: &Path,
-    end: usize,
-) -> (Vec<ChatMessageInfo>, usize, bool) {
-    load_session_message_page(session_file, end)
+    for (item_index, item) in items.into_iter().enumerate() {
+        match item {
+            TranscriptItem::Message(message) => {
+                if messages.is_empty() {
+                    segment_start = item_index;
+                }
+                messages.push(message);
+            }
+            TranscriptItem::ContextCompacted(marker) => {
+                flush(&mut messages, &mut rows, segment_start);
+                rows.push(ChatMessageInfo {
+                    id: format!("history-context-{}", marker.seq),
+                    role: MessageRole::ContextMarker,
+                    content: format!(
+                        "Context compacted · {} → {}",
+                        format_context_marker_tokens(marker.pre_tokens),
+                        format_context_marker_tokens(marker.post_tokens),
+                    ),
+                    tool_activities: Vec::new(),
+                    streaming: false,
+                    reasoning_content: None,
+                    reasoning_expanded: false,
+                });
+            }
+        }
+    }
+    flush(&mut messages, &mut rows, segment_start);
+    Ok(rows)
 }
 
 /// Opens a session JSONL once and builds every UI projection required after hydration.
@@ -453,18 +482,15 @@ pub(crate) fn compute_full_session_projection(
     let store = JsonlStore::open_read_only(session_file).map_err(|error| error.to_string())?;
     let diagnostics = threadlane_session::harness::project_session_diagnostics(&store, "main")
         .map_err(|error| error.to_string())?;
-    let (messages, history_start, history_has_older) =
-        project_message_page_from_store(&store, usize::MAX);
-    let (trajectory, metrics, token_usage) = AppState::project_trajectory_from_store(&store);
+    let (trajectory, metrics, token_usage, context_window) =
+        AppState::project_trajectory_from_store(&store);
     Ok(SessionProjectionResult {
-        messages,
-        history_start,
-        history_has_older,
         plan: store.plan(),
         trajectory,
         diagnostics,
         metrics,
         token_usage,
+        context_window,
     })
 }
 
@@ -509,6 +535,23 @@ fn tool_activity_summary(name: &str, arguments: &str) -> String {
     display_name
 }
 
+fn tool_activity_display_summary(summary: &str) -> String {
+    let first_line = summary.lines().next().unwrap_or(summary).trim();
+    if summary.lines().nth(1).is_some()
+        && !first_line.ends_with('…')
+        && !first_line.ends_with("...")
+    {
+        format!("{first_line} …")
+    } else {
+        first_line.to_string()
+    }
+}
+
+fn format_context_marker_tokens(tokens: usize) -> String {
+    let formatted = crate::model_catalog::format_tokens(tokens.min(u32::MAX as usize) as u32);
+    formatted.replace(".0k", "k").replace(".0M", "M")
+}
+
 fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageInfo> {
     threadlane_session::harness::project_chat_messages(&agent_messages)
         .into_iter()
@@ -527,13 +570,16 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
             tool_activities: msg
                 .tool_activities
                 .into_iter()
-                .map(|act| ToolActivityInfo {
-                    id: act.id,
-                    category: act.category,
-                    title: act.title,
-                    summary: act.summary,
-                    detail: act.detail,
-                    is_expanded: false,
+                .map(|act| {
+                    let display_summary = tool_activity_display_summary(&act.summary);
+                    ToolActivityInfo {
+                        id: act.id,
+                        category: act.category,
+                        title: act.title,
+                        display_summary,
+                        detail: act.detail,
+                        is_expanded: false,
+                    }
                 })
                 .collect(),
             streaming: false,
@@ -694,13 +740,10 @@ impl AppState {
         let model_roles = threadlane_session::ModelRoles::default();
         let mut session_runtimes = HashMap::new();
         let mut session_status = None;
-        let (active_plan, initial_messages, initial_history_start, initial_history_has_older) =
-            active_session_file
-                .as_deref()
-                .map(load_session_projection)
-                .unwrap_or_default();
-        let history_start = initial_history_start;
-        let history_has_older = initial_history_has_older;
+        let initial_messages = active_session_file
+            .as_deref()
+            .map(load_session_messages)
+            .unwrap_or_default();
         let messages = match (active_work_dir.as_ref(), active_session_file.as_ref()) {
             (Some(work_dir), Some(session_file)) => {
                 let runtime = SessionRuntime::new(
@@ -712,7 +755,7 @@ impl AppState {
                     ),
                     ExecutionMode::Interactive,
                 );
-                let messages = initial_messages.clone();
+                let messages = initial_messages;
                 selected_model = runtime.selected_model.clone();
                 session_status = runtime_status_text(runtime.status());
                 session_runtimes.insert(session_file.clone(), runtime);
@@ -732,18 +775,17 @@ impl AppState {
             search_query: String::new(),
             messages: Arc::new(messages),
             available_models,
-            history_session_file: active_session_file.clone(),
-            history_start,
-            history_has_older,
-            active_plan,
+            active_plan: SessionPlan::default(),
             is_generating: false,
             composer_text: String::new(),
             session_status,
             pending_composer_messages: HashMap::new(),
             session_token_usage: HashMap::new(),
             trajectory_by_session: HashMap::new(),
+            trajectory_revision: 0,
             diagnostics_by_session: HashMap::new(),
             session_metrics: HashMap::new(),
+            context_windows: HashMap::new(),
             stashed_prompts: HashMap::new(),
             selected_model,
             model_roles: threadlane_session::ModelRoles::default(),
@@ -772,23 +814,11 @@ impl AppState {
             state.active_session_id.clone(),
             active_session_file.as_deref(),
         ) {
-            if let Err(error) = state.hydrate_session_projection(&session_id, session_file) {
-                state.trajectory_by_session.insert(
-                    session_id,
-                    vec![TrajectoryEntry {
-                        seq: None,
-                        run_id: None,
-                        turn: None,
-                        request: None,
-                        category: "Error".into(),
-                        summary: "Could not load durable trajectory".into(),
-                        detail: error,
-                        lane: Some("main".into()),
-                        correlation_id: None,
-                        diagnostics: TrajectoryDiagnostics::default(),
-                    }],
-                );
-            }
+            state.pending_hydrations.push(SessionHydrationRequest {
+                session_id,
+                session_file: session_file.to_path_buf(),
+                reload_messages: false,
+            });
         }
         state
     }
@@ -802,9 +832,8 @@ impl AppState {
     }
 
     pub(crate) fn refresh_available_models(&mut self) {
-        self.available_models = crate::model_catalog::available_models_for_project(
-            self.active_work_dir.as_deref(),
-        );
+        self.available_models =
+            crate::model_catalog::available_models_for_project(self.active_work_dir.as_deref());
     }
 
     pub(crate) fn set_needle_enabled(&mut self, enabled: bool) -> Result<(), String> {
@@ -817,8 +846,8 @@ impl AppState {
     }
 
     pub(crate) fn current_session_token_usage(&self) -> TokenUsage {
-        if let Some(session_id) = &self.active_session_id {
-            if let Some(usage) = self.session_token_usage.get(session_id) {
+        if let Some(key) = self.active_session_projection_key() {
+            if let Some(usage) = self.session_token_usage.get(&key) {
                 return usage.clone();
             }
         }
@@ -907,11 +936,7 @@ impl AppState {
     }
 
     pub(crate) fn set_selected_model(&mut self, model: String) {
-        if !self
-            .available_models
-            .iter()
-            .any(|m| m.id == model)
-        {
+        if !self.available_models.iter().any(|m| m.id == model) {
             return;
         }
         self.selected_model = model.clone();
@@ -979,8 +1004,11 @@ impl AppState {
                 .get(&session_file)
                 .is_some_and(|runtime| runtime.is_generating());
             if !is_generating {
-                self.replace_visible_history(&session_file);
-                self.active_plan = load_session_plan(&session_file);
+                self.pending_hydrations.push(SessionHydrationRequest {
+                    session_id: session_id.clone(),
+                    session_file: session_file.clone(),
+                    reload_messages: true,
+                });
             }
             self.request_session_refresh(work_dir);
         }
@@ -991,9 +1019,6 @@ impl AppState {
         self.active_session_id = None;
         self.is_new_task = true;
         self.messages = Arc::new(Vec::new());
-        self.history_session_file = None;
-        self.history_start = 0;
-        self.history_has_older = false;
         self.active_plan = SessionPlan::default();
         self.is_generating = false;
         self.session_status = None;
@@ -1021,9 +1046,6 @@ impl AppState {
             self.active_session_id = None;
             self.is_new_task = true;
             self.messages = Arc::new(Vec::new());
-            self.history_session_file = None;
-            self.history_start = 0;
-            self.history_has_older = false;
             self.active_plan = SessionPlan::default();
             self.is_generating = false;
             self.session_status = None;
@@ -1031,23 +1053,6 @@ impl AppState {
             self.refresh_available_models();
             self.request_session_refresh(&work_dir);
         }
-    }
-
-    fn replace_visible_history(&mut self, session_file: &Path) {
-        let (messages, start, has_older) = load_session_message_page(session_file, usize::MAX);
-        self.messages = Arc::new(messages);
-        self.history_session_file = Some(session_file.to_path_buf());
-        self.history_start = start;
-        self.history_has_older = has_older;
-    }
-    pub(crate) fn has_older_messages(&self) -> bool {
-        self.history_has_older
-    }
-
-    pub(crate) fn history_page_request(&self) -> Option<(PathBuf, usize)> {
-        self.history_has_older
-            .then(|| self.history_session_file.clone().map(|file| (file, self.history_start)))
-            .flatten()
     }
 
     pub(crate) fn request_open_file(&mut self, relative_path: String) {
@@ -1095,9 +1100,6 @@ impl AppState {
             }
         }
         self.messages = Arc::new(Vec::new());
-        self.history_session_file = Some(session_file.clone());
-        self.history_start = 0;
-        self.history_has_older = false;
         self.active_plan = SessionPlan::default();
         self.is_generating = runtime.is_generating();
         self.selected_model = runtime.selected_model.clone();
@@ -1105,10 +1107,12 @@ impl AppState {
         let request = SessionHydrationRequest {
             session_id,
             session_file,
+            reload_messages: true,
         };
         self.pending_hydrations.push(SessionHydrationRequest {
             session_id: request.session_id.clone(),
             session_file: request.session_file.clone(),
+            reload_messages: request.reload_messages,
         });
         request
     }
@@ -1226,6 +1230,28 @@ impl AppState {
                     .join(".threadlane/sessions")
                     .join(format!("{session_id}.jsonl"))
             })
+    }
+
+    fn projection_key(session_id: &str, session_file: &Path) -> SessionProjectionKey {
+        SessionProjectionKey {
+            session_id: session_id.to_owned(),
+            session_file: session_file.to_path_buf(),
+        }
+    }
+
+    fn session_projection_key(&self, work_dir: &Path, session_id: &str) -> SessionProjectionKey {
+        Self::projection_key(session_id, &self.session_file(work_dir, session_id))
+    }
+
+    fn active_session_projection_key(&self) -> Option<SessionProjectionKey> {
+        let work_dir = self.active_work_dir.as_deref()?;
+        let session_id = self.active_session_id.as_deref()?;
+        Some(self.session_projection_key(work_dir, session_id))
+    }
+
+    pub(crate) fn active_session_matches(&self, session_id: &str, session_file: &Path) -> bool {
+        self.active_session_projection_key()
+            .is_some_and(|active| active == Self::projection_key(session_id, session_file))
     }
 
     fn finish_session_removal(&mut self, work_dir: &Path, session_id: &str) {
@@ -1352,20 +1378,31 @@ impl AppState {
         session_file: &Path,
     ) -> Result<(), String> {
         let result = compute_full_session_projection(session_file)?;
+        let key = Self::projection_key(session_id, session_file);
         self.diagnostics_by_session
-            .insert(session_id.to_owned(), result.diagnostics);
+            .insert(key.clone(), result.diagnostics);
         self.trajectory_by_session
-            .insert(session_id.into(), result.trajectory);
-        self.session_metrics.insert(session_id.into(), result.metrics);
-        self.session_token_usage
-            .insert(session_id.into(), result.token_usage);
+            .insert(key.clone(), result.trajectory);
+        self.trajectory_revision = self.trajectory_revision.wrapping_add(1);
+        self.session_metrics.insert(key.clone(), result.metrics);
+        if let Some(context_window) = result.context_window {
+            self.context_windows.insert(key.clone(), context_window);
+        } else {
+            self.context_windows.remove(&key);
+        }
+        self.session_token_usage.insert(key, result.token_usage);
         Ok(())
     }
 
     /// Projects trajectory entries, token usage, and metrics from an already-open store.
     fn project_trajectory_from_store(
         store: &JsonlStore,
-    ) -> (Vec<TrajectoryEntry>, SessionMetricsInfo, TokenUsage) {
+    ) -> (
+        Vec<TrajectoryEntry>,
+        SessionMetricsInfo,
+        TokenUsage,
+        Option<ContextWindowInfo>,
+    ) {
         let mut trajectory: Vec<TrajectoryEntry> = Vec::new();
         let mut metrics = SessionMetricsInfo::default();
         let mut durable_usage = TokenUsage::default();
@@ -2072,7 +2109,11 @@ impl AppState {
                     diagnostics: TrajectoryDiagnostics {
                         model_visible: true,
                         source: Some("Tool result".into()),
-                        error_summary: if *is_error { Some("Tool failed".into()) } else { None },
+                        error_summary: if *is_error {
+                            Some("Tool failed".into())
+                        } else {
+                            None
+                        },
                         ..Default::default()
                     },
                 });
@@ -2176,7 +2217,140 @@ impl AppState {
             }
         }
 
-        (trajectory, metrics, durable_usage)
+        let context_window = Self::project_context_window(store);
+        (trajectory, metrics, durable_usage, context_window)
+    }
+
+    fn project_context_window(store: &JsonlStore) -> Option<ContextWindowInfo> {
+        use threadlane_session::harness::Record;
+        let manifest = store
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                Record::ContextManifestCaptured {
+                    seq,
+                    lane,
+                    run_id,
+                    attempt,
+                    request_id,
+                    total_estimated_tokens,
+                    effective_model,
+                    context_limit,
+                    context_limit_is_estimate,
+                    compaction_generation,
+                    ..
+                } if lane == "main" => Some((
+                    *seq,
+                    run_id,
+                    *attempt,
+                    request_id.as_str(),
+                    *total_estimated_tokens,
+                    effective_model.as_ref().map(|value| value.as_str()),
+                    *context_limit,
+                    *context_limit_is_estimate,
+                    *compaction_generation,
+                )),
+                _ => None,
+            })
+            .max_by_key(|value| value.0)?;
+        let compaction = store
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                Record::ContextCompacted {
+                    seq,
+                    lane,
+                    timestamp,
+                    generation,
+                    effective_model,
+                    context_limit,
+                    context_limit_is_estimate,
+                    post_tokens,
+                    ..
+                } if lane == "main" => Some((
+                    *generation,
+                    *seq,
+                    *timestamp,
+                    effective_model.as_str(),
+                    *context_limit,
+                    *context_limit_is_estimate,
+                    *post_tokens,
+                )),
+                _ => None,
+            })
+            .max_by_key(|value| (value.0, value.1));
+        let (
+            manifest_seq,
+            run_id,
+            attempt,
+            request_id,
+            token_estimate,
+            persisted_model,
+            persisted_limit,
+            persisted_limit_estimate,
+            manifest_generation,
+        ) = manifest;
+        let effective_model = persisted_model
+            .map(str::to_owned)
+            .or_else(|| {
+                store.records().iter().find_map(|record| match record {
+                    Record::ProviderRequestStarted {
+                        run_id: candidate_run,
+                        attempt: candidate_attempt,
+                        request_id: Some(candidate_request),
+                        model,
+                        ..
+                    } if candidate_run == run_id
+                        && *candidate_attempt == attempt
+                        && candidate_request.as_str() == request_id =>
+                    {
+                        Some(model.as_str().to_owned())
+                    }
+                    _ => None,
+                })
+            })
+            .unwrap_or_default();
+        let estimating = store.records().iter().any(|record| match record {
+            Record::ProviderRequestStarted {
+                seq,
+                lane,
+                run_id: started_run_id,
+                attempt: started_attempt,
+                request_id: started_request_id,
+                ..
+            } if lane == "main" && *seq > manifest_seq => {
+                started_run_id != run_id
+                    || *started_attempt != attempt
+                    || started_request_id.as_ref().map(|value| value.as_str()) != Some(request_id)
+            }
+            _ => false,
+        });
+        let mut info = ContextWindowInfo {
+            current_tokens: u64::from(token_estimate.unwrap_or_default()),
+            context_limit: persisted_limit
+                .map(|value| value.min(u64::MAX as usize) as u64)
+                .unwrap_or_else(|| {
+                    u64::from(crate::model_catalog::model_context_window(&effective_model))
+                }),
+            context_limit_is_estimate: persisted_limit.is_none() || persisted_limit_estimate,
+            effective_model,
+            compaction_generation: manifest_generation,
+            last_compaction_seq: compaction.map(|value| value.2),
+            provisional: false,
+            estimating,
+        };
+        if let Some((generation, _, _, model, limit, estimated, post_tokens)) = compaction {
+            if generation > manifest_generation {
+                info.current_tokens = post_tokens.min(u64::MAX as usize) as u64;
+                info.context_limit = limit.min(u64::MAX as usize) as u64;
+                info.context_limit_is_estimate = estimated;
+                info.effective_model = model.to_owned();
+                info.compaction_generation = generation;
+                info.provisional = true;
+                info.estimating = false;
+            }
+        }
+        Some(info)
     }
 
     /// Applies a completed background projection if its session remains active.
@@ -2186,49 +2360,40 @@ impl AppState {
             .and_then(|runtime| runtime_status_text(runtime.status()))
     }
 
+    pub(crate) fn apply_session_messages(
+        &mut self,
+        session_id: &str,
+        session_file: &Path,
+        messages: Vec<ChatMessageInfo>,
+    ) {
+        if self.active_session_matches(session_id, session_file) {
+            self.messages = Arc::new(messages);
+        }
+    }
+
     pub(crate) fn apply_session_hydration(
         &mut self,
         session_id: &str,
         session_file: &Path,
         result: SessionProjectionResult,
     ) {
-        if self.active_session_id.as_deref() != Some(session_id) {
+        if !self.active_session_matches(session_id, session_file) {
             return;
         }
-        self.messages = Arc::new(result.messages);
-        self.history_session_file = Some(session_file.to_path_buf());
-        self.history_start = result.history_start;
-        self.history_has_older = result.history_has_older;
+        let key = Self::projection_key(session_id, session_file);
         self.active_plan = result.plan;
         self.trajectory_by_session
-            .insert(session_id.to_owned(), result.trajectory);
+            .insert(key.clone(), result.trajectory);
+        self.trajectory_revision = self.trajectory_revision.wrapping_add(1);
         self.diagnostics_by_session
-            .insert(session_id.to_owned(), result.diagnostics);
-        self.session_metrics.insert(session_id.to_owned(), result.metrics);
-        self.session_token_usage
-            .insert(session_id.to_owned(), result.token_usage);
-    }
-
-    /// Applies an older page that was computed off the UI thread.
-    pub(crate) fn apply_older_message_page(
-        &mut self,
-        session_file: &Path,
-        older: Vec<ChatMessageInfo>,
-        start: usize,
-        has_older: bool,
-    ) -> usize {
-        if self.history_session_file.as_deref() != Some(session_file) {
-            return 0;
-        }
-        let added = older.len();
-        if added > 0 {
-            self.messages_mut().splice(0..0, older);
-            self.history_start = start;
-            self.history_has_older = has_older;
+            .insert(key.clone(), result.diagnostics);
+        self.session_metrics.insert(key.clone(), result.metrics);
+        if let Some(context_window) = result.context_window {
+            self.context_windows.insert(key.clone(), context_window);
         } else {
-            self.history_has_older = false;
+            self.context_windows.remove(&key);
         }
-        added
+        self.session_token_usage.insert(key, result.token_usage);
     }
 
     fn record_trajectory(&mut self, session_id: &str, event: &AgentEvent) {
@@ -2315,8 +2480,14 @@ impl AppState {
             _ => None,
         };
         if let Some((category, summary, detail, lane)) = entry {
+            let Some(key) = self
+                .active_session_projection_key()
+                .filter(|key| key.session_id == session_id)
+            else {
+                return;
+            };
             self.trajectory_by_session
-                .entry(session_id.into())
+                .entry(key)
                 .or_default()
                 .push(TrajectoryEntry {
                     seq: None,
@@ -2336,14 +2507,14 @@ impl AppState {
                     },
                     diagnostics: TrajectoryDiagnostics::default(),
                 });
+            self.trajectory_revision = self.trajectory_revision.wrapping_add(1);
         }
     }
 
     pub(crate) fn active_model_context_diagnostics(&self) -> Vec<TrajectoryEntry> {
         let Some(projection) = self
-            .active_session_id
-            .as_ref()
-            .and_then(|id| self.diagnostics_by_session.get(id))
+            .active_session_projection_key()
+            .and_then(|key| self.diagnostics_by_session.get(&key))
         else {
             return Vec::new();
         };
@@ -2382,9 +2553,8 @@ impl AppState {
 
     pub(crate) fn active_durable_event_diagnostics(&self) -> Vec<TrajectoryEntry> {
         let Some(projection) = self
-            .active_session_id
-            .as_ref()
-            .and_then(|id| self.diagnostics_by_session.get(id))
+            .active_session_projection_key()
+            .and_then(|key| self.diagnostics_by_session.get(&key))
         else {
             return Vec::new();
         };
@@ -2431,9 +2601,8 @@ impl AppState {
 
     pub(crate) fn active_recovery_diagnostics(&self) -> Vec<TrajectoryEntry> {
         let Some(projection) = self
-            .active_session_id
-            .as_ref()
-            .and_then(|id| self.diagnostics_by_session.get(id))
+            .active_session_projection_key()
+            .and_then(|key| self.diagnostics_by_session.get(&key))
         else {
             return Vec::new();
         };
@@ -2441,26 +2610,37 @@ impl AppState {
     }
 
     pub(crate) fn active_trajectory(&self) -> &[TrajectoryEntry] {
-        self.active_session_id
-            .as_ref()
-            .and_then(|id| self.trajectory_by_session.get(id))
+        self.active_session_projection_key()
+            .and_then(|key| self.trajectory_by_session.get(&key))
             .map(Vec::as_slice)
             .unwrap_or(&[])
     }
 
+    pub(crate) fn trajectory_revision(&self) -> u64 {
+        self.trajectory_revision
+    }
+
     pub(crate) fn session_trajectory(&self, session_id: &str) -> &[TrajectoryEntry] {
-        self.trajectory_by_session
-            .get(session_id)
+        let key = self
+            .active_work_dir
+            .as_deref()
+            .map(|work_dir| self.session_projection_key(work_dir, session_id));
+        key.as_ref()
+            .and_then(|key| self.trajectory_by_session.get(key))
             .map(Vec::as_slice)
             .unwrap_or(&[])
     }
 
     pub(crate) fn active_session_metrics(&self) -> SessionMetricsInfo {
-        self.active_session_id
-            .as_ref()
-            .and_then(|id| self.session_metrics.get(id))
+        self.active_session_projection_key()
+            .and_then(|key| self.session_metrics.get(&key))
             .cloned()
             .unwrap_or_default()
+    }
+
+    pub(crate) fn active_context_window(&self) -> Option<&ContextWindowInfo> {
+        self.active_session_projection_key()
+            .and_then(|key| self.context_windows.get(&key))
     }
 
     pub(crate) fn chat_stream_pending(&self) -> bool {
@@ -2518,7 +2698,10 @@ impl AppState {
                         }
                     }
                     self.record_trajectory(&session_id, &event);
-                    let metrics = self.session_metrics.entry(session_id.clone()).or_default();
+                    let key = self
+                        .active_session_projection_key()
+                        .expect("active stream event must have a projection key");
+                    let metrics = self.session_metrics.entry(key.clone()).or_default();
                     match &event {
                         AgentEvent::AgentStart => metrics.turns = metrics.turns.saturating_add(1),
                         AgentEvent::ToolExecutionStart { .. } => {
@@ -2531,11 +2714,13 @@ impl AppState {
                         ChatAgentUpdate::TextDelta(delta) => {
                             active_changed = true;
                             let stream_prefix = format!("streaming-{session_id}-");
-                            if let Some(message) = self.messages_mut().last_mut().filter(|message| {
-                                message.role == MessageRole::Assistant
-                                    && message.id.starts_with(&stream_prefix)
-                                    && message.tool_activities.is_empty()
-                            }) {
+                            if let Some(message) =
+                                self.messages_mut().last_mut().filter(|message| {
+                                    message.role == MessageRole::Assistant
+                                        && message.id.starts_with(&stream_prefix)
+                                        && message.tool_activities.is_empty()
+                                })
+                            {
                                 message.content.push_str(&delta);
                             } else {
                                 let new_len = self.messages.len();
@@ -2580,17 +2765,22 @@ impl AppState {
                             arguments,
                         } => {
                             active_changed = true;
+                            let summary = tool_activity_summary(&name, &arguments);
+                            let display_summary = tool_activity_display_summary(&summary);
                             let activity = ToolActivityInfo {
                                 id: tool_call_id,
                                 category: "Working".into(),
-                                summary: tool_activity_summary(&name, &arguments),
+                                display_summary,
                                 title: name,
                                 detail: arguments,
                                 is_expanded: false,
                             };
-                            if let Some(message) = self.messages_mut().last_mut().filter(|message| {
-                                message.role == MessageRole::Assistant && message.content.is_empty()
-                            }) {
+                            if let Some(message) =
+                                self.messages_mut().last_mut().filter(|message| {
+                                    message.role == MessageRole::Assistant
+                                        && message.content.is_empty()
+                                })
+                            {
                                 message.tool_activities.push(activity);
                             } else {
                                 let new_len = self.messages.len();
@@ -2664,10 +2854,7 @@ impl AppState {
                             self.model_roles = roles;
                         }
                         ChatAgentUpdate::Usage(usage) => {
-                            let entry = self
-                                .session_token_usage
-                                .entry(session_id.clone())
-                                .or_default();
+                            let entry = self.session_token_usage.entry(key.clone()).or_default();
                             entry.accumulate(&usage);
                         }
                         ChatAgentUpdate::PermissionRequested(request) => {
@@ -2712,6 +2899,7 @@ impl AppState {
                     self.pending_hydrations.push(SessionHydrationRequest {
                         session_id: session_id.clone(),
                         session_file: session_file.clone(),
+                        reload_messages: true,
                     });
                     let runtime_is_stale =
                         self.session_runtimes
@@ -2926,7 +3114,7 @@ impl AppState {
             format!("{text}\n[{} image attachment(s)]", images.len())
         };
         self.trajectory_by_session
-            .entry(session_id.clone())
+            .entry(Self::projection_key(&session_id, &session_file))
             .or_default()
             .push(TrajectoryEntry {
                 seq: None,
@@ -2940,6 +3128,7 @@ impl AppState {
                 correlation_id: None,
                 diagnostics: TrajectoryDiagnostics::default(),
             });
+        self.trajectory_revision = self.trajectory_revision.wrapping_add(1);
         if !threadlane_provider::router::is_antigravity_model(&model) {
             crate::services::chat::maybe_generate_session_title(
                 session_file,
@@ -3071,11 +3260,651 @@ fn project_recovery_diagnostics(
 }
 
 #[cfg(test)]
+pub(crate) use tests::reported_session_shape_state;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
     use threadlane_session::harness::{
         OperationIntent, OperationOutcome, ProviderOutcome, Record, SessionStore, TraceString,
     };
+
+    #[test]
+    fn cache_hit_rounding_uses_wide_intermediates_at_u64_max() {
+        let metrics = SessionMetricsInfo {
+            cache_read_tokens: u64::MAX,
+            ..SessionMetricsInfo::default()
+        };
+
+        assert_eq!(metrics.billed_input_tokens(), u64::MAX);
+        assert_eq!(metrics.cache_hit_percent(), Some(100));
+    }
+
+    struct ReportedShapeProvider {
+        attempts: AtomicUsize,
+        previous_serialized_request: Mutex<Option<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl threadlane_protocol::ProviderPort for ReportedShapeProvider {
+        async fn stream_request(
+            &self,
+            request: threadlane_protocol::RuntimeRequest,
+            events: tokio::sync::mpsc::Sender<threadlane_protocol::RuntimeStreamEvent>,
+        ) {
+            use threadlane_protocol::{
+                RuntimeStreamEvent, RuntimeToolCall, RuntimeToolCallFunction, RuntimeUsage,
+            };
+
+            let serialized_request = format!("{}\n{}", request.messages, request.tools);
+            let estimate = serialized_request.len().div_ceil(4);
+            let cache_read_tokens = {
+                let mut previous = self.previous_serialized_request.lock().unwrap();
+                let repeated_prefix_bytes = previous
+                    .as_ref()
+                    .map(|prior| {
+                        prior
+                            .bytes()
+                            .zip(serialized_request.bytes())
+                            .take_while(|(left, right)| left == right)
+                            .count()
+                    })
+                    .unwrap_or(0);
+                *previous = Some(serialized_request);
+                repeated_prefix_bytes / 4
+            };
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            let tool_calls = (attempt < 102)
+                .then(|| RuntimeToolCall {
+                    id: format!("loop-{attempt}"),
+                    r#type: "function".into(),
+                    function: RuntimeToolCallFunction {
+                        name: threadlane_skills::LOAD_SKILL_TOOL_NAME.into(),
+                        arguments: serde_json::json!({ "name": "reported-shape" }).to_string(),
+                    },
+                    thought_signature: None,
+                })
+                .into_iter()
+                .collect();
+            if attempt == 102 {
+                events
+                    .send(RuntimeStreamEvent::ContentToken("complete".into()))
+                    .await
+                    .unwrap();
+            }
+            let input_tokens = u32::try_from(estimate.saturating_sub(cache_read_tokens)).unwrap();
+            let cache_read_tokens = u32::try_from(cache_read_tokens).unwrap();
+            events
+                .send(RuntimeStreamEvent::Finished {
+                    tool_calls,
+                    usage: RuntimeUsage {
+                        input_tokens,
+                        output_tokens: if attempt == 102 { 1 } else { 20 },
+                        cache_read_tokens,
+                        cache_write_tokens: 0,
+                        total_tokens: u32::try_from(estimate).unwrap()
+                            + if attempt == 102 { 1 } else { 20 },
+                    },
+                })
+                .await
+                .unwrap();
+        }
+
+        async fn fetch_deferred(
+            &self,
+            _model: &str,
+            _handle_id: &str,
+        ) -> Result<threadlane_protocol::DeferredResponse, String> {
+            Ok(threadlane_protocol::DeferredResponse::Pending)
+        }
+
+        async fn cancel_deferred(&self, _model: &str, _handle_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn provider_kind(&self, _model: &str) -> &'static str {
+            "test"
+        }
+    }
+
+    async fn generated_reported_session_path() -> PathBuf {
+        use threadlane_runtime::AgentConfig;
+        use threadlane_session::coding_agent::CodingAgentOptions;
+        use threadlane_session::SystemPromptConfig;
+
+        let root = tempfile::tempdir().unwrap().keep();
+        let skill_dir = root.join(".agents/skills/reported-shape");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!(
+                "---\nname: reported-shape\ndescription: deterministic compaction input\n---\n{}",
+                "segment ".repeat(1_000)
+            ),
+        )
+        .unwrap();
+        let path = root.join("reported-session-shape.jsonl");
+        let provider = Arc::new(ReportedShapeProvider {
+            attempts: AtomicUsize::new(0),
+            previous_serialized_request: Mutex::new(None),
+        });
+        let mut agent = threadlane_session::test_support::coding_agent_with_provider(
+            CodingAgentOptions {
+                api_key: "test-key".into(),
+                account_id: None,
+                model: "gpt-4o".into(),
+                work_dir: root,
+                session_file: Some(path.clone()),
+                system_prompt: SystemPromptConfig::default(),
+                agent_config: Some(AgentConfig::default()),
+                coding_config: None,
+            },
+            provider.clone(),
+        );
+        let result = agent
+            .handle_input_with_images("continue the cached tool loop", vec![])
+            .await;
+        assert!(result.is_none(), "foreground run failed: {result:?}");
+        assert_eq!(provider.attempts.load(Ordering::SeqCst), 102);
+        drop(agent);
+        path
+    }
+
+    pub(crate) async fn reported_session_shape_state() -> (PathBuf, AppState) {
+        let path = generated_reported_session_path().await;
+        // This is the production GPUI projection reading the journal emitted above by CodingAgent.
+        let projection = compute_full_session_projection(&path).unwrap();
+        let mut state = AppState::load_from_registry(Vec::new());
+        activate_test_session(&mut state, "context-session", &path);
+        state.apply_session_hydration("context-session", &path, projection);
+        (path, state)
+    }
+
+    #[tokio::test]
+    async fn reported_session_shape_keeps_total_processed_separate() {
+        let (path, state) = reported_session_shape_state().await;
+
+        let projected_context = state.active_context_window().unwrap();
+        let projected_metrics = state.active_session_metrics();
+        assert!(
+            projected_metrics
+                .billed_input_tokens()
+                .saturating_add(projected_metrics.output_tokens)
+                > projected_context.context_limit as u64
+        );
+        assert!(projected_context.current_tokens < projected_context.context_limit);
+        assert_eq!(projected_context.current_tokens, 38_278);
+        assert_eq!(projected_context.context_limit, 128_000);
+        assert_eq!(projected_context.effective_model, "gpt-4o");
+        assert!(!projected_context.context_limit_is_estimate);
+
+        // Inspect the production journal again, independently of the GPUI projection above.
+        use threadlane_session::harness::{read_transcript_page, CompactionReason, TranscriptItem};
+
+        let store = JsonlStore::open(&path).unwrap();
+        let records = store.records();
+        let provider_starts = records
+            .iter()
+            .filter_map(|record| match record {
+                Record::ProviderRequestStarted { seq, .. } => Some(*seq),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(provider_starts.len(), 102);
+
+        let adaptive_compactions = records
+            .iter()
+            .filter_map(|record| match record {
+                Record::ContextCompacted {
+                    seq,
+                    generation,
+                    reason: CompactionReason::AdaptiveBudget,
+                    ..
+                } => Some((*seq, *generation)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(adaptive_compactions.len(), 3);
+
+        let mut checkpoint_sequences = HashSet::new();
+        for (compaction_seq, generation) in adaptive_compactions {
+            let (checkpoint_seq, summary) = store
+                .entries()
+                .iter()
+                .filter_map(|entry| match &entry.message {
+                    AgentMessage::Custom {
+                        custom_type,
+                        payload,
+                    } if custom_type == "compaction_summary" && entry.seq < compaction_seq => {
+                        payload
+                            .get("summary")
+                            .and_then(serde_json::Value::as_str)
+                            .map(|summary| (entry.seq, summary))
+                    }
+                    _ => None,
+                })
+                .next_back()
+                .expect("durable summary checkpoint before adaptive compaction");
+            assert!(!summary.is_empty());
+            assert!(
+                checkpoint_sequences.insert(checkpoint_seq),
+                "adaptive compactions must have distinct durable checkpoints"
+            );
+
+            let next_start_seq = provider_starts
+                .iter()
+                .copied()
+                .find(|seq| *seq > compaction_seq)
+                .expect("provider request after adaptive compaction");
+            let (manifest_seq, manifest_generation) = records
+                .iter()
+                .filter_map(|record| match record {
+                    Record::ContextManifestCaptured {
+                        seq,
+                        compaction_generation,
+                        ..
+                    } if *seq > next_start_seq => Some((*seq, *compaction_generation)),
+                    _ => None,
+                })
+                .next()
+                .expect("manifest after post-compaction provider request start");
+            assert_eq!(manifest_generation, generation);
+            assert!(
+                checkpoint_seq < compaction_seq
+                    && compaction_seq < next_start_seq
+                    && next_start_seq < manifest_seq,
+                "checkpoint={checkpoint_seq}, compaction={compaction_seq}, provider_start={next_start_seq}, manifest={manifest_seq}"
+            );
+        }
+        assert_eq!(checkpoint_sequences.len(), 3);
+
+        let page = read_transcript_page(&path, None, 1_000).unwrap();
+        assert!(!page.has_older);
+        let transcript_messages = page
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                TranscriptItem::Message(message) => Some(message),
+                TranscriptItem::ContextCompacted(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let mut call_ids = Vec::new();
+        let mut call_positions = HashMap::new();
+        let mut result_ids = Vec::new();
+        let mut result_positions = HashMap::new();
+        for (position, message) in transcript_messages.iter().enumerate() {
+            match message {
+                AgentMessage::Assistant {
+                    tool_calls: Some(calls),
+                    ..
+                } => {
+                    for call in calls {
+                        assert!(
+                            call_positions.insert(call.id.clone(), position).is_none(),
+                            "duplicate tool call {}",
+                            call.id
+                        );
+                        call_ids.push(call.id.clone());
+                    }
+                }
+                AgentMessage::Tool { tool_call_id, .. } => {
+                    assert!(
+                        result_positions
+                            .insert(tool_call_id.clone(), position)
+                            .is_none(),
+                        "duplicate tool result {tool_call_id}"
+                    );
+                    result_ids.push(tool_call_id.clone());
+                }
+                _ => {}
+            }
+        }
+        let expected_loop_ids = (1..=101)
+            .map(|index| format!("loop-{index}"))
+            .collect::<Vec<_>>();
+        assert_eq!(call_ids, expected_loop_ids);
+        assert_eq!(result_ids, expected_loop_ids);
+        assert_eq!(call_positions.len(), 101);
+        assert_eq!(result_positions.len(), 101);
+        for call_id in &expected_loop_ids {
+            assert!(
+                call_positions[call_id] < result_positions[call_id],
+                "tool call {call_id} must precede its matching result"
+            );
+        }
+
+        let reloaded = compute_session_messages(&path).unwrap();
+        assert_eq!(
+            reloaded
+                .iter()
+                .filter(|message| message.role == MessageRole::ContextMarker)
+                .count(),
+            3
+        );
+        assert!(reloaded.iter().any(|message| {
+            message.role == MessageRole::ContextMarker
+                && message.content == "Context compacted · 96.9k → 38.3k"
+        }));
+        assert!(reloaded.iter().any(|message| {
+            message.role == MessageRole::User && message.content == "continue the cached tool loop"
+        }));
+        assert!(reloaded.iter().any(|message| {
+            message.role == MessageRole::Assistant && message.content == "complete"
+        }));
+        let projected_tool_ids = reloaded
+            .iter()
+            .flat_map(|message| &message.tool_activities)
+            .map(|activity| activity.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            projected_tool_ids, expected_loop_ids,
+            "projected tool activities must contain every loop exactly once and in order"
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[tokio::test]
+    async fn durable_projections_and_hydration_are_scoped_by_session_file() {
+        use threadlane_session::harness::UsageCause;
+
+        let root = std::env::temp_dir().join(format!(
+            "threadlane-same-session-projects-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let project_a = root.join("a");
+        let project_b = root.join("b");
+        std::fs::create_dir_all(&project_a).unwrap();
+        std::fs::create_dir_all(&project_b).unwrap();
+        let file_a = project_a.join("same-session.jsonl");
+        let file_b = project_b.join("same-session.jsonl");
+        std::fs::rename(generated_reported_session_path().await, &file_a).unwrap();
+        std::fs::rename(generated_reported_session_path().await, &file_b).unwrap();
+        let mut store_b = JsonlStore::open(&file_b).unwrap();
+        let next_generation = store_b
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                Record::ContextCompacted { generation, .. } => Some(*generation),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let manifest_seq = store_b.next_sequence();
+        store_b
+            .append_record(Record::ContextManifestCaptured {
+                id: "project-b-manifest".into(),
+                seq: manifest_seq,
+                lane: "main".into(),
+                timestamp: 7,
+                run_id: "run".into(),
+                attempt: 1,
+                request_id: TraceString::new("req").unwrap(),
+                total_estimated_tokens: Some(222_222),
+                effective_model: Some(TraceString::new("project-b-model").unwrap()),
+                context_limit: Some(333_333),
+                context_limit_is_estimate: false,
+                compaction_generation: next_generation,
+                items: Vec::new(),
+            })
+            .unwrap();
+        store_b
+            .append_record(Record::Usage {
+                id: "project-b-usage".into(),
+                seq: manifest_seq + 1,
+                lane: "main".into(),
+                timestamp: 8,
+                run_id: None,
+                cause: UsageCause::Provider,
+                entry_id: None,
+                tool_call_id: None,
+                attempt: Some(1),
+                usage: TokenUsage {
+                    input_tokens: 123,
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        drop(store_b);
+
+        let projection_a = compute_full_session_projection(&file_a).unwrap();
+        let projection_b = compute_full_session_projection(&file_b).unwrap();
+        let expected_b_billed = projection_b.metrics.billed_input_tokens();
+        let mut state = AppState::load_from_registry(Vec::new());
+        activate_test_session(&mut state, "same-session", &file_a);
+        state.apply_session_hydration("same-session", &file_a, projection_a);
+        activate_test_session(&mut state, "same-session", &file_b);
+        state.apply_session_hydration("same-session", &file_b, projection_b);
+
+        assert_eq!(state.context_windows.len(), 2);
+        assert_eq!(state.session_metrics.len(), 2);
+        assert_eq!(
+            state.active_context_window().unwrap().current_tokens,
+            222_222
+        );
+        assert_eq!(
+            state.active_session_metrics().billed_input_tokens(),
+            expected_b_billed
+        );
+
+        let stale = compute_full_session_projection(&file_a).unwrap();
+        state.apply_session_hydration("same-session", &file_a, stale);
+        assert_eq!(
+            state.active_context_window().unwrap().current_tokens,
+            222_222
+        );
+        assert_eq!(
+            state.active_session_metrics().billed_input_tokens(),
+            expected_b_billed
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn newer_provisional_compaction_clears_manifest_estimation() {
+        use threadlane_session::harness::CompactionReason;
+
+        let path = generated_reported_session_path().await;
+        let mut store = JsonlStore::open(&path).unwrap();
+        let request_seq = store.next_sequence();
+        store
+            .append_record(Record::ProviderRequestStarted {
+                id: "newer-request".into(),
+                seq: request_seq,
+                lane: "main".into(),
+                timestamp: 7,
+                run_id: "run".into(),
+                attempt: 2,
+                provider: TraceString::new("openai").unwrap(),
+                model: TraceString::new("newer-model").unwrap(),
+                request_id: Some(TraceString::new("newer-request").unwrap()),
+            })
+            .unwrap();
+        store
+            .append_record(Record::ContextCompacted {
+                id: "newer-compaction".into(),
+                seq: request_seq + 1,
+                lane: "main".into(),
+                timestamp: 8,
+                run_id: "run".into(),
+                generation: 4,
+                reason: CompactionReason::AdaptiveBudget,
+                effective_model: TraceString::new("newer-model").unwrap(),
+                context_limit: 500_000,
+                context_limit_is_estimate: true,
+                pre_tokens: 400_000,
+                post_tokens: 111_111,
+                retained_tail_target: 0,
+                retained_tail_tokens: 0,
+                compacted_messages: 1,
+            })
+            .unwrap();
+        drop(store);
+
+        let context = compute_full_session_projection(&path)
+            .unwrap()
+            .context_window
+            .unwrap();
+        assert!(context.provisional);
+        assert_eq!(context.compaction_generation, 4);
+        assert_eq!(context.current_tokens, 111_111);
+        assert!(!context.estimating);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[tokio::test]
+    async fn model_switch_estimation_keeps_latest_manifest_model() {
+        let path = generated_reported_session_path().await;
+        let mut store = JsonlStore::open(&path).unwrap();
+        let request_seq = store.next_sequence();
+        store
+            .append_record(Record::ProviderRequestStarted {
+                id: "next-provider".into(),
+                seq: request_seq,
+                lane: "main".into(),
+                timestamp: 7,
+                run_id: "run".into(),
+                attempt: 2,
+                provider: TraceString::new("openai").unwrap(),
+                model: TraceString::new("unused-new-model").unwrap(),
+                request_id: Some(TraceString::new("next-request").unwrap()),
+            })
+            .unwrap();
+        drop(store);
+        let context = compute_full_session_projection(&path)
+            .unwrap()
+            .context_window
+            .unwrap();
+        assert!(context.estimating);
+        assert_eq!(context.effective_model, "gpt-4o");
+        assert_eq!(context.context_limit, 128_000);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[tokio::test]
+    async fn transcript_marker_survives_reload_without_summary_content() {
+        let path = generated_reported_session_path().await;
+        let first = compute_session_messages(&path).unwrap();
+        let second = compute_session_messages(&path).unwrap();
+        assert!(first.iter().any(|message| {
+            message.role == MessageRole::ContextMarker
+                && message.content.starts_with("Context compacted · ")
+        }));
+        assert_eq!(
+            first.iter().map(|row| &row.id).collect::<Vec<_>>(),
+            second.iter().map(|row| &row.id).collect::<Vec<_>>()
+        );
+        assert!(!first
+            .iter()
+            .any(|message| message.content.contains("Context checkpoint from")));
+        assert!(first.iter().any(|message| {
+            message.role == MessageRole::User && message.content == "continue the cached tool loop"
+        }));
+        assert!(first.iter().any(|message| {
+            message.role == MessageRole::Assistant && message.content == "complete"
+        }));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn legacy_session_without_compaction_has_no_fabricated_marker() {
+        let path = std::env::temp_dir().join(format!(
+            "threadlane-gpui-legacy-{}.jsonl",
+            std::process::id()
+        ));
+        let mut store = JsonlStore::open(&path).unwrap();
+        store
+            .append_record(Record::ContextManifestCaptured {
+                id: "manifest".into(),
+                seq: 1,
+                lane: "main".into(),
+                timestamp: 1,
+                run_id: "legacy".into(),
+                attempt: 1,
+                request_id: TraceString::new("request").unwrap(),
+                total_estimated_tokens: Some(99),
+                effective_model: None,
+                context_limit: None,
+                context_limit_is_estimate: false,
+                compaction_generation: 0,
+                items: Vec::new(),
+            })
+            .unwrap();
+        drop(store);
+        assert!(compute_session_messages(&path)
+            .unwrap()
+            .iter()
+            .all(|message| message.role != MessageRole::ContextMarker));
+        assert_eq!(
+            compute_full_session_projection(&path)
+                .unwrap()
+                .context_window
+                .unwrap()
+                .last_compaction_seq,
+            None
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    fn cached_key(state: &AppState, session_id: &str) -> SessionProjectionKey {
+        state
+            .trajectory_by_session
+            .keys()
+            .chain(state.session_metrics.keys())
+            .chain(state.session_token_usage.keys())
+            .find(|key| key.session_id == session_id)
+            .cloned()
+            .expect("session projection must be cached")
+    }
+
+    fn activate_test_session(state: &mut AppState, session_id: &str, session_file: &Path) {
+        let work_dir = session_file
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        state.projects.push(ProjectInfo {
+            name: session_id.into(),
+            work_dir: work_dir.clone(),
+            sessions: vec![SessionInfo {
+                id: session_id.into(),
+                title: session_id.into(),
+                work_dir: work_dir.clone(),
+                session_file: session_file.to_path_buf(),
+                updated_at: 0,
+                health: SessionHealth::Healthy,
+            }],
+            is_expanded: true,
+        });
+        state.active_work_dir = Some(work_dir);
+        state.active_session_id = Some(session_id.into());
+    }
+
+    fn apply_pending_hydration(state: &mut AppState) {
+        let request = state.pending_hydrations.pop().unwrap();
+        let projection = compute_full_session_projection(&request.session_file).unwrap();
+        state.apply_session_hydration(&request.session_id, &request.session_file, projection);
+    }
+
+    #[test]
+    fn tool_activity_display_summary_is_prepared_during_projection() {
+        assert_eq!(
+            tool_activity_display_summary("read file · src/main.rs\nignored"),
+            "read file · src/main.rs …"
+        );
+        assert_eq!(
+            tool_activity_display_summary("still working...\nmore detail"),
+            "still working..."
+        );
+        assert_eq!(tool_activity_display_summary(""), "");
+    }
 
     #[test]
     fn persisted_thinking_message_projects_as_reasoning_content() {
@@ -3176,7 +4005,7 @@ mod tests {
     }
 
     #[test]
-    fn app_state_startup_hydrates_complete_initial_session_history() {
+    fn app_state_startup_pages_messages_before_full_projection() {
         use threadlane_provider::openai::{ToolCall, ToolCallFunction};
         use threadlane_session::harness::{
             CapabilitySnapshot, OperationIntent, PromptSnapshot, ProviderOutcome, Record,
@@ -3370,7 +4199,7 @@ mod tests {
             .unwrap();
         drop(store);
 
-        let state = AppState::load_from_registry(vec![AttachedProject {
+        let mut state = AppState::load_from_registry(vec![AttachedProject {
             id: "hydration-test".into(),
             path: work_dir.clone(),
             name: "hydration-test".into(),
@@ -3394,13 +4223,20 @@ mod tests {
         assert_eq!(messages[1].tool_activities.len(), 1);
         assert_eq!(messages[1].tool_activities[0].id, "call-read");
         assert_eq!(messages[1].tool_activities[0].detail, "file contents");
-        assert!(state.trajectory_by_session["hydration-test"]
-            .iter()
-            .any(|entry| entry.summary == "User input"));
-        assert!(state.trajectory_by_session["hydration-test"]
-            .iter()
-            .any(|entry| entry.summary == "read_file finished"));
-        let trace = &state.trajectory_by_session["hydration-test"];
+        assert_eq!(state.pending_hydrations.len(), 1);
+
+        apply_pending_hydration(&mut state);
+        assert!(
+            state.trajectory_by_session[&cached_key(&state, "hydration-test")]
+                .iter()
+                .any(|entry| entry.summary == "User input")
+        );
+        assert!(
+            state.trajectory_by_session[&cached_key(&state, "hydration-test")]
+                .iter()
+                .any(|entry| entry.summary == "read_file finished")
+        );
+        let trace = &state.trajectory_by_session[&cached_key(&state, "hydration-test")];
         let context_index = trace
             .iter()
             .position(|entry| entry.category == "Context")
@@ -3416,9 +4252,15 @@ mod tests {
         assert!(
             context_index < provider_start_index && provider_start_index < provider_finish_index
         );
-        assert_eq!(state.session_metrics["hydration-test"].turns, 1);
-        assert_eq!(state.session_metrics["hydration-test"].tool_calls, 1);
-        let metrics = &state.session_metrics["hydration-test"];
+        assert_eq!(
+            state.session_metrics[&cached_key(&state, "hydration-test")].turns,
+            1
+        );
+        assert_eq!(
+            state.session_metrics[&cached_key(&state, "hydration-test")].tool_calls,
+            1
+        );
+        let metrics = &state.session_metrics[&cached_key(&state, "hydration-test")];
         assert_eq!(metrics.input_tokens, 17);
         assert_eq!(metrics.output_tokens, 9);
         assert_eq!(metrics.cache_read_tokens, 4);
@@ -3689,8 +4531,11 @@ mod tests {
         let mut state = AppState::load_from_registry(Vec::new());
         state.hydrate_session_projection("session", &path).unwrap();
 
-        assert_eq!(state.session_token_usage["session"], usage);
-        let diagnostics = &state.diagnostics_by_session["session"];
+        assert_eq!(
+            state.session_token_usage[&cached_key(&state, "session")],
+            usage
+        );
+        let diagnostics = &state.diagnostics_by_session[&cached_key(&state, "session")];
         assert!(!diagnostics.model_context.is_empty());
         assert_eq!(
             diagnostics
@@ -3709,7 +4554,7 @@ mod tests {
             }
         );
         assert_eq!(diagnostics.recovery.len(), 1);
-        let tool_rows = state.trajectory_by_session["session"]
+        let tool_rows = state.trajectory_by_session[&cached_key(&state, "session")]
             .iter()
             .filter(|entry| entry.correlation_id.as_deref() == Some("call-1"))
             .collect::<Vec<_>>();
@@ -3798,7 +4643,7 @@ mod tests {
             is_expanded: true,
         });
         state.trajectory_by_session.insert(
-            session_id.clone(),
+            AppState::projection_key(&session_id, &session_file),
             vec![
                 TrajectoryEntry {
                     seq: None,
@@ -3842,7 +4687,7 @@ mod tests {
 
         state.select_session(work_dir, session_id.clone());
 
-        let trajectory = &state.trajectory_by_session[&session_id];
+        let trajectory = &state.trajectory_by_session[&cached_key(&state, &session_id)];
         assert_eq!(trajectory.len(), 2);
         assert_eq!(trajectory[0].summary, "read_file running");
         assert_eq!(trajectory[1].summary, "read_file finished");
@@ -3892,7 +4737,7 @@ mod tests {
             .hydrate_session_projection("old-session", &path)
             .unwrap();
 
-        let trajectory = &state.trajectory_by_session["old-session"];
+        let trajectory = &state.trajectory_by_session[&cached_key(&state, "old-session")];
         assert!(trajectory.iter().any(|entry| entry.category == "Operation"));
         assert!(trajectory
             .iter()
@@ -3908,6 +4753,8 @@ mod tests {
     #[test]
     fn trajectory_projection_is_session_scoped_and_preserves_tool_details() {
         let mut state = AppState::load_from_registry(Vec::new());
+        state.active_work_dir = Some(std::env::temp_dir().join("threadlane-trajectory-scope"));
+        state.active_session_id = Some("session-a".into());
         state.record_trajectory(
             "session-a",
             &AgentEvent::ToolExecutionStart {
@@ -3916,6 +4763,7 @@ mod tests {
                 arguments: r#"{"path":"src/lib.rs"}"#.into(),
             },
         );
+        state.active_session_id = Some("session-b".into());
         state.record_trajectory(
             "session-b",
             &AgentEvent::SubagentQueued {
@@ -3925,29 +4773,44 @@ mod tests {
                 task: "Review the patch".into(),
             },
         );
-        assert_eq!(state.trajectory_by_session["session-a"].len(), 1);
-        assert_eq!(state.trajectory_by_session["session-a"][0].category, "Tool");
-        assert!(state.trajectory_by_session["session-a"][0]
-            .detail
-            .contains("src/lib.rs"));
         assert_eq!(
-            state.trajectory_by_session["session-a"][0]
+            state.trajectory_by_session[&cached_key(&state, "session-a")].len(),
+            1
+        );
+        assert_eq!(
+            state.trajectory_by_session[&cached_key(&state, "session-a")][0].category,
+            "Tool"
+        );
+        assert!(
+            state.trajectory_by_session[&cached_key(&state, "session-a")][0]
+                .detail
+                .contains("src/lib.rs")
+        );
+        assert_eq!(
+            state.trajectory_by_session[&cached_key(&state, "session-a")][0]
                 .correlation_id
                 .as_deref(),
             Some("call-1")
         );
         assert_eq!(
-            state.trajectory_by_session["session-b"][0].lane.as_deref(),
+            state.trajectory_by_session[&cached_key(&state, "session-b")][0]
+                .lane
+                .as_deref(),
             Some("reviewer")
         );
+        state.active_session_id = Some("session-a".into());
         state.record_trajectory("session-a", &AgentEvent::TurnStart { turn_number: 12 });
-        assert_eq!(state.trajectory_by_session["session-a"].len(), 1);
+        assert_eq!(
+            state.trajectory_by_session[&cached_key(&state, "session-a")].len(),
+            1
+        );
     }
 
     #[test]
     fn inactive_session_stream_events_replay_after_switching_back() {
         let mut state = AppState::load_from_registry(Vec::new());
         state.messages_mut().clear();
+        state.active_work_dir = Some(std::env::temp_dir().join("threadlane-stream-replay"));
         state.active_session_id = Some("foreground-session".into());
         state.is_new_task = false;
 
@@ -4006,6 +4869,7 @@ mod tests {
     fn stream_drain_preserves_events_beyond_one_frame_budget() {
         let mut state = AppState::load_from_registry(Vec::new());
         state.messages_mut().clear();
+        state.active_work_dir = Some(std::env::temp_dir().join("threadlane-stream-budget"));
         state.active_session_id = Some("session".into());
         state.is_new_task = false;
 
@@ -4032,20 +4896,22 @@ mod tests {
     }
 
     #[test]
-    fn session_message_page_returns_newest_window_and_older_cursor() {
+    fn session_messages_include_complete_durable_history_beyond_legacy_page() {
+        const LEGACY_PAGE_SIZE: usize = 40;
+        const MESSAGE_COUNT: usize = 45;
         let unique = std::time::SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "threadlane-gpui-history-page-{}-{unique}",
+            "threadlane-gpui-complete-history-{}-{unique}",
             std::process::id()
         ));
         let path = root.join("session.jsonl");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let mut store = threadlane_session::harness::JsonlStore::open(&path).unwrap();
         let mut parent_id = None;
-        for index in 0..45 {
+        for index in 0..MESSAGE_COUNT {
             let id = format!("node_{index}");
             store
                 .append_entry(threadlane_session::harness::Entry {
@@ -4065,18 +4931,18 @@ mod tests {
         }
         drop(store);
 
-        let (messages, start, has_older) = load_session_message_page(&path, usize::MAX);
-        assert_eq!(messages.len(), CHAT_HISTORY_PAGE_SIZE);
-        assert_eq!(messages.first().unwrap().content, "message-5");
-        assert_eq!(messages.last().unwrap().content, "message-44");
-        assert_eq!(start, 5);
-        assert!(has_older);
+        // Keep the fixture tied to the regression: the former GPUI helper loaded
+        // only this newest page, omitting the first five durable messages.
+        let legacy_page =
+            threadlane_session::harness::read_transcript_page(&path, None, LEGACY_PAGE_SIZE)
+                .unwrap();
+        assert_eq!(legacy_page.items.len(), LEGACY_PAGE_SIZE);
+        assert!(legacy_page.has_older);
 
-        let (older, older_start, has_more) = load_session_message_page(&path, start);
-        assert_eq!(older.len(), 5);
-        assert_eq!(older.first().unwrap().content, "message-0");
-        assert_eq!(older_start, 0);
-        assert!(!has_more);
+        let messages = load_session_messages(&path);
+        assert_eq!(messages.len(), MESSAGE_COUNT);
+        assert_eq!(messages.first().unwrap().content, "message-0");
+        assert_eq!(messages.last().unwrap().content, "message-44");
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -4163,16 +5029,18 @@ mod tests {
         let mut attached_project = AttachedProject::from_path(project_root.clone());
         attached_project.last_opened_at = 1_000_000;
 
-        let state = AppState::load_from_registry(vec![attached_project]);
+        let mut state = AppState::load_from_registry(vec![attached_project]);
 
         assert_eq!(state.active_session_id.as_deref(), Some("session_1001"));
         assert_eq!(state.messages.len(), 2);
         assert_eq!(state.messages[0].content, "Hello on startup");
         assert_eq!(state.messages[1].content, "I am ready");
 
+        apply_pending_hydration(&mut state);
+
         let trajectory = state
             .trajectory_by_session
-            .get("session_1001")
+            .get(&cached_key(&state, "session_1001"))
             .expect("trajectory must be hydrated on startup");
         assert!(!trajectory.is_empty());
         assert!(trajectory.iter().any(|t| t.category == "Operation"));
@@ -4180,13 +5048,13 @@ mod tests {
 
         let usage = state
             .session_token_usage
-            .get("session_1001")
+            .get(&cached_key(&state, "session_1001"))
             .expect("token usage must be hydrated on startup");
         assert_eq!(usage.total_tokens, 50);
 
         let metrics = state
             .session_metrics
-            .get("session_1001")
+            .get(&cached_key(&state, "session_1001"))
             .expect("session metrics must be hydrated on startup");
         assert_eq!(metrics.input_tokens, 20);
         assert_eq!(metrics.output_tokens, 12);
@@ -4319,7 +5187,10 @@ mod tests {
             AgentMessage::Assistant { content, .. } if content.as_deref() == Some("Branch B alternative answer")
         ));
 
-        let trajectory = state.trajectory_by_session.get("branch-session").unwrap();
+        let trajectory = state
+            .trajectory_by_session
+            .get(&cached_key(&state, "branch-session"))
+            .unwrap();
         assert!(trajectory
             .iter()
             .any(|t| t.run_id.as_deref() == Some("run-branch-a")));

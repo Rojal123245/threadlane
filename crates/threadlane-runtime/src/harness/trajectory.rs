@@ -267,7 +267,8 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
     // Intermediate indices for lifecycle joining
     let mut tools_by_call_id: HashMap<String, ToolTrajectory> = HashMap::new();
     let mut providers_by_req_id: HashMap<String, ProviderTrajectory> = HashMap::new();
-    let mut context_manifests_by_req_id: HashMap<String, ContextManifestTrajectory> = HashMap::new();
+    let mut context_manifests_by_req_id: HashMap<String, ContextManifestTrajectory> =
+        HashMap::new();
     let mut permissions_by_req_id: HashMap<String, PermissionTrajectory> = HashMap::new();
 
     let mut requests: Vec<RequestTrajectory> = Vec::new();
@@ -349,34 +350,39 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
                         // Associate tool calls with this assistant entry
                         if let Some(calls) = tool_calls {
                             for call in calls {
-                                let tool = tools_by_call_id.entry(call.id.clone()).or_insert_with(|| {
-                                    let args = serde_json::from_str(&call.function.arguments)
-                                        .unwrap_or_else(|_| serde_json::Value::String(call.function.arguments.clone()));
-                                    ToolTrajectory {
-                                        call_id: call.id.clone(),
-                                        tool_name: call.function.name.clone(),
-                                        effective_args: args,
-                                        status: ToolStatus::Started,
-                                        started_seq: entry.seq,
-                                        executed_seq: None,
-                                        finished_seq: None,
-                                        duration_ms: None,
-                                        exit_code: None,
-                                        output_bytes: None,
-                                        output_sha256: None,
-                                        output_summary: None,
-                                        result_content: None,
-                                        is_error: false,
-                                        parent_assistant_entry: Some(TrajectoryRef {
-                                            seq: entry.seq,
-                                            entry_id: Some(entry.id.clone()),
-                                            run_id: None,
-                                            lane: entry.lane.clone(),
-                                        }),
-                                        result_entry: None,
-                                        raw_record_seqs: Vec::new(),
-                                    }
-                                });
+                                let tool =
+                                    tools_by_call_id.entry(call.id.clone()).or_insert_with(|| {
+                                        let args = serde_json::from_str(&call.function.arguments)
+                                            .unwrap_or_else(|_| {
+                                                serde_json::Value::String(
+                                                    call.function.arguments.clone(),
+                                                )
+                                            });
+                                        ToolTrajectory {
+                                            call_id: call.id.clone(),
+                                            tool_name: call.function.name.clone(),
+                                            effective_args: args,
+                                            status: ToolStatus::Started,
+                                            started_seq: entry.seq,
+                                            executed_seq: None,
+                                            finished_seq: None,
+                                            duration_ms: None,
+                                            exit_code: None,
+                                            output_bytes: None,
+                                            output_sha256: None,
+                                            output_summary: None,
+                                            result_content: None,
+                                            is_error: false,
+                                            parent_assistant_entry: Some(TrajectoryRef {
+                                                seq: entry.seq,
+                                                entry_id: Some(entry.id.clone()),
+                                                run_id: None,
+                                                lane: entry.lane.clone(),
+                                            }),
+                                            result_entry: None,
+                                            raw_record_seqs: Vec::new(),
+                                        }
+                                    });
                                 tool.parent_assistant_entry = Some(TrajectoryRef {
                                     seq: entry.seq,
                                     entry_id: Some(entry.id.clone()),
@@ -392,36 +398,37 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
                         is_error,
                         ..
                     } => {
-                        let tool = tools_by_call_id.entry(tool_call_id.clone()).or_insert_with(|| {
-                            ToolTrajectory {
-                                call_id: tool_call_id.clone(),
-                                tool_name: "tool".into(),
-                                effective_args: serde_json::Value::Null,
-                                status: if *is_error {
-                                    ToolStatus::Failed
-                                } else {
-                                    ToolStatus::Succeeded
-                                },
-                                started_seq: entry.seq,
-                                executed_seq: None,
-                                finished_seq: Some(entry.seq),
-                                duration_ms: None,
-                                exit_code: None,
-                                output_bytes: Some(content.len() as u64),
-                                output_sha256: None,
-                                output_summary: None,
-                                result_content: Some(content.clone()),
-                                is_error: *is_error,
-                                parent_assistant_entry: None,
-                                result_entry: Some(TrajectoryRef {
-                                    seq: entry.seq,
-                                    entry_id: Some(entry.id.clone()),
-                                    run_id: None,
-                                    lane: entry.lane.clone(),
-                                }),
-                                raw_record_seqs: Vec::new(),
-                            }
-                        });
+                        let tool =
+                            tools_by_call_id
+                                .entry(tool_call_id.clone())
+                                .or_insert_with(|| ToolTrajectory {
+                                    call_id: tool_call_id.clone(),
+                                    tool_name: "tool".into(),
+                                    effective_args: serde_json::Value::Null,
+                                    status: if *is_error {
+                                        ToolStatus::Failed
+                                    } else {
+                                        ToolStatus::Succeeded
+                                    },
+                                    started_seq: entry.seq,
+                                    executed_seq: None,
+                                    finished_seq: Some(entry.seq),
+                                    duration_ms: None,
+                                    exit_code: None,
+                                    output_bytes: Some(content.len() as u64),
+                                    output_sha256: None,
+                                    output_summary: None,
+                                    result_content: Some(content.clone()),
+                                    is_error: *is_error,
+                                    parent_assistant_entry: None,
+                                    result_entry: Some(TrajectoryRef {
+                                        seq: entry.seq,
+                                        entry_id: Some(entry.id.clone()),
+                                        run_id: None,
+                                        lane: entry.lane.clone(),
+                                    }),
+                                    raw_record_seqs: Vec::new(),
+                                });
                         tool.result_content = Some(content.clone());
                         tool.is_error = *is_error;
                         tool.status = if *is_error {
@@ -491,14 +498,15 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
                         let req_id_str = request_id
                             .as_ref()
                             .map_or_else(|| format!("req-{seq}"), |id| id.as_str().to_owned());
-                        let manifest_ref = context_manifests_by_req_id
-                            .get(&req_id_str)
-                            .map(|m| TrajectoryRef {
-                                seq: m.seq,
-                                entry_id: None,
-                                run_id: run_id.clone(),
-                                lane: lane.clone(),
-                            });
+                        let manifest_ref =
+                            context_manifests_by_req_id
+                                .get(&req_id_str)
+                                .map(|m| TrajectoryRef {
+                                    seq: m.seq,
+                                    entry_id: None,
+                                    run_id: run_id.clone(),
+                                    lane: lane.clone(),
+                                });
                         providers_by_req_id.insert(
                             req_id_str.clone(),
                             ProviderTrajectory {
@@ -565,7 +573,8 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
                     } => {
                         if let Some(req) = current_request.as_mut() {
                             req.tool_calls_count += 1;
-                            if let Some(mutated) = extract_mutated_files(tool_name, effective_args) {
+                            if let Some(mutated) = extract_mutated_files(tool_name, effective_args)
+                            {
                                 if !req.files_mutated.contains(&mutated) {
                                     req.files_mutated.push(mutated);
                                 }
@@ -576,32 +585,33 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
                                 }
                             }
                         }
-                        let tool = tools_by_call_id.entry(tool_call_id.clone()).or_insert_with(|| {
-                            ToolTrajectory {
-                                call_id: tool_call_id.clone(),
-                                tool_name: tool_name.clone(),
-                                effective_args: effective_args.clone(),
-                                status: ToolStatus::Started,
-                                started_seq: *seq,
-                                executed_seq: None,
-                                finished_seq: None,
-                                duration_ms: None,
-                                exit_code: None,
-                                output_bytes: None,
-                                output_sha256: None,
-                                output_summary: None,
-                                result_content: None,
-                                is_error: false,
-                                parent_assistant_entry: Some(TrajectoryRef {
-                                    seq: *seq,
-                                    entry_id: Some(assistant_entry_id.clone()),
-                                    run_id: run_id.clone(),
-                                    lane: lane.clone(),
-                                }),
-                                result_entry: None,
-                                raw_record_seqs: vec![*seq],
-                            }
-                        });
+                        let tool =
+                            tools_by_call_id
+                                .entry(tool_call_id.clone())
+                                .or_insert_with(|| ToolTrajectory {
+                                    call_id: tool_call_id.clone(),
+                                    tool_name: tool_name.clone(),
+                                    effective_args: effective_args.clone(),
+                                    status: ToolStatus::Started,
+                                    started_seq: *seq,
+                                    executed_seq: None,
+                                    finished_seq: None,
+                                    duration_ms: None,
+                                    exit_code: None,
+                                    output_bytes: None,
+                                    output_sha256: None,
+                                    output_summary: None,
+                                    result_content: None,
+                                    is_error: false,
+                                    parent_assistant_entry: Some(TrajectoryRef {
+                                        seq: *seq,
+                                        entry_id: Some(assistant_entry_id.clone()),
+                                        run_id: run_id.clone(),
+                                        lane: lane.clone(),
+                                    }),
+                                    result_entry: None,
+                                    raw_record_seqs: vec![*seq],
+                                });
                         tool.raw_record_seqs.push(*seq);
                     }
                     Record::ToolExecutionObserved {
@@ -631,10 +641,13 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
                                     }
                                     tool.exit_code = *exit_code;
                                     tool.output_bytes = *output_bytes;
-                                    tool.output_sha256 = output_sha256.as_ref().map(|s| s.as_str().to_owned());
+                                    tool.output_sha256 =
+                                        output_sha256.as_ref().map(|s| s.as_str().to_owned());
                                     if let Some(out) = outcome {
                                         tool.status = match out {
-                                            ToolExecutionOutcome::Succeeded => ToolStatus::Succeeded,
+                                            ToolExecutionOutcome::Succeeded => {
+                                                ToolStatus::Succeeded
+                                            }
                                             ToolExecutionOutcome::Failed => ToolStatus::Failed,
                                             ToolExecutionOutcome::Cancelled
                                             | ToolExecutionOutcome::Declined => {
@@ -647,9 +660,7 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
                         }
                     }
                     Record::ToolFinished {
-                        seq,
-                        tool_call_id,
-                        ..
+                        seq, tool_call_id, ..
                     } => {
                         if let Some(tool) = tools_by_call_id.get_mut(tool_call_id) {
                             tool.raw_record_seqs.push(*seq);
@@ -707,8 +718,12 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
                             agent_id: agent_id.as_str().to_owned(),
                             subagent_lane: subagent_lane.as_str().to_owned(),
                             phase: phase.clone(),
-                            parent_tool_call_id: parent_tool_call_id.as_ref().map(|s| s.as_str().to_owned()),
-                            result_entry_id: result_entry_id.as_ref().map(|s| s.as_str().to_owned()),
+                            parent_tool_call_id: parent_tool_call_id
+                                .as_ref()
+                                .map(|s| s.as_str().to_owned()),
+                            result_entry_id: result_entry_id
+                                .as_ref()
+                                .map(|s| s.as_str().to_owned()),
                             error: error.as_ref().map(|s| s.as_str().to_owned()),
                             seq: *seq,
                         }));
@@ -722,6 +737,29 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
     if let Some(mut req) = current_request.take() {
         req.status = RequestStatus::Completed;
         requests.push(req);
+    }
+
+    // Canonical journals append ProviderRequestStarted before the manifest.
+    // Backfill the join after the scan; the eager lookup above remains useful
+    // for legacy manifest-before-start journals.
+    for (request_id, provider) in &mut providers_by_req_id {
+        if provider.context_manifest_ref.is_none() {
+            provider.context_manifest_ref =
+                context_manifests_by_req_id
+                    .get(request_id)
+                    .map(|manifest| TrajectoryRef {
+                        seq: manifest.seq,
+                        entry_id: None,
+                        run_id: manifest
+                            .parent_ref
+                            .as_ref()
+                            .and_then(|reference| reference.run_id.clone()),
+                        lane: manifest
+                            .parent_ref
+                            .as_ref()
+                            .map_or_else(|| "main".to_owned(), |reference| reference.lane.clone()),
+                    });
+        }
     }
 
     // Populate joined items
@@ -751,10 +789,7 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
     let mut seen_calls: HashMap<(String, String), Vec<TrajectoryRef>> = HashMap::new();
     for item in &items {
         if let TrajectoryItem::Tool(tool) = item {
-            let key = (
-                tool.tool_name.clone(),
-                tool.effective_args.to_string(),
-            );
+            let key = (tool.tool_name.clone(), tool.effective_args.to_string());
             seen_calls.entry(key).or_default().push(TrajectoryRef {
                 seq: tool.started_seq,
                 entry_id: None,
@@ -1056,6 +1091,20 @@ mod tests {
             })
             .unwrap();
 
+        // Current canonical order: request start is durable before its manifest.
+        store
+            .append_record(Record::ProviderRequestStarted {
+                id: "provider-start-canonical".into(),
+                seq: store.next_sequence(),
+                lane: "main".into(),
+                timestamp: 75,
+                run_id: "run-1".into(),
+                attempt: 1,
+                provider: TraceString::new("test").unwrap(),
+                model: TraceString::new("model").unwrap(),
+                request_id: Some(TraceString::new("req-123").unwrap()),
+            })
+            .unwrap();
         let items = vec![ContextManifestItem {
             position: 0,
             source: ContextItemSource::SystemPrompt,
@@ -1077,7 +1126,43 @@ mod tests {
                 attempt: 1,
                 request_id: TraceString::new("req-123").unwrap(),
                 total_estimated_tokens: Some(50),
+                effective_model: None,
+                context_limit: None,
+                context_limit_is_estimate: false,
+                compaction_generation: 0,
                 items,
+            })
+            .unwrap();
+
+        // Legacy order remains joinable as well.
+        store
+            .append_record(Record::ContextManifestCaptured {
+                id: "context-manifest-legacy".into(),
+                seq: store.next_sequence(),
+                lane: "main".into(),
+                timestamp: 110,
+                run_id: "run-1".into(),
+                attempt: 2,
+                request_id: TraceString::new("req-legacy").unwrap(),
+                total_estimated_tokens: Some(1),
+                effective_model: None,
+                context_limit: None,
+                context_limit_is_estimate: false,
+                compaction_generation: 0,
+                items: Vec::new(),
+            })
+            .unwrap();
+        store
+            .append_record(Record::ProviderRequestStarted {
+                id: "provider-start-legacy".into(),
+                seq: store.next_sequence(),
+                lane: "main".into(),
+                timestamp: 120,
+                run_id: "run-1".into(),
+                attempt: 2,
+                provider: TraceString::new("test").unwrap(),
+                model: TraceString::new("model").unwrap(),
+                request_id: Some(TraceString::new("req-legacy").unwrap()),
             })
             .unwrap();
 
@@ -1091,10 +1176,33 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(manifests.len(), 1);
-        assert_eq!(manifests[0].request_id, "req-123");
-        assert_eq!(manifests[0].total_estimated_tokens, Some(50));
-        assert_eq!(manifests[0].items.len(), 1);
+        assert_eq!(manifests.len(), 2);
+        let canonical = manifests
+            .iter()
+            .find(|manifest| manifest.request_id == "req-123")
+            .unwrap();
+        assert_eq!(canonical.total_estimated_tokens, Some(50));
+        assert_eq!(canonical.items.len(), 1);
+        let providers: Vec<_> = traj
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                TrajectoryItem::Provider(provider) => Some(provider),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(providers.len(), 2);
+        for provider in providers {
+            let manifest = provider
+                .context_manifest_ref
+                .as_ref()
+                .expect("manifest join");
+            let expected = manifests
+                .iter()
+                .find(|candidate| candidate.request_id == provider.request_id)
+                .unwrap();
+            assert_eq!(manifest.seq, expected.seq);
+        }
     }
 
     #[test]

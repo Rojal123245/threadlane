@@ -9,10 +9,13 @@ use crate::compaction::{
 use crate::config::AgentConfig;
 use crate::events::AgentEvent;
 use crate::harness::{
-    ContextItemSource, ContextItemStatus, ContextManifestItem, ErrorCategory,
-    ProviderErrorSummary, ProviderOutcome, TraceString,
+    ContextItemSource, ContextItemStatus, ContextManifestItem, ErrorCategory, ProviderErrorSummary,
+    ProviderOutcome, TraceString,
 };
-use crate::provider::{ProviderTraceEvent, ProviderTraceRecorder};
+use crate::provider::{
+    ProviderBoundaryPreparer, ProviderBoundaryRequest, ProviderBoundaryResult, ProviderTraceEvent,
+    ProviderTraceRecorder,
+};
 use crate::rules::{StreamRule, StreamRuleMonitor};
 use crate::tool_dispatcher::ToolDispatcher;
 use crate::types::{AgentMessage, TokenUsage, ToolExecutionMode, TurnState};
@@ -22,11 +25,13 @@ use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use threadlane_protocol::{ProviderPort, RuntimeRequest, RuntimeStreamEvent as StreamEvent, RuntimeToolCall as ToolCall};
+use threadlane_protocol::{
+    ProviderPort, RuntimeRequest, RuntimeStreamEvent as StreamEvent, RuntimeToolCall as ToolCall,
+};
 
 use tokio::sync::{broadcast, mpsc, Mutex};
 
-const STREAM_CHECKPOINT_BYTES: usize = 16 * 1024;
+const STREAM_CHECKPOINT_BYTES: usize = 64 * 1024;
 
 async fn persist_messages_with(
     recorder: Option<&crate::provider::AssistantMessageRecorder>,
@@ -43,7 +48,12 @@ async fn persist_messages_with(
 
 fn is_quota_or_rate_limit(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
-    error.contains("429") || error.contains("rate limit") || error.contains("rate_limit") || error.contains("quota") || error.contains("too many requests") || error.contains("resource_exhausted")
+    error.contains("429")
+        || error.contains("rate limit")
+        || error.contains("rate_limit")
+        || error.contains("quota")
+        || error.contains("too many requests")
+        || error.contains("resource_exhausted")
 }
 
 fn classify_provider_error(error: &str) -> ErrorCategory {
@@ -137,6 +147,7 @@ pub(crate) struct TurnDriver<'a> {
     pub(crate) event_tx: broadcast::Sender<AgentEvent>,
     pub(crate) harness_event_hub: crate::harness::HarnessEventHub,
     pub(crate) provider_trace_recorder: Option<ProviderTraceRecorder>,
+    pub(crate) provider_boundary_preparer: Option<ProviderBoundaryPreparer>,
     /// Persists model-visible messages before they may affect another provider
     /// request. Durable runtimes install the canonical session-journal writer.
     pub(crate) message_recorder: Option<crate::provider::AssistantMessageRecorder>,
@@ -162,24 +173,29 @@ impl<'a> TurnDriver<'a> {
         persist_messages_with(self.message_recorder.as_ref(), messages).await
     }
 
-    pub(crate) async fn run_turns(&mut self) {
+    pub(crate) async fn run_turns(&mut self) -> TokenUsage {
         let mut turn_number = 0;
+        let mut total_usage = TokenUsage::default();
         let mut overflow_recovery_attempted = false;
+        let mut overflow_recovery_pending = false;
         let mut stream_rule_recovery_attempted = false;
         let mut provider_fallback_attempted = false;
+        let mut effective_model_override: Option<String> = None;
 
         'turns: loop {
             turn_number += 1;
 
-            // Drain steering queue into turn state.
+            // Persist the complete steering batch before removing it from the
+            // queue or exposing it to provider context.
             if !self.steering_queue.is_empty() {
-                let items: Vec<_> = self.steering_queue.drain(..).collect();
+                let items = self.steering_queue.clone();
                 if let Err(error) = self.persist_messages(&items).await {
                     self.emit_event(AgentEvent::AgentError {
                         error: format!("failed to persist steering before provider work: {error}"),
                     });
-                    return;
+                    return total_usage;
                 }
+                self.steering_queue.clear();
                 let mut turn = self.turn.lock().await;
                 turn.messages.extend(items);
             }
@@ -203,29 +219,179 @@ impl<'a> TurnDriver<'a> {
             // --- Provider streaming ---
             let model = {
                 let turn = self.turn.lock().await;
-                // The session model is the user-facing base selection. The Task
-                // role is the model that actually drives execution, including
-                // queued turns and session switches.
-                let task = self.config.model_roles.resolve_task(&turn.model);
-                if provider_fallback_attempted {
+                // Keep the user-facing base selection unchanged while installing
+                // a concrete route for this and subsequent continuation attempts.
+                effective_model_override.clone().unwrap_or_else(|| {
                     self.config
                         .model_roles
-                        .fallback_after(task)
-                        .unwrap_or(task)
+                        .resolve_task(&turn.model)
                         .to_string()
-                } else {
-                    task.to_string()
+                })
+            };
+            let overflow_recovery = std::mem::take(&mut overflow_recovery_pending);
+            let configured_tool_definitions = self.tool_dispatcher.configured_tool_definitions();
+            let query = {
+                let turn = self.turn.lock().await;
+                turn.messages
+                    .iter()
+                    .rev()
+                    .find_map(|message| match message {
+                        AgentMessage::User { content }
+                        | AgentMessage::UserWithImages { content, .. } => Some(content.clone()),
+                        _ => None,
+                    })
+            };
+            let tool_definitions = crate::local_tool_router::shortlist_from_environment(
+                &query.unwrap_or_default(),
+                &configured_tool_definitions,
+                self.config.needle_enabled,
+            )
+            .await;
+            let provider_tools = tool_definitions
+                .iter()
+                .map(|tool| tool.to_chat_completions_tool())
+                .collect::<Vec<_>>();
+            let tool_schema_json = (!provider_tools.is_empty())
+                .then(|| serde_json::to_string(&provider_tools).unwrap_or_default());
+
+            let mut boundary_result: Option<ProviderBoundaryResult> = None;
+            if let Some(preparer) = &self.provider_boundary_preparer {
+                let messages = self.turn.lock().await.messages.clone();
+                let prepared = preparer(ProviderBoundaryRequest {
+                    attempt: turn_number as u32,
+                    model: model.clone(),
+                    messages,
+                    tool_schema_json: tool_schema_json.clone(),
+                    overflow_recovery,
+                })
+                .await
+                .map_err(|error| format!("context preparation failed: {error}"));
+                match prepared {
+                    Ok(prepared) => {
+                        self.turn.lock().await.messages = prepared.messages.clone();
+                        boundary_result = Some(prepared);
+                    }
+                    Err(error) => {
+                        self.emit_event(AgentEvent::AgentError { error });
+                        return total_usage;
+                    }
+                }
+            }
+
+            let provider = self.provider_client.provider_kind(&model).to_string();
+            let provider_attempt = boundary_result
+                .as_ref()
+                .and_then(|prepared| prepared.provider_attempt)
+                .unwrap_or(turn_number as u32);
+            static PROVIDER_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+            let request_id = boundary_result
+                .as_ref()
+                .and_then(|prepared| prepared.provider_request_id.clone())
+                .unwrap_or_else(|| {
+                    format!(
+                        "provider-request-{}",
+                        PROVIDER_REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed)
+                    )
+                });
+            let (stream_tx, mut stream_rx) = mpsc::channel(100);
+            let client = self.provider_client.clone();
+            let payload_cache_key = self.prompt_cache_key.clone();
+            let request_messages = self.turn.lock().await.messages.clone();
+            let request = {
+                let turn = self.turn.lock().await;
+                RuntimeRequest {
+                    model: model.clone(),
+                    messages: serde_json::to_value(&request_messages).unwrap_or_default(),
+                    tools: serde_json::Value::Array(provider_tools),
+                    prompt_cache_key: payload_cache_key,
+                    reasoning_effort: turn.reasoning_effort.as_api_str().map(str::to_owned),
                 }
             };
-            let provider = self.provider_client.provider_kind(&model).to_string();
-            static PROVIDER_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
-            let request_id = format!(
-                "provider-request-{}",
-                PROVIDER_REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed)
-            );
+
+            let manifest_items = {
+                let mut items = Vec::new();
+                for (idx, message) in request_messages.iter().enumerate() {
+                    let normalized = crate::compaction::provider_normalized_message(message);
+                    let accounted_message = normalized.as_ref().unwrap_or(message);
+                    let serialized = crate::compaction::serialized_message(accounted_message);
+                    let digest = format!("{:x}", Sha256::digest(&serialized));
+                    let token_estimate = normalized
+                        .as_ref()
+                        .map(|message| {
+                            crate::compaction::estimate_message_tokens(message, &self.config)
+                                .min(u32::MAX as usize) as u32
+                        })
+                        .unwrap_or(0);
+                    let status = if normalized.is_some() {
+                        ContextItemStatus::Active
+                    } else {
+                        ContextItemStatus::Omitted
+                    };
+                    let source = match message {
+                        AgentMessage::System { .. } => ContextItemSource::SystemPrompt,
+                        AgentMessage::Tool { .. } => ContextItemSource::ToolResult,
+                        _ => ContextItemSource::Message,
+                    };
+                    if let (Ok(role), Ok(digest_sha256)) = (
+                        TraceString::new(accounted_message.role_str()),
+                        TraceString::new(digest),
+                    ) {
+                        items.push(ContextManifestItem {
+                            position: idx,
+                            source,
+                            entry_id: None,
+                            role,
+                            token_estimate,
+                            status,
+                            digest_sha256,
+                            label: None,
+                        });
+                    }
+                }
+                if let Some(schema) = tool_schema_json.as_deref() {
+                    let digest = format!("{:x}", Sha256::digest(schema.as_bytes()));
+                    let token_estimate = schema.len().div_ceil(4).min(u32::MAX as usize) as u32;
+                    if let (Ok(role), Ok(digest_sha256), Ok(label)) = (
+                        TraceString::new("tools"),
+                        TraceString::new(digest),
+                        TraceString::new(format!("{} tools", tool_definitions.len())),
+                    ) {
+                        items.push(ContextManifestItem {
+                            position: items.len(),
+                            source: ContextItemSource::ToolSchema,
+                            entry_id: None,
+                            role,
+                            token_estimate,
+                            status: ContextItemStatus::Active,
+                            digest_sha256,
+                            label: Some(label),
+                        });
+                    }
+                }
+                items
+            };
+            let total_estimated_tokens = crate::compaction::estimate_request_tokens(
+                &request_messages,
+                tool_schema_json.as_deref(),
+                &self.config,
+            )
+            .try_into()
+            .ok();
+            let (context_limit, context_limit_is_estimate, compaction_generation) = boundary_result
+                .as_ref()
+                .map_or((None, false, 0), |prepared| {
+                    (
+                        Some(prepared.context_limit),
+                        prepared.context_limit_is_estimate,
+                        prepared.compaction_generation,
+                    )
+                });
+
+            // Canonical durable boundary: preparation, request start, exact
+            // context manifest, and only then provider I/O.
             if let Err(error) = self
                 .record_provider_trace(ProviderTraceEvent::Started {
-                    attempt: turn_number as u32,
+                    attempt: provider_attempt,
                     request_id: request_id.clone(),
                     model: model.clone(),
                     provider,
@@ -235,119 +401,49 @@ impl<'a> TurnDriver<'a> {
                 self.emit_event(AgentEvent::AgentError {
                     error: format!("failed to persist provider request start: {error}"),
                 });
-                return;
+                return total_usage;
+            }
+
+            if let Err(error) = self
+                .record_provider_trace(ProviderTraceEvent::ContextManifest {
+                    attempt: provider_attempt,
+                    request_id: request_id.clone(),
+                    model: model.clone(),
+                    context_limit,
+                    context_limit_is_estimate,
+                    compaction_generation,
+                    total_estimated_tokens,
+                    items: manifest_items,
+                })
+                .await
+            {
+                let terminal_result = self
+                    .record_provider_trace(ProviderTraceEvent::Finished {
+                        attempt: provider_attempt,
+                        request_id: request_id.clone(),
+                        outcome: ProviderOutcome::Failed,
+                        error: Some(ProviderErrorSummary {
+                            category: ErrorCategory::Protocol,
+                            code: TraceString::new("context_manifest_persistence_failed").ok(),
+                            retryable: false,
+                        }),
+                        duration_ms: 0,
+                        usage: None,
+                    })
+                    .await;
+                let terminal_detail = terminal_result
+                    .err()
+                    .map(|terminal| format!("; terminal record also failed: {terminal}"))
+                    .unwrap_or_default();
+                self.emit_event(AgentEvent::AgentError {
+                    error: format!(
+                        "failed to persist request context manifest: {error}{terminal_detail}"
+                    ),
+                });
+                return total_usage;
             }
             let request_started_at = Instant::now();
             let mut provider_terminal_recorded = false;
-            let (stream_tx, mut stream_rx) = mpsc::channel(100);
-            let client = self.provider_client.clone();
-            let pc_key = self.prompt_cache_key.clone();
-            let configured_tool_definitions = self.tool_dispatcher.configured_tool_definitions();
-            let query = {
-                let turn = self.turn.lock().await;
-                turn.messages.iter().rev().find_map(|message| match message {
-                    AgentMessage::User { content } | AgentMessage::UserWithImages { content, .. } => {
-                        Some(content.clone())
-                    }
-                    _ => None,
-                })
-            };
-            let tool_definitions = crate::local_tool_router::shortlist_from_environment(
-                &query.unwrap_or_default(),
-                &configured_tool_definitions,
-                self.config.needle_enabled,
-            )
-            .await;
-            let payload_cache_key = pc_key.clone();
-
-            let request = {
-                let turn = self.turn.lock().await;
-                RuntimeRequest {
-                    model: model.clone(),
-                    messages: serde_json::to_value(&turn.messages).unwrap_or_default(),
-                    tools: serde_json::Value::Array(
-                        tool_definitions
-                            .iter()
-                            .map(|tool| tool.to_chat_completions_tool())
-                            .collect(),
-                    ),
-                    prompt_cache_key: payload_cache_key.clone(),
-                    reasoning_effort: turn.reasoning_effort.as_api_str().map(str::to_owned),
-                }
-            };
-
-            let manifest_items = {
-                let turn = self.turn.lock().await;
-                let mut items = Vec::new();
-                for (idx, msg) in turn.messages.iter().enumerate() {
-                    let role = msg.role_str();
-                    let custom_serialized;
-                    let content_str = match msg {
-                        AgentMessage::User { content } => content.as_str(),
-                        AgentMessage::UserWithImages { content, .. } => content.as_str(),
-                        AgentMessage::Assistant { content, .. } => content.as_deref().unwrap_or(""),
-                        AgentMessage::System { content } => content.as_str(),
-                        AgentMessage::Tool { content, .. } => content.as_str(),
-                        AgentMessage::Custom { payload, .. } => {
-                            custom_serialized = payload.to_string();
-                            custom_serialized.as_str()
-                        }
-                    };
-                    let digest = format!("{:x}", Sha256::digest(content_str.as_bytes()));
-                    let token_estimate = ((content_str.len() + 3) / 4) as u32;
-                    let source = match msg {
-                        AgentMessage::System { .. } => ContextItemSource::SystemPrompt,
-                        AgentMessage::Tool { .. } => ContextItemSource::Skill,
-                        _ => ContextItemSource::Message,
-                    };
-                    if let (Ok(role_trace), Ok(digest_trace)) = (
-                        TraceString::new(role),
-                        TraceString::new(digest),
-                    ) {
-                        items.push(ContextManifestItem {
-                            position: idx,
-                            source,
-                            entry_id: None,
-                            role: role_trace,
-                            token_estimate,
-                            status: ContextItemStatus::Active,
-                            digest_sha256: digest_trace,
-                            label: None,
-                        });
-                    }
-                }
-                if !tool_definitions.is_empty() {
-                    let tools_json = serde_json::to_string(&tool_definitions).unwrap_or_default();
-                    let digest = format!("{:x}", Sha256::digest(tools_json.as_bytes()));
-                    let token_estimate = ((tools_json.len() + 3) / 4) as u32;
-                    if let (Ok(role_trace), Ok(digest_trace), Ok(label_trace)) = (
-                        TraceString::new("tools"),
-                        TraceString::new(digest),
-                        TraceString::new(format!("{} tools", tool_definitions.len())),
-                    ) {
-                        items.push(ContextManifestItem {
-                            position: items.len(),
-                            source: ContextItemSource::ToolSchema,
-                            entry_id: None,
-                            role: role_trace,
-                            token_estimate,
-                            status: ContextItemStatus::Active,
-                            digest_sha256: digest_trace,
-                            label: Some(label_trace),
-                        });
-                    }
-                }
-                items
-            };
-            let total_estimated_tokens: u32 = manifest_items.iter().map(|item| item.token_estimate).sum();
-            let _ = self
-                .record_provider_trace(ProviderTraceEvent::ContextManifest {
-                    attempt: turn_number as u32,
-                    request_id: request_id.clone(),
-                    total_estimated_tokens: Some(total_estimated_tokens),
-                    items: manifest_items,
-                })
-                .await;
 
             let _stream_task = AbortOnDrop::new(tokio::spawn(async move {
                 client.stream_request(request, stream_tx).await;
@@ -393,7 +489,7 @@ impl<'a> TurnDriver<'a> {
                             checkpoint_index = checkpoint_index.saturating_add(1);
                             if let Err(error) = self
                                 .record_provider_trace(ProviderTraceEvent::Checkpoint {
-                                    attempt: turn_number as u32,
+                                    attempt: provider_attempt,
                                     request_id: request_id.clone(),
                                     checkpoint_index,
                                     text: current_text.clone(),
@@ -404,7 +500,7 @@ impl<'a> TurnDriver<'a> {
                                 self.emit_event(AgentEvent::AgentError {
                                     error: format!("failed to persist stream checkpoint: {error}"),
                                 });
-                                return;
+                                return total_usage;
                             }
                             checkpointed_bytes = current_text.len();
                         }
@@ -434,7 +530,7 @@ impl<'a> TurnDriver<'a> {
                                 checkpoint_index = checkpoint_index.saturating_add(1);
                                 let _ = self
                                     .record_provider_trace(ProviderTraceEvent::Checkpoint {
-                                        attempt: turn_number as u32,
+                                        attempt: provider_attempt,
                                         request_id: request_id.clone(),
                                         checkpoint_index,
                                         text: current_text.clone(),
@@ -444,7 +540,7 @@ impl<'a> TurnDriver<'a> {
                             }
                             let _ = self
                                 .record_provider_trace(ProviderTraceEvent::Finished {
-                                    attempt: turn_number as u32,
+                                    attempt: provider_attempt,
                                     request_id: request_id.clone(),
                                     outcome: ProviderOutcome::Aborted,
                                     error: Some(ProviderErrorSummary {
@@ -502,6 +598,7 @@ impl<'a> TurnDriver<'a> {
                             cache_write_tokens: usage.cache_write_tokens,
                             total_tokens: usage.total_tokens,
                         };
+                        total_usage.accumulate(&usage);
                         tracing::info!(
                             turn = turn_number,
                             tool_calls = captured_tool_calls.len(),
@@ -510,7 +607,7 @@ impl<'a> TurnDriver<'a> {
                         );
                         if let Err(error) = self
                             .record_provider_trace(ProviderTraceEvent::Finished {
-                                attempt: turn_number as u32,
+                                attempt: provider_attempt,
                                 request_id: request_id.clone(),
                                 outcome: ProviderOutcome::Completed,
                                 error: None,
@@ -524,7 +621,7 @@ impl<'a> TurnDriver<'a> {
                                     "failed to persist provider request finish: {error}"
                                 ),
                             });
-                            return;
+                            return total_usage;
                         }
                         provider_terminal_recorded = true;
                         break;
@@ -535,7 +632,7 @@ impl<'a> TurnDriver<'a> {
                             checkpoint_index = checkpoint_index.saturating_add(1);
                             if let Err(error) = self
                                 .record_provider_trace(ProviderTraceEvent::Checkpoint {
-                                    attempt: turn_number as u32,
+                                    attempt: provider_attempt,
                                     request_id: request_id.clone(),
                                     checkpoint_index,
                                     text: current_text.clone(),
@@ -546,7 +643,7 @@ impl<'a> TurnDriver<'a> {
                                 self.emit_event(AgentEvent::AgentError {
                                     error: format!("failed to persist error checkpoint: {error}"),
                                 });
-                                return;
+                                return total_usage;
                             }
                         }
                         let category = classify_provider_error(&err);
@@ -563,7 +660,7 @@ impl<'a> TurnDriver<'a> {
                             TraceString::new(err.chars().take(2048).collect::<String>()).ok();
                         if let Err(error) = self
                             .record_provider_trace(ProviderTraceEvent::Finished {
-                                attempt: turn_number as u32,
+                                attempt: provider_attempt,
                                 request_id: request_id.clone(),
                                 outcome: ProviderOutcome::Failed,
                                 error: Some(ProviderErrorSummary {
@@ -581,39 +678,41 @@ impl<'a> TurnDriver<'a> {
                                     "failed to persist provider request failure: {error}"
                                 ),
                             });
-                            return;
+                            return total_usage;
                         }
                         if !overflow_recovery_attempted
-                            && self.message_recorder.is_none()
                             && is_context_overflow_error(&err)
+                            && (self.provider_boundary_preparer.is_some()
+                                || self.message_recorder.is_none())
                         {
-                            let mut turn = self.turn.lock().await;
-                            turn.messages = compact_messages_to_token_budget(
-                                &turn.messages,
-                                self.config.auto_compaction_keep_recent_tokens,
-                            );
+                            if self.provider_boundary_preparer.is_none() {
+                                let mut turn = self.turn.lock().await;
+                                turn.messages = compact_messages_to_token_budget(
+                                    &turn.messages,
+                                    self.config.auto_compaction_keep_recent_tokens,
+                                );
+                            }
                             overflow_recovery_attempted = true;
+                            overflow_recovery_pending = true;
                             continue 'turns;
                         }
                         if !provider_fallback_attempted
                             && current_text.is_empty()
                             && is_quota_or_rate_limit(&err)
                         {
-                            provider_fallback_attempted = true;
-                            let fallback = self.config.model_roles.fallback_after(&model);
-                            let reminder = match fallback {
-                                Some(fallback) => format!("System: primary provider is rate-limited; retry this identical turn using fallback model {fallback}."),
-                                None => "System: primary provider is rate-limited; retry this identical turn using the configured fallback route.".into(),
-                            };
-                            self.turn
-                                .lock()
-                                .await
-                                .messages
-                                .push(AgentMessage::user(reminder, Vec::new()));
-                            continue 'turns;
+                            if let Some(fallback) = self
+                                .config
+                                .model_roles
+                                .fallback_after(&model)
+                                .map(str::to_owned)
+                            {
+                                provider_fallback_attempted = true;
+                                effective_model_override = Some(fallback);
+                                continue 'turns;
+                            }
                         }
                         self.emit_event(AgentEvent::AgentError { error: err });
-                        return;
+                        return total_usage;
                     }
                 }
             }
@@ -621,7 +720,7 @@ impl<'a> TurnDriver<'a> {
             if !provider_terminal_recorded {
                 if let Err(error) = self
                     .record_provider_trace(ProviderTraceEvent::Finished {
-                        attempt: turn_number as u32,
+                        attempt: provider_attempt,
                         request_id: request_id.clone(),
                         outcome: ProviderOutcome::Failed,
                         error: Some(ProviderErrorSummary {
@@ -637,7 +736,7 @@ impl<'a> TurnDriver<'a> {
                     self.emit_event(AgentEvent::AgentError {
                         error: format!("failed to persist incomplete provider request: {error}"),
                     });
-                    return;
+                    return total_usage;
                 }
             }
 
@@ -646,7 +745,7 @@ impl<'a> TurnDriver<'a> {
                     self.emit_event(AgentEvent::AgentError {
                         error: "stream rule matched again after corrective retry".into(),
                     });
-                    return;
+                    return total_usage;
                 }
                 stream_rule_recovery_attempted = true;
                 // Do not persist or emit the partial completion. The injected reminder
@@ -670,7 +769,7 @@ impl<'a> TurnDriver<'a> {
                 };
                 tracing::warn!(turn = turn_number, error = %error, "provider returned no usable response");
                 self.emit_event(AgentEvent::AgentError { error });
-                return;
+                return total_usage;
             }
 
             // Record assistant message in turn state.
@@ -707,11 +806,11 @@ impl<'a> TurnDriver<'a> {
                 self.emit_event(AgentEvent::AgentError {
                     error: format!("failed to persist assistant step before continuation: {error}"),
                 });
-                return;
+                return total_usage;
             }
             if let Err(error) = self
                 .record_provider_trace(ProviderTraceEvent::AssistantReady {
-                    attempt: turn_number as u32,
+                    attempt: provider_attempt,
                     request_id: request_id.clone(),
                     reasoning: (!current_reasoning.trim().is_empty())
                         .then(|| current_reasoning.clone()),
@@ -722,7 +821,7 @@ impl<'a> TurnDriver<'a> {
                 self.emit_event(AgentEvent::AgentError {
                     error: format!("failed to persist provider assistant result: {error}"),
                 });
-                return;
+                return total_usage;
             }
             self.turn
                 .lock()
@@ -741,27 +840,29 @@ impl<'a> TurnDriver<'a> {
                 });
 
                 if !self.steering_queue.is_empty() {
-                    let items: Vec<_> = self.steering_queue.drain(..).collect();
+                    let items = self.steering_queue.clone();
                     if let Err(error) = self.persist_messages(&items).await {
                         self.emit_event(AgentEvent::AgentError {
                             error: format!("failed to persist steering before retry: {error}"),
                         });
-                        return;
+                        return total_usage;
                     }
+                    self.steering_queue.clear();
                     self.turn.lock().await.messages.extend(items);
                     continue;
                 }
 
                 if !self.follow_up_queue.is_empty() {
-                    let items: Vec<_> = self.follow_up_queue.drain(..).collect();
+                    let items = self.follow_up_queue.clone();
                     if let Err(error) = self.persist_messages(&items).await {
                         self.emit_event(AgentEvent::AgentError {
                             error: format!(
                                 "failed to persist follow-up before provider work: {error}"
                             ),
                         });
-                        return;
+                        return total_usage;
                     }
+                    self.follow_up_queue.clear();
                     self.turn.lock().await.messages.extend(items);
                     continue;
                 }
@@ -773,7 +874,7 @@ impl<'a> TurnDriver<'a> {
                 checkpoint_index = checkpoint_index.saturating_add(1);
                 if let Err(error) = self
                     .record_provider_trace(ProviderTraceEvent::Checkpoint {
-                        attempt: turn_number as u32,
+                        attempt: provider_attempt,
                         request_id: request_id.clone(),
                         checkpoint_index,
                         text: current_text.clone(),
@@ -784,7 +885,7 @@ impl<'a> TurnDriver<'a> {
                     self.emit_event(AgentEvent::AgentError {
                         error: format!("failed to persist pre-tool checkpoint: {error}"),
                     });
-                    return;
+                    return total_usage;
                 }
             }
 
@@ -811,7 +912,7 @@ impl<'a> TurnDriver<'a> {
                 self.emit_event(AgentEvent::AgentError {
                     error: format!("failed to persist tool results before continuation: {error}"),
                 });
-                return;
+                return total_usage;
             }
             self.turn.lock().await.messages.extend(tool_messages);
 
@@ -824,5 +925,6 @@ impl<'a> TurnDriver<'a> {
                 break;
             }
         }
+        total_usage
     }
 }

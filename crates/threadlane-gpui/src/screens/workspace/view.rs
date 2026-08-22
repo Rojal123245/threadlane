@@ -9,9 +9,7 @@ use gpui_component::command::{Command, CommandGroup, CommandItem, CommandState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::resizable::{h_resizable, resizable_panel, v_resizable, ResizableState};
 use gpui_component::status_bar::StatusBar;
-use gpui_component::{
-    v_flex, ActiveTheme, Icon, IconName, Root, Selectable, Sizable,
-};
+use gpui_component::{v_flex, ActiveTheme, Icon, IconName, Root, Selectable, Sizable};
 
 actions!(
     threadlane_workspace,
@@ -36,7 +34,8 @@ use crate::screens::sidebar::SidebarView;
 use crate::screens::terminal::TerminalView;
 use crate::services::updater::{self, UpdaterEvent};
 use crate::state::{
-    compute_full_session_projection, AppState, SessionHydrationRequest, WorkspacePage,
+    compute_full_session_projection, compute_session_messages, AppState, SessionHydrationRequest,
+    WorkspacePage,
 };
 use threadlane_updater::UpdateStatus;
 
@@ -126,13 +125,36 @@ impl WorkspaceView {
         cx: &mut AsyncApp,
     ) {
         cx.spawn(async move |cx| {
+            if request.reload_messages {
+                let history_file = request.session_file.clone();
+                let history = cx
+                    .background_executor()
+                    .spawn(async move { compute_session_messages(&history_file) })
+                    .await;
+                let _ = model.update(cx, |state, cx| {
+                    if !state.active_session_matches(&request.session_id, &request.session_file) {
+                        return;
+                    }
+                    match history {
+                        Ok(messages) => state.apply_session_messages(
+                            &request.session_id,
+                            &request.session_file,
+                            messages,
+                        ),
+                        Err(error) => {
+                            state.session_status = Some(format!("Could not load session: {error}"))
+                        }
+                    }
+                    cx.notify();
+                });
+            }
             let session_file = request.session_file.clone();
             let result = cx
                 .background_executor()
                 .spawn(async move { compute_full_session_projection(&session_file) })
                 .await;
             let _ = model.update(cx, |state, cx| {
-                if state.active_session_id.as_deref() != Some(&request.session_id) {
+                if !state.active_session_matches(&request.session_id, &request.session_file) {
                     return;
                 }
                 match result {
@@ -144,7 +166,9 @@ impl WorkspaceView {
                         );
                         state.session_status = state.session_status_for_file(&request.session_file);
                     }
-                    Err(error) => state.session_status = Some(format!("Could not load session: {error}")),
+                    Err(error) => {
+                        state.session_status = Some(format!("Could not load session: {error}"))
+                    }
                 }
                 cx.notify();
             });
@@ -191,9 +215,7 @@ impl WorkspaceView {
                     })
                     .unwrap_or_default();
                 for request in hydration_requests {
-                    let model = this
-                        .update(cx, |this, _cx| this.model.clone())
-                        .ok();
+                    let model = this.update(cx, |this, _cx| this.model.clone()).ok();
                     if let Some(model) = model {
                         Self::spawn_session_hydration(model, request, cx);
                     }
@@ -324,10 +346,13 @@ impl WorkspaceView {
 
     fn add_terminal_tab(&mut self, project: PathBuf, cx: &mut Context<Self>) {
         let terminal = cx.new(|cx| TerminalView::new(project.clone(), cx));
-        let group = self.terminal_groups.entry(project).or_insert(TerminalGroup {
-            tabs: Vec::new(),
-            active_tab: 0,
-        });
+        let group = self
+            .terminal_groups
+            .entry(project)
+            .or_insert(TerminalGroup {
+                tabs: Vec::new(),
+                active_tab: 0,
+            });
         group.tabs.push(terminal);
         group.active_tab = group.tabs.len() - 1;
         cx.notify();
@@ -336,7 +361,8 @@ impl WorkspaceView {
     fn fallback_terminal(&mut self, cx: &mut Context<Self>) -> Entity<TerminalView> {
         self.fallback_terminal
             .get_or_insert_with(|| {
-                let project = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let project =
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
                 cx.new(|cx| TerminalView::new(project, cx))
             })
             .clone()
@@ -370,7 +396,12 @@ impl WorkspaceView {
         }
     }
 
-    fn close_other_terminal_tabs(&mut self, project: &PathBuf, keep_tab: usize, cx: &mut Context<Self>) {
+    fn close_other_terminal_tabs(
+        &mut self,
+        project: &PathBuf,
+        keep_tab: usize,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(group) = self.terminal_groups.get_mut(project) {
             if keep_tab < group.tabs.len() && group.tabs.len() > 1 {
                 let keep_elem = group.tabs.remove(keep_tab);
@@ -863,11 +894,15 @@ impl WorkspaceView {
                                 let _ = view.update(cx, |this, cx| {
                                     this.command_palette_open = false;
                                     if index.section == 0 {
-                                        if let Some((_, _, action_key, _, _)) = commands.get(index.row) {
+                                        if let Some((_, _, action_key, _, _)) =
+                                            commands.get(index.row)
+                                        {
                                             this.execute_palette_action(action_key, window, cx);
                                         }
                                     } else if index.section == 1 {
-                                        if let Some((work_dir, session_id)) = session_entries.get(index.row) {
+                                        if let Some((work_dir, session_id)) =
+                                            session_entries.get(index.row)
+                                        {
                                             let work_dir = work_dir.clone();
                                             let session_id = session_id.clone();
                                             this.model.update(cx, |state, _cx| {
@@ -1152,23 +1187,25 @@ impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let workspace_page = self.model.read(cx).workspace_page;
         let terminal_project = self.model.read(cx).active_work_dir.clone();
-        let (terminal_tabs, active_terminal_tab, active_terminal) = if let Some(project) = &terminal_project {
-            let group = self.terminal_groups.entry(project.clone()).or_insert_with(|| {
-                TerminalGroup {
-                    tabs: vec![cx.new(|cx| TerminalView::new(project.clone(), cx))],
-                    active_tab: 0,
-                }
-            });
-            group.active_tab = group.active_tab.min(group.tabs.len().saturating_sub(1));
-            (
-                group.tabs.clone(),
-                group.active_tab,
-                group.tabs[group.active_tab].clone(),
-            )
-        } else {
-            let fallback = self.fallback_terminal(cx);
-            (vec![fallback.clone()], 0, fallback)
-        };
+        let (terminal_tabs, active_terminal_tab, active_terminal) =
+            if let Some(project) = &terminal_project {
+                let group = self
+                    .terminal_groups
+                    .entry(project.clone())
+                    .or_insert_with(|| TerminalGroup {
+                        tabs: vec![cx.new(|cx| TerminalView::new(project.clone(), cx))],
+                        active_tab: 0,
+                    });
+                group.active_tab = group.active_tab.min(group.tabs.len().saturating_sub(1));
+                (
+                    group.tabs.clone(),
+                    group.active_tab,
+                    group.tabs[group.active_tab].clone(),
+                )
+            } else {
+                let fallback = self.fallback_terminal(cx);
+                (vec![fallback.clone()], 0, fallback)
+            };
         let sidebar_tooltip = if self.sidebar_collapsed {
             "Expand sidebar"
         } else {
@@ -1227,28 +1264,33 @@ impl Render for WorkspaceView {
                                 .context_menu(move |menu, _window, _cx| {
                                     let c_proj = close_project.clone();
                                     let c_view = close_view.clone();
-                                    let mut menu = menu.item(PopupMenuItem::new("Close Shell").on_click(
-                                        move |_event, _window, cx| {
-                                            if let Some(project) = &c_proj {
-                                                c_view.update(cx, |this, cx| {
-                                                    this.close_terminal_tab(project, tab, cx);
-                                                });
-                                            }
-                                        },
-                                    ));
-
-                                    if total_tabs > 1 {
-                                        let o_proj = other_project.clone();
-                                        let o_view = other_view.clone();
-                                        menu = menu.item(PopupMenuItem::new("Close Other Tabs").on_click(
+                                    let mut menu =
+                                        menu.item(PopupMenuItem::new("Close Shell").on_click(
                                             move |_event, _window, cx| {
-                                                if let Some(project) = &o_proj {
-                                                    o_view.update(cx, |this, cx| {
-                                                        this.close_other_terminal_tabs(project, tab, cx);
+                                                if let Some(project) = &c_proj {
+                                                    c_view.update(cx, |this, cx| {
+                                                        this.close_terminal_tab(project, tab, cx);
                                                     });
                                                 }
                                             },
                                         ));
+
+                                    if total_tabs > 1 {
+                                        let o_proj = other_project.clone();
+                                        let o_view = other_view.clone();
+                                        menu = menu.item(
+                                            PopupMenuItem::new("Close Other Tabs").on_click(
+                                                move |_event, _window, cx| {
+                                                    if let Some(project) = &o_proj {
+                                                        o_view.update(cx, |this, cx| {
+                                                            this.close_other_terminal_tabs(
+                                                                project, tab, cx,
+                                                            );
+                                                        });
+                                                    }
+                                                },
+                                            ),
+                                        );
                                     }
 
                                     let r_term = restart_terminal.clone();
@@ -1309,7 +1351,11 @@ impl Render for WorkspaceView {
                         .py_0p5()
                         .rounded_sm()
                         .bg(theme.secondary)
-                        .child(Icon::new(IconName::SquareTerminal).xsmall().text_color(theme.primary))
+                        .child(
+                            Icon::new(IconName::SquareTerminal)
+                                .xsmall()
+                                .text_color(theme.primary),
+                        )
                         .child(
                             div()
                                 .text_xs()
@@ -1529,7 +1575,6 @@ impl Render for WorkspaceView {
             .children(Root::render_notification_layer(window, cx))
             .children(Root::render_sheet_layer(window, cx))
     }
-
 }
 
 #[cfg(test)]

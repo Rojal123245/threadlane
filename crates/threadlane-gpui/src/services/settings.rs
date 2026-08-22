@@ -19,8 +19,11 @@ pub(crate) fn load_needle_enabled() -> bool {
 }
 
 pub(crate) fn save_needle_enabled(enabled: bool) -> Result<(), String> {
-    let path = needle_preferences_path().ok_or_else(|| "Global settings directory is unavailable.".to_string())?;
-    let parent = path.parent().ok_or_else(|| "Needle settings path has no parent.".to_string())?;
+    let path = needle_preferences_path()
+        .ok_or_else(|| "Global settings directory is unavailable.".to_string())?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Needle settings path has no parent.".to_string())?;
     std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     let bytes = serde_json::to_vec(&enabled).map_err(|error| error.to_string())?;
     std::fs::write(path, bytes).map_err(|error| error.to_string())

@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+#[cfg(test)]
 use std::time::Duration;
 use threadlane_runtime::harness::{
     DurableEvent, HarnessEvent, LaneStatus as HarnessLaneStatus, OperationOutcome,
@@ -22,7 +23,6 @@ use threadlane_runtime::harness::{
 use threadlane_runtime::{AgentEvent, AgentMessage, TokenUsage};
 use threadlane_wasi::packages::ExtensionScope;
 use tokio::sync::broadcast;
-use tokio::time::{interval, MissedTickBehavior};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskStatus {
@@ -147,7 +147,9 @@ impl TaskAgentEvent {
 
     /// Returns the inner [`DurableEvent`] if this event wraps a committed journal fact.
     pub fn durable_event(&self) -> Option<DurableEvent> {
-        self.harness_event.as_ref().and_then(HarnessEvent::as_durable)
+        self.harness_event
+            .as_ref()
+            .and_then(HarnessEvent::as_durable)
     }
 
     /// Returns `true` if this event represents a durable fact on disk.
@@ -746,11 +748,8 @@ impl HarnessSupervisor {
         // so background task subagent operations update chat activities in real time.
         if let Some(mut watch) = harness_watch {
             tokio::spawn(async move {
-                let mut tick = interval(Duration::from_millis(50));
-                tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
                 loop {
-                    tick.tick().await;
-                    match watch.poll() {
+                    match watch.wait().await {
                         Ok(events) => {
                             for event in events {
                                 let _ = harness_event_tx.send(TaskAgentEvent {
@@ -879,8 +878,9 @@ impl HarnessSupervisor {
                 .get_mut(&tid)
                 .and_then(|runtime| runtime.cancellation_guard.take());
             let mut agent = controller.agent.lock().await;
-            let should_restore =
-                !controller.recovery_loaded.swap(true, std::sync::atomic::Ordering::SeqCst);
+            let should_restore = !controller
+                .recovery_loaded
+                .swap(true, std::sync::atomic::Ordering::SeqCst);
             if should_restore {
                 if let Some(session_file) = session_file_for_run.as_deref() {
                     match supervisor.restore_session_lanes(&session_id_for_run, session_file) {
@@ -1074,7 +1074,9 @@ impl HarnessSupervisor {
     }
 
     pub fn resume_task(&self, task_id: &str) -> Result<(), String> {
-        let task = self.get_task(task_id).ok_or_else(|| format!("Task ID '{task_id}' not found"))?;
+        let task = self
+            .get_task(task_id)
+            .ok_or_else(|| format!("Task ID '{task_id}' not found"))?;
         if task.active() {
             return Err("Task is already running".into());
         }
@@ -1127,9 +1129,11 @@ impl HarnessSupervisor {
                 project_id: project_id.to_owned(),
                 session_id: session_id.to_owned(),
                 session_file: Some(session_file.to_path_buf()),
-                parent_task_id: parent_task_id
-                    .map(str::to_owned)
-                    .or_else(|| parent_tool_call_id.as_ref().map(|id| id.as_str().to_owned())),
+                parent_task_id: parent_task_id.map(str::to_owned).or_else(|| {
+                    parent_tool_call_id
+                        .as_ref()
+                        .map(|id| id.as_str().to_owned())
+                }),
                 kind: TaskKind::Subagent,
                 agent: agent_id.as_str().to_owned(),
                 summary: task_index
@@ -1281,7 +1285,6 @@ impl HarnessSupervisor {
         });
         tasks
     }
-
 }
 
 // ── Free helpers ──────────────────────────────────────────────────────────
@@ -1351,7 +1354,11 @@ mod tests {
             .begin_run("run-1", AgentMessage::user("prompt", Vec::new()))
             .unwrap();
         harness
-            .finish_run("run-1", OperationOutcome::Failed, Some("durable failure".into()))
+            .finish_run(
+                "run-1",
+                OperationOutcome::Failed,
+                Some("durable failure".into()),
+            )
             .unwrap();
 
         let supervisor = HarnessSupervisor::new(dir.path().to_path_buf());
@@ -1392,8 +1399,8 @@ mod tests {
             .unwrap();
         harness
             .finish_subagent_lane(
-                &child.lane_name,
-                &child.run_id,
+                &child.identity.lane_name,
+                &child.identity.run_id,
                 OperationOutcome::Completed,
                 None,
             )
@@ -1421,7 +1428,7 @@ mod tests {
         let tasks = supervisor.list_tasks_for_project("project-1");
         let subagent = tasks
             .into_iter()
-            .find(|task| task.id == child.run_id)
+            .find(|task| task.id == child.identity.run_id)
             .expect("subagent must be rebuilt from durable lifecycle records");
         assert_eq!(subagent.kind, TaskKind::Subagent);
         assert_eq!(subagent.status, TaskStatus::Completed);
@@ -1733,6 +1740,7 @@ mod tests {
                 .accept_prompt_on_lane(lane_name, run_id, AgentMessage::user("sub", Vec::new()))
                 .unwrap();
         }
+        harness.store.drive_to_completion().unwrap();
         drop(harness);
         supervisor.cancel_task("task-1").unwrap();
 
@@ -2040,12 +2048,7 @@ mod tests {
             .restore_session_lanes("session-1", &session_file)
             .unwrap();
         let snap = open_test_harness(&session_file).snapshot().unwrap();
-        let main_lane = snap
-            .state
-            .lanes
-            .iter()
-            .find(|l| l.name == "main")
-            .unwrap();
+        let main_lane = snap.state.lanes.iter().find(|l| l.name == "main").unwrap();
         let follow_up_count = main_lane
             .queued
             .iter()
@@ -2296,6 +2299,7 @@ mod tests {
                 terminate: false,
             })
             .unwrap();
+        harness.store.drive_to_completion().unwrap();
         harness
             .store
             .accept_prompt_on_lane(
@@ -2348,6 +2352,7 @@ mod tests {
                 },
             })
             .unwrap();
+        harness.store.drive_to_completion().unwrap();
 
         let recovery = supervisor
             .restore_session_lanes("session-1", &session_file)

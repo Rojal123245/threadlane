@@ -115,11 +115,16 @@ impl DateGroup {
     }
 }
 
-fn get_date_group(timestamp: u64) -> DateGroup {
-    let now = std::time::SystemTime::now()
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
+        .as_secs()
+}
+
+/// Callers pass a shared `now` so a render pass performs one clock read
+/// instead of one per row.
+fn get_date_group(timestamp: u64, now: u64) -> DateGroup {
     let seconds = now.saturating_sub(timestamp);
     if seconds < 86400 {
         DateGroup::Today
@@ -132,11 +137,7 @@ fn get_date_group(timestamp: u64) -> DateGroup {
     }
 }
 
-fn format_time_ago(timestamp: u64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+fn format_time_ago(timestamp: u64, now: u64) -> String {
     let seconds = now.saturating_sub(timestamp);
     match seconds {
         0..=59 => format!("{}s ago", seconds),
@@ -303,8 +304,9 @@ impl SidebarView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme().colors;
+        let health = session.health.clone();
         let is_generating = is_active && self.model.read(cx).is_generating;
-        let is_working = session.health == SessionHealth::Working || is_generating;
+        let is_working = health == SessionHealth::Working || is_generating;
 
         let status_indicator = if is_working {
             Some(
@@ -328,7 +330,7 @@ impl SidebarView {
                     .into_any_element(),
             )
         } else {
-            match session.health {
+            match health {
                 SessionHealth::Warning => Some(
                     Tag::new()
                         .child("!")
@@ -370,7 +372,7 @@ impl SidebarView {
         let quick_settle_model = self.model.clone();
         let quick_settle_work_dir = session.work_dir.clone();
         let quick_settle_session_id = session.id.clone();
-        let time_ago = format_time_ago(session.updated_at);
+        let time_ago = format_time_ago(session.updated_at, now_unix_secs());
         let project = session
             .work_dir
             .file_name()
@@ -384,27 +386,6 @@ impl SidebarView {
             .get(&session.work_dir)
             .and_then(|g| g.pr.as_ref())
             .cloned();
-
-        let _tooltip_text = if let Some(pr) = &pr_info {
-            format!(
-                "{}\n{}\nUpdated {}\nPR #{}: {} (CI: {}/{} passed, {} comments)",
-                session.title,
-                session.work_dir.display(),
-                time_ago,
-                pr.number,
-                pr.title,
-                pr.passing_checks,
-                pr.total_checks,
-                pr.comments_count,
-            )
-        } else {
-            format!(
-                "{}\n{}\nUpdated {}",
-                session.title,
-                session.work_dir.display(),
-                time_ago,
-            )
-        };
 
         let pr_meta = pr_info.map(|pr| {
             let state_upper = pr.state.to_uppercase();
@@ -963,43 +944,47 @@ impl SidebarView {
         let query = state.search_query.trim().to_lowercase();
         let active_work_dir = state.active_work_dir.clone();
         let active_session_id = state.active_session_id.clone();
-        let mut sessions: Vec<SessionInfo> = state
-            .projects
-            .iter()
-            .flat_map(|project| project.sessions.iter().cloned())
-            .map(|mut session| {
-                if state.session_is_generating(&session.session_file) {
-                    session.health = SessionHealth::Working;
-                }
-                session
-            })
-            .filter(|session| {
-                query.is_empty()
-                    || session.title.to_lowercase().contains(&query)
-                    || session.id.to_lowercase().contains(&query)
-            })
-            .collect();
-        sessions.sort_by(|left, right| {
-            right
-                .updated_at
-                .cmp(&left.updated_at)
-                .then_with(|| left.title.cmp(&right.title))
-        });
+        let now = now_unix_secs();
 
+        // Filter by reference and clone only rows that will render. Grouping
+        // before sorting is equivalent to the previous global sort because
+        // bucket insertion preserves scan order.
         let mut grouped: Vec<(DateGroup, Vec<SessionInfo>)> = vec![
             (DateGroup::Today, Vec::new()),
             (DateGroup::Yesterday, Vec::new()),
             (DateGroup::ThisWeek, Vec::new()),
             (DateGroup::Older, Vec::new()),
         ];
-        for session in sessions {
-            let group = get_date_group(session.updated_at);
+        for session in state
+            .projects
+            .iter()
+            .flat_map(|project| project.sessions.iter())
+        {
+            if !query.is_empty()
+                && !session.title.to_lowercase().contains(&query)
+                && !session.id.to_lowercase().contains(&query)
+            {
+                continue;
+            }
+            let mut session = session.clone();
+            if state.session_is_generating(&session.session_file) {
+                session.health = SessionHealth::Working;
+            }
+            let group = get_date_group(session.updated_at, now);
             if let Some((_, entries)) = grouped
                 .iter_mut()
                 .find(|(candidate, _)| *candidate == group)
             {
                 entries.push(session);
             }
+        }
+        for (_, entries) in grouped.iter_mut() {
+            entries.sort_by(|left, right| {
+                right
+                    .updated_at
+                    .cmp(&left.updated_at)
+                    .then_with(|| left.title.cmp(&right.title))
+            });
         }
 
         let mut children = Vec::new();

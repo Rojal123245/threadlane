@@ -253,16 +253,18 @@ impl RightPanelView {
             this.sync_project(cx);
             cx.notify();
         });
-        let tree_subscription = cx.subscribe(&tree_state, |this, _tree, event: &TreeEvent, _cx| {
-            match event {
-                TreeEvent::Expanded(id) => {
-                    this.expanded_paths.insert(id.to_string());
-                }
-                TreeEvent::Collapsed(id) => {
-                    this.expanded_paths.remove(id.as_ref());
-                }
-            }
-        });
+        let tree_subscription =
+            cx.subscribe(
+                &tree_state,
+                |this, _tree, event: &TreeEvent, _cx| match event {
+                    TreeEvent::Expanded(id) => {
+                        this.expanded_paths.insert(id.to_string());
+                    }
+                    TreeEvent::Collapsed(id) => {
+                        this.expanded_paths.remove(id.as_ref());
+                    }
+                },
+            );
 
         let mut panel = Self {
             model,
@@ -320,7 +322,8 @@ impl RightPanelView {
             return;
         }
         self.project = project.clone();
-        self.tree_state.update(cx, |state, cx| state.set_items(Vec::new(), cx));
+        self.tree_state
+            .update(cx, |state, cx| state.set_items(Vec::new(), cx));
         self.expanded_paths.clear();
         self.review_files.clear();
         self.selected_files.clear();
@@ -335,18 +338,15 @@ impl RightPanelView {
         if let Some(work_dir) = project {
             let tx = self.event_tx.clone();
             let proj = work_dir.clone();
-            self._watcher = WorkspaceWatcher::start(
-                work_dir,
-                Duration::from_millis(200),
-                move |change| {
+            self._watcher =
+                WorkspaceWatcher::start(work_dir, Duration::from_millis(200), move |change| {
                     let _ = tx.send(PanelEvent::WorkspaceChanged {
                         project: proj.clone(),
                         git_dirty: change.git_dirty,
                         files_dirty: change.files_dirty,
                     });
-                },
-            )
-            .ok();
+                })
+                .ok();
         } else {
             self._watcher = None;
         }
@@ -527,7 +527,8 @@ impl RightPanelView {
                     .into_iter()
                     .map(|node| convert_node_to_tree_item(node, expanded_paths))
                     .collect::<Vec<_>>();
-                self.tree_state.update(cx, |state, cx| state.set_items(items, cx));
+                self.tree_state
+                    .update(cx, |state, cx| state.set_items(items, cx));
             }
             PanelEvent::ReviewLoaded {
                 project,
@@ -537,7 +538,9 @@ impl RightPanelView {
             } if self.project.as_ref() == Some(&project) => {
                 if let Some(status_ref) = &status {
                     self.model.update(cx, |state, cx| {
-                        state.git_statuses.insert(project.clone(), status_ref.clone());
+                        state
+                            .git_statuses
+                            .insert(project.clone(), status_ref.clone());
                         cx.notify();
                     });
                 }
@@ -734,7 +737,12 @@ impl RightPanelView {
             cx.notify();
             return;
         };
-        let message = self.commit_message_input.read(cx).value().trim().to_string();
+        let message = self
+            .commit_message_input
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
         let selected_paths: Vec<String> = self.selected_files.iter().cloned().collect();
 
         if matches!(action, GitAction::Commit | GitAction::CommitAndPush) {
@@ -1063,71 +1071,74 @@ impl RightPanelView {
             .min_h_0()
             .py_2()
             .child(
-                Tree::new(&self.tree_state, move |ix, entry, is_selected, _window, cx| {
-                    let relative_path = entry.item().id.to_string();
-                    let name = entry.item().label.to_string();
-                    let is_folder = entry.is_folder();
-                    let is_expanded = entry.is_expanded();
-                    let depth = entry.depth();
+                Tree::new(
+                    &self.tree_state,
+                    move |ix, entry, is_selected, _window, cx| {
+                        let relative_path = entry.item().id.to_string();
+                        let name = entry.item().label.to_string();
+                        let is_folder = entry.is_folder();
+                        let is_expanded = entry.is_expanded();
+                        let depth = entry.depth();
 
-                    let target_path = relative_path.clone();
-                    let click_model = model.clone();
-                    let theme = cx.theme().colors;
+                        let target_path = relative_path.clone();
+                        let click_model = model.clone();
+                        let theme = cx.theme().colors;
 
-                    ListItem::new(format!("tree-item-{ix}"))
-                        .mx_1()
-                        .rounded_md()
-                        .px_1p5()
-                        .py_1()
-                        .pl(px(6.0 + depth as f32 * 12.0))
-                        .selected(is_selected)
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_1p5()
-                                .text_xs()
-                                .text_color(if is_selected {
-                                    theme.foreground
-                                } else {
-                                    theme.muted_foreground
+                        ListItem::new(format!("tree-item-{ix}"))
+                            .mx_1()
+                            .rounded_md()
+                            .px_1p5()
+                            .py_1()
+                            .pl(px(6.0 + depth as f32 * 12.0))
+                            .selected(is_selected)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .text_xs()
+                                    .text_color(if is_selected {
+                                        theme.foreground
+                                    } else {
+                                        theme.muted_foreground
+                                    })
+                                    .child(if is_folder {
+                                        div()
+                                            .w(px(14.0))
+                                            .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .child(if is_expanded {
+                                                Icon::new(IconName::ChevronDown)
+                                                    .xsmall()
+                                                    .into_any_element()
+                                            } else {
+                                                Icon::new(IconName::ChevronRight)
+                                                    .xsmall()
+                                                    .into_any_element()
+                                            })
+                                            .into_any_element()
+                                    } else {
+                                        div().w(px(14.0)).flex_none().into_any_element()
+                                    })
+                                    .child(if is_folder {
+                                        Icon::new(IconName::Folder).xsmall().into_any_element()
+                                    } else {
+                                        Icon::new(IconName::File).xsmall().into_any_element()
+                                    })
+                                    .child(name),
+                            )
+                            .when(!is_folder, move |item| {
+                                item.on_click(move |_event, _window, cx| {
+                                    click_model.update(cx, |state, cx| {
+                                        state.request_open_file(target_path.clone());
+                                        cx.notify();
+                                    });
                                 })
-                                .child(if is_folder {
-                                    div()
-                                        .w(px(14.0))
-                                        .flex_none()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .child(if is_expanded {
-                                            Icon::new(IconName::ChevronDown)
-                                                .xsmall()
-                                                .into_any_element()
-                                        } else {
-                                            Icon::new(IconName::ChevronRight)
-                                                .xsmall()
-                                                .into_any_element()
-                                        })
-                                        .into_any_element()
-                                } else {
-                                    div().w(px(14.0)).flex_none().into_any_element()
-                                })
-                                .child(if is_folder {
-                                    Icon::new(IconName::Folder).xsmall().into_any_element()
-                                } else {
-                                    Icon::new(IconName::File).xsmall().into_any_element()
-                                })
-                                .child(name),
-                        )
-                        .when(!is_folder, move |item| {
-                            item.on_click(move |_event, _window, cx| {
-                                click_model.update(cx, |state, cx| {
-                                    state.request_open_file(target_path.clone());
-                                    cx.notify();
-                                });
                             })
-                        })
-                })
+                    },
+                )
                 .context_menu({
                     let model = self.model.clone();
                     let project = self.project.clone();
@@ -1567,8 +1578,11 @@ impl RightPanelView {
                                 .small()
                                 .on_click(cx.listener(move |this, checked, _window, cx| {
                                     if *checked {
-                                        this.selected_files =
-                                            this.review_files.iter().map(|f| f.path.clone()).collect();
+                                        this.selected_files = this
+                                            .review_files
+                                            .iter()
+                                            .map(|f| f.path.clone())
+                                            .collect();
                                     } else {
                                         this.selected_files.clear();
                                     }
@@ -1740,8 +1754,11 @@ impl RightPanelView {
                                         let content = cx
                                             .background_executor()
                                             .spawn(async move {
-                                                threadlane_git::diff_file(&diff_project, &diff_target)
-                                                    .unwrap_or_else(|error| error.to_string())
+                                                threadlane_git::diff_file(
+                                                    &diff_project,
+                                                    &diff_target,
+                                                )
+                                                .unwrap_or_else(|error| error.to_string())
                                             })
                                             .await;
                                         let _ = model.update(cx, |state, cx| {
@@ -1840,15 +1857,11 @@ impl RightPanelView {
                                                             &diff_project,
                                                             &diff_target,
                                                         )
-                                                        .unwrap_or_else(|error| {
-                                                            error.to_string()
-                                                        })
+                                                        .unwrap_or_else(|error| error.to_string())
                                                     })
                                                     .await;
                                                 let _ = m.update(cx, |state, cx| {
-                                                    state.request_open_diff(
-                                                        proj, target, content,
-                                                    );
+                                                    state.request_open_diff(proj, target, content);
                                                     cx.notify();
                                                 });
                                             })
@@ -1968,29 +1981,20 @@ impl RightPanelView {
                     .child(
                         Button::new("git-generate-message")
                             .when(self.git_message_pending, |button| {
-                                button
-                                    .child(Spinner::new().xsmall())
-                                    .label("Generating…")
+                                button.child(Spinner::new().xsmall()).label("Generating…")
                             })
-                            .when(!self.git_message_pending, |button| {
-                                button.label("Generate")
-                            })
+                            .when(!self.git_message_pending, |button| button.label("Generate"))
                             .ghost()
                             .xsmall()
                             .disabled(
-                                self.git_busy
-                                    || self.git_message_pending
-                                    || selected_count == 0,
+                                self.git_busy || self.git_message_pending || selected_count == 0,
                             )
                             .on_click(cx.listener(|this, _event, _window, cx| {
                                 this.generate_commit_message(cx);
                             })),
                     ),
             )
-            .child(
-                Input::new(&self.commit_message_input)
-                    .disabled(self.git_busy),
-            )
+            .child(Input::new(&self.commit_message_input).disabled(self.git_busy))
             .children(self.git_feedback.as_ref().map(|feedback| {
                 div()
                     .rounded_md()
@@ -3740,10 +3744,7 @@ fn convert_node_to_tree_item(node: FileNode, expanded_paths: &HashSet<String>) -
     }
 }
 
-fn scan_project_tree(
-    root: &Path,
-    limit: usize,
-) -> Vec<FileNode> {
+fn scan_project_tree(root: &Path, limit: usize) -> Vec<FileNode> {
     fn visit(
         root: &Path,
         relative: &Path,
@@ -3828,8 +3829,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["src"]
         );
-        assert!(items[0].children.iter().any(|item| item.relative_path == "src/main.rs"));
-        assert!(items[0].children.iter().any(|item| item.relative_path == "src/nested"));
+        assert!(items[0]
+            .children
+            .iter()
+            .any(|item| item.relative_path == "src/main.rs"));
+        assert!(items[0]
+            .children
+            .iter()
+            .any(|item| item.relative_path == "src/nested"));
 
         std::fs::remove_dir_all(root).unwrap();
     }

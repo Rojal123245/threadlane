@@ -1,12 +1,15 @@
 use crate::antigravity::AntigravityClient;
 use crate::openai::OpenAIClient;
-use threadlane_protocol::{DeferredResponse as RuntimeDeferredResponse, ProviderPort, RuntimeRequest, RuntimeStreamEvent as StreamEvent};
 use crate::opencode::OpenCodeGoClient;
 use crate::title_generator::{title_payload, TITLE_REQUEST_TIMEOUT};
 use crate::traits::ModelProvider;
 use futures_util::future::BoxFuture;
 use serde_json::Value;
 use std::sync::Arc;
+use threadlane_protocol::{
+    DeferredResponse as RuntimeDeferredResponse, ProviderPort, RuntimeRequest,
+    RuntimeStreamEvent as StreamEvent,
+};
 use tokio::sync::mpsc;
 
 const ANTIGRAVITY_MODEL_PREFIX: &str = "antigravity/";
@@ -141,11 +144,15 @@ fn runtime_request_payload_source(request: &RuntimeRequest) -> PayloadSource {
                         .into_iter()
                         .flatten()
                         .filter_map(|tool| {
-                            threadlane_runtime::types::AgentToolDefinition::from_provider_schema(tool).ok()
+                            threadlane_runtime::types::AgentToolDefinition::from_provider_schema(
+                                tool,
+                            )
+                            .ok()
                         })
                         .map(|tool| tool.to_codex_responses_tool())
                         .collect::<Vec<_>>();
-                    let (instructions, input) = threadlane_runtime::convert_to_codex_llm(&agent_messages);
+                    let (instructions, input) =
+                        threadlane_runtime::convert_to_codex_llm(&agent_messages);
                     let mut payload = serde_json::json!({
                         "model": model,
                         "instructions": instructions,
@@ -179,15 +186,26 @@ pub struct ProviderClient {
 impl ProviderPort for ProviderClient {
     async fn stream_request(&self, request: RuntimeRequest, events: mpsc::Sender<StreamEvent>) {
         let payload = runtime_request_payload_source(&request);
-        self.stream_chat_completion(payload, request.prompt_cache_key, events).await;
+        self.stream_chat_completion(payload, request.prompt_cache_key, events)
+            .await;
     }
 
-    async fn fetch_deferred(&self, model: &str, handle_id: &str) -> Result<RuntimeDeferredResponse, String> {
-        self.fetch_deferred(model, handle_id).await.map(|response| match response {
-            crate::traits::DeferredResponse::Pending => RuntimeDeferredResponse::Pending,
-            crate::traits::DeferredResponse::Ready { content } => RuntimeDeferredResponse::Ready { content },
-            crate::traits::DeferredResponse::Error { message } => RuntimeDeferredResponse::Error { message },
-        })
+    async fn fetch_deferred(
+        &self,
+        model: &str,
+        handle_id: &str,
+    ) -> Result<RuntimeDeferredResponse, String> {
+        self.fetch_deferred(model, handle_id)
+            .await
+            .map(|response| match response {
+                crate::traits::DeferredResponse::Pending => RuntimeDeferredResponse::Pending,
+                crate::traits::DeferredResponse::Ready { content } => {
+                    RuntimeDeferredResponse::Ready { content }
+                }
+                crate::traits::DeferredResponse::Error { message } => {
+                    RuntimeDeferredResponse::Error { message }
+                }
+            })
     }
 
     async fn cancel_deferred(&self, model: &str, handle_id: &str) -> Result<(), String> {

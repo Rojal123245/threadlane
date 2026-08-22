@@ -9,23 +9,36 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::permission::PermissionTraceEvent;
+use threadlane_runtime::compaction::{
+    compact_for_budget, estimate_request_tokens, PreparedCompaction,
+};
 pub use threadlane_runtime::harness::Record as HarnessRecord;
 use threadlane_runtime::harness::{
     AbortInitiator, AbortObservation, AbortTarget, AgentHarness, BoundedText, CapabilitySnapshot,
-    DeferredResolution, EffectAction, Entry as HarnessEntry, ErrorCategory, EventPayload,
-    HarnessEventHub, HookContext, HookKind, HookRegistry, JsonlStore, OperationOutcome,
-    PromptSnapshot, ProviderErrorSummary, ProviderOutcome, ProvisionedEntry, QueueKind,
-    ReduceError, Reducer, RetryPolicy, SessionIdGenerator, SessionStore, Snapshot,
-    SubagentLifecyclePhase, ToolExecutionOutcome, ToolExecutionPhase,
-    ToolReplaySafety as HarnessToolReplaySafety, ToolResult as HarnessToolResult, ToolSpec,
-    TraceString,
+    CompactionReason, DeferredResolution, Entry as HarnessEntry, ErrorCategory, HarnessEventHub,
+    HookContext, HookKind, HookRegistry, JsonlStore, OperationOutcome, PromptSnapshot,
+    ProviderErrorSummary, ProviderOutcome, ProvisionedEntry, QueueKind, Reducer, RetryPolicy,
+    SessionIdGenerator, SessionStore, Snapshot, SubagentLifecyclePhase, ToolExecutionOutcome,
+    ToolExecutionPhase, ToolReplaySafety as HarnessToolReplaySafety,
+    ToolResult as HarnessToolResult, ToolSpec, TraceString,
 };
+use threadlane_runtime::model_metadata::{context_budget, ContextBudget};
 use threadlane_runtime::{
-    AgentMessage, AgentToolResult, ImageAttachment, ProviderTraceEvent, ReasoningEffort,
-    TokenUsage, ToolExecutionTraceEvent,
+    AgentConfig, AgentMessage, AgentToolResult, ImageAttachment, ProviderBoundaryRequest,
+    ProviderBoundaryResult, ProviderTraceEvent, ReasoningEffort, TokenUsage,
+    ToolExecutionTraceEvent,
 };
 
 use threadlane_runtime::harness::{EventError, HarnessEvent, OperationIntent, Subscription};
+
+#[cfg(test)]
+static LAST_PATH_OPERATION_THREAD: std::sync::Mutex<Option<std::thread::ThreadId>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn last_path_operation_thread() -> Option<std::thread::ThreadId> {
+    *LAST_PATH_OPERATION_THREAD.lock().ok()?
+}
 
 pub struct HarnessWatch {
     pub(crate) hub: HarnessEventHub,
@@ -37,8 +50,8 @@ impl HarnessWatch {
         &self.subscription.snapshot
     }
 
-    pub(crate) fn poll(&mut self) -> Result<Vec<HarnessEvent>, EventError> {
-        self.hub.poll(&mut self.subscription)
+    pub(crate) async fn wait(&mut self) -> Result<Vec<HarnessEvent>, EventError> {
+        self.hub.wait(&mut self.subscription).await
     }
 }
 
@@ -84,6 +97,12 @@ pub(crate) struct SubagentLaneIdentity {
     pub(crate) started_seq: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StartedSubagentLane {
+    pub(crate) identity: SubagentLaneIdentity,
+    pub(crate) accepted: AcceptedRun,
+}
+
 #[derive(Debug)]
 pub(crate) struct SubagentStartError {
     pub(crate) identity: Option<SubagentLaneIdentity>,
@@ -112,6 +131,24 @@ pub struct CodingSessionHarness {
     pub(crate) cancellation: Arc<AtomicBool>,
 }
 
+fn boundary_result(
+    messages: Vec<AgentMessage>,
+    budget: ContextBudget,
+    compaction_generation: u64,
+    provisional_estimated_tokens: Option<usize>,
+    provider_attempt: u32,
+    provider_request_id: String,
+) -> ProviderBoundaryResult {
+    ProviderBoundaryResult {
+        messages,
+        context_limit: budget.limit,
+        context_limit_is_estimate: budget.limit_is_estimate,
+        compaction_generation,
+        provisional_estimated_tokens,
+        provider_attempt: Some(provider_attempt),
+        provider_request_id: Some(provider_request_id),
+    }
+}
 #[allow(dead_code)]
 impl CodingSessionHarness {
     // ── Construction ──────────────────────────────────────────────────
@@ -128,42 +165,9 @@ impl CodingSessionHarness {
         }
         let events = harness_event_hub(path);
         let hooks = harness_hook_registry(path);
-        let persist_path = path.to_path_buf();
-        let persist_events = events.clone();
-        let executor = move |action: EffectAction| {
-            let mut store = JsonlStore::open(&persist_path)
-                .map_err(|error| ReduceError::Storage(error.to_string()))?;
-            if let Err(error) = action.apply(&mut store) {
-                persist_events.publish(EventPayload::Fault(error.to_string()));
-                return Err(error);
-            }
-            let (payload, lane, run_id, turn) = match &action {
-                EffectAction::AppendEntry { entry } => (
-                    EventPayload::EntryCommitted(entry.clone()),
-                    Some(entry.lane.clone()),
-                    None,
-                    None,
-                ),
-                EffectAction::AppendRecord { record, .. } => (
-                    EventPayload::RecordCommitted(record.clone()),
-                    Some(record.lane().to_owned()),
-                    record.run_id().map(str::to_owned),
-                    record.turn(),
-                ),
-            };
-            persist_events.publish_identified_with_turn(payload, lane, run_id, turn, None);
-            Ok(())
-        };
         let cancellation = harness_cancellation_state(path);
         let store = JsonlStore::open(path)
-            .map(|store| {
-                AgentHarness::with_executor_and_hooks(
-                    store,
-                    events.clone(),
-                    executor,
-                    hooks.clone(),
-                )
-            })
+            .map(|store| AgentHarness::with_events_and_hooks(store, events.clone(), hooks.clone()))
             .map_err(|error| error.to_string())?;
         Ok(Self {
             store,
@@ -175,13 +179,29 @@ impl CodingSessionHarness {
         })
     }
 
+    /// Opens a short-lived journal for one path-scoped operation. `open`
+    /// already parses and reduces the full history once; downstream appends
+    /// re-validate freshness under the writer gate via `is_fresh`, so no
+    /// second eager reload happens here.
     fn with_path<T>(
         path: &Path,
         operation: impl FnOnce(&mut Self) -> Result<T, String>,
     ) -> Result<T, String> {
+        #[cfg(test)]
+        if let Ok(mut thread) = LAST_PATH_OPERATION_THREAD.lock() {
+            *thread = Some(std::thread::current().id());
+        }
         let mut journal = Self::open(path)?;
-        journal.refresh()?;
         operation(&mut journal)
+    }
+
+    /// Reloads the durable store only when another writer has appended
+    /// (cheap file-length probe), instead of unconditionally reparsing.
+    pub(crate) fn ensure_fresh(&mut self) -> Result<(), String> {
+        self.store
+            .store_mut()
+            .ensure_fresh()
+            .map_err(|error| error.to_string())
     }
 
     fn append_record_to_path(path: &Path, record: HarnessRecord) -> Result<(), String> {
@@ -217,8 +237,9 @@ impl CodingSessionHarness {
         capability_sha256: Option<String>,
         prompt_template_ids: Vec<String>,
         git_head: Option<String>,
+        context_window_limit: Option<usize>,
     ) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let trace = |value: String| TraceString::new(value);
         let record = HarnessRecord::RunContextCaptured {
             id: format!("run-context-{run_id}"),
@@ -253,7 +274,7 @@ impl CodingSessionHarness {
                 .map(TraceString::new)
                 .collect::<Result<Vec<_>, _>>()?,
             git_head: git_head.map(TraceString::new).transpose()?,
-            context_window_limit: None,
+            context_window_limit,
             route_defaults: None,
         };
         self.store
@@ -274,6 +295,259 @@ impl CodingSessionHarness {
             .map_err(|error| error.to_string())
     }
 
+    pub fn prepare_provider_boundary(
+        &mut self,
+        run_id: &str,
+        request: ProviderBoundaryRequest,
+        config: &AgentConfig,
+    ) -> Result<ProviderBoundaryResult, String> {
+        self.ensure_fresh()?;
+        // No provider boundary may proceed after cancellation, even when the
+        // already-compacted context is below the adaptive trigger. Once a
+        // checkpoint procedure starts, it is driven atomically to completion.
+        if self.cancellation.load(Ordering::SeqCst) {
+            return Err("context preparation cancelled".into());
+        }
+        let budget = context_budget(&request.model, config);
+        let provider_attempt = self
+            .store
+            .store()
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                HarnessRecord::ProviderRequestStarted {
+                    run_id: record_run_id,
+                    attempt,
+                    ..
+                } if record_run_id == run_id => Some(*attempt),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let provider_request_id = format!("provider-request-{run_id}-{provider_attempt}");
+        let mut current = self.model_context("main")?.messages();
+        let pre_tokens =
+            estimate_request_tokens(&current, request.tool_schema_json.as_deref(), config);
+        if pre_tokens < budget.trigger_tokens && !request.overflow_recovery {
+            return Ok(boundary_result(
+                current,
+                budget,
+                self.compaction_generation(),
+                None,
+                provider_attempt,
+                provider_request_id,
+            ));
+        }
+        let reason = if request.overflow_recovery {
+            CompactionReason::OverflowRecovery
+        } else {
+            CompactionReason::AdaptiveBudget
+        };
+        let targets = [
+            budget.retained_tail_tokens,
+            budget.strict_retained_tail_tokens,
+        ];
+        for (index, target) in targets.into_iter().enumerate() {
+            let Some(prepared) = compact_for_budget(
+                &current,
+                request.tool_schema_json.as_deref(),
+                target,
+                config,
+            ) else {
+                return Err("context preparation could not drop historical messages".into());
+            };
+            self.commit_prepared_compaction(
+                run_id,
+                &request.model,
+                request.tool_schema_json.as_deref(),
+                config,
+                budget,
+                reason,
+                prepared,
+            )?;
+            current = self.model_context("main")?.messages();
+            let post_tokens =
+                estimate_request_tokens(&current, request.tool_schema_json.as_deref(), config);
+            if post_tokens < budget.trigger_tokens {
+                return Ok(boundary_result(
+                    current,
+                    budget,
+                    self.compaction_generation(),
+                    Some(post_tokens),
+                    provider_attempt,
+                    provider_request_id,
+                ));
+            }
+            if index == 1 {
+                return Err(format!(
+                    "context remains above budget after strict compaction: {post_tokens}/{}",
+                    budget.trigger_tokens,
+                ));
+            }
+            self.ensure_fresh()?;
+        }
+        unreachable!()
+    }
+
+    fn compaction_generation(&self) -> u64 {
+        self.store
+            .store()
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                HarnessRecord::ContextCompacted {
+                    lane, generation, ..
+                } if lane == "main" => Some(*generation),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn checkpoint_open_run_compaction(
+        &mut self,
+        run_id: &str,
+        summary: &str,
+        reason: CompactionReason,
+    ) -> Result<(), String> {
+        self.stage_open_run_compaction(run_id, summary, reason)?;
+        self.store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())
+    }
+
+    fn stage_open_run_compaction(
+        &mut self,
+        run_id: &str,
+        summary: &str,
+        reason: CompactionReason,
+    ) -> Result<(), String> {
+        self.store
+            .checkpoint_open_run_compaction("main", run_id, summary, reason)
+            .map_err(|error| error.to_string())
+    }
+
+    fn commit_prepared_compaction(
+        &mut self,
+        parent_run_id: &str,
+        model: &str,
+        tool_schema_json: Option<&str>,
+        config: &AgentConfig,
+        budget: ContextBudget,
+        reason: CompactionReason,
+        prepared: PreparedCompaction,
+    ) -> Result<(), String> {
+        let result = (|| {
+            let summary = prepared
+                .messages
+                .iter()
+                .find_map(threadlane_runtime::compaction_summary_text)
+                .ok_or_else(|| "context preparation produced no durable summary".to_string())?;
+            let first_seq = self.next_seq();
+            let summary_id = format!("compaction-{parent_run_id}-{first_seq}-summary");
+            self.stage_open_run_compaction(parent_run_id, summary, reason)?;
+
+            let retained = super::durable::compaction_retained_tail(&prepared.messages);
+            let mut parent_id = summary_id;
+            for (index, message) in retained.into_iter().enumerate() {
+                let id = format!("compaction-{parent_run_id}-{first_seq}-tail-{index}");
+                let terminate = matches!(
+                    &message,
+                    AgentMessage::Tool {
+                        terminate: true,
+                        ..
+                    }
+                );
+                self.store
+                    .append_entry_gated(HarnessEntry {
+                        id: id.clone(),
+                        parent_id: Some(parent_id),
+                        lane: "main".into(),
+                        seq: first_seq + 2 + index as u64,
+                        timestamp: timestamp(),
+                        message,
+                        surface_op: threadlane_runtime::harness::SurfaceOperation::Replace {
+                            start_seq: first_seq + 2 + index as u64,
+                            end_seq: (first_seq + 1 + index as u64),
+                            source_event_seqs: Vec::new(),
+                        },
+                        terminate,
+                    })
+                    .map_err(|error| error.to_string())?;
+                parent_id = id;
+            }
+
+            let post_tokens = estimate_request_tokens(&prepared.messages, tool_schema_json, config);
+            let generation = self.compaction_generation().saturating_add(1);
+            let record = HarnessRecord::ContextCompacted {
+                id: format!("context-compacted-{parent_run_id}-{generation}"),
+                seq: first_seq + 2 + prepared.messages.len() as u64,
+                lane: "main".into(),
+                timestamp: timestamp(),
+                run_id: parent_run_id.into(),
+                generation,
+                reason,
+                effective_model: TraceString::new(model)?,
+                context_limit: budget.limit,
+                context_limit_is_estimate: budget.limit_is_estimate,
+                pre_tokens: prepared.pre_tokens,
+                post_tokens,
+                retained_tail_target: prepared.retained_tail_target,
+                retained_tail_tokens: prepared.retained_tail_tokens,
+                compacted_messages: prepared.compacted_messages,
+            };
+            self.store
+                .append_record_gated(record)
+                .map_err(|error| error.to_string())?;
+            self.store
+                .drive_to_completion_atomically()
+                .map_err(|error| error.to_string())
+        })();
+        if result.is_err() {
+            let _ = self.ensure_fresh();
+        }
+        result
+    }
+
+    pub(crate) fn record_manual_compaction(
+        &mut self,
+        run_id: &str,
+        model: &str,
+        config: &AgentConfig,
+        pre_tokens: usize,
+        retained_tail_tokens: usize,
+        compacted_messages: usize,
+    ) -> Result<(), String> {
+        self.ensure_fresh()?;
+        let budget = context_budget(model, config);
+        let messages = self.model_context("main")?.messages();
+        let post_tokens = estimate_request_tokens(&messages, None, config);
+        let generation = self.compaction_generation().saturating_add(1);
+        let record = HarnessRecord::ContextCompacted {
+            id: format!("context-compacted-{run_id}-{generation}"),
+            seq: self.next_seq(),
+            lane: "main".into(),
+            timestamp: timestamp(),
+            run_id: run_id.into(),
+            generation,
+            reason: CompactionReason::Manual,
+            effective_model: TraceString::new(model)?,
+            context_limit: budget.limit,
+            context_limit_is_estimate: budget.limit_is_estimate,
+            pre_tokens,
+            post_tokens,
+            retained_tail_target: budget.retained_tail_tokens,
+            retained_tail_tokens,
+            compacted_messages,
+        };
+        self.store
+            .append_record_gated(record)
+            .map_err(|error| error.to_string())?;
+        self.store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())
+    }
     pub fn transcript(&self, lane: &str) -> threadlane_runtime::harness::TranscriptProjection {
         self.store.store().transcript(lane)
     }
@@ -283,8 +557,15 @@ impl CodingSessionHarness {
         run_id: &str,
         event: ProviderTraceEvent,
     ) -> Result<(), String> {
-        let mut journal = Self::open(path)?;
-        journal.refresh()?;
+        Self::with_path(path, |journal| journal.record_provider_trace(run_id, event))
+    }
+
+    pub(crate) fn record_provider_trace(
+        &mut self,
+        run_id: &str,
+        event: ProviderTraceEvent,
+    ) -> Result<(), String> {
+        let journal = self;
         let event = match event {
             ProviderTraceEvent::AssistantReady {
                 attempt,
@@ -370,6 +651,10 @@ impl CodingSessionHarness {
             ProviderTraceEvent::ContextManifest {
                 attempt,
                 request_id,
+                model,
+                context_limit,
+                context_limit_is_estimate,
+                compaction_generation,
                 total_estimated_tokens,
                 items,
             } => HarnessRecord::ContextManifestCaptured {
@@ -381,6 +666,10 @@ impl CodingSessionHarness {
                 attempt,
                 request_id: TraceString::new(request_id)?,
                 total_estimated_tokens,
+                effective_model: Some(TraceString::new(model)?),
+                context_limit,
+                context_limit_is_estimate,
+                compaction_generation,
                 items,
             },
             ProviderTraceEvent::Checkpoint {
@@ -436,7 +725,16 @@ impl CodingSessionHarness {
                 usage,
             },
         };
-        Self::append_record_to_path(path, record)
+        // Append through the journal already open above instead of reopening
+        // the file; gated append re-checks freshness under the writer gate.
+        journal
+            .store
+            .append_record_gated(record)
+            .map_err(|error| error.to_string())?;
+        journal
+            .store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())
     }
 
     pub(crate) fn record_permission_trace_to_path(
@@ -444,8 +742,17 @@ impl CodingSessionHarness {
         run_id: Option<&str>,
         event: PermissionTraceEvent,
     ) -> Result<(), String> {
-        let mut journal = Self::open(path)?;
-        journal.refresh()?;
+        Self::with_path(path, |journal| {
+            journal.record_permission_trace(run_id, event)
+        })
+    }
+
+    pub(crate) fn record_permission_trace(
+        &mut self,
+        run_id: Option<&str>,
+        event: PermissionTraceEvent,
+    ) -> Result<(), String> {
+        let journal = self;
         let state = Reducer::reduce(journal.store.store()).map_err(|error| error.to_string())?;
         let attempt = run_id.and_then(|_| state.lane("main").map(|lane| lane.attempts));
         let seq = harness_next_seq(journal.store.store());
@@ -489,7 +796,15 @@ impl CodingSessionHarness {
                 remembered,
             },
         };
-        Self::append_record_to_path(path, record)
+        // Append through the already-open journal; see record_provider_trace_to_path.
+        journal
+            .store
+            .append_record_gated(record)
+            .map_err(|error| error.to_string())?;
+        journal
+            .store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())
     }
 
     pub(crate) async fn record_tool_execution_to_path(
@@ -498,7 +813,15 @@ impl CodingSessionHarness {
         event: ToolExecutionTraceEvent,
     ) -> Result<(), String> {
         let mut journal = Self::open(path)?;
-        journal.refresh()?;
+        journal.record_tool_execution(run_id, event).await
+    }
+
+    pub(crate) async fn record_tool_execution(
+        &mut self,
+        run_id: &str,
+        event: ToolExecutionTraceEvent,
+    ) -> Result<(), String> {
+        let journal = self;
         if let ToolExecutionTraceEvent::Started {
             tool_call_id,
             tool_name,
@@ -522,7 +845,6 @@ impl CodingSessionHarness {
                 journal
                     .append_tool_intent_after_hook(run_id, tool_call_id, tool_name, effective_args)
                     .await?;
-                journal.refresh()?;
             }
         }
         let state = Reducer::reduce(journal.store.store()).map_err(|error| error.to_string())?;
@@ -592,7 +914,15 @@ impl CodingSessionHarness {
                 output_bytes: Some(output_bytes),
             },
         };
-        Self::append_record_to_path(path, record)
+        // Append through the already-open journal; see record_provider_trace_to_path.
+        journal
+            .store
+            .append_record_gated(record)
+            .map_err(|error| error.to_string())?;
+        journal
+            .store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())
     }
 
     pub(crate) async fn append_tool_intent_to_path(
@@ -613,7 +943,24 @@ impl CodingSessionHarness {
         run_id: &str,
         result: &AgentToolResult,
     ) -> Result<(), String> {
-        Self::with_path(path, |journal| journal.finish_tool_result(run_id, result))
+        let path = path.to_path_buf();
+        let run_id = run_id.to_owned();
+        let result = result.clone();
+        tokio::task::spawn_blocking(move || {
+            Self::with_path(&path, |journal| {
+                journal.finish_tool_result(&run_id, &result)
+            })
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
+    pub(crate) fn record_tool_result(
+        &mut self,
+        run_id: &str,
+        result: &AgentToolResult,
+    ) -> Result<(), String> {
+        self.finish_tool_result(run_id, result)
     }
 
     pub(crate) fn start_subagent_lane(
@@ -621,7 +968,7 @@ impl CodingSessionHarness {
         lane_hint: &str,
         task: &str,
         source_leaf_id: Option<&str>,
-    ) -> Result<SubagentLaneIdentity, SubagentStartError> {
+    ) -> Result<StartedSubagentLane, SubagentStartError> {
         if self.cancellation.load(Ordering::SeqCst) {
             return Err(SubagentStartError {
                 identity: None,
@@ -638,7 +985,7 @@ impl CodingSessionHarness {
             })?;
         let mut attempt_idx = 0;
         let identity = loop {
-            self.refresh().map_err(|error| SubagentStartError {
+            self.ensure_fresh().map_err(|error| SubagentStartError {
                 identity: None,
                 error: error.to_string(),
             })?;
@@ -817,7 +1164,52 @@ impl CodingSessionHarness {
                 identity: Some(identity.clone()),
                 error: error.to_string(),
             })?;
-        Ok(identity)
+        let identity = SubagentLaneIdentity {
+            started_seq: self
+                .store
+                .records()
+                .iter()
+                .find_map(|record| match record {
+                    HarnessRecord::OperationStarted { id, seq, .. } if id == &identity.run_id => {
+                        Some(*seq)
+                    }
+                    _ => None,
+                })
+                .unwrap_or(0),
+            ..identity
+        };
+        let accepted =
+            self.accepted_subagent_run(&identity)
+                .map_err(|error| SubagentStartError {
+                    identity: Some(identity.clone()),
+                    error,
+                })?;
+        Ok(StartedSubagentLane { identity, accepted })
+    }
+
+    pub(crate) fn accepted_subagent_run(
+        &self,
+        identity: &SubagentLaneIdentity,
+    ) -> Result<AcceptedRun, String> {
+        let accepted = AcceptedRun {
+            session_id: self.store.session_id().to_owned(),
+            run_id: identity.run_id.clone(),
+            lane: identity.lane_name.clone(),
+            prompt_entry_id: format!("subagent-entry-{}-0", identity.run_id),
+            assistant_entry_id: format!("entry-{}-assistant-1", identity.run_id),
+            accepted_through_seq: self
+                .store
+                .entries()
+                .iter()
+                .map(|entry| entry.seq)
+                .chain(self.store.records().iter().map(HarnessRecord::seq))
+                .max()
+                .unwrap_or(0),
+        };
+        self.store
+            .validate_accepted_run(&accepted)
+            .map_err(|error| error.to_string())?;
+        Ok(accepted)
     }
 
     pub(crate) fn finish_subagent_lane(
@@ -827,7 +1219,7 @@ impl CodingSessionHarness {
         outcome: OperationOutcome,
         error: Option<String>,
     ) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let is_open = Reducer::reduce(self.store.store()).ok().map(|state| {
             state
                 .lanes
@@ -895,7 +1287,9 @@ impl CodingSessionHarness {
         let phase = match outcome {
             OperationOutcome::Completed => SubagentLifecyclePhase::Completed,
             OperationOutcome::Failed => SubagentLifecyclePhase::Failed,
-            OperationOutcome::Aborted | OperationOutcome::Declined => SubagentLifecyclePhase::Cancelled,
+            OperationOutcome::Aborted | OperationOutcome::Declined => {
+                SubagentLifecyclePhase::Cancelled
+            }
         };
         let seq = harness_next_seq(self.store.store());
         self.store
@@ -930,7 +1324,7 @@ impl CodingSessionHarness {
         if messages.is_empty() {
             return Ok(());
         }
-        self.refresh()?;
+        self.ensure_fresh()?;
         for message in messages {
             self.append_message_to_lane(lane, run_id, message.clone())?;
         }
@@ -948,7 +1342,7 @@ impl CodingSessionHarness {
         run_id: &str,
         prompt: AgentMessage,
     ) -> Result<AcceptedRun, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         self.store
             .accept_prompt_and_drive_on_lane(&self.main_lane_name, run_id, prompt)
             .map_err(|error| error.to_string())
@@ -971,7 +1365,7 @@ impl CodingSessionHarness {
         content: String,
         images: Vec<ImageAttachment>,
     ) -> Result<String, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let id = format!(
             "entry-queue-{}",
             SystemTime::now()
@@ -996,7 +1390,7 @@ impl CodingSessionHarness {
         target: ProvisionedEntry,
         priority: Option<threadlane_runtime::SteerPriority>,
     ) -> Result<String, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let id = target.id.clone();
         if let Some(priority) = priority {
             let underlying = self.store.store();
@@ -1039,7 +1433,7 @@ impl CodingSessionHarness {
     }
 
     pub(crate) fn consume_first_unbound_queue(&mut self, queue: QueueKind) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let state = Reducer::reduce(self.store.store())
             .map_err(|error| format!("reduce failed: {error:?}"))?;
         let entry_id = state
@@ -1067,7 +1461,7 @@ impl CodingSessionHarness {
         queue: QueueKind,
         entry_id: &str,
     ) -> Result<Option<AgentMessage>, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let state = Reducer::reduce(self.store.store())
             .map_err(|error| format!("reduce failed: {error:?}"))?;
         let lane = state
@@ -1092,7 +1486,7 @@ impl CodingSessionHarness {
     }
 
     pub(crate) fn cancel_queued_unbound(&mut self, entry_id: &str) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         self.store
             .cancel_unbound(entry_id)
             .map_err(|error| error.to_string())?;
@@ -1116,7 +1510,7 @@ impl CodingSessionHarness {
         tool_name: &str,
         effective_args: Value,
     ) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         if self.store.records().iter().any(|record| {
             matches!(record, HarnessRecord::ToolStarted {
                 run_id: record_run_id,
@@ -1173,7 +1567,7 @@ impl CodingSessionHarness {
         run_id: &str,
         prompt: Option<AgentMessage>,
     ) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         self.store
             .start_operation(run_id, None, OperationIntent::Run)
             .map_err(|error| error.to_string())?;
@@ -1214,7 +1608,7 @@ impl CodingSessionHarness {
 
     /// Generate a unique run identifier scoped to this session.
     pub(crate) fn unique_run_id(&mut self, prefix: &str) -> Result<String, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let used_ids = self
             .store
             .entries()
@@ -1236,7 +1630,7 @@ impl CodingSessionHarness {
     /// if any.
     pub(crate) fn request_abort(&mut self) -> Result<Option<String>, String> {
         self.cancellation.store(true, Ordering::SeqCst);
-        self.refresh()?;
+        self.ensure_fresh()?;
         let state = Reducer::reduce(&self.store).map_err(|error| error.to_string())?;
         let open_lanes: Vec<(String, String)> = state
             .lanes
@@ -1268,7 +1662,7 @@ impl CodingSessionHarness {
         run_id: &str,
         acknowledged: bool,
     ) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let state = Reducer::reduce(&self.store).map_err(|error| error.to_string())?;
         let attempt = state.lane("main").map(|lane| lane.attempts);
         let unfinished_requests = self
@@ -1348,7 +1742,7 @@ impl CodingSessionHarness {
     /// finish with `Aborted` outcome.  Returns `true` if recovery produced
     /// a terminal state.
     pub(crate) fn recover_abort(&mut self) -> Result<bool, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let state = Reducer::reduce(&self.store).map_err(|error| error.to_string())?;
         let Some(lane) = state.lane("main") else {
             return Ok(false);
@@ -1457,7 +1851,7 @@ impl CodingSessionHarness {
     /// Append a user/assistant/tool message as a harness entry on the main
     /// lane.
     pub(crate) fn append_message(&mut self, message: AgentMessage) -> Result<String, String> {
-        self.append_message_inner(message, true)
+        self.append_message_inner(message, true, false)
     }
 
     /// Append a message discovered while reconciling the provider transcript.
@@ -1467,15 +1861,28 @@ impl CodingSessionHarness {
     /// because two consecutive provider messages can legitimately have the
     /// same serialized value.
     fn append_synced_message(&mut self, message: AgentMessage) -> Result<String, String> {
-        self.append_message_inner(message, false)
+        self.append_message_inner(message, false, false)
+    }
+
+    /// Restores a retained compaction-tail occurrence to model context.
+    ///
+    /// A replacement with an empty range changes no prior context entries. Its
+    /// non-append surface metadata identifies this as context restoration rather
+    /// than a second human-visible transcript occurrence.
+    pub(crate) fn append_message_occurrence(
+        &mut self,
+        message: AgentMessage,
+    ) -> Result<String, String> {
+        self.append_message_inner(message, false, true)
     }
 
     fn append_message_inner(
         &mut self,
         message: AgentMessage,
         deduplicate_last_entry: bool,
+        context_restoration: bool,
     ) -> Result<String, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         if deduplicate_last_entry {
             if let Some(entry) = self.store.entries().last() {
                 if entry.message == message {
@@ -1483,26 +1890,17 @@ impl CodingSessionHarness {
                 }
             }
         }
-        let state = Reducer::reduce(&self.store).ok();
-        let latest_main_entry = || {
-            self.store
-                .entries()
-                .iter()
-                .rev()
-                .find(|entry| entry.lane == "main")
-                .map(|entry| entry.id.clone())
-        };
-        let parent_id = state
-            .as_ref()
-            .and_then(|state| state.lane("main"))
-            .and_then(|lane| {
-                if lane.open_operation.is_some() {
-                    latest_main_entry().or_else(|| lane.leaf_id.clone())
-                } else {
-                    lane.leaf_id.clone()
-                }
-            })
-            .or_else(|| latest_main_entry());
+        let parent_id = Reducer::reduce(&self.store)
+            .ok()
+            .and_then(|state| state.lane("main").and_then(|lane| lane.leaf_id.clone()))
+            .or_else(|| {
+                self.store
+                    .entries()
+                    .iter()
+                    .rev()
+                    .find(|entry| entry.lane == "main")
+                    .map(|entry| entry.id.clone())
+            });
         let seq = self.next_seq();
         let terminate = matches!(
             &message,
@@ -1548,9 +1946,12 @@ impl CodingSessionHarness {
         // Tool completions are recorded both by the execution lifecycle and
         // by the model-visible transcript.  They may be separated by other
         // journal records, so checking only the last entry is insufficient.
-        if self.store.entries().iter().any(|entry| {
-            entry.id == id && entry.message == message
-        }) {
+        if self
+            .store
+            .entries()
+            .iter()
+            .any(|entry| entry.id == id && entry.message == message)
+        {
             return Ok(id);
         }
         self.store
@@ -1561,7 +1962,15 @@ impl CodingSessionHarness {
                 seq,
                 timestamp: timestamp(),
                 message,
-                surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
+                surface_op: if context_restoration {
+                    threadlane_runtime::harness::SurfaceOperation::Replace {
+                        start_seq: seq,
+                        end_seq: seq.saturating_sub(1),
+                        source_event_seqs: Vec::new(),
+                    }
+                } else {
+                    threadlane_runtime::harness::SurfaceOperation::Append
+                },
                 terminate,
             })
             .map_err(|error| error.to_string())?;
@@ -1578,7 +1987,7 @@ impl CodingSessionHarness {
         run_id: &str,
         message: AgentMessage,
     ) -> Result<String, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let prefix = format!("subagent-entry-{run_id}-");
         if matches!(
             message,
@@ -1685,7 +2094,7 @@ impl CodingSessionHarness {
     /// Prepare an assistant attempt record for the given run.  Returns
     /// the result entry id that the assistant message should carry.
     pub(crate) fn prepare_assistant_attempt(&mut self, run_id: &str) -> Result<String, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let state = Reducer::reduce(&self.store).map_err(|error| error.to_string())?;
         let lane = state
             .lane("main")
@@ -1740,7 +2149,7 @@ impl CodingSessionHarness {
         run_id: &str,
         usage: TokenUsage,
     ) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let start_seq = self
             .store
             .records()
@@ -1778,7 +2187,7 @@ impl CodingSessionHarness {
         tool_name: &str,
         effective_args: Value,
     ) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         if self.store.records().iter().any(|record| {
             matches!(record, HarnessRecord::ToolStarted {
                 run_id: record_run_id,
@@ -1845,7 +2254,7 @@ impl CodingSessionHarness {
         tool_name: &str,
         effective_args: Value,
     ) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         if self.store.records().iter().any(|record| {
             matches!(record, HarnessRecord::ToolStarted {
                 run_id: record_run_id,
@@ -1931,7 +2340,7 @@ impl CodingSessionHarness {
         else {
             return Ok(());
         };
-        self.refresh()?;
+        self.ensure_fresh()?;
         self.store
             .finish_existing_tool(
                 run_id,
@@ -1955,7 +2364,7 @@ impl CodingSessionHarness {
         run_id: &str,
         result: &AgentToolResult,
     ) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         self.store
             .finish_tool(
                 run_id,
@@ -1979,7 +2388,7 @@ impl CodingSessionHarness {
         run_id: &str,
         result: &AgentToolResult,
     ) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         self.store
             .finish_existing_tool(
                 run_id,
@@ -2003,7 +2412,7 @@ impl CodingSessionHarness {
         run_id: &str,
         termination: &HashMap<String, bool>,
     ) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let start_seq = self
             .store
             .records()
@@ -2133,7 +2542,7 @@ impl CodingSessionHarness {
         run_id: &str,
         usage: TokenUsage,
     ) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         self.store
             .record_provider_usage(run_id, usage)
             .map_err(|error| error.to_string())?;
@@ -2148,7 +2557,7 @@ impl CodingSessionHarness {
         run_id: &str,
         usage: TokenUsage,
     ) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         self.store
             .record_discarded_usage(run_id, usage)
             .map_err(|error| error.to_string())?;
@@ -2161,7 +2570,7 @@ impl CodingSessionHarness {
 
     /// Schedule a retry for a failed run.
     pub(crate) fn schedule_retry(&mut self, run_id: &str, reason: &str) -> Result<u32, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let attempt = self
             .store
             .schedule_retry(
@@ -2182,7 +2591,7 @@ impl CodingSessionHarness {
 
     /// Begin a previously scheduled retry attempt.
     pub(crate) fn begin_retry(&mut self, run_id: &str) -> Result<u32, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let attempt = self
             .store
             .begin_retry(run_id)
@@ -2201,7 +2610,7 @@ impl CodingSessionHarness {
         run_id: &str,
         resolution: DeferredResolution,
     ) -> Result<bool, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let terminal = self
             .store
             .redeem_deferred(run_id, resolution)
@@ -2219,7 +2628,7 @@ impl CodingSessionHarness {
 
     /// Accept a compaction summary.
     pub(crate) fn accept_compaction(&mut self, run_id: &str, summary: &str) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         self.store
             .accept_compaction(run_id, summary)
             .map_err(|error| error.to_string())?;
@@ -2232,7 +2641,7 @@ impl CodingSessionHarness {
 
     /// Set a session-level fact.
     pub(crate) fn set_fact(&mut self, lane: &str, key: &str, value: String) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         self.store
             .set_fact(lane, key, value, None)
             .map_err(|error| error.to_string())?;
@@ -2369,7 +2778,7 @@ impl CodingSessionHarness {
         &mut self,
         branch_ids: &[String],
     ) -> Result<Option<String>, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let mut harness_target_id = None;
         for legacy_id in branch_ids {
             let entry = self
@@ -2393,13 +2802,13 @@ impl CodingSessionHarness {
 
     /// Take a point-in-time snapshot of the session.
     pub(crate) fn snapshot(&mut self) -> Result<Snapshot, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         self.store.snapshot().map_err(|error| error.to_string())
     }
 
     /// Subscribe to session-scoped events.
     pub(crate) fn watch(&mut self) -> Result<HarnessWatch, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let subscription = self
             .store
             .watch_session()
@@ -2421,64 +2830,11 @@ impl CodingSessionHarness {
 
     /// Re-read the store from disk to pick up external writes.
     pub(crate) fn refresh(&mut self) -> Result<(), String> {
-        let path = self.store.store().path().to_path_buf();
-        let hooks = std::mem::take(self.store.hooks_mut());
-        let events = self.events.clone();
-        let cancellation = self.cancellation.clone();
-        match JsonlStore::open(&path) {
-            Ok(store) => {
-                let persist_path = path.clone();
-                let persist_events = events.clone();
-                let executor = move |action: EffectAction| {
-                    let mut store = JsonlStore::open(&persist_path)
-                        .map_err(|error| ReduceError::Storage(error.to_string()))?;
-                    if let Err(error) = action.apply(&mut store) {
-                        persist_events.publish(EventPayload::Fault(error.to_string()));
-                        return Err(error);
-                    }
-                    let (payload, lane, run_id, turn) = match &action {
-                        EffectAction::AppendEntry { entry } => (
-                            EventPayload::EntryCommitted(entry.clone()),
-                            Some(entry.lane.clone()),
-                            None,
-                            None,
-                        ),
-                        EffectAction::AppendRecord { record, .. } => (
-                            EventPayload::RecordCommitted(record.clone()),
-                            Some(record.lane().to_owned()),
-                            record.run_id().map(str::to_owned),
-                            record.turn(),
-                        ),
-                    };
-                    persist_events.publish_identified_with_turn(payload, lane, run_id, turn, None);
-                    Ok(())
-                };
-                *self.store.hooks_mut() = hooks;
-                self.store = AgentHarness::with_executor_and_hooks(
-                    store,
-                    events,
-                    executor,
-                    self.store.hooks().clone(),
-                );
-                let _ = cancellation;
-                Ok(())
-            }
-            Err(error) => {
-                *self.store.hooks_mut() = hooks;
-                Err(error.to_string())
-            }
-        }
+        self.ensure_fresh()
     }
 
     fn next_seq(&self) -> u64 {
-        self.store
-            .entries()
-            .iter()
-            .map(|entry| entry.seq)
-            .chain(self.store.records().iter().map(HarnessRecord::seq))
-            .max()
-            .unwrap_or(0)
-            + 1
+        self.store.store().next_sequence()
     }
 
     /// Legacy test/repair helper for journal-free or recovery-only callers.
@@ -2488,7 +2844,7 @@ impl CodingSessionHarness {
     /// complete mutable provider transcript after the fact.
     #[cfg(test)]
     pub(crate) fn sync_messages(&mut self, messages: &[AgentMessage]) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         // The provider gives us the complete conversation, not stable entry
         // IDs.  Track occurrences rather than using a set: two turns can
         // legitimately produce byte-for-byte identical assistant messages,
@@ -2518,7 +2874,7 @@ impl CodingSessionHarness {
                 }
             }
             if let AgentMessage::Tool { tool_call_id, .. } = msg {
-                self.refresh()?;
+                self.ensure_fresh()?;
                 let unfinished_tool = Reducer::reduce(self.store.store()).ok().and_then(|state| {
                     let lane = state.lane("main")?;
                     let run_id = lane.open_operation.as_deref()?;
@@ -2550,7 +2906,7 @@ impl CodingSessionHarness {
         Ok(())
     }
     pub(crate) fn assert_model_visible(&mut self, messages: &[AgentMessage]) -> Result<(), String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let logged = self
             .store
             .model_context("main")
@@ -2673,7 +3029,7 @@ impl CodingSessionHarness {
         &mut self,
         lane: &str,
     ) -> Result<threadlane_runtime::harness::RecoveryPlan, String> {
-        self.refresh()?;
+        self.ensure_fresh()?;
         let agent = threadlane_runtime::harness::SessionAgent::new(AgentHarness::new(
             self.store.store().clone(),
         ));
@@ -2705,14 +3061,7 @@ fn timestamp() -> u64 {
 }
 
 fn harness_next_seq(store: &JsonlStore) -> u64 {
-    store
-        .entries()
-        .iter()
-        .map(|entry| entry.seq)
-        .chain(store.records().iter().map(HarnessRecord::seq))
-        .max()
-        .unwrap_or(0)
-        + 1
+    store.next_sequence()
 }
 #[cfg(test)]
 mod tests {
@@ -2721,6 +3070,539 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
         (dir, path)
+    }
+
+    fn open_long_run(path: &Path) -> CodingSessionHarness {
+        let mut harness = CodingSessionHarness::open(path).unwrap();
+        harness
+            .begin_run("run-compact", AgentMessage::user("start", vec![]))
+            .unwrap();
+        for index in 0..28 {
+            harness
+                .append_message(AgentMessage::user(
+                    format!("history-{index}-{}", "x".repeat(16_000)),
+                    vec![],
+                ))
+                .unwrap();
+        }
+        harness
+    }
+
+    fn boundary_request(overflow_recovery: bool) -> ProviderBoundaryRequest {
+        ProviderBoundaryRequest {
+            attempt: 1,
+            model: "unknown/test-model".into(),
+            messages: Vec::new(),
+            tool_schema_json: None,
+            overflow_recovery,
+        }
+    }
+
+    #[test]
+    fn provider_identity_survives_reopen_of_same_open_run() {
+        let (_dir, path) = temp_session();
+        let accepted = {
+            let mut harness = CodingSessionHarness::open(&path).unwrap();
+            let accepted = harness
+                .begin_run("restart-run", AgentMessage::user("hello", vec![]))
+                .unwrap();
+            let first = harness
+                .prepare_provider_boundary(
+                    "restart-run",
+                    boundary_request(false),
+                    &AgentConfig::default(),
+                )
+                .unwrap();
+            let attempt = first.provider_attempt.unwrap();
+            let request_id = first.provider_request_id.unwrap();
+            harness
+                .record_provider_trace(
+                    "restart-run",
+                    ProviderTraceEvent::Started {
+                        attempt,
+                        request_id,
+                        model: "unknown/test-model".into(),
+                        provider: "fake".into(),
+                    },
+                )
+                .unwrap();
+            accepted
+        };
+
+        let mut resumed = CodingSessionHarness::open(&path).unwrap();
+        resumed.validate_accepted_run(&accepted).unwrap();
+        let second = resumed
+            .prepare_provider_boundary(
+                "restart-run",
+                boundary_request(false),
+                &AgentConfig::default(),
+            )
+            .unwrap();
+        assert_eq!(second.provider_attempt, Some(2));
+        let second_request_id = second.provider_request_id.clone().unwrap();
+        resumed
+            .record_provider_trace(
+                "restart-run",
+                ProviderTraceEvent::Started {
+                    attempt: second.provider_attempt.unwrap(),
+                    request_id: second_request_id,
+                    model: "unknown/test-model".into(),
+                    provider: "fake".into(),
+                },
+            )
+            .unwrap();
+
+        let starts: Vec<_> = resumed
+            .store
+            .store()
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                HarnessRecord::ProviderRequestStarted {
+                    id,
+                    attempt,
+                    request_id: Some(request_id),
+                    ..
+                } => Some((id, *attempt, request_id.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(starts.len(), 2);
+        assert_eq!((starts[0].1, starts[1].1), (1, 2));
+        assert_ne!(starts[0].0, starts[1].0);
+        assert_ne!(starts[0].2, starts[1].2);
+        assert!(Reducer::reduce(resumed.store.store()).is_ok());
+    }
+    #[test]
+    fn adaptive_compaction_commits_before_next_provider_attempt() {
+        let (_dir, path) = temp_session();
+        let mut harness = open_long_run(&path);
+        harness
+            .prepare_provider_boundary(
+                "run-compact",
+                boundary_request(false),
+                &AgentConfig::default(),
+            )
+            .unwrap();
+        harness
+            .record_provider_trace(
+                "run-compact",
+                ProviderTraceEvent::Started {
+                    attempt: 1,
+                    request_id: "request-after-compaction".into(),
+                    model: "unknown/test-model".into(),
+                    provider: "fake".into(),
+                },
+            )
+            .unwrap();
+        let compacted_seq = harness
+            .store
+            .records()
+            .iter()
+            .find_map(|record| match record {
+                HarnessRecord::ContextCompacted {
+                    seq,
+                    reason: CompactionReason::AdaptiveBudget,
+                    ..
+                } => Some(*seq),
+                _ => None,
+            })
+            .expect("adaptive compaction");
+        let start_seq = harness
+            .store
+            .records()
+            .iter()
+            .find_map(|record| match record {
+                HarnessRecord::ProviderRequestStarted { seq, .. } if *seq > compacted_seq => {
+                    Some(*seq)
+                }
+                _ => None,
+            })
+            .expect("provider start after compaction");
+        assert!(compacted_seq < start_seq);
+        assert_eq!(
+            Reducer::reduce(&harness.store)
+                .unwrap()
+                .lane("main")
+                .unwrap()
+                .open_operation
+                .as_deref(),
+            Some("run-compact"),
+            "provider-boundary compaction must preserve the foreground run"
+        );
+    }
+
+    #[test]
+    fn reload_uses_checkpoint_tail_but_transcript_keeps_original_entries() {
+        let (_dir, path) = temp_session();
+        let mut harness = open_long_run(&path);
+        harness
+            .prepare_provider_boundary(
+                "run-compact",
+                boundary_request(false),
+                &AgentConfig::default(),
+            )
+            .unwrap();
+        drop(harness);
+        let reloaded = CodingSessionHarness::open(&path).unwrap();
+        let context = reloaded.model_context("main").unwrap();
+        assert!(context.checkpoint.is_some());
+        assert!(reloaded.transcript("main").entries.len() > context.entries.len());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compaction_persistence_failure_appends_no_checkpoint_prefix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_dir, path) = temp_session();
+        let mut harness = open_long_run(&path);
+        let original = fs::metadata(&path).unwrap().permissions();
+        let canonical = fs::read(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+        let result = harness.prepare_provider_boundary(
+            "run-compact",
+            boundary_request(false),
+            &AgentConfig::default(),
+        );
+        fs::set_permissions(&path, original).unwrap();
+        assert!(result.is_err());
+        assert_eq!(fs::read(&path).unwrap(), canonical);
+        assert!(!harness
+            .store
+            .records()
+            .iter()
+            .any(|record| matches!(record, HarnessRecord::ProviderRequestStarted { .. })));
+    }
+
+    #[test]
+    fn ineffective_compaction_retries_once() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        harness
+            .begin_run(
+                "run-compact",
+                AgentMessage::user("x".repeat(50_000), vec![]),
+            )
+            .unwrap();
+        harness
+            .append_message(AgentMessage::user("y".repeat(50_000), vec![]))
+            .unwrap();
+        // The oversized accepted tail survives the normal checkpoint, so the
+        // strict pass is attempted and deterministically cannot drop further.
+        harness
+            .append_message(AgentMessage::user("z".repeat(500_000), vec![]))
+            .unwrap();
+        let result = harness.prepare_provider_boundary(
+            "run-compact",
+            boundary_request(false),
+            &AgentConfig::default(),
+        );
+        let error = result.expect_err("strict compaction must remain over budget");
+        assert_eq!(
+            error,
+            "context preparation could not drop historical messages"
+        );
+        let attempts = harness
+            .store
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                HarnessRecord::ContextCompacted {
+                    generation,
+                    reason: CompactionReason::AdaptiveBudget,
+                    run_id,
+                    ..
+                } => Some((*generation, run_id.as_str())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        // The normal attempt commits generation 1. The exact terminal error
+        // proves the second (strict) attempt ran and found no further droppable
+        // history; there is no recursive third checkpoint.
+        assert_eq!(attempts, vec![(1, "run-compact")]);
+    }
+
+    #[test]
+    fn provider_overflow_retries_once() {
+        let (_dir, path) = temp_session();
+        let mut harness = open_long_run(&path);
+        harness
+            .prepare_provider_boundary(
+                "run-compact",
+                boundary_request(true),
+                &AgentConfig::default(),
+            )
+            .unwrap();
+        let recoveries = harness
+            .store
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                HarnessRecord::ContextCompacted {
+                    generation,
+                    reason: CompactionReason::OverflowRecovery,
+                    run_id,
+                    pre_tokens,
+                    post_tokens,
+                    ..
+                } => Some((*generation, run_id.as_str(), *pre_tokens, *post_tokens)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(recoveries.len(), 1);
+        assert_eq!(recoveries[0].0, 1);
+        assert_eq!(recoveries[0].1, "run-compact");
+        assert!(recoveries[0].2 > recoveries[0].3);
+        assert_eq!(
+            Reducer::reduce(&harness.store)
+                .unwrap()
+                .lane("main")
+                .unwrap()
+                .open_operation
+                .as_deref(),
+            Some("run-compact")
+        );
+    }
+
+    #[test]
+    fn retained_tail_appends_equal_occurrences_without_value_deduplication() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        harness
+            .begin_run("run-compact", AgentMessage::user("old", vec![]))
+            .unwrap();
+        let repeated = AgentMessage::user("repeat", vec![]);
+        let summary = AgentMessage::Custom {
+            custom_type: "compaction_summary".into(),
+            payload: serde_json::json!({ "summary": "summary" }),
+        };
+        harness
+            .commit_prepared_compaction(
+                "run-compact",
+                "unknown/test-model",
+                None,
+                &AgentConfig::default(),
+                context_budget("unknown/test-model", &AgentConfig::default()),
+                CompactionReason::AdaptiveBudget,
+                PreparedCompaction {
+                    messages: vec![summary, repeated.clone(), repeated.clone()],
+                    pre_tokens: 100,
+                    post_tokens: 20,
+                    compacted_messages: 1,
+                    retained_tail_target: 12,
+                    retained_tail_tokens: 10,
+                },
+            )
+            .unwrap();
+
+        let context = harness.model_context("main").unwrap().messages();
+        assert_eq!(context.len(), 3);
+        assert_eq!(context[1], repeated);
+        assert_eq!(context[2], repeated);
+        let compacted = harness
+            .store
+            .records()
+            .iter()
+            .find_map(|record| match record {
+                HarnessRecord::ContextCompacted {
+                    retained_tail_target,
+                    retained_tail_tokens,
+                    ..
+                } => Some((*retained_tail_target, *retained_tail_tokens)),
+                _ => None,
+            })
+            .expect("compaction telemetry");
+        assert_eq!(compacted, (12, 10));
+        let tail_entries = harness
+            .store
+            .entries()
+            .iter()
+            .rev()
+            .take(2)
+            .collect::<Vec<_>>();
+        assert_ne!(tail_entries[0].id, tail_entries[1].id);
+        assert_eq!(tail_entries[0].message, tail_entries[1].message);
+    }
+
+    #[test]
+    fn manual_compaction_telemetry_reports_true_pre_post_and_removed_count() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        let config = AgentConfig::default();
+        harness
+            .begin_run(
+                "run",
+                AgentMessage::user(format!("old-{}", "x".repeat(4_000)), vec![]),
+            )
+            .unwrap();
+        harness
+            .append_message(AgentMessage::Assistant {
+                content: Some("discarded".repeat(500)),
+                tool_calls: None,
+                stop_reason: None,
+                deferred_handle: None,
+            })
+            .unwrap();
+        let before = harness.model_context("main").unwrap().messages();
+        let pre_tokens = estimate_request_tokens(&before, None, &config);
+        let compacted_messages = 2;
+        harness
+            .checkpoint_open_run_compaction("run", "durable summary", CompactionReason::Manual)
+            .unwrap();
+        let tail = AgentMessage::user("tail", vec![]);
+        let retained_tail_tokens =
+            estimate_request_tokens(std::slice::from_ref(&tail), None, &config);
+        harness.append_message_occurrence(tail).unwrap();
+        let expected_post = estimate_request_tokens(
+            &harness.model_context("main").unwrap().messages(),
+            None,
+            &config,
+        );
+        harness
+            .record_manual_compaction(
+                "run",
+                "unknown/test-model",
+                &config,
+                pre_tokens,
+                retained_tail_tokens,
+                compacted_messages,
+            )
+            .unwrap();
+
+        let telemetry = harness
+            .store
+            .records()
+            .iter()
+            .find_map(|record| match record {
+                HarnessRecord::ContextCompacted {
+                    reason: CompactionReason::Manual,
+                    pre_tokens,
+                    post_tokens,
+                    retained_tail_tokens,
+                    compacted_messages,
+                    ..
+                } => Some((
+                    *pre_tokens,
+                    *post_tokens,
+                    *retained_tail_tokens,
+                    *compacted_messages,
+                )),
+                _ => None,
+            })
+            .expect("manual compaction telemetry");
+        assert_eq!(
+            telemetry,
+            (
+                pre_tokens,
+                expected_post,
+                retained_tail_tokens,
+                compacted_messages,
+            )
+        );
+        assert!(telemetry.1 < telemetry.0);
+    }
+
+    #[test]
+    fn cancellation_before_compaction_has_no_partial_operation_or_provider_start() {
+        let (_dir, path) = temp_session();
+        let mut harness = open_long_run(&path);
+        harness.request_abort().unwrap();
+        let abort_seq = harness
+            .store
+            .records()
+            .iter()
+            .find_map(|record| match record {
+                HarnessRecord::AbortRequested { seq, .. } => Some(*seq),
+                _ => None,
+            })
+            .expect("abort record");
+        assert!(harness
+            .prepare_provider_boundary(
+                "run-compact",
+                boundary_request(false),
+                &AgentConfig::default(),
+            )
+            .is_err());
+        assert!(!harness.store.records().iter().any(|record| {
+            matches!(record, HarnessRecord::ContextCompacted { seq, .. } if *seq > abort_seq)
+                || matches!(record, HarnessRecord::ProviderRequestStarted { seq, .. } if *seq > abort_seq)
+        }));
+    }
+
+    #[test]
+    fn cancellation_after_accepted_checkpoint_keeps_complete_canonical_state() {
+        let (_dir, path) = temp_session();
+        let mut harness = open_long_run(&path);
+        harness
+            .prepare_provider_boundary(
+                "run-compact",
+                boundary_request(false),
+                &AgentConfig::default(),
+            )
+            .unwrap();
+        let compacted = harness.model_context("main").unwrap();
+        let checkpoint = compacted.checkpoint.clone().expect("accepted checkpoint");
+        assert!(
+            compacted.messages().len() > 1,
+            "retained tail was committed"
+        );
+        let compacted_seq = harness
+            .store
+            .records()
+            .iter()
+            .find_map(|record| match record {
+                HarnessRecord::ContextCompacted { seq, .. } => Some(*seq),
+                _ => None,
+            })
+            .expect("completed compaction telemetry");
+
+        harness.request_abort().unwrap();
+        let error = harness
+            .prepare_provider_boundary(
+                "run-compact",
+                boundary_request(false),
+                &AgentConfig::default(),
+            )
+            .expect_err("accepted cancellation blocks subsequent provider preparation");
+        assert_eq!(error, "context preparation cancelled");
+        assert!(!harness.store.records().iter().any(|record| {
+            matches!(record, HarnessRecord::ContextCompacted { seq, .. } if *seq > compacted_seq)
+                || matches!(record, HarnessRecord::ProviderRequestStarted { .. })
+        }));
+
+        drop(harness);
+        let reloaded = CodingSessionHarness::open(&path).unwrap();
+        let reloaded_context = reloaded.model_context("main").unwrap();
+        assert_eq!(reloaded_context.checkpoint, Some(checkpoint));
+        let expected_json = serde_json::to_vec(&reloaded_context.messages()).unwrap();
+        drop(reloaded);
+        let reloaded = CodingSessionHarness::open(&path).unwrap();
+        let second_json =
+            serde_json::to_vec(&reloaded.model_context("main").unwrap().messages()).unwrap();
+        assert_eq!(
+            (second_json.len(), Sha256::digest(&second_json)),
+            (expected_json.len(), Sha256::digest(&expected_json))
+        );
+        assert_eq!(
+            Reducer::reduce(&reloaded.store)
+                .unwrap()
+                .lane("main")
+                .unwrap()
+                .open_operation
+                .as_deref(),
+            Some("run-compact")
+        );
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn path_scoped_async_helper_uses_blocking_worker() {
+        let (_dir, path) = temp_session();
+        let caller = std::thread::current().id();
+        let result = AgentToolResult::external("missing", "read_file", "result", false);
+
+        let _ = CodingSessionHarness::record_tool_result_to_path(&path, "run", &result).await;
+
+        assert_ne!(last_path_operation_thread().unwrap(), caller);
     }
 
     #[tokio::test]
@@ -2839,18 +3721,30 @@ mod tests {
         let left_path = path.clone();
         let right_path = path.clone();
         let left = tokio::spawn(async move {
-            CodingSessionHarness::record_tool_execution_to_path(&left_path, "run-1", started("call-1"))
-                .await
+            CodingSessionHarness::record_tool_execution_to_path(
+                &left_path,
+                "run-1",
+                started("call-1"),
+            )
+            .await
         });
         let right = tokio::spawn(async move {
-            CodingSessionHarness::record_tool_execution_to_path(&right_path, "run-1", started("call-2"))
-                .await
+            CodingSessionHarness::record_tool_execution_to_path(
+                &right_path,
+                "run-1",
+                started("call-2"),
+            )
+            .await
         });
         left.await.unwrap().unwrap();
         right.await.unwrap().unwrap();
 
         let store = JsonlStore::open(&path).unwrap();
-        let sequences = store.records().iter().map(HarnessRecord::seq).collect::<Vec<_>>();
+        let sequences = store
+            .records()
+            .iter()
+            .map(HarnessRecord::seq)
+            .collect::<Vec<_>>();
         assert!(sequences.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
@@ -2960,6 +3854,53 @@ mod tests {
     }
 
     #[test]
+    fn subagent_start_returns_accepted_child_run_while_main_is_busy() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        let parent = harness
+            .begin_run("parent-run", AgentMessage::user("parent prompt", vec![]))
+            .unwrap();
+
+        let started = harness
+            .start_subagent_lane("worker", "inspect", Some(&parent.prompt_entry_id))
+            .unwrap();
+
+        assert_eq!(started.accepted.run_id, started.identity.run_id);
+        assert_eq!(started.accepted.lane, started.identity.lane_name);
+        assert!(started.accepted.accepted_through_seq >= started.identity.started_seq);
+        harness.validate_accepted_run(&started.accepted).unwrap();
+
+        let state = Reducer::reduce(harness.store.store()).unwrap();
+        assert_eq!(
+            state
+                .lane("main")
+                .and_then(|lane| lane.open_operation.as_deref()),
+            Some("parent-run")
+        );
+        assert_eq!(
+            harness
+                .store
+                .records()
+                .iter()
+                .filter(|record| matches!(
+                    record,
+                    HarnessRecord::OperationStarted { lane, .. } if lane == "main"
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            harness
+                .store
+                .entries()
+                .iter()
+                .filter(|entry| entry.lane == "main"
+                    && matches!(entry.message, AgentMessage::User { .. }))
+                .count(),
+            1
+        );
+    }
+    #[test]
     fn invalid_subagent_source_is_not_retained_for_passive_commit() {
         let (_dir, path) = temp_session();
         let mut harness = CodingSessionHarness::open(&path).unwrap();
@@ -2968,14 +3909,14 @@ mod tests {
             .start_subagent_lane("worker", "inspect", Some("node_69"))
             .unwrap();
 
-        assert!(identity.source_leaf_id.is_none());
+        assert!(identity.identity.source_leaf_id.is_none());
         assert!(harness.store.records().iter().any(|record| matches!(
             record,
             HarnessRecord::OperationStarted {
                 lane,
                 source_leaf_id: None,
                 ..
-            } if lane == &identity.lane_name
+            } if lane == &identity.identity.lane_name
         )));
     }
 
@@ -3122,66 +4063,6 @@ mod tests {
                 .iter()
                 .any(|e| matches!(&e.message, AgentMessage::Assistant { .. })),
             "assistant entry should be present"
-        );
-    }
-
-    #[test]
-    fn main_tool_result_stays_on_the_active_branch() {
-        let (_dir, path) = temp_session();
-        let mut harness = CodingSessionHarness::open(&path).unwrap();
-        let run_id = harness.unique_run_id("test").unwrap();
-        harness
-            .begin_run(&run_id, AgentMessage::user("inspect", vec![]))
-            .unwrap();
-        harness.prepare_assistant_attempt(&run_id).unwrap();
-        harness
-            .append_message(AgentMessage::Assistant {
-                content: None,
-                tool_calls: Some(vec![threadlane_provider::openai::ToolCall {
-                    id: "call-1".into(),
-                    r#type: "function".into(),
-                    function: threadlane_provider::openai::ToolCallFunction {
-                        name: "read_file".into(),
-                        arguments: "{}".into(),
-                    },
-                    thought_signature: None,
-                }]),
-                stop_reason: None,
-                deferred_handle: None,
-            })
-            .unwrap();
-        harness
-            .append_message(AgentMessage::Tool {
-                tool_call_id: "call-1".into(),
-                name: "read_file".into(),
-                content: "done".into(),
-                is_error: false,
-                terminate: false,
-            })
-            .unwrap();
-        harness
-            .append_message(AgentMessage::Assistant {
-                content: Some("finished".into()),
-                tool_calls: None,
-                stop_reason: Some("end_turn".into()),
-                deferred_handle: None,
-            })
-            .unwrap();
-
-        let store = threadlane_runtime::harness::JsonlStore::open_read_only(&path).unwrap();
-        let branch = store.model_context("main").unwrap().messages();
-        assert!(matches!(
-            branch.get(1),
-            Some(AgentMessage::Assistant {
-                tool_calls: Some(_),
-                ..
-            })
-        ));
-        assert!(
-            matches!(branch.get(2), Some(AgentMessage::Tool { tool_call_id, .. }) if tool_call_id == "call-1")
-        );
-        assert!(
-            matches!(branch.get(3), Some(AgentMessage::Assistant { content: Some(content), .. }) if content == "finished")
         );
     }
 

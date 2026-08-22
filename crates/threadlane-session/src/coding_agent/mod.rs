@@ -1,6 +1,6 @@
 pub(crate) mod broker;
-pub(crate) mod capabilities;
 pub mod cancellation;
+pub(crate) mod capabilities;
 pub mod durable;
 pub mod harness;
 pub mod options;

@@ -205,8 +205,8 @@ impl SubagentToolExecutor {
         "threadlane.host.subagent"
     }
 
-    fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
-        vec![subagent_tool_definition()]
+    fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
+        vec![subagent_tool_definition()].into()
     }
 
     async fn execute_tool_impl(
@@ -312,7 +312,7 @@ impl ToolExecutor for SubagentToolExecutor {
         SubagentToolExecutor::executor_id(self)
     }
 
-    fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
+    fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
         SubagentToolExecutor::tool_definitions(self)
     }
 
@@ -635,7 +635,7 @@ impl ToolExecutor for BrokerAwareWasiToolExecutor {
         "threadlane.wasi_broker_tools"
     }
 
-    fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
+    fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
         self.extensions.tool_definitions()
     }
 

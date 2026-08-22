@@ -133,7 +133,10 @@ pub(crate) fn disconnect_gitlab() -> Result<(), String> {
     threadlane_auth::github_auth::remove_gitlab_credentials()
 }
 
-pub(crate) fn test_openai_connection(key: Option<String>, tx: Sender<ProviderAuthEvent>) -> Result<(), String> {
+pub(crate) fn test_openai_connection(
+    key: Option<String>,
+    tx: Sender<ProviderAuthEvent>,
+) -> Result<(), String> {
     let _ = tx.send(ProviderAuthEvent::Status(
         "Validating OpenAI connection...".to_string(),
     ));
@@ -142,7 +145,8 @@ pub(crate) fn test_openai_connection(key: Option<String>, tx: Sender<ProviderAut
         let api_key = key.filter(|k| !k.trim().is_empty());
         if !has_oauth && api_key.is_none() {
             let _ = tx.send(ProviderAuthEvent::Error(
-                "No OpenAI credentials configured. Enter an API key or sign in with ChatGPT.".to_string(),
+                "No OpenAI credentials configured. Enter an API key or sign in with ChatGPT."
+                    .to_string(),
             ));
             return;
         }
@@ -185,7 +189,8 @@ pub(crate) fn test_antigravity_connection(tx: Sender<ProviderAuthEvent>) -> Resu
             }
             None => {
                 let _ = tx.send(ProviderAuthEvent::Error(
-                    "No Google Antigravity credentials found. Sign in with Google first.".to_string(),
+                    "No Google Antigravity credentials found. Sign in with Google first."
+                        .to_string(),
                 ));
             }
         }
@@ -193,7 +198,10 @@ pub(crate) fn test_antigravity_connection(tx: Sender<ProviderAuthEvent>) -> Resu
     Ok(())
 }
 
-pub(crate) fn test_opencode_connection(key: &str, tx: Sender<ProviderAuthEvent>) -> Result<(), String> {
+pub(crate) fn test_opencode_connection(
+    key: &str,
+    tx: Sender<ProviderAuthEvent>,
+) -> Result<(), String> {
     let key = key.to_string();
     let _ = tx.send(ProviderAuthEvent::Status(
         "Validating OpenCode connection...".to_string(),

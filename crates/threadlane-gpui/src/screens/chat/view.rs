@@ -1,16 +1,20 @@
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
+use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use std::time::Duration;
 
 use base64::Engine as _;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::button::{Button, ButtonVariants, Toggle, ToggleVariants};
 use gpui_component::collapsible::Collapsible;
 use gpui_component::hover_card::HoverCard;
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::notification::Notification;
+use gpui_component::popover::Popover;
 use gpui_component::progress::ProgressCircle;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::tag::{Tag, TagVariant};
@@ -20,10 +24,130 @@ use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable, WindowExt
 
 use crate::app::{actions::AppAction, controller};
 use crate::screens::editor::EditorView;
-use crate::state::{
-    compute_older_message_page, AppState, ChatMessageInfo, MessageRole, ToolActivityInfo,
-};
-use threadlane_session::commands::available_slash_commands;
+use crate::state::{AppState, ChatMessageInfo, MessageRole, ToolActivityInfo, TrajectoryEntry};
+
+#[derive(Clone, Debug)]
+struct ContextMeterContext {
+    current_tokens: u64,
+    context_limit: u64,
+    context_limit_is_estimate: bool,
+    effective_model: String,
+    last_compaction_seq: Option<u64>,
+    provisional: bool,
+    estimating: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ContextMeterMetrics {
+    billed_input_tokens: u64,
+    output_tokens: u64,
+    cache_hit_percent: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ContextMeterViewModel {
+    percent: Option<f64>,
+    bar_percent: f64,
+    current_label: String,
+    detail_label: String,
+    total_processed_label: String,
+    cache_hit_label: Option<String>,
+    effective_model: Option<String>,
+    last_compaction_seq: Option<u64>,
+    provisional: bool,
+}
+
+#[derive(IntoElement)]
+struct ContextMeterTrigger {
+    toggle: Toggle,
+    selected: bool,
+}
+
+impl Selectable for ContextMeterTrigger {
+    fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    fn is_selected(&self) -> bool {
+        self.selected
+    }
+}
+
+impl RenderOnce for ContextMeterTrigger {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        self.toggle.checked(self.selected)
+    }
+}
+
+fn format_meter_tokens(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.1}k", tokens as f64 / 1_000.0)
+    } else {
+        tokens.to_string()
+    }
+}
+
+fn context_meter_view_model(
+    context: Option<&ContextMeterContext>,
+    metrics: &ContextMeterMetrics,
+) -> ContextMeterViewModel {
+    let total_processed = metrics
+        .billed_input_tokens
+        .saturating_add(metrics.output_tokens);
+    let cache_hit_label = metrics.cache_hit_percent.map(|value| format!("{value}%"));
+
+    let Some(context) = context else {
+        return ContextMeterViewModel {
+            percent: None,
+            bar_percent: 0.0,
+            current_label: "Estimating…".into(),
+            detail_label: "Context usage details, estimating usage".into(),
+            total_processed_label: format_meter_tokens(total_processed),
+            cache_hit_label,
+            effective_model: None,
+            last_compaction_seq: None,
+            provisional: false,
+        };
+    };
+
+    let unknown = context.estimating || context.context_limit == 0;
+    let percent =
+        (!unknown).then(|| context.current_tokens as f64 / context.context_limit as f64 * 100.0);
+    let limit_prefix = if context.context_limit_is_estimate {
+        "~"
+    } else {
+        ""
+    };
+    let current_label = if unknown {
+        "Estimating…".into()
+    } else {
+        format!(
+            "{} / {limit_prefix}{}",
+            format_meter_tokens(context.current_tokens),
+            format_meter_tokens(context.context_limit)
+        )
+    };
+    let detail_label = percent.map_or_else(
+        || "Context usage details, estimating usage".into(),
+        |percent| format!("Context usage details, {percent:.0}% used"),
+    );
+    ContextMeterViewModel {
+        percent,
+        bar_percent: percent.unwrap_or_default().clamp(0.0, 100.0),
+        current_label,
+        detail_label,
+        total_processed_label: format_meter_tokens(total_processed),
+        cache_hit_label,
+        effective_model: (!context.effective_model.is_empty())
+            .then(|| context.effective_model.clone()),
+        last_compaction_seq: context.last_compaction_seq,
+        provisional: context.provisional,
+    }
+}
+use threadlane_session::commands::{available_slash_commands, SlashCommandInfo};
 use threadlane_session::{ImageAttachment, PlanItemStatus, ReasoningEffort, SessionPlan};
 
 actions!(threadlane_composer, [PasteClipboard]);
@@ -60,6 +184,212 @@ enum TrajectoryInspectorTab {
     Source,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MarkdownUpdate<'a> {
+    Unchanged,
+    Append(&'a str),
+    Replace,
+}
+
+fn classify_markdown_update<'a>(current: &str, next: &'a str) -> MarkdownUpdate<'a> {
+    if current == next {
+        MarkdownUpdate::Unchanged
+    } else if let Some(suffix) = next.strip_prefix(current) {
+        MarkdownUpdate::Append(suffix)
+    } else {
+        MarkdownUpdate::Replace
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ChatLinkTarget {
+    Web,
+    ProjectFile(String),
+    Rejected,
+}
+
+fn classify_chat_link(link: &str) -> ChatLinkTarget {
+    if link.starts_with("http://") || link.starts_with("https://") {
+        return ChatLinkTarget::Web;
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in Path::new(link).components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {}
+            Component::ParentDir if normalized.pop() => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return ChatLinkTarget::Rejected;
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        ChatLinkTarget::Rejected
+    } else {
+        ChatLinkTarget::ProjectFile(normalized.to_string_lossy().into_owned())
+    }
+}
+struct MarkdownRenderState {
+    source: String,
+    state: Entity<TextViewState>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TranscriptRow {
+    Message(usize),
+    Activities(Range<usize>),
+    Working,
+}
+
+fn is_activity_only(message: &ChatMessageInfo) -> bool {
+    message.role == MessageRole::Assistant
+        && message.content.is_empty()
+        && message.reasoning_content.is_none()
+        && message
+            .tool_activities
+            .iter()
+            .any(|activity| activity.title != "update_plan")
+}
+
+fn build_transcript_rows(messages: &[ChatMessageInfo], generating: bool) -> Vec<TranscriptRow> {
+    let mut rows = Vec::with_capacity(messages.len().saturating_add(1));
+    let mut index = 0;
+    while index < messages.len() {
+        if !is_activity_only(&messages[index]) {
+            rows.push(TranscriptRow::Message(index));
+            index += 1;
+            continue;
+        }
+
+        let start = index;
+        while index < messages.len() && is_activity_only(&messages[index]) {
+            index += 1;
+        }
+        rows.push(TranscriptRow::Activities(start..index));
+    }
+    if generating {
+        rows.push(TranscriptRow::Working);
+    }
+    rows
+}
+
+fn grouped_tool_activities(
+    messages: &[ChatMessageInfo],
+) -> impl Iterator<Item = &ToolActivityInfo> + Clone {
+    messages
+        .iter()
+        .flat_map(|message| message.tool_activities.iter())
+        .filter(|activity| activity.title != "update_plan")
+}
+
+fn format_trajectory_raw_json(entry: &TrajectoryEntry) -> String {
+    serde_json::to_string_pretty(entry).unwrap_or_else(|_| entry.detail.clone())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TrajectoryCacheKey {
+    revision: u64,
+    mode: TrajectoryMode,
+    query: String,
+    category: Option<String>,
+    lane: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TrajectoryRow {
+    RequestHeader(u32),
+    Setup,
+    TurnHeader(u32),
+    Entry(usize),
+}
+
+fn build_trajectory_rows(
+    all_entries: &[TrajectoryEntry],
+    filtered_indices: &[usize],
+    mode: TrajectoryMode,
+) -> Vec<TrajectoryRow> {
+    let mut rows = Vec::with_capacity(filtered_indices.len());
+    let mut previous_turn = None;
+    let mut previous_request = None;
+    let mut request_input_seen = false;
+    for &all_index in filtered_indices {
+        let entry = &all_entries[all_index];
+        if mode == TrajectoryMode::Requests && entry.request != previous_request {
+            if let Some(request) = entry.request {
+                rows.push(TrajectoryRow::RequestHeader(request));
+                request_input_seen = false;
+            }
+            previous_request = entry.request;
+        }
+        if mode == TrajectoryMode::Requests && entry.request.is_some() && !request_input_seen {
+            if entry.category != "Input" {
+                rows.push(TrajectoryRow::Setup);
+            }
+            request_input_seen = true;
+        }
+        if mode != TrajectoryMode::Requests && entry.turn != previous_turn {
+            if let Some(turn) = entry.turn {
+                rows.push(TrajectoryRow::TurnHeader(turn));
+            }
+            previous_turn = entry.turn;
+        }
+        rows.push(TrajectoryRow::Entry(all_index));
+    }
+    rows
+}
+
+#[derive(Default)]
+struct TrajectorySummary {
+    overview_positions: [HashSet<usize>; 3],
+    tool_count: usize,
+    total_duration_ms: u64,
+    anomaly_count: usize,
+    max_turn: u32,
+}
+
+fn summarize_trajectory(entries: &[TrajectoryEntry]) -> TrajectorySummary {
+    let mut summary = TrajectorySummary::default();
+    for (index, entry) in entries.iter().enumerate() {
+        let position = index * 48 / entries.len().max(1);
+        if matches!(
+            entry.category.as_str(),
+            "Input" | "Context" | "Context Manifest" | "Queue" | "Request"
+        ) {
+            summary.overview_positions[0].insert(position);
+        }
+        if matches!(
+            entry.category.as_str(),
+            "Operation" | "Step" | "Retry" | "Turn" | "Error" | "Provider" | "Anomaly"
+        ) {
+            summary.overview_positions[1].insert(position);
+        }
+        if matches!(entry.category.as_str(), "Tool" | "Tool runtime") {
+            summary.overview_positions[2].insert(position);
+            summary.tool_count += 1;
+        }
+        summary.total_duration_ms = summary
+            .total_duration_ms
+            .saturating_add(entry.diagnostics.duration_ms.unwrap_or_default());
+        summary.anomaly_count +=
+            usize::from(entry.diagnostics.is_anomaly || entry.category == "Anomaly");
+        summary.max_turn = summary.max_turn.max(entry.turn.unwrap_or_default());
+    }
+    summary
+}
+
+struct TrajectoryRenderCache {
+    key: TrajectoryCacheKey,
+    all_entries: Vec<TrajectoryEntry>,
+    categories: Arc<Vec<String>>,
+    lanes: Arc<Vec<String>>,
+    lane_latest: Arc<std::collections::BTreeMap<String, String>>,
+    filtered_indices: Vec<usize>,
+    rows: Vec<TrajectoryRow>,
+    summary: TrajectorySummary,
+}
+
 pub fn init(cx: &mut App) {
     // gpui-component's Textarea owns the focused `Input` context. Register
     // after gpui-component initialization so this action can inspect image
@@ -74,14 +404,16 @@ pub struct ChatListView {
     model: Entity<AppState>,
     pub(crate) input_state: Entity<TextareaState>,
     pub(crate) header_left_padding: Pixels,
-    scroll_handle: ScrollHandle,
-    trajectory_scroll_handle: ScrollHandle,
+    transcript_list_state: ListState,
+    transcript_messages: Arc<Vec<ChatMessageInfo>>,
+    transcript_rows: Vec<TranscriptRow>,
+    transcript_generating: bool,
+    trajectory_list_state: ListState,
     expanded_activity_groups: HashSet<String>,
-    markdown_states: HashMap<String, (String, Entity<TextViewState>, std::time::Instant)>,
+    markdown_states: HashMap<String, MarkdownRenderState>,
     pasted_images: Vec<ImageAttachment>,
     last_session_key: Option<(std::path::PathBuf, String)>,
     initial_scroll_frames: u8,
-    older_load_pending: bool,
     current_tab: CentralTab,
     editor: Entity<EditorView>,
     trajectory_mode: TrajectoryMode,
@@ -91,6 +423,14 @@ pub struct ChatListView {
     trajectory_lane: Option<String>,
     selected_trajectory_index: Option<usize>,
     trajectory_inspector_tab: TrajectoryInspectorTab,
+    trajectory_cache: Option<TrajectoryRenderCache>,
+    trajectory_raw_json: Option<(u64, usize, String)>,
+    slash_command_cache: Option<(
+        Option<std::path::PathBuf>,
+        std::time::Instant,
+        Vec<SlashCommandInfo>,
+    )>,
+    context_meter_open: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -100,8 +440,9 @@ impl ChatListView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let scroll_handle = ScrollHandle::new();
-        let trajectory_scroll_handle = ScrollHandle::new();
+        let transcript_list_state = ListState::new(0, ListAlignment::Bottom, px(600.0));
+        transcript_list_state.set_follow_mode(FollowMode::Tail);
+        let trajectory_list_state = ListState::new(0, ListAlignment::Top, px(400.0));
         let input_state = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder("Do anything...")
@@ -147,7 +488,7 @@ impl ChatListView {
         });
 
         let model_clone = model.clone();
-        let submit_scroll_handle = scroll_handle.clone();
+        let submit_list_state = transcript_list_state.clone();
         let sub2 = cx.subscribe_in(
             &input_state,
             window,
@@ -184,7 +525,7 @@ impl ChatListView {
                         input_state.update(cx, |state, cx| {
                             state.set_value("", window, cx);
                         });
-                        submit_scroll_handle.scroll_to_bottom();
+                        submit_list_state.scroll_to_end();
                         cx.notify();
                     }
                 }
@@ -192,9 +533,7 @@ impl ChatListView {
         );
 
         let stream_model = model.clone();
-        let stream_scroll_handle = scroll_handle.clone();
         cx.spawn(async move |this, cx| {
-            let mut follow_tail = true;
             let mut settle_frames = 0_u8;
             loop {
                 // Event-driven pacing: check quickly when generating,
@@ -205,15 +544,6 @@ impl ChatListView {
                     Duration::from_millis(100)
                 };
                 cx.background_executor().timer(interval).await;
-
-                // Re-arm tail following as soon as the user manually returns to the bottom,
-                // even while stream events keep arriving and settling never reaches zero.
-                if !follow_tail {
-                    let distance_from_bottom = (stream_scroll_handle.offset().y
-                        + stream_scroll_handle.max_offset().y)
-                        .abs();
-                    follow_tail = distance_from_bottom <= px(24.0);
-                }
 
                 let has_event =
                     stream_model.read_with(cx, |state, _cx| state.chat_stream_pending());
@@ -229,19 +559,11 @@ impl ChatListView {
                 if changed {
                     // Markdown measurement and new rows can complete after the first redraw.
                     settle_frames = 6;
-                } else if settle_frames == 0 {
-                    let distance_from_bottom = (stream_scroll_handle.offset().y
-                        + stream_scroll_handle.max_offset().y)
-                        .abs();
-                    follow_tail = distance_from_bottom <= px(24.0);
                 }
 
-                if follow_tail && (changed || settle_frames > 0) {
-                    stream_scroll_handle.scroll_to_bottom();
+                if !changed && settle_frames > 0 {
                     let _ = this.update(cx, |_this, cx| cx.notify());
-                    if !changed {
-                        settle_frames = settle_frames.saturating_sub(1);
-                    }
+                    settle_frames = settle_frames.saturating_sub(1);
                 }
             }
         })
@@ -256,14 +578,16 @@ impl ChatListView {
             model,
             input_state,
             header_left_padding: px(14.0),
-            scroll_handle,
-            trajectory_scroll_handle,
+            transcript_list_state,
+            transcript_messages: Arc::new(Vec::new()),
+            transcript_rows: Vec::new(),
+            transcript_generating: false,
+            trajectory_list_state,
             expanded_activity_groups: HashSet::new(),
             markdown_states: HashMap::new(),
             pasted_images: Vec::new(),
             last_session_key: None,
             initial_scroll_frames: 0,
-            older_load_pending: false,
             current_tab: CentralTab::Chat,
             editor,
             trajectory_mode: TrajectoryMode::Execution,
@@ -273,6 +597,10 @@ impl ChatListView {
             trajectory_lane: None,
             selected_trajectory_index: None,
             trajectory_inspector_tab: TrajectoryInspectorTab::Overview,
+            trajectory_cache: None,
+            trajectory_raw_json: None,
+            slash_command_cache: None,
+            context_meter_open: false,
             _subscriptions: vec![sub1, sub2, sub3, sub_editor],
         }
     }
@@ -478,12 +806,7 @@ impl ChatListView {
                         .rounded_full()
                         .border_1()
                         .border_color(colors.primary)
-                        .child(
-                            div()
-                                .size(px(6.0))
-                                .rounded_full()
-                                .bg(colors.primary),
-                        )
+                        .child(div().size(px(6.0)).rounded_full().bg(colors.primary))
                         .into_any_element()
                 }
             }
@@ -576,14 +899,13 @@ impl ChatListView {
                     div()
                         .w(px(520.0))
                         .max_w(px(CHAT_CONTENT_MAX_WIDTH - 32.0))
-                        .max_h(px(360.0))
-                        .overflow_y_scrollbar()
                         .p_2()
                         .flex()
                         .flex_col()
                         .gap_2()
                         .children(content_plan.explanation.clone().map(|explanation| {
                             div()
+                                .flex_none()
                                 .pb_2()
                                 .border_b_1()
                                 .border_color(colors.border)
@@ -591,7 +913,16 @@ impl ChatListView {
                                 .text_color(colors.muted_foreground)
                                 .child(explanation)
                         }))
-                        .children(rows)
+                        .child(
+                            div()
+                                .w_full()
+                                .max_h(px(280.0))
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .overflow_y_scrollbar()
+                                .children(rows),
+                        )
                 })
                 .into_any_element(),
         )
@@ -613,22 +944,7 @@ impl ChatListView {
         let tool_call_id = activity.id.clone();
         let has_detail = !activity.detail.trim().is_empty();
         let row_id = SharedString::from(activity.id.clone());
-        let display_summary = {
-            let first_line = activity
-                .summary
-                .lines()
-                .next()
-                .unwrap_or(activity.summary.as_str())
-                .trim();
-            if activity.summary.lines().nth(1).is_some()
-                && !first_line.ends_with('…')
-                && !first_line.ends_with("...")
-            {
-                format!("{first_line} …")
-            } else {
-                first_line.to_string()
-            }
-        };
+        let display_summary = activity.display_summary.clone();
 
         div()
             .w_full()
@@ -723,21 +1039,26 @@ impl ChatListView {
 
     fn render_activity_group(
         &mut self,
-        activities: &[ToolActivityInfo],
+        messages: &[ChatMessageInfo],
         cx: &mut Context<Self>,
     ) -> AnyElement {
         const RECENT_ACTIVITY_LIMIT: usize = 4;
 
         let theme = cx.theme().colors;
+        let activities = grouped_tool_activities(messages);
         let group_id = activities
-            .first()
+            .clone()
+            .next()
             .map(|activity| activity.id.clone())
             .unwrap_or_else(|| "empty".into());
         let is_expanded = self.expanded_activity_groups.contains(&group_id);
-        let hidden_count = activities.len().saturating_sub(RECENT_ACTIVITY_LIMIT);
+        let hidden_count = activities
+            .clone()
+            .count()
+            .saturating_sub(RECENT_ACTIVITY_LIMIT);
         let visible_start = if is_expanded { 0 } else { hidden_count };
-        let activity_rows = activities[visible_start..]
-            .iter()
+        let activity_rows = activities
+            .skip(visible_start)
             .map(|activity| self.render_tool_activity(activity, cx))
             .collect::<Vec<_>>();
         let button_group_id = group_id.clone();
@@ -826,177 +1147,133 @@ impl ChatListView {
             .into_any_element()
     }
 
-    fn render_trajectory(&self, cx: &mut Context<Self>) -> AnyElement {
-        let all_entries = match self.trajectory_mode {
-            TrajectoryMode::Execution | TrajectoryMode::Requests => {
-                self.model.read(cx).active_trajectory().to_vec()
-            }
-            TrajectoryMode::ModelContext => self.model.read(cx).active_model_context_diagnostics(),
-            TrajectoryMode::DurableEvents => self.model.read(cx).active_durable_event_diagnostics(),
-            TrajectoryMode::Recovery => self.model.read(cx).active_recovery_diagnostics(),
+    fn render_trajectory_row(
+        &mut self,
+        index: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(row) = self
+            .trajectory_cache
+            .as_ref()
+            .and_then(|cache| cache.rows.get(index))
+            .cloned()
+        else {
+            return Empty.into_any_element();
         };
-        let mut categories = all_entries
-            .iter()
-            .map(|entry| entry.category.clone())
-            .collect::<Vec<_>>();
-        categories.sort();
-        categories.dedup();
-        let mut lane_latest = std::collections::BTreeMap::<String, String>::new();
-        for entry in &all_entries {
-            if let Some(lane) = &entry.lane {
-                lane_latest.insert(lane.clone(), entry.summary.clone());
-            }
-        }
-        let lanes = lane_latest.keys().cloned().collect::<Vec<_>>();
-        let query = self.trajectory_search.to_lowercase();
-        let entries = all_entries
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| {
-                self.trajectory_category
-                    .as_ref()
-                    .is_none_or(|category| &entry.category == category)
-                    && self
-                        .trajectory_lane
-                        .as_ref()
-                        .is_none_or(|lane| entry.lane.as_ref() == Some(lane))
-                    && (query.is_empty()
-                        || [
-                            entry.category.as_str(),
-                            entry.summary.as_str(),
-                            entry.detail.as_str(),
-                            entry.lane.as_deref().unwrap_or(""),
-                            entry.correlation_id.as_deref().unwrap_or(""),
-                        ]
-                        .iter()
-                        .any(|value| value.to_lowercase().contains(&query)))
-            })
-            .map(|(index, entry)| (index, entry.clone()))
-            .collect::<Vec<_>>();
         let theme = cx.theme().colors;
-        if entries.is_empty() {
-            return div()
-                .flex_1()
+        match row {
+            TrajectoryRow::RequestHeader(request) => div()
+                .h(px(28.0))
+                .px_3()
                 .flex()
                 .items_center()
-                .justify_center()
+                .border_b_1()
+                .border_color(theme.border.opacity(0.65))
+                .bg(theme.muted.opacity(0.35))
                 .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.accent)
+                .child(format!("Request #{request}"))
+                .into_any_element(),
+            TrajectoryRow::Setup => div()
+                .h(px(20.0))
+                .px_3()
+                .flex()
+                .items_center()
+                .border_b_1()
+                .border_color(theme.border.opacity(0.35))
+                .text_xs()
+                .font_weight(FontWeight::MEDIUM)
                 .text_color(theme.muted_foreground)
-                .child("No canonical trajectory events have been observed in this session yet.")
-                .into_any_element();
-        }
-        let selected_entry = self
-            .selected_trajectory_index
-            .and_then(|index| all_entries.get(index))
-            .cloned();
-        let mut rows = Vec::new();
-        let mut previous_turn = None;
-        let mut previous_request = None;
-        let mut request_input_seen = false;
-        for (all_index, entry) in entries.into_iter() {
-            if self.trajectory_mode == TrajectoryMode::Requests && entry.request != previous_request {
-                if let Some(request) = entry.request {
-                    request_input_seen = false;
-                    rows.push(
-                        div()
-                            .h(px(28.0))
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .border_b_1()
-                            .border_color(theme.border.opacity(0.65))
-                            .bg(theme.muted.opacity(0.35))
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.accent)
-                            .child(format!("Request #{request}"))
-                            .into_any_element(),
-                    );
-                }
-                previous_request = entry.request;
-            }
-            if self.trajectory_mode == TrajectoryMode::Requests
-                && entry.request.is_some()
-                && !request_input_seen
-                && entry.category == "Input"
-            {
-                request_input_seen = true;
-            } else if self.trajectory_mode == TrajectoryMode::Requests
-                && entry.request.is_some()
-                && !request_input_seen
-            {
-                rows.push(
-                    div()
-                        .h(px(20.0))
-                        .px_3()
-                        .flex()
-                        .items_center()
-                        .border_b_1()
-                        .border_color(theme.border.opacity(0.35))
-                        .text_xs()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.muted_foreground)
-                        .child("Setup")
-                        .into_any_element(),
-                );
-                request_input_seen = true;
-            }
-            if self.trajectory_mode != TrajectoryMode::Requests && entry.turn != previous_turn {
-                if let Some(turn) = entry.turn {
-                    rows.push(
-                        div()
-                            .h(px(22.0))
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .border_b_1()
-                            .border_color(theme.border.opacity(0.5))
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(format!("Turn {turn}"))
-                            .into_any_element(),
-                    );
-                }
-                previous_turn = entry.turn;
-            }
-            let seq = entry.seq;
-            let selected = Some(all_index) == self.selected_trajectory_index;
-            let preview = if entry.detail.trim().is_empty() {
-                entry.summary.clone()
-            } else {
-                format!("{}  {}", entry.summary, entry.detail.replace('\n', " "))
-            };
-            let view = cx.entity().clone();
-            let (badge_bg, badge_fg, badge_label): (Hsla, Hsla, SharedString) = match entry.category.as_str() {
-                "Tool" | "Tool runtime" => (theme.warning.opacity(0.18), theme.warning, "TOOL".into()),
-                "Provider" => (theme.primary.opacity(0.18), theme.primary, "PROVIDER".into()),
-                "Context Manifest" | "Manifest" => (theme.accent.opacity(0.14), theme.muted_foreground, "MANIFEST".into()),
-                "Request" => (theme.primary.opacity(0.16), theme.accent, "REQUEST".into()),
-                "Anomaly" => (theme.warning.opacity(0.20), theme.warning, "ANOMALY".into()),
-                "Error" => (theme.danger.opacity(0.20), theme.danger, "ERROR".into()),
-                "Input" => (theme.muted.opacity(0.8), theme.foreground, "INPUT".into()),
-                "Assistant" => (theme.muted.opacity(0.8), theme.foreground, "ASSISTANT".into()),
-                "Permission" => (theme.warning.opacity(0.18), theme.warning, "PERMISSION".into()),
-                "Subagent" => (theme.primary.opacity(0.16), theme.primary, "SUBAGENT".into()),
-                _ => (theme.muted.opacity(0.5), theme.muted_foreground, entry.category.clone().into()),
-            };
-            let dot_color = if entry.diagnostics.is_anomaly || entry.category == "Anomaly" {
-                theme.warning
-            } else if entry.category == "Error"
-                || entry.detail.contains("Failed")
-                || entry.detail.contains("Error")
-                || entry.diagnostics.status.as_deref() == Some("Failed")
-                || entry.diagnostics.status.as_deref() == Some("failed")
-            {
-                theme.danger
-            } else if entry.category == "Tool" || entry.category == "Tool runtime" {
-                theme.warning
-            } else if entry.category == "Request" {
-                theme.primary
-            } else {
-                theme.muted_foreground
-            };
-            rows.push(
+                .child("Setup")
+                .into_any_element(),
+            TrajectoryRow::TurnHeader(turn) => div()
+                .h(px(22.0))
+                .px_3()
+                .flex()
+                .items_center()
+                .border_b_1()
+                .border_color(theme.border.opacity(0.5))
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(format!("Turn {turn}"))
+                .into_any_element(),
+            TrajectoryRow::Entry(all_index) => {
+                let entry = &self
+                    .trajectory_cache
+                    .as_ref()
+                    .expect("trajectory cache")
+                    .all_entries[all_index];
+                let selected = Some(all_index) == self.selected_trajectory_index;
+                let preview = if entry.detail.trim().is_empty() {
+                    entry.summary.clone()
+                } else {
+                    format!("{}  {}", entry.summary, entry.detail.replace('\n', " "))
+                };
+                let (badge_bg, badge_fg, badge_label): (Hsla, Hsla, SharedString) =
+                    match entry.category.as_str() {
+                        "Tool" | "Tool runtime" => {
+                            (theme.warning.opacity(0.18), theme.warning, "TOOL".into())
+                        }
+                        "Provider" => (
+                            theme.primary.opacity(0.18),
+                            theme.primary,
+                            "PROVIDER".into(),
+                        ),
+                        "Context Manifest" | "Manifest" => (
+                            theme.accent.opacity(0.14),
+                            theme.muted_foreground,
+                            "MANIFEST".into(),
+                        ),
+                        "Request" => (theme.primary.opacity(0.16), theme.accent, "REQUEST".into()),
+                        "Anomaly" => (theme.warning.opacity(0.20), theme.warning, "ANOMALY".into()),
+                        "Error" => (theme.danger.opacity(0.20), theme.danger, "ERROR".into()),
+                        "Input" => (theme.muted.opacity(0.8), theme.foreground, "INPUT".into()),
+                        "Assistant" => (
+                            theme.muted.opacity(0.8),
+                            theme.foreground,
+                            "ASSISTANT".into(),
+                        ),
+                        "Permission" => (
+                            theme.warning.opacity(0.18),
+                            theme.warning,
+                            "PERMISSION".into(),
+                        ),
+                        "Subagent" => (
+                            theme.primary.opacity(0.16),
+                            theme.primary,
+                            "SUBAGENT".into(),
+                        ),
+                        _ => (
+                            theme.muted.opacity(0.5),
+                            theme.muted_foreground,
+                            entry.category.clone().into(),
+                        ),
+                    };
+                let dot_color = if entry.diagnostics.is_anomaly || entry.category == "Anomaly" {
+                    theme.warning
+                } else if entry.category == "Error"
+                    || entry.detail.contains("Failed")
+                    || entry.detail.contains("Error")
+                    || matches!(
+                        entry.diagnostics.status.as_deref(),
+                        Some("Failed" | "failed")
+                    )
+                {
+                    theme.danger
+                } else if entry.category == "Tool" || entry.category == "Tool runtime" {
+                    theme.warning
+                } else if entry.category == "Request" {
+                    theme.primary
+                } else {
+                    theme.muted_foreground
+                };
+                let seq = entry.seq;
+                let exit_code = entry.diagnostics.exit_code;
+                let duration_ms = entry.diagnostics.duration_ms;
+                let lane = entry.lane.clone();
+                let view = cx.entity().clone();
                 div()
                     .id(SharedString::from(format!("trajectory-{all_index}")))
                     .h(px(34.0))
@@ -1033,24 +1310,23 @@ impl ChatListView {
                             .child(badge_label),
                     )
                     .child(div().min_w_0().flex_1().text_sm().truncate().child(preview))
-                    .children(entry.diagnostics.exit_code.map(|code| {
+                    .children(exit_code.map(|code| {
                         let is_ok = code == 0;
                         div()
                             .px_1p5()
                             .py_0p5()
                             .rounded_sm()
-                            .bg(if is_ok { theme.success.opacity(0.15) } else { theme.danger.opacity(0.15) })
+                            .bg(if is_ok {
+                                theme.success.opacity(0.15)
+                            } else {
+                                theme.danger.opacity(0.15)
+                            })
                             .text_xs()
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(if is_ok { theme.success } else { theme.danger })
                             .child(format!("exit {code}"))
                     }))
-                    .children(entry.diagnostics.duration_ms.map(|dur| {
-                        let dur_str = if dur < 1000 {
-                            format!("{dur}ms")
-                        } else {
-                            format!("{:.1}s", dur as f64 / 1000.0)
-                        };
+                    .children(duration_ms.map(|duration| {
                         div()
                             .px_1p5()
                             .py_0p5()
@@ -1058,9 +1334,13 @@ impl ChatListView {
                             .bg(theme.muted.opacity(0.8))
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child(dur_str)
+                            .child(if duration < 1000 {
+                                format!("{duration}ms")
+                            } else {
+                                format!("{:.1}s", duration as f64 / 1000.0)
+                            })
                     }))
-                    .children(entry.lane.clone().map(|lane| {
+                    .children(lane.map(|lane| {
                         div()
                             .max_w(px(110.0))
                             .truncate()
@@ -1083,10 +1363,151 @@ impl ChatListView {
                             cx.notify();
                         })
                     })
-                    .into_any_element(),
-            );
+                    .into_any_element()
+            }
+        }
+    }
+
+    fn render_trajectory(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let revision = self.model.read(cx).trajectory_revision();
+        let key = TrajectoryCacheKey {
+            revision,
+            mode: self.trajectory_mode,
+            query: self.trajectory_search.to_lowercase(),
+            category: self.trajectory_category.clone(),
+            lane: self.trajectory_lane.clone(),
+        };
+        if self
+            .trajectory_cache
+            .as_ref()
+            .is_none_or(|cache| cache.key != key)
+        {
+            let all_entries = match self.trajectory_mode {
+                TrajectoryMode::Execution | TrajectoryMode::Requests => {
+                    self.model.read(cx).active_trajectory().to_vec()
+                }
+                TrajectoryMode::ModelContext => {
+                    self.model.read(cx).active_model_context_diagnostics()
+                }
+                TrajectoryMode::DurableEvents => {
+                    self.model.read(cx).active_durable_event_diagnostics()
+                }
+                TrajectoryMode::Recovery => self.model.read(cx).active_recovery_diagnostics(),
+            };
+            let mut categories = all_entries
+                .iter()
+                .map(|entry| entry.category.clone())
+                .collect::<Vec<_>>();
+            categories.sort();
+            categories.dedup();
+            let mut lane_latest = std::collections::BTreeMap::new();
+            for entry in &all_entries {
+                if let Some(lane) = &entry.lane {
+                    lane_latest.insert(lane.clone(), entry.summary.clone());
+                }
+            }
+            let lanes = lane_latest.keys().cloned().collect();
+            let filtered_indices = all_entries
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| {
+                    key.category
+                        .as_ref()
+                        .is_none_or(|category| &entry.category == category)
+                        && key
+                            .lane
+                            .as_ref()
+                            .is_none_or(|lane| entry.lane.as_ref() == Some(lane))
+                        && (key.query.is_empty()
+                            || [
+                                entry.category.as_str(),
+                                entry.summary.as_str(),
+                                entry.detail.as_str(),
+                                entry.lane.as_deref().unwrap_or(""),
+                                entry.correlation_id.as_deref().unwrap_or(""),
+                            ]
+                            .iter()
+                            .any(|value| value.to_lowercase().contains(&key.query)))
+                })
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            let rows = build_trajectory_rows(&all_entries, &filtered_indices, self.trajectory_mode);
+            let summary = summarize_trajectory(&all_entries);
+            let previous_row_count = self
+                .trajectory_cache
+                .as_ref()
+                .map_or(0, |cache| cache.rows.len());
+            let extends_previous = self
+                .trajectory_cache
+                .as_ref()
+                .is_some_and(|cache| rows.starts_with(&cache.rows));
+            if extends_previous {
+                self.trajectory_list_state.splice(
+                    previous_row_count..previous_row_count,
+                    rows.len() - previous_row_count,
+                );
+            } else {
+                self.trajectory_list_state.reset(rows.len());
+            }
+            self.trajectory_raw_json = None;
+            self.trajectory_cache = Some(TrajectoryRenderCache {
+                key,
+                all_entries,
+                categories: Arc::new(categories),
+                lanes: Arc::new(lanes),
+                lane_latest: Arc::new(lane_latest),
+                filtered_indices,
+                rows,
+                summary,
+            });
         }
         let inspector_tab = self.trajectory_inspector_tab;
+        let selected_index = self.selected_trajectory_index;
+        if let Some(index) = (inspector_tab == TrajectoryInspectorTab::Raw)
+            .then_some(selected_index)
+            .flatten()
+        {
+            let needs_raw = self.trajectory_raw_json.as_ref().is_none_or(
+                |(cached_revision, cached_index, _)| {
+                    *cached_revision != revision || *cached_index != index
+                },
+            );
+            if needs_raw {
+                self.trajectory_raw_json = self
+                    .trajectory_cache
+                    .as_ref()
+                    .and_then(|cache| cache.all_entries.get(index))
+                    .map(|entry| (revision, index, format_trajectory_raw_json(entry)));
+            }
+        }
+        let cache = self.trajectory_cache.as_ref().expect("trajectory cache");
+        let all_entries = &cache.all_entries;
+        let categories = Arc::clone(&cache.categories);
+        let lanes = Arc::clone(&cache.lanes);
+        let lane_latest = Arc::clone(&cache.lane_latest);
+        let entries = &cache.filtered_indices;
+        let theme = cx.theme().colors;
+        if entries.is_empty() {
+            return div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child("No canonical trajectory events have been observed in this session yet.")
+                .into_any_element();
+        }
+        let selected_entry = selected_index
+            .and_then(|index| all_entries.get(index))
+            .cloned();
+        let selected_raw_json = (inspector_tab == TrajectoryInspectorTab::Raw)
+            .then(|| {
+                self.trajectory_raw_json
+                    .as_ref()
+                    .map(|(_, _, raw)| raw.clone())
+            })
+            .flatten();
         let inspector = selected_entry.map(|entry| {
             let close_view = cx.entity().clone();
             let inspector_view = cx.entity().clone();
@@ -1334,7 +1755,7 @@ impl ChatListView {
                                 )
                                 .into_any_element(),
                             TrajectoryInspectorTab::Raw => {
-                                let raw_json = serde_json::to_string_pretty(&entry).unwrap_or_else(|_| entry.detail.clone());
+                                let raw_json = selected_raw_json.clone().unwrap_or_default();
                                 div()
                                     .flex()
                                     .flex_col()
@@ -1374,23 +1795,7 @@ impl ChatListView {
                         }),
                 )
         });
-        let overview_lane = |label: &'static str, category: &'static str, color: Hsla| {
-            let markers = all_entries
-                .iter()
-                .enumerate()
-                .filter(|(_, entry)| match category {
-                    "Input" => matches!(entry.category.as_str(), "Input" | "Context" | "Context Manifest" | "Queue" | "Request"),
-                    "Model" => matches!(
-                        entry.category.as_str(),
-                        "Operation" | "Step" | "Retry" | "Turn" | "Error" | "Provider" | "Anomaly"
-                    ),
-                    _ => matches!(entry.category.as_str(), "Tool" | "Tool runtime"),
-                })
-                .map(|(index, _)| {
-                    let position = index * 48 / all_entries.len().max(1);
-                    (position, color)
-                })
-                .collect::<HashMap<_, _>>();
+        let overview_lane = |label: &'static str, markers: &HashSet<usize>, color: Hsla| {
             div()
                 .h(px(18.0))
                 .flex()
@@ -1414,16 +1819,17 @@ impl ChatListView {
                         .children((0..48).map(|index| {
                             div()
                                 .flex_1()
-                                .h(if markers.contains_key(&index) {
+                                .h(if markers.contains(&index) {
                                     px(10.0)
                                 } else {
                                     px(2.0)
                                 })
                                 .rounded_sm()
-                                .bg(markers
-                                    .get(&index)
-                                    .copied()
-                                    .unwrap_or(theme.border.opacity(0.35)))
+                                .bg(if markers.contains(&index) {
+                                    color
+                                } else {
+                                    theme.border.opacity(0.35)
+                                })
                         })),
                 )
         };
@@ -1437,9 +1843,21 @@ impl ChatListView {
             .border_b_1()
             .border_color(theme.border)
             .bg(theme.background)
-            .child(overview_lane("Input", "Input", theme.success))
-            .child(overview_lane("Model", "Model", theme.primary))
-            .child(overview_lane("Tools", "Tools", theme.warning));
+            .child(overview_lane(
+                "Input",
+                &cache.summary.overview_positions[0],
+                theme.success,
+            ))
+            .child(overview_lane(
+                "Model",
+                &cache.summary.overview_positions[1],
+                theme.primary,
+            ))
+            .child(overview_lane(
+                "Tools",
+                &cache.summary.overview_positions[2],
+                theme.warning,
+            ));
         let category_label = self
             .trajectory_category
             .clone()
@@ -1514,7 +1932,7 @@ impl ChatListView {
                                 });
                             },
                         ));
-                        for category in categories.clone() {
+                        for category in categories.iter().cloned() {
                             let selected = category.clone();
                             let view = category_view.clone();
                             menu = menu.item(PopupMenuItem::new(category).on_click(
@@ -1544,7 +1962,7 @@ impl ChatListView {
                                     cx.notify();
                                 });
                             }));
-                        for lane in lanes.clone() {
+                        for lane in lanes.iter().cloned() {
                             let selected = lane.clone();
                             let view = lane_view.clone();
                             let latest = lane_latest.get(&lane).cloned().unwrap_or_default();
@@ -1574,24 +1992,15 @@ impl ChatListView {
                     .bg(theme.background)
                     .child(Input::new(&self.trajectory_search_input).appearance(false)),
             );
-        let tool_count = all_entries
-            .iter()
-            .filter(|e| e.category == "Tool" || e.category == "Tool runtime")
-            .count();
-        let total_dur_ms: u64 = all_entries
-            .iter()
-            .filter_map(|e| e.diagnostics.duration_ms)
-            .sum();
+        let tool_count = cache.summary.tool_count;
+        let total_dur_ms = cache.summary.total_duration_ms;
         let dur_label = if total_dur_ms < 1000 {
             format!("{total_dur_ms}ms total")
         } else {
             format!("{:.2}s total", total_dur_ms as f64 / 1000.0)
         };
-        let anomaly_count = all_entries
-            .iter()
-            .filter(|e| e.diagnostics.is_anomaly || e.category == "Anomaly")
-            .count();
-        let max_turn = all_entries.iter().filter_map(|e| e.turn).max().unwrap_or(0);
+        let anomaly_count = cache.summary.anomaly_count;
+        let max_turn = cache.summary.max_turn;
 
         let stats_bar = div()
             .h(px(26.0))
@@ -1632,32 +2041,23 @@ impl ChatListView {
                     .child("tool calls"),
             )
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.foreground)
-                            .child(dur_label),
-                    ),
+                div().flex().items_center().gap_1().child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.foreground)
+                        .child(dur_label),
+                ),
             )
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_1()
-                    .child(
-                        div()
-                            .size(px(6.0))
-                            .rounded_full()
-                            .bg(if anomaly_count > 0 {
-                                theme.warning
-                            } else {
-                                theme.success
-                            }),
-                    )
+                    .child(div().size(px(6.0)).rounded_full().bg(if anomaly_count > 0 {
+                        theme.warning
+                    } else {
+                        theme.success
+                    }))
                     .child(format!("{anomaly_count} anomalies")),
             );
 
@@ -1684,16 +2084,16 @@ impl ChatListView {
                             .min_w_0()
                             .min_h_0()
                             .child(
-                                div()
-                                    .id("trajectory-events-scroll")
-                                    .size_full()
-                                    .track_scroll(&self.trajectory_scroll_handle)
-                                    .overflow_y_scroll()
-                                    .child(div().w_full().children(rows)),
+                                list(
+                                    self.trajectory_list_state.clone(),
+                                    cx.processor(Self::render_trajectory_row),
+                                )
+                                .size_full()
+                                .with_sizing_behavior(ListSizingBehavior::Auto),
                             )
                             .child(div().absolute().inset_0().child(
                                 gpui_component::scroll::Scrollbar::vertical(
-                                    &self.trajectory_scroll_handle,
+                                    &self.trajectory_list_state,
                                 ),
                             )),
                     )
@@ -1702,58 +2102,190 @@ impl ChatListView {
             .into_any_element()
     }
 
-    fn render_transcript_rows(
+    fn sync_transcript_rows(
         &mut self,
-        messages: &[ChatMessageInfo],
+        messages: Arc<Vec<ChatMessageInfo>>,
+        generating: bool,
+        session_changed: bool,
+    ) {
+        if !session_changed
+            && Arc::ptr_eq(&messages, &self.transcript_messages)
+            && generating == self.transcript_generating
+        {
+            return;
+        }
+
+        let old_message_count = self.transcript_messages.len();
+        let old_row_count = self.transcript_rows.len();
+        let new_message_count = messages.len();
+
+        if !session_changed
+            && new_message_count == old_message_count
+            && generating == self.transcript_generating
+        {
+            let last_changed = messages
+                .last()
+                .zip(self.transcript_messages.last())
+                .is_some_and(|(new, old)| {
+                    new.id != old.id
+                        || new.content.len() != old.content.len()
+                        || new.reasoning_content.as_ref().map(String::len)
+                            != old.reasoning_content.as_ref().map(String::len)
+                        || new.tool_activities.len() != old.tool_activities.len()
+                        || new.streaming != old.streaming
+                });
+            self.transcript_messages = messages;
+            if last_changed {
+                self.transcript_list_state
+                    .remeasure_items(old_row_count.saturating_sub(1)..old_row_count);
+            } else {
+                self.transcript_list_state.remeasure();
+            }
+            return;
+        }
+
+        let new_rows = build_transcript_rows(&messages, generating);
+        let new_row_count = new_rows.len();
+        let working_changed = !session_changed
+            && new_message_count == old_message_count
+            && generating != self.transcript_generating;
+        let prepended = !session_changed
+            && new_message_count > old_message_count
+            && self
+                .transcript_messages
+                .first()
+                .zip(messages.get(new_message_count - old_message_count))
+                .is_some_and(|(old, new)| old.id == new.id)
+            && self
+                .transcript_messages
+                .last()
+                .zip(messages.last())
+                .is_some_and(|(old, new)| old.id == new.id)
+            && new_row_count >= old_row_count;
+        let appended = !session_changed
+            && new_message_count > old_message_count
+            && self
+                .transcript_messages
+                .first()
+                .zip(messages.first())
+                .is_some_and(|(old, new)| old.id == new.id)
+            && self
+                .transcript_messages
+                .last()
+                .zip(messages.get(old_message_count.saturating_sub(1)))
+                .is_some_and(|(old, new)| old.id == new.id)
+            && new_row_count >= old_row_count;
+
+        self.transcript_messages = messages;
+        self.transcript_rows = new_rows;
+        self.transcript_generating = generating;
+        if working_changed && generating {
+            self.transcript_list_state
+                .splice(old_row_count..old_row_count, 1);
+        } else if working_changed {
+            self.transcript_list_state
+                .splice(new_row_count..old_row_count, 0);
+        } else if prepended {
+            self.transcript_list_state
+                .splice(0..0, new_row_count - old_row_count);
+        } else if appended {
+            self.transcript_list_state
+                .splice(old_row_count..old_row_count, new_row_count - old_row_count);
+        } else {
+            self.transcript_list_state.reset(new_row_count);
+        }
+        if session_changed {
+            self.transcript_list_state.set_follow_mode(FollowMode::Tail);
+        }
+    }
+
+    fn render_transcript_row(
+        &mut self,
+        index: usize,
+        _window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        let mut rows = Vec::with_capacity(messages.len().saturating_add(1));
-        let mut index = 0;
-        while index < messages.len() {
-            let message = &messages[index];
-            let is_activity_only = message.role == MessageRole::Assistant
-                && message.content.is_empty()
-                && message.reasoning_content.is_none()
-                && message
-                    .tool_activities
-                    .iter()
-                    .any(|activity| activity.title != "update_plan");
-            if !is_activity_only {
-                rows.push(self.render_message(message, cx));
-                index += 1;
-                continue;
-            }
+    ) -> AnyElement {
+        let messages = Arc::clone(&self.transcript_messages);
+        let content = match self.transcript_rows.get(index).cloned() {
+            Some(TranscriptRow::Message(message_index)) => messages
+                .get(message_index)
+                .map(|message| self.render_message(message, cx)),
+            Some(TranscriptRow::Activities(range)) => messages
+                .get(range)
+                .map(|messages| self.render_activity_group(messages, cx)),
+            Some(TranscriptRow::Working) => Some(self.render_working_indicator(cx)),
+            None => None,
+        };
 
-            let mut activities = Vec::new();
-            while index < messages.len() {
-                let candidate = &messages[index];
-                let candidate_is_activity_only = candidate.role == MessageRole::Assistant
-                    && candidate.content.is_empty()
-                    && candidate.reasoning_content.is_none()
-                    && candidate
-                        .tool_activities
-                        .iter()
-                        .any(|activity| activity.title != "update_plan");
-                if !candidate_is_activity_only {
-                    break;
+        div()
+            .w_full()
+            .max_w(px(CHAT_CONTENT_MAX_WIDTH))
+            .mx_auto()
+            .children(content)
+            .into_any_element()
+    }
+
+    fn markdown_state(
+        &mut self,
+        key: String,
+        source: &str,
+        cx: &mut Context<Self>,
+    ) -> Entity<TextViewState> {
+        let entry = self
+            .markdown_states
+            .entry(key)
+            .or_insert_with(|| MarkdownRenderState {
+                source: source.to_owned(),
+                state: cx.new(|cx| TextViewState::markdown(source, cx)),
+            });
+
+        match classify_markdown_update(&entry.source, source) {
+            MarkdownUpdate::Unchanged => {}
+            MarkdownUpdate::Append(suffix) => {
+                entry.source.push_str(suffix);
+                entry
+                    .state
+                    .update(cx, |state, cx| state.push_str(suffix, cx));
+            }
+            MarkdownUpdate::Replace => {
+                entry.source.clear();
+                entry.source.push_str(source);
+                entry
+                    .state
+                    .update(cx, |state, cx| state.set_text(source, cx));
+            }
+        }
+
+        entry.state.clone()
+    }
+
+    fn chat_markdown_view(&self, state: &Entity<TextViewState>) -> TextView {
+        let model = self.model.clone();
+        TextView::new(state)
+            .selectable(true)
+            .on_link_click(move |url, event, _window, cx| {
+                let activate = match event {
+                    ClickEvent::Mouse(click) => {
+                        matches!(click.up.button, MouseButton::Left | MouseButton::Middle)
+                    }
+                    ClickEvent::Keyboard(_) => true,
+                    ClickEvent::Touch(click) => !click.long_press,
+                };
+                if !activate {
+                    return;
                 }
-                activities.extend(
-                    candidate
-                        .tool_activities
-                        .iter()
-                        .filter(|activity| activity.title != "update_plan")
-                        .cloned(),
-                );
-                index += 1;
-            }
-            rows.push(self.render_activity_group(&activities, cx));
-        }
 
-        if self.model.read(cx).is_generating {
-            rows.push(self.render_working_indicator(cx));
-        }
-
-        rows
+                match classify_chat_link(url) {
+                    ChatLinkTarget::Web => cx.open_url(url),
+                    ChatLinkTarget::ProjectFile(path) => {
+                        model.update(cx, |state, cx| {
+                            state.request_open_file(path);
+                            cx.notify();
+                        });
+                    }
+                    ChatLinkTarget::Rejected => {}
+                }
+            })
     }
 
     fn render_reasoning_block(
@@ -1841,26 +2373,7 @@ impl ChatListView {
             });
 
         let detail = is_expanded.then(|| {
-            let now = std::time::Instant::now();
-            let entry = self
-                .markdown_states
-                .entry(format!("reasoning-{}", msg.id))
-                .or_insert_with(|| {
-                    let state = cx.new(|cx| TextViewState::markdown(reasoning, cx));
-                    (reasoning.to_string(), state, now)
-                });
-            if entry.0 != reasoning {
-                let should_update = !msg.streaming
-                    || now.duration_since(entry.2) >= Duration::from_millis(120);
-                if should_update {
-                    entry.0 = reasoning.to_string();
-                    entry.2 = now;
-                    entry.1.update(cx, |state, cx| {
-                        state.set_text(reasoning, cx);
-                    });
-                }
-            }
-            div()
+            let container = div()
                 .ml(px(26.0))
                 .mt_1()
                 .p_2()
@@ -1871,8 +2384,12 @@ impl ChatListView {
                 .bg(theme.title_bar)
                 .text_xs()
                 .text_color(theme.muted_foreground)
-                .overflow_y_scrollbar()
-                .child(TextView::new(&entry.1).selectable(true))
+                .overflow_y_scrollbar();
+            let markdown_state =
+                self.markdown_state(format!("reasoning-{}", msg.id), reasoning, cx);
+            container
+                .child(TextView::new(&markdown_state).selectable(true))
+                .into_any_element()
         });
 
         Some(
@@ -1904,24 +2421,9 @@ impl ChatListView {
                         .text_sm()
                         .text_color(theme.secondary_foreground)
                         .child({
-                            let now = std::time::Instant::now();
-                            let entry =
-                                self.markdown_states
-                                    .entry(msg.id.clone())
-                                    .or_insert_with(|| {
-                                        let content = msg.content.clone();
-                                        let state =
-                                            cx.new(|cx| TextViewState::markdown(&content, cx));
-                                        (content, state, now)
-                                    });
-                            if entry.0 != msg.content {
-                                entry.0 = msg.content.clone();
-                                entry.2 = now;
-                                entry.1.update(cx, |state, cx| {
-                                    state.set_text(&msg.content, cx);
-                                });
-                            }
-                            TextView::new(&entry.1).selectable(true)
+                            let markdown_state =
+                                self.markdown_state(msg.id.clone(), &msg.content, cx);
+                            self.chat_markdown_view(&markdown_state)
                         })
                         .context_menu({
                             let content = msg.content.clone();
@@ -1966,38 +2468,18 @@ impl ChatListView {
                             .gap_2()
                             .children(reasoning_element)
                             .children(if !msg.content.is_empty() {
+                                let markdown_state =
+                                    self.markdown_state(msg.id.clone(), &msg.content, cx);
                                 let content_element = div()
                                     .w_full()
                                     .text_sm()
                                     .text_color(theme.foreground)
-                                    .child({
-                                        let now = std::time::Instant::now();
-                                        let entry = self
-                                            .markdown_states
-                                            .entry(msg.id.clone())
-                                            .or_insert_with(|| {
-                                                let content = msg.content.clone();
-                                                let state = cx.new(|cx| {
-                                                    TextViewState::markdown(&content, cx)
-                                                });
-                                                (content, state, now)
-                                            });
-                                        if entry.0 != msg.content {
-                                            let should_update = !msg.streaming
-                                                || now.duration_since(entry.2) >= Duration::from_millis(120);
-                                            if should_update {
-                                                entry.0 = msg.content.clone();
-                                                entry.2 = now;
-                                                entry.1.update(cx, |state, cx| {
-                                                    state.set_text(&msg.content, cx);
-                                                });
-                                            }
-                                        }
-                                        TextView::new(&entry.1).selectable(true)
-                                    });
+                                    .child(self.chat_markdown_view(&markdown_state))
+                                    .into_any_element();
 
                                 Some(if msg.streaming {
-                                    content_element
+                                    div()
+                                        .child(content_element)
                                         .with_animation(
                                             SharedString::from(format!("stream-text-{}", msg.id)),
                                             Animation::new(Duration::from_millis(150)),
@@ -2029,6 +2511,14 @@ impl ChatListView {
                                 }
                             }),
                     )
+            }
+            MessageRole::ContextMarker => {
+                div().w_full().flex().justify_center().my_2().px_4().child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(msg.content.clone()),
+                )
             }
             MessageRole::System => div().flex().justify_center().my_2().child(
                 div()
@@ -2357,17 +2847,33 @@ impl ChatListView {
         )
     }
 
-    fn render_composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Cached slash-command discovery. `available_slash_commands` scans
+    /// extension directories and compiles each installed WASM module just to
+    /// read its manifest, so it must not run per keystroke in render. The
+    /// cache is keyed by project root and refreshed at most once per TTL
+    /// while the command menu is open.
+    fn cached_slash_commands(
+        &mut self,
+        project_root: Option<&std::path::Path>,
+    ) -> Vec<SlashCommandInfo> {
+        const SLASH_COMMAND_CACHE_TTL: Duration = Duration::from_secs(10);
+        let project_root = project_root.map(std::path::Path::to_path_buf);
+        if let Some((root, loaded_at, commands)) = &self.slash_command_cache {
+            if *root == project_root && loaded_at.elapsed() < SLASH_COMMAND_CACHE_TTL {
+                return commands.clone();
+            }
+        }
+        let commands = available_slash_commands(project_root.as_deref());
+        self.slash_command_cache =
+            Some((project_root, std::time::Instant::now(), commands.clone()));
+        commands
+    }
+
+    fn render_composer(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
         let model = self.model.clone();
         let input_state = self.input_state.clone();
-        let (
-            selected_model,
-            reasoning_effort,
-            is_generating,
-            pending_message,
-            active_session_id,
-        ) = {
+        let (selected_model, reasoning_effort, is_generating, pending_message, active_session_id) = {
             let state = self.model.read(cx);
             (
                 state.selected_model.clone(),
@@ -2377,7 +2883,21 @@ impl ChatListView {
                 state.active_session_id.clone(),
             )
         };
-        let metrics = self.model.read(cx).active_session_metrics();
+        let (metrics, context_window) = {
+            let state = self.model.read(cx);
+            let context_window = state
+                .active_context_window()
+                .map(|context| ContextMeterContext {
+                    current_tokens: context.current_tokens,
+                    context_limit: context.context_limit,
+                    context_limit_is_estimate: context.context_limit_is_estimate,
+                    effective_model: context.effective_model.clone(),
+                    last_compaction_seq: context.last_compaction_seq,
+                    provisional: context.provisional,
+                    estimating: context.estimating,
+                });
+            (state.active_session_metrics(), context_window)
+        };
         let lane_count = self
             .model
             .read(cx)
@@ -2591,7 +3111,8 @@ impl ChatListView {
                 .split_whitespace()
                 .next()
                 .unwrap_or_default();
-            let commands = available_slash_commands(project_root.as_deref())
+            let commands = self
+                .cached_slash_commands(project_root.as_deref())
                 .into_iter()
                 .filter(|command| query.is_empty() || command.name.starts_with(query))
                 .collect::<Vec<_>>();
@@ -2683,121 +3204,170 @@ impl ChatListView {
             div().into_any_element()
         };
 
-        let token_usage = self.model.read(cx).current_session_token_usage();
-        let context_max = crate::model_catalog::model_context_window(&selected_model);
-        let percent = if context_max > 0 {
-            ((token_usage.total_tokens as f64 / context_max as f64) * 100.0).clamp(0.0, 100.0)
-        } else {
-            0.0
-        };
-
-        let meter_color = if percent == 0.0 {
+        let meter = context_meter_view_model(
+            context_window.as_ref(),
+            &ContextMeterMetrics {
+                billed_input_tokens: metrics.billed_input_tokens(),
+                output_tokens: metrics.output_tokens,
+                cache_hit_percent: metrics.cache_hit_percent(),
+            },
+        );
+        let displayed_percent = meter.percent.unwrap_or_default();
+        let meter_color = if meter.percent.is_none() || displayed_percent == 0.0 {
             theme.muted_foreground
-        } else if percent >= 95.0 {
+        } else if displayed_percent >= 95.0 {
             theme.danger
-        } else if percent >= 80.0 {
+        } else if displayed_percent >= 80.0 {
             theme.warning
         } else {
             theme.accent
         };
-        let context_metrics = self.model.read(cx).active_session_metrics();
-        let total_processed = context_metrics
-            .billed_input_tokens()
-            .saturating_add(context_metrics.output_tokens)
-            .min(u64::from(u32::MAX)) as u32;
-        let context_used = crate::model_catalog::format_tokens(token_usage.total_tokens);
-        let context_limit = crate::model_catalog::format_tokens(context_max);
-        let processed = crate::model_catalog::format_tokens(total_processed);
-        let context_meter =
-            HoverCard::new("context-window-hover-card")
-                .anchor(Anchor::BottomRight)
-                .open_delay(Duration::from_millis(200))
-                .close_delay(Duration::from_millis(300))
-                .trigger(
-                    div()
-                        .id("context-meter-badge")
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .size(px(32.0))
-                        .rounded_full()
-                        .hover(|style| style.bg(theme.accent.opacity(0.1)))
-                        .cursor_pointer()
-                        .child(
-                            ProgressCircle::new("context-meter-circle")
-                                .value(percent as f32)
-                                .color(meter_color)
-                                .size(px(24.0)),
-                        ),
-                )
-                .content(move |_state, _window, _cx| {
-                    let bar_width = ((percent / 100.0) * 308.0).clamp(0.0, 308.0);
-                    div()
-                        .w(px(340.0))
-                        .p_4()
-                        .rounded_xl()
-                        .border_1()
-                        .border_color(theme.border)
-                        .bg(theme.background)
-                        .shadow_lg()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .child(
-                            div()
-                                .flex()
-                                .justify_between()
-                                .items_center()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(theme.foreground)
-                                        .child("Context Window"),
-                                )
-                                .child(div().text_sm().text_color(theme.muted_foreground).child(
-                                    format!("{percent:.0}% · {context_used}/{context_limit}"),
-                                )),
-                        )
-                        .child(
-                            div()
-                                .w_full()
-                                .h(px(5.0))
-                                .rounded_full()
-                                .bg(theme.border)
-                                .child(
-                                    div()
-                                        .h_full()
-                                        .w(px(bar_width as f32))
-                                        .rounded_full()
-                                        .bg(meter_color),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .justify_between()
-                                .items_center()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(theme.muted_foreground)
-                                        .child("Total processed"),
-                                )
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(theme.muted_foreground)
-                                        .child(processed.clone()),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child("Context is automatically compacted when needed."),
-                        )
+        let context_meter_open = self.context_meter_open;
+        let toggle_context_meter = cx.entity();
+        let sync_context_meter = cx.entity();
+        let context_meter = Popover::new("context-window-popover")
+            .anchor(Anchor::BottomRight)
+            .appearance(false)
+            .open(context_meter_open)
+            .on_open_change(move |open, _window, cx| {
+                sync_context_meter.update(cx, |this, cx| {
+                    if this.context_meter_open != *open {
+                        this.context_meter_open = *open;
+                        cx.notify();
+                    }
                 });
+            })
+            .trigger(ContextMeterTrigger {
+                selected: context_meter_open,
+                toggle: Toggle::new("context-meter-badge")
+                    .ghost()
+                    .rounded_full()
+                    .size(px(32.0))
+                    .tooltip(meter.detail_label.clone())
+                    .child(
+                        ProgressCircle::new("context-meter-circle")
+                            .value(meter.bar_percent as f32)
+                            .color(meter_color)
+                            .size(px(24.0)),
+                    )
+                    .on_click(move |open, _window, cx| {
+                        toggle_context_meter.update(cx, |this, cx| {
+                            this.context_meter_open = *open;
+                            cx.notify();
+                        });
+                    }),
+            })
+            .content(move |_state, _window, _cx| {
+                let bar_width = meter.bar_percent / 100.0 * 308.0;
+                let current_summary = match meter.percent {
+                    Some(percent) => format!(
+                        "{percent:.0}% · {}{}",
+                        meter.current_label,
+                        if meter.provisional {
+                            " · provisional"
+                        } else {
+                            ""
+                        }
+                    ),
+                    None => meter.current_label.clone(),
+                };
+                div()
+                    .w(px(340.0))
+                    .p_4()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.background)
+                    .shadow_lg()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.foreground)
+                                    .child("Current context"),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child(current_summary),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .h(px(5.0))
+                            .rounded_full()
+                            .bg(theme.border)
+                            .child(
+                                div()
+                                    .h_full()
+                                    .w(px(bar_width as f32))
+                                    .rounded_full()
+                                    .bg(meter_color),
+                            ),
+                    )
+                    .when_some(meter.effective_model.clone(), |card, effective_model| {
+                        card.child(
+                            div()
+                                .flex()
+                                .justify_between()
+                                .items_center()
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child("Model")
+                                .child(effective_model),
+                        )
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .items_center()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child("Total processed")
+                            .child(meter.total_processed_label.clone()),
+                    )
+                    .when_some(meter.cache_hit_label.clone(), |card, cache_hit| {
+                        card.child(
+                            div()
+                                .flex()
+                                .justify_between()
+                                .items_center()
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child("Cache hit")
+                                .child(cache_hit),
+                        )
+                    })
+                    .when_some(meter.last_compaction_seq, |card, sequence| {
+                        card.child(
+                            div()
+                                .flex()
+                                .justify_between()
+                                .items_center()
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child("Last compacted")
+                                .child(format!("Record #{sequence}")),
+                        )
+                    })
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("Context is compacted automatically when needed."),
+                    )
+            });
 
         let stashed_draft = active_session_id
             .as_ref()
@@ -3007,7 +3577,7 @@ impl ChatListView {
                                             input_state.update(cx, |state, cx| {
                                                 state.set_value("", window, cx);
                                             });
-                                            this.scroll_handle.scroll_to_bottom();
+                                            this.transcript_list_state.scroll_to_end();
                                             cx.notify();
                                         }
                                     })),
@@ -3053,7 +3623,7 @@ impl ChatListView {
 
 impl Render for ChatListView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (messages, is_new_task, active_plan, session_key, has_older) = {
+        let (messages, is_new_task, active_plan, session_key, is_generating) = {
             let state = self.model.read(cx);
             (
                 state.messages.clone(),
@@ -3063,10 +3633,11 @@ impl Render for ChatListView {
                     .active_work_dir
                     .clone()
                     .zip(state.active_session_id.clone()),
-                state.has_older_messages(),
+                state.is_generating,
             )
         };
-        if session_key != self.last_session_key {
+        let session_changed = session_key != self.last_session_key;
+        if session_changed {
             self.last_session_key = session_key;
             self.initial_scroll_frames = 6;
             self.trajectory_category = None;
@@ -3074,10 +3645,13 @@ impl Render for ChatListView {
             self.selected_trajectory_index = None;
             self.trajectory_search.clear();
             self.markdown_states.clear();
+            self.trajectory_cache = None;
+            self.trajectory_raw_json = None;
             self.trajectory_search_input.update(cx, |state, cx| {
                 state.set_value("", window, cx);
             });
         }
+        self.sync_transcript_rows(messages.clone(), is_generating, session_changed);
         if let Some(prompt) = self
             .model
             .update(cx, |state, _cx| state.requested_composer_prompt.take())
@@ -3088,55 +3662,10 @@ impl Render for ChatListView {
             });
         }
         if self.initial_scroll_frames > 0 {
-            self.scroll_handle.scroll_to_bottom();
+            self.transcript_list_state.scroll_to_end();
             self.initial_scroll_frames = self.initial_scroll_frames.saturating_sub(1);
         }
-        if has_older
-            && self.initial_scroll_frames == 0
-            && !self.older_load_pending
-            && self.scroll_handle.offset().y >= px(-80.0)
-        {
-            let old_top_item = self.scroll_handle.top_item();
-            self.older_load_pending = true;
-            let model = self.model.clone();
-            let scroll_handle = self.scroll_handle.clone();
-            cx.spawn(async move |this, cx| {
-                let request = model.update(cx, |state, _cx| {
-                    state.history_page_request()
-                });
-                let added = if let Some((session_file, end)) = request {
-                    let page_file = session_file.clone();
-                    let page = cx
-                        .background_executor()
-                        .spawn(async move { compute_older_message_page(&page_file, end) })
-                        .await;
-                    model.update(cx, |state, cx| {
-                        let added = state.apply_older_message_page(
-                            &session_file,
-                            page.0,
-                            page.1,
-                            page.2,
-                        );
-                        if added > 0 {
-                            cx.notify();
-                        }
-                        added
-                    })
-                } else {
-                    0
-                };
-                if added > 0 {
-                    scroll_handle.scroll_to_item(old_top_item.saturating_add(added));
-                }
-                let _ = this.update(cx, |view, cx| {
-                    view.older_load_pending = false;
-                    cx.notify();
-                });
-            })
-            .detach();
-        }
         let theme = cx.theme().colors;
-        let transcript_rows = self.render_transcript_rows(&messages, cx);
 
         div()
             .flex()
@@ -3173,23 +3702,19 @@ impl Render for ChatListView {
                             .min_w_0()
                             .min_h_0()
                             .child(
-                                div()
-                                    .id("chat-transcript")
-                                    .size_full()
-                                    .track_scroll(&self.scroll_handle)
-                                    .overflow_y_scroll()
-                                    .pt_3()
-                                    .pb_6()
-                                    .child(
-                                        div()
-                                            .w_full()
-                                            .max_w(px(CHAT_CONTENT_MAX_WIDTH))
-                                            .mx_auto()
-                                            .children(transcript_rows),
-                                    ),
+                                list(
+                                    self.transcript_list_state.clone(),
+                                    cx.processor(Self::render_transcript_row),
+                                )
+                                .size_full()
+                                .pt_3()
+                                .pb_6()
+                                .with_sizing_behavior(ListSizingBehavior::Auto),
                             )
                             .child(div().absolute().inset_0().child(
-                                gpui_component::scroll::Scrollbar::vertical(&self.scroll_handle),
+                                gpui_component::scroll::Scrollbar::vertical(
+                                    &self.transcript_list_state,
+                                ),
                             ))
                             .into_any_element()
                     }
@@ -3206,5 +3731,388 @@ impl Render for ChatListView {
                     .flatten(),
             )
             .children((self.current_tab == CentralTab::Chat).then(|| self.render_composer(cx)))
+    }
+}
+
+#[cfg(test)]
+mod hot_path_tests {
+    use super::{
+        build_trajectory_rows, build_transcript_rows, classify_chat_link, classify_markdown_update,
+        context_meter_view_model, format_trajectory_raw_json, grouped_tool_activities,
+        summarize_trajectory, ChatLinkTarget, ContextMeterContext, ContextMeterMetrics,
+        MarkdownUpdate, TrajectoryCacheKey, TrajectoryMode, TrajectoryRow, TranscriptRow,
+    };
+    use crate::state::{
+        reported_session_shape_state, ChatMessageInfo, MessageRole, ToolActivityInfo,
+        TrajectoryDiagnostics, TrajectoryEntry,
+    };
+
+    #[test]
+    fn chat_link_classifies_web_urls_as_external() {
+        assert_eq!(
+            classify_chat_link("https://example.com/spec"),
+            ChatLinkTarget::Web
+        );
+        assert_eq!(
+            classify_chat_link("http://example.com/spec"),
+            ChatLinkTarget::Web
+        );
+    }
+
+    #[test]
+    fn chat_link_normalizes_safe_project_relative_paths() {
+        assert_eq!(
+            classify_chat_link("docs/spec.md"),
+            ChatLinkTarget::ProjectFile("docs/spec.md".into())
+        );
+        assert_eq!(
+            classify_chat_link("docs/design/../spec.md"),
+            ChatLinkTarget::ProjectFile("docs/spec.md".into())
+        );
+    }
+
+    #[test]
+    fn chat_link_rejects_absolute_and_escaping_paths() {
+        assert_eq!(classify_chat_link("/tmp/spec.md"), ChatLinkTarget::Rejected);
+        assert_eq!(
+            classify_chat_link("../../outside.md"),
+            ChatLinkTarget::Rejected
+        );
+    }
+
+    #[test]
+    fn chat_link_does_not_parse_line_or_fragment_suffixes() {
+        assert_eq!(
+            classify_chat_link("src/main.rs:42"),
+            ChatLinkTarget::ProjectFile("src/main.rs:42".into())
+        );
+        assert_eq!(
+            classify_chat_link("src/main.rs#L42"),
+            ChatLinkTarget::ProjectFile("src/main.rs#L42".into())
+        );
+    }
+    fn metrics_with_usage(
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_tokens: u64,
+        cache_write_tokens: u64,
+    ) -> ContextMeterMetrics {
+        let billed_input_tokens = input_tokens
+            .saturating_add(cache_read_tokens)
+            .saturating_add(cache_write_tokens);
+        ContextMeterMetrics {
+            billed_input_tokens,
+            output_tokens,
+            cache_hit_percent: (billed_input_tokens > 0).then(|| {
+                (((cache_read_tokens as u128) * 100 + (billed_input_tokens as u128) / 2)
+                    / billed_input_tokens as u128) as u64
+            }),
+        }
+    }
+
+    fn estimating_context() -> ContextMeterContext {
+        ContextMeterContext {
+            current_tokens: 0,
+            context_limit: 0,
+            context_limit_is_estimate: false,
+            effective_model: "new-model".into(),
+            last_compaction_seq: None,
+            provisional: false,
+            estimating: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn meter_separates_current_context_from_total_processed() {
+        let (path, state) = reported_session_shape_state().await;
+        let projected_context = state.active_context_window().unwrap();
+        let projected_metrics = state.active_session_metrics();
+        let view = context_meter_view_model(
+            Some(&ContextMeterContext {
+                current_tokens: projected_context.current_tokens,
+                context_limit: projected_context.context_limit,
+                context_limit_is_estimate: projected_context.context_limit_is_estimate,
+                effective_model: projected_context.effective_model.clone(),
+                last_compaction_seq: projected_context.last_compaction_seq,
+                provisional: projected_context.provisional,
+                estimating: projected_context.estimating,
+            }),
+            &ContextMeterMetrics {
+                billed_input_tokens: projected_metrics.billed_input_tokens(),
+                output_tokens: projected_metrics.output_tokens,
+                cache_hit_percent: projected_metrics.cache_hit_percent(),
+            },
+        );
+        let percent = view.percent.expect("known context percentage");
+        assert!((percent - 29.904_687_5).abs() < 1e-12);
+        assert!((view.bar_percent - 29.904_687_5).abs() < 1e-12);
+        assert_eq!(view.current_label, "38.3k / 128.0k");
+        assert_eq!(view.total_processed_label, "11.9M");
+        assert_eq!(view.cache_hit_label.as_deref(), Some("91%"));
+        assert_eq!(view.detail_label, "Context usage details, 30% used");
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn meter_estimating_context_has_no_false_percentage() {
+        let view =
+            context_meter_view_model(Some(&estimating_context()), &ContextMeterMetrics::default());
+        assert_eq!(view.percent, None);
+        assert_eq!(view.current_label, "Estimating…");
+        assert_eq!(view.bar_percent, 0.0);
+        assert_eq!(view.detail_label, "Context usage details, estimating usage");
+    }
+
+    #[test]
+    fn meter_treats_zero_context_limit_as_unknown_even_when_not_estimating() {
+        let mut context = estimating_context();
+        context.current_tokens = 42;
+        context.estimating = false;
+
+        let view = context_meter_view_model(Some(&context), &ContextMeterMetrics::default());
+
+        assert_eq!(view.percent, None);
+        assert_eq!(view.current_label, "Estimating…");
+        assert_eq!(view.bar_percent, 0.0);
+        assert_eq!(view.detail_label, "Context usage details, estimating usage");
+    }
+
+    #[test]
+    fn meter_cache_hit_rounding_uses_wide_intermediates_at_u64_max() {
+        let metrics = metrics_with_usage(0, 0, u64::MAX, 0);
+
+        assert_eq!(metrics.billed_input_tokens, u64::MAX);
+        assert_eq!(metrics.cache_hit_percent, Some(100));
+    }
+
+    #[test]
+    fn meter_labels_estimated_limit_and_clamps_only_bar() {
+        let view = context_meter_view_model(
+            Some(&ContextMeterContext {
+                current_tokens: 120_000,
+                context_limit: 100_000,
+                context_limit_is_estimate: true,
+                effective_model: "model".into(),
+                last_compaction_seq: Some(42),
+                provisional: true,
+                estimating: false,
+            }),
+            &ContextMeterMetrics::default(),
+        );
+        assert_eq!(view.percent, Some(120.0));
+        assert_eq!(view.bar_percent, 100.0);
+        assert_eq!(view.current_label, "120.0k / ~100.0k");
+        assert_eq!(view.last_compaction_seq, Some(42));
+        assert!(view.provisional);
+    }
+
+    #[test]
+    fn markdown_update_appends_only_the_new_suffix() {
+        assert_eq!(
+            classify_markdown_update("Hello", "Hello **world**"),
+            MarkdownUpdate::Append(" **world**")
+        );
+    }
+
+    #[test]
+    fn markdown_update_skips_identical_content() {
+        assert_eq!(
+            classify_markdown_update("Hello", "Hello"),
+            MarkdownUpdate::Unchanged
+        );
+    }
+
+    #[test]
+    fn markdown_update_replaces_non_append_changes() {
+        assert_eq!(
+            classify_markdown_update("Hello", "Jello"),
+            MarkdownUpdate::Replace
+        );
+        assert_eq!(
+            classify_markdown_update("Hello", "Hello there"),
+            MarkdownUpdate::Append(" there")
+        );
+        assert_eq!(
+            classify_markdown_update("Hello there", "Hello"),
+            MarkdownUpdate::Replace
+        );
+        assert_eq!(
+            classify_markdown_update("Hello", "Hello!"),
+            MarkdownUpdate::Append("!")
+        );
+        assert_eq!(
+            classify_markdown_update("Hello", "Jello there"),
+            MarkdownUpdate::Replace
+        );
+    }
+
+    #[test]
+    fn grouped_tool_activities_borrows_in_order_and_hides_plan_updates() {
+        let activity_message = |activities: &[(&str, &str)]| ChatMessageInfo {
+            id: activities[0].0.into(),
+            role: MessageRole::Assistant,
+            content: String::new(),
+            tool_activities: activities
+                .iter()
+                .map(|(id, title)| ToolActivityInfo {
+                    id: (*id).into(),
+                    category: "tool".into(),
+                    title: (*title).into(),
+                    display_summary: String::new(),
+                    detail: String::new(),
+                    is_expanded: false,
+                })
+                .collect(),
+            streaming: false,
+            reasoning_content: None,
+            reasoning_expanded: false,
+        };
+        let messages = vec![
+            activity_message(&[("tool-1", "read_file"), ("plan", "update_plan")]),
+            activity_message(&[("tool-2", "write_file")]),
+        ];
+
+        let ids = grouped_tool_activities(&messages)
+            .map(|activity| activity.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec!["tool-1", "tool-2"]);
+    }
+
+    #[test]
+    fn transcript_rows_group_consecutive_tool_only_messages() {
+        let message = |id: &str, activity: bool| ChatMessageInfo {
+            id: id.into(),
+            role: if activity {
+                MessageRole::Assistant
+            } else {
+                MessageRole::User
+            },
+            content: if activity { "" } else { id }.into(),
+            tool_activities: activity
+                .then(|| ToolActivityInfo {
+                    id: format!("tool-{id}"),
+                    category: "tool".into(),
+                    title: "read_file".into(),
+                    display_summary: String::new(),
+                    detail: String::new(),
+                    is_expanded: false,
+                })
+                .into_iter()
+                .collect(),
+            streaming: false,
+            reasoning_content: None,
+            reasoning_expanded: false,
+        };
+        let messages = vec![
+            message("user", false),
+            message("tool-1", true),
+            message("tool-2", true),
+            message("answer", false),
+        ];
+
+        assert_eq!(
+            build_transcript_rows(&messages, true),
+            vec![
+                TranscriptRow::Message(0),
+                TranscriptRow::Activities(1..3),
+                TranscriptRow::Message(3),
+                TranscriptRow::Working,
+            ]
+        );
+    }
+
+    #[test]
+    fn selected_trajectory_entry_formats_as_raw_json() {
+        let entry = TrajectoryEntry {
+            seq: Some(1),
+            run_id: None,
+            turn: None,
+            request: None,
+            category: "Tool".into(),
+            summary: "Read file".into(),
+            detail: "src/main.rs".into(),
+            lane: None,
+            correlation_id: None,
+            diagnostics: TrajectoryDiagnostics::default(),
+        };
+
+        let raw = format_trajectory_raw_json(&entry);
+
+        assert!(raw.contains("\"category\": \"Tool\""));
+        assert!(raw.contains("\"summary\": \"Read file\""));
+    }
+
+    fn trajectory_entry(
+        category: &str,
+        request: Option<u32>,
+        turn: Option<u32>,
+    ) -> TrajectoryEntry {
+        TrajectoryEntry {
+            seq: None,
+            run_id: None,
+            turn,
+            request,
+            category: category.into(),
+            summary: category.into(),
+            detail: String::new(),
+            lane: None,
+            correlation_id: None,
+            diagnostics: TrajectoryDiagnostics::default(),
+        }
+    }
+
+    #[test]
+    fn trajectory_rows_preserve_request_headers_and_setup_boundaries() {
+        let entries = vec![
+            trajectory_entry("Provider", Some(1), Some(1)),
+            trajectory_entry("Input", Some(1), Some(1)),
+            trajectory_entry("Input", Some(2), Some(2)),
+        ];
+
+        assert_eq!(
+            build_trajectory_rows(&entries, &[0, 1, 2], TrajectoryMode::Requests),
+            vec![
+                TrajectoryRow::RequestHeader(1),
+                TrajectoryRow::Setup,
+                TrajectoryRow::Entry(0),
+                TrajectoryRow::Entry(1),
+                TrajectoryRow::RequestHeader(2),
+                TrajectoryRow::Entry(2),
+            ]
+        );
+    }
+
+    #[test]
+    fn trajectory_summary_is_computed_once_from_canonical_entries() {
+        let mut tool = trajectory_entry("Tool", Some(1), Some(3));
+        tool.diagnostics.duration_ms = Some(25);
+        let mut anomaly = trajectory_entry("Anomaly", Some(1), Some(4));
+        anomaly.diagnostics.duration_ms = Some(75);
+        anomaly.diagnostics.is_anomaly = true;
+
+        let summary = summarize_trajectory(&[tool, anomaly]);
+
+        assert_eq!(summary.tool_count, 1);
+        assert_eq!(summary.total_duration_ms, 100);
+        assert_eq!(summary.anomaly_count, 1);
+        assert_eq!(summary.max_turn, 4);
+    }
+    #[test]
+    fn trajectory_cache_key_changes_with_data_or_filter() {
+        let base = TrajectoryCacheKey {
+            revision: 7,
+            mode: TrajectoryMode::Execution,
+            query: "tool".into(),
+            category: None,
+            lane: None,
+        };
+        let mut changed = base.clone();
+        changed.revision += 1;
+        assert_ne!(base, changed);
+
+        let mut changed = base.clone();
+        changed.query = "provider".into();
+        assert_ne!(base, changed);
     }
 }

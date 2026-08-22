@@ -86,6 +86,8 @@ pub struct AgentRuntime {
     allowed_tool_names: Option<HashSet<String>>,
     /// Provider trace recorder (for auditing).
     provider_trace_recorder: Option<crate::provider::ProviderTraceRecorder>,
+    /// Asynchronous context preparation at the provider-attempt boundary.
+    provider_boundary_preparer: Option<crate::provider::ProviderBoundaryPreparer>,
     /// Assistant message recorder (for persistence).
     message_recorder: Option<crate::provider::AssistantMessageRecorder>,
     /// Harness event hub for wiring durability events.
@@ -139,6 +141,7 @@ impl AgentRuntime {
             prompt_cache_key: None,
             allowed_tool_names: None,
             provider_trace_recorder: None,
+            provider_boundary_preparer: None,
             message_recorder: None,
         }
     }
@@ -175,7 +178,9 @@ impl AgentRuntime {
 
         let harness_event_hub = HarnessEventHub::new(config.event_channel_capacity);
         let _harness = AgentHarness::with_events(store, harness_event_hub);
-        Err(AgentError::Session("AgentRuntime requires an injected ProviderPort; use new_with_provider".into()))
+        Err(AgentError::Session(
+            "AgentRuntime requires an injected ProviderPort; use new_with_provider".into(),
+        ))
     }
 
     pub fn new_with_provider(
@@ -187,16 +192,31 @@ impl AgentRuntime {
         provider_client: Arc<dyn ProviderPort>,
     ) -> Result<Self, AgentError> {
         let store = if let Some(path) = session_file {
-            if let Some(parent) = path.parent() { std::fs::create_dir_all(parent).ok(); }
-            if !path.exists() { std::fs::File::create(path).map_err(|e| AgentError::Session(format!("create session file: {e}")))?; }
-            JsonlStore::open(path).map_err(|e| AgentError::Session(format!("open session journal: {e}")))?
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            if !path.exists() {
+                std::fs::File::create(path)
+                    .map_err(|e| AgentError::Session(format!("create session file: {e}")))?;
+            }
+            JsonlStore::open(path)
+                .map_err(|e| AgentError::Session(format!("open session journal: {e}")))?
         } else {
-            let tmp = std::env::temp_dir().join(format!("threadlane-ephemeral-{}", std::process::id()));
-            JsonlStore::open(&tmp).map_err(|e| AgentError::Session(format!("open ephemeral journal: {e}")))?
+            let tmp =
+                std::env::temp_dir().join(format!("threadlane-ephemeral-{}", std::process::id()));
+            JsonlStore::open(&tmp)
+                .map_err(|e| AgentError::Session(format!("open ephemeral journal: {e}")))?
         };
         let harness_event_hub = HarnessEventHub::new(config.event_channel_capacity);
         let harness = AgentHarness::with_events(store, harness_event_hub);
-        Ok(Self::from_harness_with_provider(api_key, account_id, model, harness, config, provider_client))
+        Ok(Self::from_harness_with_provider(
+            api_key,
+            account_id,
+            model,
+            harness,
+            config,
+            provider_client,
+        ))
     }
 
     // ── Model context ─────────────────────────────────────────────────
@@ -208,12 +228,20 @@ impl AgentRuntime {
         }
     }
 
-    /// Returns the canonical messages from the harness projection.
+    /// Returns the canonical messages from the main harness projection.
     pub async fn projected_messages(&self) -> Result<Vec<AgentMessage>, AgentError> {
+        self.projected_messages_on_lane("main").await
+    }
+
+    /// Returns the canonical messages from a specific harness lane projection.
+    pub async fn projected_messages_on_lane(
+        &self,
+        lane: &str,
+    ) -> Result<Vec<AgentMessage>, AgentError> {
         let context = self
             .harness
             .store()
-            .model_context("main")
+            .model_context(lane)
             .map_err(|error| AgentError::Session(error.to_string()))?;
         let system_prompt = self.turn.lock().await.system_prompt.clone();
         Ok(std::iter::once(AgentMessage::System {
@@ -223,9 +251,14 @@ impl AgentRuntime {
         .collect())
     }
 
-    /// Syncs the in-memory turn state from the canonical harness projection.
+    /// Syncs the in-memory turn state from the canonical main harness projection.
     pub async fn sync_turn_from_model_context(&self) -> Result<(), AgentError> {
-        let messages = self.projected_messages().await?;
+        self.sync_turn_from_model_context_on_lane("main").await
+    }
+
+    /// Syncs the in-memory turn state from a specific canonical harness lane.
+    pub async fn sync_turn_from_model_context_on_lane(&self, lane: &str) -> Result<(), AgentError> {
+        let messages = self.projected_messages_on_lane(lane).await?;
         let mut turn = self.turn.lock().await;
         turn.messages = messages;
         Ok(())
@@ -255,7 +288,7 @@ impl AgentRuntime {
 
     pub fn steer(&mut self, message: AgentMessage) {
         let seq = self.harness.store().next_sequence();
-        let _ = self.harness.enqueue_unbound(
+        let persisted = self.harness.enqueue_unbound(
             QueueKind::Steer,
             ProvisionedEntry {
                 id: format!("queued-steer-{seq}"),
@@ -264,13 +297,24 @@ impl AgentRuntime {
                 surface_op: crate::harness::SurfaceOperation::Append,
             },
         );
-        let _ = self.harness.drive_to_completion();
-        self.steering_queue.push(message);
+        let persisted = persisted.and_then(|_| {
+            self.harness
+                .drive_to_completion()
+                .map_err(ProcedureError::from)
+        });
+        match persisted {
+            Ok(()) => self.steering_queue.push(message),
+            Err(error) => {
+                let _ = self.event_tx.send(AgentEvent::AgentError {
+                    error: format!("failed to persist steering: {error}"),
+                });
+            }
+        }
     }
 
     pub fn follow_up(&mut self, message: AgentMessage) {
         let seq = self.harness.store().next_sequence();
-        let _ = self.harness.enqueue_unbound(
+        let persisted = self.harness.enqueue_unbound(
             QueueKind::FollowUp,
             ProvisionedEntry {
                 id: format!("queued-followup-{seq}"),
@@ -279,8 +323,19 @@ impl AgentRuntime {
                 surface_op: crate::harness::SurfaceOperation::Append,
             },
         );
-        let _ = self.harness.drive_to_completion();
-        self.follow_up_queue.push(message);
+        let persisted = persisted.and_then(|_| {
+            self.harness
+                .drive_to_completion()
+                .map_err(ProcedureError::from)
+        });
+        match persisted {
+            Ok(()) => self.follow_up_queue.push(message),
+            Err(error) => {
+                let _ = self.event_tx.send(AgentEvent::AgentError {
+                    error: format!("failed to persist follow-up: {error}"),
+                });
+            }
+        }
     }
 
     /// Records a user prompt through the harness then runs the turn loop.
@@ -309,28 +364,34 @@ impl AgentRuntime {
             .await;
     }
 
-    /// Execute a turn loop for a pre-accepted run token.
+    /// Execute a turn loop for a pre-accepted durable run token.
     pub async fn run_accepted(&mut self, run_id: &str, lane: &str, accepted_through_seq: u64) {
-        assert!(!run_id.is_empty(), "accepted run id must not be empty");
-        assert_eq!(lane, "main", "agent runtime currently serves main lane");
-        assert!(
-            accepted_through_seq > 0,
-            "accepted run must name a committed prefix"
-        );
+        let validation = self
+            .harness
+            .store_mut()
+            .ensure_fresh()
+            .map_err(|error| error.to_string())
+            .and_then(|_| {
+                self.harness
+                    .validate_accepted_run_token(run_id, lane, accepted_through_seq)
+                    .map_err(|error| error.to_string())
+            });
+        if let Err(error) = validation {
+            let _ = self.event_tx.send(AgentEvent::AgentError {
+                error: format!("refusing unvalidated accepted run: {error}"),
+            });
+            return;
+        }
         let _ = self.event_tx.send(AgentEvent::AgentStart);
-        self.run_turns().await;
-        let _ = self.event_tx.send(AgentEvent::AgentEnd {
-            usage: TokenUsage::default(),
-        });
+        let usage = self.run_turns().await;
+        let _ = self.event_tx.send(AgentEvent::AgentEnd { usage });
     }
 
     /// Resumes provider/tool execution without appending a duplicate prompt.
     pub async fn resume_pending_turn(&mut self) {
         let _ = self.event_tx.send(AgentEvent::AgentStart);
-        self.run_turns().await;
-        let _ = self.event_tx.send(AgentEvent::AgentEnd {
-            usage: TokenUsage::default(),
-        });
+        let usage = self.run_turns().await;
+        let _ = self.event_tx.send(AgentEvent::AgentEnd { usage });
     }
 
     pub fn set_credentials(&mut self, api_key: String, account_id: Option<String>) {
@@ -351,6 +412,13 @@ impl AgentRuntime {
         recorder: Option<crate::provider::ProviderTraceRecorder>,
     ) {
         self.provider_trace_recorder = recorder;
+    }
+
+    pub fn set_provider_boundary_preparer(
+        &mut self,
+        preparer: Option<crate::provider::ProviderBoundaryPreparer>,
+    ) {
+        self.provider_boundary_preparer = preparer;
     }
 
     pub fn set_message_recorder(
@@ -390,6 +458,27 @@ impl AgentRuntime {
 
     pub async fn get_state(&self) -> TurnState {
         self.turn.lock().await.clone()
+    }
+
+    /// Returns the current system prompt.
+    pub fn system_prompt(&self) -> String {
+        self.turn
+            .try_lock()
+            .map(|t| t.system_prompt.clone())
+            .unwrap_or_else(|_| "".to_string())
+    }
+
+    /// Returns the current reasoning effort.
+    pub fn reasoning_effort(&self) -> crate::types::ReasoningEffort {
+        self.turn
+            .try_lock()
+            .map(|t| t.reasoning_effort)
+            .unwrap_or_else(|_| Default::default())
+    }
+
+    /// Returns a snapshot of the current messages.
+    pub async fn messages(&self) -> Vec<AgentMessage> {
+        self.turn.lock().await.messages.clone()
     }
 
     pub fn register_tool_executor(
@@ -434,12 +523,14 @@ impl AgentRuntime {
         }
     }
 
-    pub async fn compact_history(
+    /// Computes manual compaction without mutating provider context. Durable
+    /// callers commit this projection before installing it in memory.
+    pub async fn preview_compact_history(
         &self,
         options: Option<crate::compaction::CompactionOptions>,
-    ) -> bool {
-        let mut turn = self.turn.lock().await;
-        let compacted = match options {
+    ) -> Vec<AgentMessage> {
+        let turn = self.turn.lock().await;
+        match options {
             Some(opts) => crate::compaction::compact_messages(&turn.messages, &opts),
             None => {
                 let by_tokens = compact_messages_to_token_budget(
@@ -455,8 +546,16 @@ impl AgentRuntime {
                     by_tokens
                 }
             }
-        };
-        let changed = compacted.len() != turn.messages.len();
+        }
+    }
+
+    pub async fn compact_history(
+        &self,
+        options: Option<crate::compaction::CompactionOptions>,
+    ) -> bool {
+        let compacted = self.preview_compact_history(options).await;
+        let mut turn = self.turn.lock().await;
+        let changed = compacted != turn.messages;
         turn.messages = compacted;
         changed
     }
@@ -487,12 +586,20 @@ impl AgentRuntime {
 
     pub async fn run_steer(&mut self) {
         if !self.steering_queue.is_empty() {
-            let items: Vec<_> = self.steering_queue.drain(..).collect();
+            let items = self.steering_queue.clone();
             if let Some(recorder) = self.message_recorder.as_ref() {
                 for item in &items {
-                    let _ = recorder(item.clone()).await;
+                    if let Err(error) = recorder(item.clone()).await {
+                        let _ = self.event_tx.send(AgentEvent::AgentError {
+                            error: format!(
+                                "failed to persist steering before provider work: {error}"
+                            ),
+                        });
+                        return;
+                    }
                 }
             }
+            self.steering_queue.clear();
             {
                 let mut turn = self.turn.lock().await;
                 turn.messages.extend(items);
@@ -503,12 +610,20 @@ impl AgentRuntime {
 
     pub async fn run_follow_up(&mut self) {
         if !self.follow_up_queue.is_empty() {
-            let items: Vec<_> = self.follow_up_queue.drain(..).collect();
+            let items = self.follow_up_queue.clone();
             if let Some(recorder) = self.message_recorder.as_ref() {
                 for item in &items {
-                    let _ = recorder(item.clone()).await;
+                    if let Err(error) = recorder(item.clone()).await {
+                        let _ = self.event_tx.send(AgentEvent::AgentError {
+                            error: format!(
+                                "failed to persist follow-up before provider work: {error}"
+                            ),
+                        });
+                        return;
+                    }
                 }
             }
+            self.follow_up_queue.clear();
             {
                 let mut turn = self.turn.lock().await;
                 turn.messages.extend(items);
@@ -620,7 +735,7 @@ impl AgentRuntime {
     }
 
     /// Runs the main turn loop.
-    async fn run_turns(&mut self) {
+    async fn run_turns(&mut self) -> TokenUsage {
         let tool_dispatcher = self.synced_dispatcher();
         let mut driver = crate::turn_driver::TurnDriver {
             turn: self.turn.clone(),
@@ -631,11 +746,819 @@ impl AgentRuntime {
             event_tx: self.event_tx.clone(),
             harness_event_hub: self.harness_event_hub.clone(),
             provider_trace_recorder: self.provider_trace_recorder.clone(),
+            provider_boundary_preparer: self.provider_boundary_preparer.clone(),
             message_recorder: self.message_recorder.clone(),
             stream_rules: self.stream_rules.clone(),
             steering_queue: &mut self.steering_queue,
             follow_up_queue: &mut self.follow_up_queue,
         };
-        driver.run_turns().await;
+        driver.run_turns().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use sha2::Digest;
+    use threadlane_protocol::{
+        RuntimeRequest, RuntimeStreamEvent, RuntimeToolCall as ToolCall,
+        RuntimeToolCallFunction as ToolCallFunction, RuntimeUsage,
+    };
+
+    use crate::provider::{ProviderBoundaryRequest, ProviderBoundaryResult};
+
+    struct UnusedProvider;
+
+    #[async_trait]
+    impl ProviderPort for UnusedProvider {
+        async fn stream_request(
+            &self,
+            _request: RuntimeRequest,
+            _events: tokio::sync::mpsc::Sender<RuntimeStreamEvent>,
+        ) {
+        }
+
+        async fn fetch_deferred(
+            &self,
+            _model: &str,
+            _handle_id: &str,
+        ) -> Result<DeferredResponse, String> {
+            Ok(DeferredResponse::Pending)
+        }
+
+        async fn cancel_deferred(&self, _model: &str, _handle_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn provider_kind(&self, _model: &str) -> &'static str {
+            "test"
+        }
+    }
+
+    #[tokio::test]
+    async fn projected_messages_can_target_a_dedicated_lane() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let store = JsonlStore::open(&path).unwrap();
+        let mut harness = AgentHarness::new(store);
+        harness
+            .accept_prompt_and_drive_on_lane(
+                "subagent-worker",
+                "child-run",
+                AgentMessage::user("child task", Vec::new()),
+            )
+            .unwrap();
+        drop(harness);
+        let runtime = AgentRuntime::new_with_provider(
+            "",
+            None,
+            "test-model",
+            Some(&path),
+            AgentConfig::default(),
+            Arc::new(UnusedProvider),
+        )
+        .unwrap();
+
+        let messages = runtime
+            .projected_messages_on_lane("subagent-worker")
+            .await
+            .unwrap();
+
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            AgentMessage::User { content } if content == "child task"
+        )));
+    }
+
+    struct RecordingProvider {
+        order: Arc<std::sync::Mutex<Vec<&'static str>>>,
+        message_counts: Arc<std::sync::Mutex<Vec<usize>>>,
+        request_tools: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    }
+
+    #[async_trait]
+    impl ProviderPort for RecordingProvider {
+        async fn stream_request(
+            &self,
+            request: RuntimeRequest,
+            events: tokio::sync::mpsc::Sender<RuntimeStreamEvent>,
+        ) {
+            self.order.lock().unwrap().push("sent");
+            self.message_counts
+                .lock()
+                .unwrap()
+                .push(request.messages.as_array().map_or(0, Vec::len));
+            self.request_tools
+                .lock()
+                .unwrap()
+                .push(request.tools.clone());
+            let _ = events
+                .send(RuntimeStreamEvent::ContentToken("done".into()))
+                .await;
+            let _ = events
+                .send(RuntimeStreamEvent::Finished {
+                    tool_calls: Vec::new(),
+                    usage: RuntimeUsage::default(),
+                })
+                .await;
+        }
+
+        async fn fetch_deferred(
+            &self,
+            _model: &str,
+            _handle_id: &str,
+        ) -> Result<DeferredResponse, String> {
+            Ok(DeferredResponse::Pending)
+        }
+
+        async fn cancel_deferred(&self, _model: &str, _handle_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn provider_kind(&self, _model: &str) -> &'static str {
+            "test"
+        }
+    }
+
+    #[tokio::test]
+    async fn public_run_accepted_rejects_non_durable_token_before_provider_send() {
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = Arc::new(RecordingProvider {
+            order: order.clone(),
+            message_counts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            request_tools: Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+        let mut runtime = AgentRuntime::new_with_provider(
+            "",
+            None,
+            "test-model",
+            None,
+            AgentConfig::default(),
+            provider,
+        )
+        .unwrap();
+        let mut events = runtime.subscribe();
+
+        runtime.run_accepted("invented-run", "main", 99).await;
+
+        assert!(
+            order.lock().unwrap().is_empty(),
+            "provider must not be sent"
+        );
+        let event = events.try_recv().expect("validation error event");
+        assert!(matches!(
+            event,
+            AgentEvent::AgentError { error }
+                if error.contains("refusing unvalidated accepted run")
+        ));
+        assert!(events.try_recv().is_err(), "no start/end events are valid");
+    }
+
+    #[tokio::test]
+    async fn preparation_finishes_before_provider_started_and_network_send() {
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let request_tools = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = Arc::new(RecordingProvider {
+            order: order.clone(),
+            message_counts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            request_tools: request_tools.clone(),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let mut runtime = AgentRuntime::new_with_provider(
+            "",
+            None,
+            "effective-model",
+            Some(&dir.path().join("session.jsonl")),
+            AgentConfig::default(),
+            provider,
+        )
+        .unwrap();
+        runtime
+            .turn
+            .lock()
+            .await
+            .messages
+            .push(AgentMessage::user("test", Vec::new()));
+
+        let prepared_tools = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let manifest_tools = prepared_tools.clone();
+        let started_order = order.clone();
+        runtime.set_provider_trace_recorder(Some(Arc::new(move |event| {
+            let started_order = started_order.clone();
+            let manifest_tools = manifest_tools.clone();
+            Box::pin(async move {
+                match event {
+                    crate::provider::ProviderTraceEvent::Started { .. } => {
+                        started_order.lock().unwrap().push("started");
+                    }
+                    crate::provider::ProviderTraceEvent::ContextManifest {
+                        context_limit,
+                        items,
+                        ..
+                    } => {
+                        assert_eq!(context_limit, Some(128_000));
+                        let prepared = manifest_tools.lock().unwrap();
+                        let tools = prepared.last().expect("preparer schema before manifest");
+                        let tools_json = serde_json::to_string(tools).unwrap();
+                        let expected_count = tools.as_array().expect("tool array").len();
+                        let expected_label = format!("{expected_count} tools");
+                        let expected_digest =
+                            format!("{:x}", sha2::Sha256::digest(tools_json.as_bytes()));
+                        let tool_items = items
+                            .iter()
+                            .filter(|item| {
+                                item.source == crate::harness::ContextItemSource::ToolSchema
+                            })
+                            .collect::<Vec<_>>();
+                        assert_eq!(tool_items.len(), 1);
+                        assert_eq!(
+                            tool_items[0].label.as_ref().map(|label| label.as_str()),
+                            Some(expected_label.as_str())
+                        );
+                        assert_eq!(tool_items[0].digest_sha256.as_str(), expected_digest);
+                        assert_eq!(
+                            tool_items[0].token_estimate,
+                            tools_json.len().div_ceil(4) as u32
+                        );
+                        started_order.lock().unwrap().push("manifest");
+                    }
+                    _ => {}
+                }
+                Ok(())
+            })
+        })));
+        let preparer_order = order.clone();
+        let preparer_tools = prepared_tools.clone();
+        runtime.set_provider_boundary_preparer(Some(Arc::new(
+            move |request: ProviderBoundaryRequest| {
+                let preparer_order = preparer_order.clone();
+                let preparer_tools = preparer_tools.clone();
+                Box::pin(async move {
+                    assert_eq!(request.model, "effective-model");
+                    let tools: serde_json::Value = serde_json::from_str(
+                        request
+                            .tool_schema_json
+                            .as_deref()
+                            .expect("shortlisted schema"),
+                    )
+                    .unwrap();
+                    assert!(tools.as_array().is_some_and(|tools| !tools.is_empty()));
+                    preparer_tools.lock().unwrap().push(tools);
+                    preparer_order.lock().unwrap().push("prepared");
+                    Ok(ProviderBoundaryResult {
+                        messages: request.messages,
+                        context_limit: 128_000,
+                        context_limit_is_estimate: true,
+                        compaction_generation: 0,
+                        provisional_estimated_tokens: None,
+                        provider_attempt: None,
+                        provider_request_id: None,
+                    })
+                })
+            },
+        )));
+
+        runtime.run_turns().await;
+
+        assert_eq!(
+            &*order.lock().unwrap(),
+            &["prepared", "started", "manifest", "sent"]
+        );
+        assert_eq!(
+            *prepared_tools.lock().unwrap(),
+            *request_tools.lock().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn context_manifest_uses_complete_serialized_messages_and_image_cost() {
+        let provider = Arc::new(RecordingProvider {
+            order: Arc::new(std::sync::Mutex::new(Vec::new())),
+            message_counts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            request_tools: Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+        let config = AgentConfig::builder().estimated_image_tokens(321).build();
+        let messages = vec![
+            AgentMessage::Assistant {
+                content: Some("calling".into()),
+                tool_calls: Some(vec![ToolCall {
+                    id: "call-1".into(),
+                    r#type: "function".into(),
+                    function: ToolCallFunction {
+                        name: "read_file".into(),
+                        arguments: "{\"path\":\"README.md\"}".into(),
+                    },
+                    thought_signature: None,
+                }]),
+                stop_reason: Some("tool_use".into()),
+                deferred_handle: None,
+            },
+            AgentMessage::Tool {
+                tool_call_id: "call-1".into(),
+                name: "read_file".into(),
+                content: "contents".into(),
+                is_error: false,
+                terminate: false,
+            },
+            AgentMessage::UserWithImages {
+                content: "inspect".into(),
+                images: vec![crate::types::ImageAttachment {
+                    display_name: "screen.png".into(),
+                    data_url: "data:image/png;base64,AA==".into(),
+                }],
+            },
+            AgentMessage::Custom {
+                custom_type: "thinking".into(),
+                payload: serde_json::json!({ "text": "private reasoning" }),
+            },
+            AgentMessage::Custom {
+                custom_type: "extension_note".into(),
+                payload: serde_json::json!({ "text": "not provider-visible" }),
+            },
+            AgentMessage::Custom {
+                custom_type: "compaction_summary".into(),
+                payload: serde_json::json!({ "summary": "durable checkpoint" }),
+            },
+        ];
+        let mut runtime =
+            AgentRuntime::new_with_provider("", None, "test-model", None, config.clone(), provider)
+                .unwrap();
+        runtime.turn.lock().await.messages = messages.clone();
+        let expected = messages.clone();
+        runtime.set_provider_trace_recorder(Some(Arc::new(move |event| {
+            let expected = expected.clone();
+            let config = config.clone();
+            Box::pin(async move {
+                if let crate::provider::ProviderTraceEvent::ContextManifest {
+                    items,
+                    total_estimated_tokens,
+                    ..
+                } = event
+                {
+                    let message_items = items
+                        .iter()
+                        .filter(|item| item.source != crate::harness::ContextItemSource::ToolSchema)
+                        .collect::<Vec<_>>();
+                    assert_eq!(message_items.len(), expected.len());
+                    for (item, message) in message_items.iter().zip(&expected) {
+                        let normalized = crate::compaction::provider_normalized_message(message);
+                        let accounted = normalized.as_ref().unwrap_or(message);
+                        let serialized = serde_json::to_vec(accounted).unwrap();
+                        assert_eq!(
+                            item.digest_sha256.as_str(),
+                            format!("{:x}", sha2::Sha256::digest(&serialized))
+                        );
+                        assert_eq!(
+                            item.status,
+                            if normalized.is_some() {
+                                crate::harness::ContextItemStatus::Active
+                            } else {
+                                crate::harness::ContextItemStatus::Omitted
+                            }
+                        );
+                        assert_eq!(
+                            item.token_estimate as usize,
+                            normalized.as_ref().map_or(0, |message| {
+                                crate::compaction::estimate_message_tokens(message, &config)
+                            })
+                        );
+                    }
+                    assert_eq!(
+                        message_items
+                            .iter()
+                            .filter(|item| {
+                                item.status == crate::harness::ContextItemStatus::Omitted
+                            })
+                            .count(),
+                        2
+                    );
+                    assert!(message_items.last().is_some_and(|item| {
+                        item.status == crate::harness::ContextItemStatus::Active
+                            && item.token_estimate > 0
+                    }));
+                    assert_eq!(
+                        message_items[1].source,
+                        crate::harness::ContextItemSource::ToolResult
+                    );
+                    assert_eq!(
+                        total_estimated_tokens.map(|value| value as usize),
+                        Some(items.iter().map(|item| item.token_estimate as usize).sum())
+                    );
+                }
+                Ok(())
+            })
+        })));
+
+        runtime.run_turns().await;
+    }
+
+    #[tokio::test]
+    async fn context_manifest_persistence_failure_blocks_network_send() {
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = Arc::new(RecordingProvider {
+            order: order.clone(),
+            message_counts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            request_tools: Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+        let mut runtime = AgentRuntime::new_with_provider(
+            "",
+            None,
+            "test-model",
+            None,
+            AgentConfig::default(),
+            provider,
+        )
+        .unwrap();
+        runtime
+            .turn
+            .lock()
+            .await
+            .messages
+            .push(AgentMessage::user("test", Vec::new()));
+        let trace_order = order.clone();
+        runtime.set_provider_trace_recorder(Some(Arc::new(move |event| {
+            let trace_order = trace_order.clone();
+            Box::pin(async move {
+                match event {
+                    crate::provider::ProviderTraceEvent::Started { .. } => {
+                        trace_order.lock().unwrap().push("started");
+                        Ok(())
+                    }
+                    crate::provider::ProviderTraceEvent::ContextManifest { .. } => {
+                        Err("manifest disk full".into())
+                    }
+                    crate::provider::ProviderTraceEvent::Finished { .. } => {
+                        trace_order.lock().unwrap().push("finished");
+                        Ok(())
+                    }
+                    _ => Ok(()),
+                }
+            })
+        })));
+
+        runtime.run_turns().await;
+
+        assert_eq!(&*order.lock().unwrap(), &["started", "finished"]);
+    }
+
+    #[tokio::test]
+    async fn compaction_persistence_failure_sends_zero_fake_provider_requests() {
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = Arc::new(RecordingProvider {
+            order: order.clone(),
+            message_counts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            request_tools: Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+        let mut runtime = AgentRuntime::new_with_provider(
+            "",
+            None,
+            "test-model",
+            None,
+            AgentConfig::default(),
+            provider,
+        )
+        .unwrap();
+        runtime
+            .turn
+            .lock()
+            .await
+            .messages
+            .push(AgentMessage::user("test", Vec::new()));
+        let started_order = order.clone();
+        runtime.set_provider_trace_recorder(Some(Arc::new(move |event| {
+            let started_order = started_order.clone();
+            Box::pin(async move {
+                if matches!(event, crate::provider::ProviderTraceEvent::Started { .. }) {
+                    started_order.lock().unwrap().push("started");
+                }
+                Ok(())
+            })
+        })));
+        // The session layer installs this boundary hook around the durable
+        // checkpoint+tail+telemetry commit. Its error must stop the attempt
+        // before either provider tracing or ProviderPort::stream_request.
+        runtime.set_provider_boundary_preparer(Some(Arc::new(|_| {
+            Box::pin(async { Err("compaction persistence failed: disk full".into()) })
+        })));
+
+        runtime.run_turns().await;
+
+        assert!(order.lock().unwrap().is_empty());
+    }
+
+    struct RateLimitOnceProvider {
+        models: Arc<std::sync::Mutex<Vec<String>>>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ProviderPort for RateLimitOnceProvider {
+        async fn stream_request(
+            &self,
+            request: RuntimeRequest,
+            events: tokio::sync::mpsc::Sender<RuntimeStreamEvent>,
+        ) {
+            self.models.lock().unwrap().push(request.model);
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let event = if call == 0 {
+                RuntimeStreamEvent::Error("rate limit exceeded".into())
+            } else {
+                RuntimeStreamEvent::Finished {
+                    tool_calls: Vec::new(),
+                    usage: RuntimeUsage::default(),
+                }
+            };
+            let _ = events.send(event).await;
+        }
+
+        async fn fetch_deferred(
+            &self,
+            _model: &str,
+            _handle_id: &str,
+        ) -> Result<DeferredResponse, String> {
+            Ok(DeferredResponse::Pending)
+        }
+
+        async fn cancel_deferred(&self, _model: &str, _handle_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn provider_kind(&self, _model: &str) -> &'static str {
+            "test"
+        }
+    }
+
+    #[tokio::test]
+    async fn rate_limit_fallback_is_installed_across_boundary_manifest_and_network() {
+        let network_models = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = Arc::new(RateLimitOnceProvider {
+            models: network_models.clone(),
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let roles = crate::types::ModelRoles {
+            task: Some("primary-model".into()),
+            fallback_chain: vec!["primary-model".into(), "fallback-model".into()],
+            ..Default::default()
+        };
+        let config = AgentConfig::builder().model_roles(roles).build();
+        let mut runtime =
+            AgentRuntime::new_with_provider("", None, "base-model", None, config, provider)
+                .unwrap();
+        runtime
+            .turn
+            .lock()
+            .await
+            .messages
+            .push(AgentMessage::user("unchanged request", Vec::new()));
+
+        let prepared_models = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let preparer_models = prepared_models.clone();
+        runtime.set_provider_boundary_preparer(Some(Arc::new(move |request| {
+            let preparer_models = preparer_models.clone();
+            Box::pin(async move {
+                preparer_models.lock().unwrap().push(request.model.clone());
+                let budget =
+                    crate::model_metadata::context_budget(&request.model, &AgentConfig::default());
+                Ok(ProviderBoundaryResult {
+                    messages: request.messages,
+                    context_limit: budget.limit,
+                    context_limit_is_estimate: budget.limit_is_estimate,
+                    compaction_generation: 0,
+                    provisional_estimated_tokens: None,
+                    provider_attempt: None,
+                    provider_request_id: None,
+                })
+            })
+        })));
+        let started_models = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let manifest_models = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let started_capture = started_models.clone();
+        let manifest_capture = manifest_models.clone();
+        runtime.set_provider_trace_recorder(Some(Arc::new(move |event| {
+            let started_capture = started_capture.clone();
+            let manifest_capture = manifest_capture.clone();
+            Box::pin(async move {
+                match event {
+                    crate::provider::ProviderTraceEvent::Started { model, .. } => {
+                        started_capture.lock().unwrap().push(model);
+                    }
+                    crate::provider::ProviderTraceEvent::ContextManifest { model, .. } => {
+                        manifest_capture.lock().unwrap().push(model);
+                    }
+                    _ => {}
+                }
+                Ok(())
+            })
+        })));
+
+        runtime.run_turns().await;
+
+        let expected = vec!["primary-model".to_string(), "fallback-model".to_string()];
+        assert_eq!(*prepared_models.lock().unwrap(), expected);
+        assert_eq!(*started_models.lock().unwrap(), expected);
+        assert_eq!(*manifest_models.lock().unwrap(), expected);
+        assert_eq!(*network_models.lock().unwrap(), expected);
+        assert_eq!(
+            runtime.turn.lock().await.messages.len(),
+            1,
+            "no routing reminder"
+        );
+    }
+    struct OverflowOnceProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ProviderPort for OverflowOnceProvider {
+        async fn stream_request(
+            &self,
+            _request: RuntimeRequest,
+            events: tokio::sync::mpsc::Sender<RuntimeStreamEvent>,
+        ) {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let event = match call {
+                0 => RuntimeStreamEvent::Error("maximum context length exceeded".into()),
+                1 => RuntimeStreamEvent::Finished {
+                    tool_calls: vec![ToolCall {
+                        id: "call-after-overflow".into(),
+                        r#type: "function".into(),
+                        function: ToolCallFunction {
+                            name: "missing_test_tool".into(),
+                            arguments: "{}".into(),
+                        },
+                        thought_signature: None,
+                    }],
+                    usage: RuntimeUsage::default(),
+                },
+                _ => RuntimeStreamEvent::Finished {
+                    tool_calls: Vec::new(),
+                    usage: RuntimeUsage::default(),
+                },
+            };
+            let _ = events.send(event).await;
+        }
+
+        async fn fetch_deferred(
+            &self,
+            _model: &str,
+            _handle_id: &str,
+        ) -> Result<DeferredResponse, String> {
+            Ok(DeferredResponse::Pending)
+        }
+
+        async fn cancel_deferred(&self, _model: &str, _handle_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn provider_kind(&self, _model: &str) -> &'static str {
+            "test"
+        }
+    }
+
+    #[tokio::test]
+    async fn overflow_success_with_tool_continuation_marks_only_immediate_retry() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = Arc::new(OverflowOnceProvider {
+            calls: calls.clone(),
+        });
+        let mut runtime = AgentRuntime::new_with_provider(
+            "",
+            None,
+            "test-model",
+            None,
+            AgentConfig::default(),
+            provider,
+        )
+        .unwrap();
+        runtime
+            .turn
+            .lock()
+            .await
+            .messages
+            .push(AgentMessage::user("test", Vec::new()));
+        let recovery_values = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed_values = recovery_values.clone();
+        runtime.set_provider_boundary_preparer(Some(Arc::new(move |request| {
+            let observed_values = observed_values.clone();
+            Box::pin(async move {
+                observed_values
+                    .lock()
+                    .unwrap()
+                    .push(request.overflow_recovery);
+                Ok(ProviderBoundaryResult {
+                    messages: request.messages,
+                    context_limit: 128_000,
+                    context_limit_is_estimate: false,
+                    compaction_generation: 0,
+                    provisional_estimated_tokens: None,
+                    provider_attempt: None,
+                    provider_request_id: None,
+                })
+            })
+        })));
+
+        runtime.run_turns().await;
+
+        assert_eq!(&*recovery_values.lock().unwrap(), &[false, true, false]);
+        assert_eq!(
+            recovery_values
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|value| **value)
+                .count(),
+            1
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn non_durable_runtime_keeps_direct_compaction() {
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let message_counts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = Arc::new(RecordingProvider {
+            order,
+            message_counts: message_counts.clone(),
+            request_tools: Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+        let config = AgentConfig::builder()
+            .auto_compaction_threshold_tokens(1)
+            .auto_compaction_keep_recent_tokens(16)
+            .build();
+        let dir = tempfile::tempdir().unwrap();
+        let mut runtime = AgentRuntime::new_with_provider(
+            "",
+            None,
+            "test-model",
+            Some(&dir.path().join("session.jsonl")),
+            config,
+            provider,
+        )
+        .unwrap();
+        let original_count = 8;
+        runtime.turn.lock().await.messages = (0..original_count)
+            .map(|index| {
+                AgentMessage::user(format!("message {index} {}", "x".repeat(100)), Vec::new())
+            })
+            .collect();
+
+        runtime.run_turns().await;
+
+        assert!(message_counts.lock().unwrap()[0] < original_count);
+    }
+
+    #[tokio::test]
+    async fn terminal_queue_persistence_failure_retains_steering_and_follow_up() {
+        for steering in [true, false] {
+            let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let provider = Arc::new(RecordingProvider {
+                order: order.clone(),
+                message_counts: Arc::new(std::sync::Mutex::new(Vec::new())),
+                request_tools: Arc::new(std::sync::Mutex::new(Vec::new())),
+            });
+            let mut runtime = AgentRuntime::new_with_provider(
+                "",
+                None,
+                "test-model",
+                None,
+                AgentConfig::default(),
+                provider,
+            )
+            .unwrap();
+            runtime.turn.lock().await.messages = vec![AgentMessage::user("initial", Vec::new())];
+            let queued = AgentMessage::user(
+                if steering {
+                    "queued steer"
+                } else {
+                    "queued follow-up"
+                },
+                Vec::new(),
+            );
+            if steering {
+                runtime.steering_queue.push(queued.clone());
+            } else {
+                runtime.follow_up_queue.push(queued.clone());
+            }
+            runtime.set_message_recorder(Some(Arc::new(move |message| {
+                let queued = queued.clone();
+                Box::pin(async move {
+                    if message == queued {
+                        Err("injected queue persistence failure".into())
+                    } else {
+                        Ok(())
+                    }
+                })
+            })));
+
+            runtime.run_turns().await;
+
+            assert_eq!(order.lock().unwrap().len(), usize::from(!steering));
+            if steering {
+                assert_eq!(runtime.steering_queue.len(), 1);
+            } else {
+                assert_eq!(runtime.follow_up_queue.len(), 1);
+            }
+        }
     }
 }

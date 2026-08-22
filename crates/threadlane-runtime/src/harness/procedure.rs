@@ -1,8 +1,8 @@
 use super::effects::{EffectAction, EffectsError, GatedEffects};
 use super::store::SessionStore;
 use super::types::{
-    Entry, OperationIntent, OperationOutcome, ProvisionedEntry, QueueKind, Record, ToolResult,
-    ToolSpec, UsageCause,
+    CompactionReason, Entry, OperationIntent, OperationOutcome, ProvisionedEntry, QueueKind,
+    Record, ToolResult, ToolSpec, UsageCause,
 };
 use crate::types::{AgentMessage, DeferredHandle, TokenUsage};
 
@@ -992,6 +992,69 @@ impl CompactionProcedure {
         Self::accept_on_lane(store, "main", run_id, summary, effects)
     }
 
+    pub fn checkpoint_open_run<S: SessionStore>(
+        store: &S,
+        lane_name: &str,
+        run_id: &str,
+        summary: &str,
+        reason: CompactionReason,
+        effects: &mut GatedEffects,
+    ) -> Result<(), ProcedureError> {
+        if lane_name.trim().is_empty() || run_id.trim().is_empty() || summary.trim().is_empty() {
+            return Err(ProcedureError::Invalid(
+                "lane name, run id, and summary must be non-empty".into(),
+            ));
+        }
+        let lane = super::Reducer::reduce(store)
+            .map_err(|error| ProcedureError::Invalid(error.to_string()))?
+            .lane(lane_name)
+            .cloned()
+            .ok_or_else(|| ProcedureError::Invalid(format!("lane {lane_name} is missing")))?;
+        if lane.open_operation.as_deref() != Some(run_id) {
+            return Err(ProcedureError::Invalid(format!(
+                "operation {run_id} is not open on lane {lane_name}"
+            )));
+        }
+        let first_seq = next_seq_with_effects(store, effects);
+        let source_leaf_id = lane.leaf_id;
+        let summary_id = format!("compaction-{run_id}-{first_seq}-summary");
+        effects.park(EffectAction::AppendEntry {
+            entry: Entry {
+                id: summary_id.clone(),
+                parent_id: None,
+                lane: lane_name.into(),
+                seq: first_seq,
+                timestamp: first_seq,
+                message: AgentMessage::Custom {
+                    custom_type: "compaction_summary".into(),
+                    payload: serde_json::json!({
+                        "schema_version": 1,
+                        "summary": summary,
+                        "checkpoint_kind": reason.as_str(),
+                        "source_leaf_id": source_leaf_id,
+                    }),
+                },
+                surface_op: super::types::SurfaceOperation::Replace {
+                    start_seq: 1,
+                    end_seq: first_seq.saturating_sub(1),
+                    source_event_seqs: Vec::new(),
+                },
+                terminate: false,
+            },
+        })?;
+        effects.park(EffectAction::AppendRecord {
+            id: format!("compaction-move-action-{run_id}-{first_seq}"),
+            record: Record::LaneMoved {
+                id: format!("compaction-move-{run_id}-{first_seq}"),
+                seq: first_seq + 1,
+                lane: lane_name.into(),
+                timestamp: first_seq + 1,
+                run_id: run_id.into(),
+                target_leaf_id: summary_id,
+            },
+        })?;
+        Ok(())
+    }
     pub(crate) fn accept_on_lane<S: SessionStore>(
         store: &S,
         lane_name: &str,
@@ -2353,4 +2416,84 @@ fn next_seq_with_effects<S: SessionStore>(store: &S, effects: &GatedEffects) -> 
         .saturating_sub(1)
         .max(effects.pending_sequences().max().unwrap_or(0))
         + 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::harness::{MemoryStore, Reducer, SessionStore};
+
+    fn open_store(run_id: &str) -> MemoryStore {
+        let mut store = MemoryStore::new("session");
+        let leaf = store.append_message(
+            None,
+            AgentMessage::User {
+                content: "original".into(),
+            },
+        );
+        let seq = store.next_sequence();
+        store.append_record(Record::OperationStarted {
+            id: run_id.into(),
+            seq,
+            lane: "main".into(),
+            timestamp: seq,
+            source_leaf_id: Some(leaf),
+            intent: OperationIntent::Run,
+        });
+        store
+    }
+
+    #[test]
+    fn checkpoint_open_run_rejects_idle_and_wrong_run() {
+        let idle = MemoryStore::new("idle");
+        let mut effects = GatedEffects::new();
+        assert!(CompactionProcedure::checkpoint_open_run(
+            &idle,
+            "main",
+            "run",
+            "summary",
+            CompactionReason::AdaptiveBudget,
+            &mut effects,
+        )
+        .is_err());
+
+        let store = open_store("run");
+        assert!(CompactionProcedure::checkpoint_open_run(
+            &store,
+            "main",
+            "wrong-run",
+            "summary",
+            CompactionReason::AdaptiveBudget,
+            &mut effects,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn checkpoint_open_run_moves_leaf_and_keeps_operation_open() {
+        let mut store = open_store("run");
+        let mut effects = GatedEffects::new();
+        CompactionProcedure::checkpoint_open_run(
+            &store,
+            "main",
+            "run",
+            "durable summary",
+            CompactionReason::OverflowRecovery,
+            &mut effects,
+        )
+        .unwrap();
+        effects.run_to_completion(&mut store).unwrap();
+
+        let reduced = Reducer::reduce(&store).unwrap();
+        let lane = reduced.lane("main").unwrap();
+        assert_eq!(lane.open_operation.as_deref(), Some("run"));
+        let leaf = lane.leaf_id.as_deref().unwrap();
+        assert!(leaf.starts_with("compaction-run-"));
+        assert!(matches!(
+            store.entries().last().map(|entry| &entry.message),
+            Some(AgentMessage::Custom { custom_type, payload })
+                if custom_type == "compaction_summary"
+                    && payload["checkpoint_kind"] == "overflow_recovery"
+        ));
+    }
 }

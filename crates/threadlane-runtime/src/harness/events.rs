@@ -5,6 +5,7 @@ use crate::types::TokenUsage;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+use tokio::sync::Notify;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct StreamingState {
@@ -577,6 +578,7 @@ pub struct Subscription {
 #[derive(Debug, Clone)]
 pub struct HarnessEventHub {
     inner: Arc<Mutex<HarnessEventHubState>>,
+    notify: Arc<Notify>,
 }
 
 #[derive(Debug)]
@@ -628,6 +630,7 @@ impl HarnessEventHub {
                 streaming: None,
                 operation_intents: HashMap::new(),
             })),
+            notify: Arc::new(Notify::new()),
         }
     }
 
@@ -706,6 +709,8 @@ impl HarnessEventHub {
             state.events.pop_front();
         }
         state.events.push_back(event.clone());
+        drop(state);
+        self.notify.notify_waiters();
         event
     }
 
@@ -730,6 +735,8 @@ impl HarnessEventHub {
             hub.events.pop_front();
         }
         hub.events.push_back(event.clone());
+        drop(hub);
+        self.notify.notify_waiters();
         event
     }
 
@@ -820,6 +827,22 @@ impl HarnessEventHub {
         Ok(events)
     }
 
+    pub async fn wait(
+        &self,
+        subscription: &mut Subscription,
+    ) -> Result<Vec<HarnessEvent>, EventError> {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let events = self.poll(subscription)?;
+            if !events.is_empty() {
+                return Ok(events);
+            }
+            notified.await;
+        }
+    }
+
     /// Polls only durable events (entry/record commits) from the subscription.
     pub fn poll_durable(
         &self,
@@ -837,6 +860,29 @@ mod tests {
     use super::*;
     use crate::harness::{MemoryStore, SurfaceOperation};
     use crate::types::AgentMessage;
+
+    #[tokio::test]
+    async fn subscription_waits_for_publication_without_polling() {
+        let hub = HarnessEventHub::new(8);
+        let store = MemoryStore::new("session");
+        let mut subscription = hub.subscribe(&store).unwrap();
+        let publisher = hub.clone();
+
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            publisher.publish_agent_event(crate::events::AgentEvent::AgentStart);
+        });
+
+        let events = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            hub.wait(&mut subscription),
+        )
+        .await
+        .expect("publication should wake the subscription")
+        .unwrap();
+
+        assert_eq!(events.len(), 1);
+    }
 
     #[test]
     fn durable_event_identification_and_projection() {
@@ -873,7 +919,10 @@ mod tests {
         assert_eq!(projected.cursor, 1);
         assert_eq!(projected.lane.as_deref(), Some("main"));
         assert_eq!(projected.run_id.as_deref(), Some("run-1"));
-        assert!(matches!(projected.event, crate::events::AgentEvent::MessageEnd { .. }));
+        assert!(matches!(
+            projected.event,
+            crate::events::AgentEvent::MessageEnd { .. }
+        ));
 
         let step_record = Record::StepAttempt {
             id: "step-1".into(),
