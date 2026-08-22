@@ -180,20 +180,10 @@ fn has_openai_credentials() -> bool {
         || std::env::var("OPENAI_API_KEY").is_ok_and(|key| !key.trim().is_empty())
 }
 
-pub(crate) fn model_context_window(model_id: &str) -> u32 {
-    let unadorned = model_id
-        .strip_prefix("antigravity/")
-        .or_else(|| model_id.strip_prefix("opencode-go/"))
-        .unwrap_or(model_id);
-    match unadorned {
-        "gemini-3.7-flash" | "gemini-3.6-flash" | "gemini-3.5-flash" => 1_000_000,
-        "gemini-3.1-pro" => 2_000_000,
-        "gpt-5.6-luna" | "gpt-5.4" | "gpt-5.5" | "gpt-5.6-sol" | "gpt-5.6-terra" => 1_000_000,
-        "gpt-5.4-mini" | "gpt-4o" | "gpt-4o-mini" => 128_000,
-        "claude-sonnet-4-6" | "claude-opus-4-6" => 200_000,
-        "gpt-oss-120b" => 128_000,
-        _ => 128_000,
-    }
+pub(crate) fn model_context_window(model: &str) -> u32 {
+    threadlane_runtime::model_metadata::model_context_limit(model)
+        .unwrap_or(threadlane_runtime::model_metadata::UNKNOWN_MODEL_CONTEXT_LIMIT)
+        .min(u32::MAX as usize) as u32
 }
 
 pub(crate) fn format_tokens(tokens: u32) -> String {
@@ -240,6 +230,10 @@ mod tests {
         assert_eq!(
             model_context_window("antigravity/gemini-3.7-flash"),
             1_000_000
+        );
+        assert_eq!(
+            model_context_window("unknown/model"),
+            threadlane_runtime::model_metadata::UNKNOWN_MODEL_CONTEXT_LIMIT as u32,
         );
         assert_eq!(
             model_context_window("antigravity/gemini-3.1-pro"),
