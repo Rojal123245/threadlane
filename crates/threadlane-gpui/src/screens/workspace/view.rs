@@ -34,7 +34,8 @@ use crate::screens::sidebar::SidebarView;
 use crate::screens::terminal::TerminalView;
 use crate::services::updater::{self, UpdaterEvent};
 use crate::state::{
-    compute_full_session_projection, AppState, SessionHydrationRequest, WorkspacePage,
+    compute_full_session_projection, compute_message_page, AppState, SessionHydrationRequest,
+    WorkspacePage,
 };
 use threadlane_updater::UpdateStatus;
 
@@ -118,6 +119,29 @@ impl WorkspaceView {
         cx: &mut AsyncApp,
     ) {
         cx.spawn(async move |cx| {
+            if request.reload_messages {
+                let history_file = request.session_file.clone();
+                let history = cx
+                    .background_executor()
+                    .spawn(async move { compute_message_page(&history_file, None, 0) })
+                    .await;
+                let _ = model.update(cx, |state, cx| {
+                    if state.active_session_id.as_deref() != Some(&request.session_id) {
+                        return;
+                    }
+                    match history {
+                        Ok(page) => state.apply_initial_message_page(
+                            &request.session_id,
+                            &request.session_file,
+                            page,
+                        ),
+                        Err(error) => {
+                            state.session_status = Some(format!("Could not load session: {error}"))
+                        }
+                    }
+                    cx.notify();
+                });
+            }
             let session_file = request.session_file.clone();
             let result = cx
                 .background_executor()
@@ -1103,7 +1127,6 @@ impl Render for WorkspaceView {
                 let fallback = self.fallback_terminal(cx);
                 (vec![fallback.clone()], 0, fallback)
             };
-        let theme = cx.theme().colors;
         let sidebar_tooltip = if self.sidebar_collapsed {
             "Expand sidebar"
         } else {

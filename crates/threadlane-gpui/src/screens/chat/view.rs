@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::sync::Arc;
 
 use std::time::Duration;
@@ -22,8 +23,7 @@ use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable, WindowExt
 use crate::app::{actions::AppAction, controller};
 use crate::screens::editor::EditorView;
 use crate::state::{
-    compute_older_message_page, AppState, ChatMessageInfo, MessageRole, ToolActivityInfo,
-    TrajectoryEntry,
+    compute_message_page, AppState, ChatMessageInfo, MessageRole, ToolActivityInfo, TrajectoryEntry,
 };
 use threadlane_session::commands::{available_slash_commands, SlashCommandInfo};
 use threadlane_session::{ImageAttachment, PlanItemStatus, ReasoningEffort, SessionPlan};
@@ -67,6 +67,45 @@ fn should_use_markdown(streaming: bool) -> bool {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+enum TranscriptRow {
+    Message(usize),
+    Activities(Range<usize>),
+    Working,
+}
+
+fn is_activity_only(message: &ChatMessageInfo) -> bool {
+    message.role == MessageRole::Assistant
+        && message.content.is_empty()
+        && message.reasoning_content.is_none()
+        && message
+            .tool_activities
+            .iter()
+            .any(|activity| activity.title != "update_plan")
+}
+
+fn build_transcript_rows(messages: &[ChatMessageInfo], generating: bool) -> Vec<TranscriptRow> {
+    let mut rows = Vec::with_capacity(messages.len().saturating_add(1));
+    let mut index = 0;
+    while index < messages.len() {
+        if !is_activity_only(&messages[index]) {
+            rows.push(TranscriptRow::Message(index));
+            index += 1;
+            continue;
+        }
+
+        let start = index;
+        while index < messages.len() && is_activity_only(&messages[index]) {
+            index += 1;
+        }
+        rows.push(TranscriptRow::Activities(start..index));
+    }
+    if generating {
+        rows.push(TranscriptRow::Working);
+    }
+    rows
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct TrajectoryCacheKey {
     revision: u64,
     mode: TrajectoryMode,
@@ -98,7 +137,10 @@ pub struct ChatListView {
     model: Entity<AppState>,
     pub(crate) input_state: Entity<TextareaState>,
     pub(crate) header_left_padding: Pixels,
-    scroll_handle: ScrollHandle,
+    transcript_list_state: ListState,
+    transcript_messages: Arc<Vec<ChatMessageInfo>>,
+    transcript_rows: Vec<TranscriptRow>,
+    transcript_generating: bool,
     trajectory_scroll_handle: ScrollHandle,
     expanded_activity_groups: HashSet<String>,
     markdown_states: HashMap<String, (usize, Entity<TextViewState>)>,
@@ -130,7 +172,8 @@ impl ChatListView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let scroll_handle = ScrollHandle::new();
+        let transcript_list_state = ListState::new(0, ListAlignment::Bottom, px(600.0));
+        transcript_list_state.set_follow_mode(FollowMode::Tail);
         let trajectory_scroll_handle = ScrollHandle::new();
         let input_state = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -177,7 +220,7 @@ impl ChatListView {
         });
 
         let model_clone = model.clone();
-        let submit_scroll_handle = scroll_handle.clone();
+        let submit_list_state = transcript_list_state.clone();
         let sub2 = cx.subscribe_in(
             &input_state,
             window,
@@ -214,7 +257,7 @@ impl ChatListView {
                         input_state.update(cx, |state, cx| {
                             state.set_value("", window, cx);
                         });
-                        submit_scroll_handle.scroll_to_bottom();
+                        submit_list_state.scroll_to_end();
                         cx.notify();
                     }
                 }
@@ -222,9 +265,7 @@ impl ChatListView {
         );
 
         let stream_model = model.clone();
-        let stream_scroll_handle = scroll_handle.clone();
         cx.spawn(async move |this, cx| {
-            let mut follow_tail = true;
             let mut settle_frames = 0_u8;
             loop {
                 // Event-driven pacing: check quickly when generating,
@@ -235,15 +276,6 @@ impl ChatListView {
                     Duration::from_millis(100)
                 };
                 cx.background_executor().timer(interval).await;
-
-                // Re-arm tail following as soon as the user manually returns to the bottom,
-                // even while stream events keep arriving and settling never reaches zero.
-                if !follow_tail {
-                    let distance_from_bottom = (stream_scroll_handle.offset().y
-                        + stream_scroll_handle.max_offset().y)
-                        .abs();
-                    follow_tail = distance_from_bottom <= px(24.0);
-                }
 
                 let has_event =
                     stream_model.read_with(cx, |state, _cx| state.chat_stream_pending());
@@ -259,23 +291,11 @@ impl ChatListView {
                 if changed {
                     // Markdown measurement and new rows can complete after the first redraw.
                     settle_frames = 6;
-                } else if settle_frames == 0 {
-                    let distance_from_bottom = (stream_scroll_handle.offset().y
-                        + stream_scroll_handle.max_offset().y)
-                        .abs();
-                    follow_tail = distance_from_bottom <= px(24.0);
                 }
 
-                if follow_tail && (changed || settle_frames > 0) {
-                    stream_scroll_handle.scroll_to_bottom();
-                    if !changed {
-                        // A drained batch already invalidated the view through
-                        // AppState; only settle frames need their own redraw to
-                        // apply deferred scrolling against settled markdown
-                        // layout.
-                        let _ = this.update(cx, |_this, cx| cx.notify());
-                        settle_frames = settle_frames.saturating_sub(1);
-                    }
+                if !changed && settle_frames > 0 {
+                    let _ = this.update(cx, |_this, cx| cx.notify());
+                    settle_frames = settle_frames.saturating_sub(1);
                 }
             }
         })
@@ -290,7 +310,10 @@ impl ChatListView {
             model,
             input_state,
             header_left_padding: px(14.0),
-            scroll_handle,
+            transcript_list_state,
+            transcript_messages: Arc::new(Vec::new()),
+            transcript_rows: Vec::new(),
+            transcript_generating: false,
             trajectory_scroll_handle,
             expanded_activity_groups: HashSet::new(),
             markdown_states: HashMap::new(),
@@ -1791,58 +1814,138 @@ impl ChatListView {
             .into_any_element()
     }
 
-    fn render_transcript_rows(
+    fn sync_transcript_rows(
         &mut self,
-        messages: &[ChatMessageInfo],
+        messages: Arc<Vec<ChatMessageInfo>>,
+        generating: bool,
+        session_changed: bool,
+    ) {
+        if !session_changed
+            && Arc::ptr_eq(&messages, &self.transcript_messages)
+            && generating == self.transcript_generating
+        {
+            return;
+        }
+
+        let old_message_count = self.transcript_messages.len();
+        let old_row_count = self.transcript_rows.len();
+        let new_message_count = messages.len();
+
+        if !session_changed
+            && new_message_count == old_message_count
+            && generating == self.transcript_generating
+        {
+            let last_changed = messages
+                .last()
+                .zip(self.transcript_messages.last())
+                .is_some_and(|(new, old)| {
+                    new.id != old.id
+                        || new.content.len() != old.content.len()
+                        || new.reasoning_content.as_ref().map(String::len)
+                            != old.reasoning_content.as_ref().map(String::len)
+                        || new.tool_activities.len() != old.tool_activities.len()
+                        || new.streaming != old.streaming
+                });
+            self.transcript_messages = messages;
+            if last_changed {
+                self.transcript_list_state
+                    .remeasure_items(old_row_count.saturating_sub(1)..old_row_count);
+            } else {
+                self.transcript_list_state.remeasure();
+            }
+            return;
+        }
+
+        let new_rows = build_transcript_rows(&messages, generating);
+        let new_row_count = new_rows.len();
+        let working_changed = !session_changed
+            && new_message_count == old_message_count
+            && generating != self.transcript_generating;
+        let prepended = !session_changed
+            && new_message_count > old_message_count
+            && self
+                .transcript_messages
+                .first()
+                .zip(messages.get(new_message_count - old_message_count))
+                .is_some_and(|(old, new)| old.id == new.id)
+            && self
+                .transcript_messages
+                .last()
+                .zip(messages.last())
+                .is_some_and(|(old, new)| old.id == new.id)
+            && new_row_count >= old_row_count;
+        let appended = !session_changed
+            && new_message_count > old_message_count
+            && self
+                .transcript_messages
+                .first()
+                .zip(messages.first())
+                .is_some_and(|(old, new)| old.id == new.id)
+            && self
+                .transcript_messages
+                .last()
+                .zip(messages.get(old_message_count.saturating_sub(1)))
+                .is_some_and(|(old, new)| old.id == new.id)
+            && new_row_count >= old_row_count;
+
+        self.transcript_messages = messages;
+        self.transcript_rows = new_rows;
+        self.transcript_generating = generating;
+        if working_changed && generating {
+            self.transcript_list_state
+                .splice(old_row_count..old_row_count, 1);
+        } else if working_changed {
+            self.transcript_list_state
+                .splice(new_row_count..old_row_count, 0);
+        } else if prepended {
+            self.transcript_list_state
+                .splice(0..0, new_row_count - old_row_count);
+        } else if appended {
+            self.transcript_list_state
+                .splice(old_row_count..old_row_count, new_row_count - old_row_count);
+        } else {
+            self.transcript_list_state.reset(new_row_count);
+        }
+        if session_changed {
+            self.transcript_list_state.set_follow_mode(FollowMode::Tail);
+        }
+    }
+
+    fn render_transcript_row(
+        &mut self,
+        index: usize,
+        _window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        let mut rows = Vec::with_capacity(messages.len().saturating_add(1));
-        let mut index = 0;
-        while index < messages.len() {
-            let message = &messages[index];
-            let is_activity_only = message.role == MessageRole::Assistant
-                && message.content.is_empty()
-                && message.reasoning_content.is_none()
-                && message
-                    .tool_activities
+    ) -> AnyElement {
+        let content = match self.transcript_rows.get(index).cloned() {
+            Some(TranscriptRow::Message(message_index)) => self
+                .transcript_messages
+                .get(message_index)
+                .cloned()
+                .map(|message| self.render_message(&message, cx)),
+            Some(TranscriptRow::Activities(range)) => {
+                let activities = self.transcript_messages[range]
                     .iter()
-                    .any(|activity| activity.title != "update_plan");
-            if !is_activity_only {
-                rows.push(self.render_message(message, cx));
-                index += 1;
-                continue;
+                    .flat_map(|message| {
+                        message
+                            .tool_activities
+                            .iter()
+                            .filter(|activity| activity.title != "update_plan")
+                            .cloned()
+                    })
+                    .collect::<Vec<_>>();
+                Some(self.render_activity_group(&activities, cx))
             }
+            Some(TranscriptRow::Working) => Some(self.render_working_indicator(cx)),
+            None => None,
+        };
 
-            let mut activities = Vec::new();
-            while index < messages.len() {
-                let candidate = &messages[index];
-                let candidate_is_activity_only = candidate.role == MessageRole::Assistant
-                    && candidate.content.is_empty()
-                    && candidate.reasoning_content.is_none()
-                    && candidate
-                        .tool_activities
-                        .iter()
-                        .any(|activity| activity.title != "update_plan");
-                if !candidate_is_activity_only {
-                    break;
-                }
-                activities.extend(
-                    candidate
-                        .tool_activities
-                        .iter()
-                        .filter(|activity| activity.title != "update_plan")
-                        .cloned(),
-                );
-                index += 1;
-            }
-            rows.push(self.render_activity_group(&activities, cx));
-        }
-
-        if self.model.read(cx).is_generating {
-            rows.push(self.render_working_indicator(cx));
-        }
-
-        rows
+        div()
+            .w_full()
+            .max_w(px(CHAT_CONTENT_MAX_WIDTH))
+            .mx_auto()
+            .children(content)
+            .into_any_element()
     }
 
     fn render_reasoning_block(
@@ -3110,7 +3213,7 @@ impl ChatListView {
                                             input_state.update(cx, |state, cx| {
                                                 state.set_value("", window, cx);
                                             });
-                                            this.scroll_handle.scroll_to_bottom();
+                                            this.transcript_list_state.scroll_to_end();
                                             cx.notify();
                                         }
                                     })),
@@ -3156,7 +3259,7 @@ impl ChatListView {
 
 impl Render for ChatListView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (messages, is_new_task, active_plan, session_key, has_older) = {
+        let (messages, is_new_task, active_plan, session_key, has_older, is_generating) = {
             let state = self.model.read(cx);
             (
                 state.messages.clone(),
@@ -3167,9 +3270,11 @@ impl Render for ChatListView {
                     .clone()
                     .zip(state.active_session_id.clone()),
                 state.has_older_messages(),
+                state.is_generating,
             )
         };
-        if session_key != self.last_session_key {
+        let session_changed = session_key != self.last_session_key;
+        if session_changed {
             self.last_session_key = session_key;
             self.initial_scroll_frames = 6;
             self.trajectory_category = None;
@@ -3182,6 +3287,7 @@ impl Render for ChatListView {
                 state.set_value("", window, cx);
             });
         }
+        self.sync_transcript_rows(messages.clone(), is_generating, session_changed);
         if let Some(prompt) = self
             .model
             .update(cx, |state, _cx| state.requested_composer_prompt.take())
@@ -3192,39 +3298,34 @@ impl Render for ChatListView {
             });
         }
         if self.initial_scroll_frames > 0 {
-            self.scroll_handle.scroll_to_bottom();
+            self.transcript_list_state.scroll_to_end();
             self.initial_scroll_frames = self.initial_scroll_frames.saturating_sub(1);
         }
         if has_older
             && self.initial_scroll_frames == 0
             && !self.older_load_pending
-            && self.scroll_handle.offset().y >= px(-80.0)
+            && self.transcript_list_state.logical_scroll_top().item_ix <= 1
         {
-            let old_top_item = self.scroll_handle.top_item();
             self.older_load_pending = true;
             let model = self.model.clone();
-            let scroll_handle = self.scroll_handle.clone();
             cx.spawn(async move |this, cx| {
                 let request = model.update(cx, |state, _cx| state.history_page_request());
-                let added = if let Some((session_file, end)) = request {
+                if let Some((session_file, cursor, page_serial)) = request {
                     let page_file = session_file.clone();
                     let page = cx
                         .background_executor()
-                        .spawn(async move { compute_older_message_page(&page_file, end) })
+                        .spawn(async move {
+                            compute_message_page(&page_file, Some(cursor), page_serial)
+                        })
                         .await;
                     model.update(cx, |state, cx| {
-                        let added =
-                            state.apply_older_message_page(&session_file, page.0, page.1, page.2);
+                        let added = page
+                            .map(|page| state.apply_older_message_page(&session_file, page))
+                            .unwrap_or_default();
                         if added > 0 {
                             cx.notify();
                         }
-                        added
-                    })
-                } else {
-                    0
-                };
-                if added > 0 {
-                    scroll_handle.scroll_to_item(old_top_item.saturating_add(added));
+                    });
                 }
                 let _ = this.update(cx, |view, cx| {
                     view.older_load_pending = false;
@@ -3262,7 +3363,6 @@ impl Render for ChatListView {
                             ))
                             .into_any_element()
                     } else {
-                        let transcript_rows = self.render_transcript_rows(&messages, cx);
                         div()
                             .id("chat-transcript-container")
                             .relative()
@@ -3271,23 +3371,19 @@ impl Render for ChatListView {
                             .min_w_0()
                             .min_h_0()
                             .child(
-                                div()
-                                    .id("chat-transcript")
-                                    .size_full()
-                                    .track_scroll(&self.scroll_handle)
-                                    .overflow_y_scroll()
-                                    .pt_3()
-                                    .pb_6()
-                                    .child(
-                                        div()
-                                            .w_full()
-                                            .max_w(px(CHAT_CONTENT_MAX_WIDTH))
-                                            .mx_auto()
-                                            .children(transcript_rows),
-                                    ),
+                                list(
+                                    self.transcript_list_state.clone(),
+                                    cx.processor(Self::render_transcript_row),
+                                )
+                                .size_full()
+                                .pt_3()
+                                .pb_6()
+                                .with_sizing_behavior(ListSizingBehavior::Auto),
                             )
                             .child(div().absolute().inset_0().child(
-                                gpui_component::scroll::Scrollbar::vertical(&self.scroll_handle),
+                                gpui_component::scroll::Scrollbar::vertical(
+                                    &self.transcript_list_state,
+                                ),
                             ))
                             .into_any_element()
                     }
@@ -3309,12 +3405,59 @@ impl Render for ChatListView {
 
 #[cfg(test)]
 mod hot_path_tests {
-    use super::{should_use_markdown, TrajectoryCacheKey, TrajectoryMode};
+    use super::{
+        build_transcript_rows, should_use_markdown, TrajectoryCacheKey, TrajectoryMode,
+        TranscriptRow,
+    };
+    use crate::state::{ChatMessageInfo, MessageRole, ToolActivityInfo};
 
     #[test]
     fn markdown_is_deferred_until_streaming_completes() {
         assert!(!should_use_markdown(true));
         assert!(should_use_markdown(false));
+    }
+
+    #[test]
+    fn transcript_rows_group_consecutive_tool_only_messages() {
+        let message = |id: &str, activity: bool| ChatMessageInfo {
+            id: id.into(),
+            role: if activity {
+                MessageRole::Assistant
+            } else {
+                MessageRole::User
+            },
+            content: if activity { "" } else { id }.into(),
+            tool_activities: activity
+                .then(|| ToolActivityInfo {
+                    id: format!("tool-{id}"),
+                    category: "tool".into(),
+                    title: "read_file".into(),
+                    summary: String::new(),
+                    detail: String::new(),
+                    is_expanded: false,
+                })
+                .into_iter()
+                .collect(),
+            streaming: false,
+            reasoning_content: None,
+            reasoning_expanded: false,
+        };
+        let messages = vec![
+            message("user", false),
+            message("tool-1", true),
+            message("tool-2", true),
+            message("answer", false),
+        ];
+
+        assert_eq!(
+            build_transcript_rows(&messages, true),
+            vec![
+                TranscriptRow::Message(0),
+                TranscriptRow::Activities(1..3),
+                TranscriptRow::Message(3),
+                TranscriptRow::Working,
+            ]
+        );
     }
 
     #[test]
