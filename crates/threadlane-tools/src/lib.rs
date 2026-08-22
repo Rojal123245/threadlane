@@ -2,14 +2,6 @@ pub mod hashline;
 pub mod search;
 mod virtual_read;
 
-fn read_virtual_skill(root: &Path, name: &str) -> String {
-    virtual_read::skill(root, name)
-}
-
-fn read_virtual_agent(root: &Path, name: &str) -> String {
-    virtual_read::agent(root, name)
-}
-
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
@@ -364,11 +356,13 @@ pub fn try_execute_tool_in_workspace(
         }
         "read_file" => {
             let raw_path = match args.get("path").and_then(|v| v.as_str()) {
-                Some(path) if path.starts_with("skill://") => {
-                    return Ok(read_virtual_skill(workspace_root, &path[8..]));
+                Some(path) if path.strip_prefix("skill://").is_some() => {
+                    let name = path.strip_prefix("skill://").expect("prefix checked");
+                    return virtual_read::try_skill(workspace_root, name);
                 }
-                Some(path) if path.starts_with("agent://") => {
-                    return Ok(read_virtual_agent(workspace_root, &path[8..]));
+                Some(path) if path.strip_prefix("agent://").is_some() => {
+                    let name = path.strip_prefix("agent://").expect("prefix checked");
+                    return virtual_read::try_agent(workspace_root, name);
                 }
                 Some(path)
                     if path.starts_with("pr://")
@@ -379,7 +373,7 @@ pub fn try_execute_tool_in_workspace(
                         || path.starts_with("https://gitlab.com/")
                         || path.starts_with("http://gitlab.com/") =>
                 {
-                    return Ok(virtual_read::remote_ref_path(workspace_root, path));
+                    return virtual_read::try_remote_ref_path(workspace_root, path);
                 }
                 Some(p) => p,
                 None => return Err("Error: 'path' parameter is required".into()),
@@ -625,7 +619,8 @@ fn consolidate_memory_impl(workspace_root: &Path, args: &Value) -> Result<String
     let mem_file = dir.join("memory.md");
 
     let existing = if mem_file.is_file() {
-        fs::read_to_string(&mem_file).map_err(|e| format!("Error reading .threadlane/memory.md: {e}"))?
+        fs::read_to_string(&mem_file)
+            .map_err(|e| format!("Error reading .threadlane/memory.md: {e}"))?
     } else {
         String::new()
     };
@@ -1250,7 +1245,6 @@ mod tests {
                 || mr_res.contains("GitLab mr #99")
                 || mr_res.contains("gitlab.com")
         );
-
     }
     #[test]
     fn typed_execution_marks_hashline_mismatch_as_error() {
@@ -1273,7 +1267,10 @@ mod tests {
         let error = result.expect_err("a stale hashline anchor must fail");
         assert!(error.contains("Error applying hashline edits"), "{error}");
         assert!(error.contains("Hashline mismatch"), "{error}");
-        assert_eq!(fs::read_to_string(dir.path().join("sample.txt")).unwrap(), "original\n");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("sample.txt")).unwrap(),
+            "original\n"
+        );
     }
 
     #[test]
@@ -1302,19 +1299,142 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("sample.txt"), "contents").unwrap();
 
-        let read = try_execute_tool_in_workspace(
-            "read_file",
-            r#"{"path":"sample.txt"}"#,
-            dir.path(),
-        );
+        let read =
+            try_execute_tool_in_workspace("read_file", r#"{"path":"sample.txt"}"#, dir.path());
         assert!(read.is_ok(), "{read:?}");
 
-        let command = try_execute_tool_in_workspace(
-            "run_command",
-            r#"{"command":"printf ok"}"#,
-            dir.path(),
-        );
+        let command =
+            try_execute_tool_in_workspace("run_command", r#"{"command":"printf ok"}"#, dir.path());
         assert!(command.is_ok(), "{command:?}");
     }
 
+    #[test]
+    fn typed_execution_marks_unavailable_virtual_skill_as_error_without_changing_output() {
+        let dir = tempdir().unwrap();
+        let args = r#"{"path":"skill://definitely-not-installed-review-fixture"}"#;
+        let expected = "Unknown skill reference 'definitely-not-installed-review-fixture': No skill file found in workspace or user skills directories";
+
+        assert_eq!(
+            try_execute_tool_in_workspace("read_file", args, dir.path()),
+            Err(expected.to_string())
+        );
+        assert_eq!(
+            execute_tool_in_workspace("read_file", args, dir.path()),
+            expected
+        );
+    }
+
+    #[test]
+    fn typed_execution_marks_malformed_virtual_skill_as_error_without_changing_output() {
+        let dir = tempdir().unwrap();
+        let args = r#"{"path":"skill://"}"#;
+        let expected = "Error: 'skill://' reference requires a skill name";
+
+        assert_eq!(
+            try_execute_tool_in_workspace("read_file", args, dir.path()),
+            Err(expected.to_string())
+        );
+        assert_eq!(
+            execute_tool_in_workspace("read_file", args, dir.path()),
+            expected
+        );
+    }
+
+    #[test]
+    fn typed_execution_marks_unavailable_virtual_agent_as_error_without_changing_output() {
+        let dir = tempdir().unwrap();
+        let args = r#"{"path":"agent://definitely-not-installed-review-fixture"}"#;
+        let expected = "Unknown agent reference 'definitely-not-installed-review-fixture': No agent file found in workspace or user agent directories";
+
+        assert_eq!(
+            try_execute_tool_in_workspace("read_file", args, dir.path()),
+            Err(expected.to_string())
+        );
+        assert_eq!(
+            execute_tool_in_workspace("read_file", args, dir.path()),
+            expected
+        );
+    }
+
+    #[test]
+    fn typed_execution_marks_malformed_virtual_agent_as_error_without_changing_output() {
+        let dir = tempdir().unwrap();
+        let args = r#"{"path":"agent://"}"#;
+        let expected = "Error: 'agent://' reference requires an agent name";
+
+        assert_eq!(
+            try_execute_tool_in_workspace("read_file", args, dir.path()),
+            Err(expected.to_string())
+        );
+        assert_eq!(
+            execute_tool_in_workspace("read_file", args, dir.path()),
+            expected
+        );
+    }
+
+    #[test]
+    fn typed_execution_marks_unavailable_virtual_remote_refs_as_errors_without_changing_output() {
+        let dir = tempdir().unwrap();
+
+        for path in ["pr://7", "mr://7", "issue://7"] {
+            let args = json!({ "path": path }).to_string();
+            let kind = path.split_once("://").unwrap().0;
+            let expected = format!(
+                "{kind}://7 requires a git origin remote or an explicit repository URL (e.g. pr://owner/repo/7)"
+            );
+
+            assert_eq!(
+                try_execute_tool_in_workspace("read_file", &args, dir.path()),
+                Err(expected.clone()),
+                "typed result for {path}"
+            );
+            assert_eq!(
+                execute_tool_in_workspace("read_file", &args, dir.path()),
+                expected,
+                "compatibility output for {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_execution_marks_malformed_virtual_remote_refs_as_errors_without_changing_output() {
+        let dir = tempdir().unwrap();
+
+        for path in [
+            "pr://not-a-number",
+            "mr://not-a-number",
+            "issue://not-a-number",
+        ] {
+            let args = json!({ "path": path }).to_string();
+            let expected = format!(
+                "Invalid repository reference '{path}': expected pr://<num>, issue://<num>, mr://<num>, or GitHub/GitLab URL"
+            );
+
+            assert_eq!(
+                try_execute_tool_in_workspace("read_file", &args, dir.path()),
+                Err(expected.clone()),
+                "typed result for {path}"
+            );
+            assert_eq!(
+                execute_tool_in_workspace("read_file", &args, dir.path()),
+                expected,
+                "compatibility output for {path}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn typed_execution_marks_signal_terminated_command_as_error_without_changing_output() {
+        let dir = tempdir().unwrap();
+        let args = r#"{"command":"kill -TERM $$"}"#;
+
+        let typed = try_execute_tool_in_workspace("run_command", args, dir.path());
+        let error = typed.expect_err("signal termination must fail");
+        assert!(error.starts_with("Exit Status: signal:"), "{error}");
+        assert_eq!(
+            execute_tool_in_workspace("run_command", args, dir.path()),
+            error
+        );
+    }
 }

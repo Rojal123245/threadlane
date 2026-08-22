@@ -285,14 +285,15 @@ pub fn github_owner_repo(remote: &str) -> Option<(&str, &str)> {
 }
 
 pub fn remote_ref_path(root: &Path, reference: &str) -> String {
-    let parsed = match parse_remote_ref(reference) {
-        Some(p) => p,
-        None => {
-            return format!(
-                "Invalid repository reference '{reference}': expected pr://<num>, issue://<num>, mr://<num>, or GitHub/GitLab URL"
-            );
-        }
-    };
+    try_remote_ref_path(root, reference).unwrap_or_else(|error| error)
+}
+
+pub fn try_remote_ref_path(root: &Path, reference: &str) -> Result<String, String> {
+    let parsed = parse_remote_ref(reference).ok_or_else(|| {
+        format!(
+            "Invalid repository reference '{reference}': expected pr://<num>, issue://<num>, mr://<num>, or GitHub/GitLab URL"
+        )
+    })?;
 
     let remote_info = get_git_remote_info(root);
 
@@ -320,10 +321,10 @@ pub fn remote_ref_path(root: &Path, reference: &str) -> String {
         None => match remote_info {
             Some(info) => info.owner_repo,
             None => {
-                return format!(
+                return Err(format!(
                     "{}://{} requires a git origin remote or an explicit repository URL (e.g. pr://owner/repo/{})",
                     parsed.kind, parsed.number, parsed.number
-                );
+                ));
             }
         },
     };
@@ -341,7 +342,7 @@ pub fn github_path(root: &Path, reference: &str) -> String {
     remote_ref_path(root, reference)
 }
 
-fn fetch_github(root: &Path, owner_repo: &str, kind: &str, number: &str) -> String {
+fn fetch_github(root: &Path, owner_repo: &str, kind: &str, number: &str) -> Result<String, String> {
     let endpoint = match kind {
         "pr" | "mr" => format!("repos/{owner_repo}/pulls/{number}"),
         _ => format!("repos/{owner_repo}/issues/{number}"),
@@ -355,7 +356,7 @@ fn fetch_github(root: &Path, owner_repo: &str, kind: &str, number: &str) -> Stri
     {
         if output.status.success() {
             let raw = String::from_utf8_lossy(&output.stdout).into_owned();
-            return format_github_markdown(kind, number, &raw);
+            return Ok(format_github_markdown(kind, number, &raw));
         }
     }
 
@@ -371,41 +372,44 @@ fn fetch_github(root: &Path, owner_repo: &str, kind: &str, number: &str) -> Stri
         "Accept: application/vnd.github+json",
     ]);
 
-    let token = threadlane_auth::github_auth::get_github_token();
-    if let Some(tok) = &token {
-        cmd.args(["-H", &format!("Authorization: Bearer {tok}")]);
+    if let Some(token) = threadlane_auth::github_auth::get_github_token() {
+        cmd.args(["-H", &format!("Authorization: Bearer {token}")]);
     }
     cmd.arg(&url);
 
     match cmd.output() {
         Ok(output) if output.status.success() => {
             let raw = String::from_utf8_lossy(&output.stdout).into_owned();
-            if raw.contains("\"message\": \"Not Found\"") {
-                format!(
+            let message = serde_json::from_str::<Value>(&raw)
+                .ok()
+                .and_then(|value| value.get("message")?.as_str().map(str::to_owned));
+            match message.as_deref() {
+                Some("Not Found") => Err(format!(
                     "GitHub {kind} #{number} not found on {owner_repo}. (If private, set GITHUB_TOKEN, connect GitHub in Settings, or run 'gh auth login')"
-                )
-            } else if raw.contains("\"message\": \"Bad credentials\"") {
-                "GitHub API error: Bad credentials. Check your GITHUB_TOKEN, Settings > Integrations, or 'gh auth status'.".to_string()
-            } else {
-                format_github_markdown(kind, number, &raw)
+                )),
+                Some("Bad credentials") => Err("GitHub API error: Bad credentials. Check your GITHUB_TOKEN, Settings > Integrations, or 'gh auth status'.".to_string()),
+                Some(_) => Err(format_github_markdown(kind, number, &raw)),
+                None => Ok(format_github_markdown(kind, number, &raw)),
             }
         }
-        Ok(output) => {
-            format!(
-                "GitHub API request failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )
-        }
-        Err(e) => {
-            format!(
-                "{}://{number} requires 'gh' CLI or 'curl' with GITHUB_TOKEN: {e}",
-                kind
-            )
-        }
+        Ok(output) => Err(format!(
+            "GitHub API request failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+        Err(e) => Err(format!(
+            "{}://{number} requires 'gh' CLI or 'curl' with GITHUB_TOKEN: {e}",
+            kind
+        )),
     }
 }
 
-fn fetch_gitlab(root: &Path, host: &str, project_path: &str, kind: &str, number: &str) -> String {
+fn fetch_gitlab(
+    root: &Path,
+    host: &str,
+    project_path: &str,
+    kind: &str,
+    number: &str,
+) -> Result<String, String> {
     let encoded_project = project_path.replace('/', "%2F");
     let endpoint = match kind {
         "pr" | "mr" => format!("projects/{encoded_project}/merge_requests/{number}"),
@@ -422,7 +426,7 @@ fn fetch_gitlab(root: &Path, host: &str, project_path: &str, kind: &str, number:
     if let Ok(output) = glab_cmd.output() {
         if output.status.success() {
             let raw = String::from_utf8_lossy(&output.stdout).into_owned();
-            return format_gitlab_markdown(kind, number, &raw);
+            return Ok(format_gitlab_markdown(kind, number, &raw));
         }
     }
 
@@ -431,8 +435,7 @@ fn fetch_gitlab(root: &Path, host: &str, project_path: &str, kind: &str, number:
     let mut cmd = Command::new("curl");
     cmd.args(["-s", "-L", "-H", "User-Agent: Threadlane"]);
 
-    let token = threadlane_auth::github_auth::get_gitlab_token();
-    if let Some(tok) = &token {
+    if let Some(tok) = threadlane_auth::github_auth::get_gitlab_token() {
         cmd.args(["-H", &format!("PRIVATE-TOKEN: {tok}")]);
     }
     cmd.arg(&url);
@@ -440,28 +443,25 @@ fn fetch_gitlab(root: &Path, host: &str, project_path: &str, kind: &str, number:
     match cmd.output() {
         Ok(output) if output.status.success() => {
             let raw = String::from_utf8_lossy(&output.stdout).into_owned();
-            if raw.contains("\"message\":\"404 Project Not Found\"")
-                || raw.contains("\"message\":\"404 Not Found\"")
-            {
-                format!(
+            let message = serde_json::from_str::<Value>(&raw)
+                .ok()
+                .and_then(|value| value.get("message")?.as_str().map(str::to_owned));
+            match message.as_deref() {
+                Some("404 Project Not Found") | Some("404 Not Found") => Err(format!(
                     "GitLab {kind} #{number} not found on {project_path}. (If private, set GITLAB_TOKEN or run 'glab auth login')"
-                )
-            } else {
-                format_gitlab_markdown(kind, number, &raw)
+                )),
+                Some(_) => Err(format_gitlab_markdown(kind, number, &raw)),
+                None => Ok(format_gitlab_markdown(kind, number, &raw)),
             }
         }
-        Ok(output) => {
-            format!(
-                "GitLab API request failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )
-        }
-        Err(e) => {
-            format!(
-                "{}://{number} requires 'glab' CLI or 'curl' with GITLAB_TOKEN: {e}",
-                kind
-            )
-        }
+        Ok(output) => Err(format!(
+            "GitLab API request failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+        Err(e) => Err(format!(
+            "{}://{number} requires 'glab' CLI or 'curl' with GITLAB_TOKEN: {e}",
+            kind
+        )),
     }
 }
 
@@ -581,10 +581,10 @@ fn dirs_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-pub fn skill(root: &Path, name: &str) -> String {
+pub fn try_skill(root: &Path, name: &str) -> Result<String, String> {
     let clean_name = name.trim_matches('/');
     if clean_name.is_empty() {
-        return "Error: 'skill://' reference requires a skill name".to_string();
+        return Err("Error: 'skill://' reference requires a skill name".to_string());
     }
 
     let mut search_dirs = vec![
@@ -610,19 +610,19 @@ pub fn skill(root: &Path, name: &str) -> String {
         for candidate in candidates {
             if candidate.is_file() {
                 if let Ok(content) = fs::read_to_string(&candidate) {
-                    return content;
+                    return Ok(content);
                 }
             }
         }
     }
 
-    format!("Unknown skill reference '{clean_name}': No skill file found in workspace or user skills directories")
+    Err(format!("Unknown skill reference '{clean_name}': No skill file found in workspace or user skills directories"))
 }
 
-pub fn agent(root: &Path, name: &str) -> String {
+pub fn try_agent(root: &Path, name: &str) -> Result<String, String> {
     let clean_name = name.trim_matches('/');
     if clean_name.is_empty() {
-        return "Error: 'agent://' reference requires an agent name".to_string();
+        return Err("Error: 'agent://' reference requires an agent name".to_string());
     }
 
     let mut search_dirs = vec![root.join(".threadlane/agents"), root.join(".agents/agents")];
@@ -638,13 +638,13 @@ pub fn agent(root: &Path, name: &str) -> String {
         for candidate in candidates {
             if candidate.is_file() {
                 if let Ok(content) = fs::read_to_string(&candidate) {
-                    return content;
+                    return Ok(content);
                 }
             }
         }
     }
 
-    format!("Unknown agent reference '{clean_name}': No agent file found in workspace or user agent directories")
+    Err(format!("Unknown agent reference '{clean_name}': No agent file found in workspace or user agent directories"))
 }
 
 #[cfg(test)]
@@ -817,6 +817,6 @@ mod tests {
         fs::create_dir_all(&skill_dir).unwrap();
         fs::write(skill_dir.join("SKILL.md"), "my skill content").unwrap();
 
-        assert_eq!(skill(root, "my-skill"), "my skill content");
+        assert_eq!(try_skill(root, "my-skill").unwrap(), "my skill content");
     }
 }
