@@ -1,3 +1,3 @@
 mod view;
 
-pub use view::RightPanelView;
+pub use view::{GitAction, RightPanelView};

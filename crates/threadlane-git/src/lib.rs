@@ -39,6 +39,8 @@ fn repository_key(work_dir: &Path) -> PathBuf {
         .unwrap_or_else(|_| work_dir.to_path_buf())
 }
 
+const GIT_FIELD_SEPARATOR: char = '\u{1f}';
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GitHubPrInfo {
     pub number: u64,
@@ -74,30 +76,70 @@ pub struct PrCheckStatus {
     pub details_url: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GitBranchInfo {
+    pub name: String,
+    pub is_current: bool,
+    pub is_default: bool,
+    pub is_remote: bool,
+    pub relative_time: String,
+    pub committer_date_unix: i64,
+    pub upstream: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GitStashInfo {
+    pub index: usize,
+    pub name: String,
+    pub message: String,
+    pub relative_time: String,
+    pub timestamp: u64,
+    pub branch: Option<String>,
+    pub files: Vec<GitFile>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GitCommitInfo {
+    pub sha: String,
+    pub short_sha: String,
+    pub summary: String,
+    pub body: String,
+    pub author_name: String,
+    pub author_email: String,
+    pub relative_time: String,
+    pub timestamp: i64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GitStatus {
     pub branch: Option<String>,
-    detached: bool,
+    pub default_branch: Option<String>,
+    pub detached: bool,
     pub has_upstream: bool,
     pub has_changes: bool,
     pub staged_changes: bool,
     pub unstaged_changes: bool,
     pub ahead: usize,
-    behind: usize,
+    pub behind: usize,
     pub pr_ready: bool,
     pub remote: Option<String>,
     pub branches: Vec<String>,
+    pub branch_details: Vec<GitBranchInfo>,
     pub files: Vec<GitFile>,
     pub pr: Option<GitHubPrInfo>,
+    pub last_fetched_at: Option<String>,
+    pub stashes: Vec<GitStashInfo>,
+    pub current_stash: Option<GitStashInfo>,
+    pub recent_commits: Vec<GitCommitInfo>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GitFile {
     pub path: String,
-    status: String,
-    index_status: char,
-    worktree_status: char,
-    staged: bool,
+    pub status: String,
+    pub index_status: char,
+    pub worktree_status: char,
+    pub staged: bool,
     pub unstaged: bool,
     pub additions: u32,
     pub deletions: u32,
@@ -328,6 +370,80 @@ fn repository_metadata(work_dir: &Path) -> RepositoryMetadata {
     metadata
 }
 
+pub fn fetch(work_dir: &Path) -> Result<(), GitError> {
+    sync_remote(work_dir)
+}
+
+pub fn list_branches_detailed(
+    work_dir: &Path,
+    provided_default_branch: Option<&str>,
+) -> Result<Vec<GitBranchInfo>, GitError> {
+    let def_branch = provided_default_branch
+        .map(str::to_owned)
+        .or_else(|| discover_default_branch(work_dir));
+    let output = command(
+        work_dir,
+        &[
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname:short)\x1f%(committerdate:relative)\x1f%(committerdate:unix)\x1f%(upstream:short)\x1f%(HEAD)",
+            "refs/heads",
+            "refs/remotes/origin",
+        ],
+    )?;
+
+    let mut branches = Vec::new();
+    let mut seen_names = std::collections::HashSet::new();
+
+    for line in output.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.split(GIT_FIELD_SEPARATOR).collect();
+        if parts.is_empty() {
+            continue;
+        }
+        let ref_name = parts[0].trim();
+        if ref_name.is_empty()
+            || ref_name == "origin"
+            || ref_name == "origin/HEAD"
+            || ref_name.ends_with("/HEAD")
+        {
+            continue;
+        }
+
+        let is_remote = ref_name.starts_with("origin/");
+        let is_current = parts.get(4).map_or(false, |h| h.trim() == "*");
+        let relative_time = parts.get(1).map_or("", |t| t.trim()).to_string();
+        let committer_date_unix = parts
+            .get(2)
+            .and_then(|u| u.trim().parse::<i64>().ok())
+            .unwrap_or(0);
+        let upstream = parts
+            .get(3)
+            .map(|u| u.trim().to_string())
+            .filter(|u| !u.is_empty());
+        let is_default = def_branch.as_deref().map_or(false, |db| {
+            ref_name == db || ref_name == format!("origin/{db}")
+        });
+
+        if seen_names.insert(ref_name.to_string()) {
+            branches.push(GitBranchInfo {
+                name: ref_name.to_string(),
+                is_current,
+                is_default,
+                is_remote,
+                relative_time,
+                committer_date_unix,
+                upstream,
+            });
+        }
+    }
+
+    Ok(branches)
+}
+
 pub fn inspect(work_dir: &Path) -> Result<GitStatus, GitError> {
     let porcelain = command(work_dir, &["status", "--porcelain=v1", "-b", "-z"])?;
     let mut status = parse_status(work_dir, &porcelain);
@@ -351,6 +467,20 @@ pub fn inspect(work_dir: &Path) -> Result<GitStatus, GitError> {
         }
     }
     let metadata = repository_metadata(work_dir);
+    status.default_branch = metadata.default_branch.clone();
+    status.branch_details = list_branches_detailed(work_dir, status.default_branch.as_deref())
+        .unwrap_or_else(|_| {
+            status
+                .branches
+                .iter()
+                .map(|name| GitBranchInfo {
+                    name: name.clone(),
+                    is_current: status.branch.as_deref() == Some(name),
+                    is_default: status.default_branch.as_deref() == Some(name),
+                    ..GitBranchInfo::default()
+                })
+                .collect()
+        });
     status.remote = metadata.remote;
     if status.remote.is_some() && status.branch.is_some() {
         if !status.has_upstream && status.ahead == 0 {
@@ -360,9 +490,7 @@ pub fn inspect(work_dir: &Path) -> Result<GitStatus, GitError> {
                 .unwrap_or(0);
         }
     }
-    if let (Some(branch), Some(base)) =
-        (status.branch.as_deref(), metadata.default_branch.as_deref())
-    {
+    if let (Some(branch), Some(base)) = (status.branch.as_deref(), status.default_branch.as_deref()) {
         if branch != base {
             let local_base = command(work_dir, &["rev-list", "--count", &format!("{base}..HEAD")])
                 .or_else(|_| {
@@ -378,7 +506,328 @@ pub fn inspect(work_dir: &Path) -> Result<GitStatus, GitError> {
         }
     }
     status.pr = inspect_pr(work_dir).ok().flatten();
+    let stashes = list_stashes(work_dir).unwrap_or_default();
+    let current_branch_name = status.branch.as_deref().unwrap_or("");
+    let current_stash = stashes
+        .iter()
+        .find(|s| s.branch.as_deref() == Some(current_branch_name))
+        .cloned();
+    status.stashes = stashes;
+    status.current_stash = current_stash;
+    status.recent_commits = list_commits(work_dir, 50).unwrap_or_default();
     Ok(status)
+}
+
+pub fn list_stashes(work_dir: &Path) -> Result<Vec<GitStashInfo>, GitError> {
+    let output = match command(
+        work_dir,
+        &["stash", "list", "--format=%gd%x1f%gs%x1f%cr%x1f%ct"],
+    ) {
+        Ok(out) => out,
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    let mut stashes = Vec::new();
+    for line in output.lines() {
+        let parts: Vec<&str> = line.split(GIT_FIELD_SEPARATOR).collect();
+        if parts.len() >= 3 {
+            let name = parts[0].trim().to_string();
+            let index = name
+                .strip_prefix("stash@{")
+                .and_then(|s| s.strip_suffix('}'))
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(0);
+            let message = parts[1].trim().to_string();
+            let relative_time = parts[2].trim().to_string();
+            let timestamp = parts.get(3).and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(0);
+
+            let branch = if let Some(rest) = message.strip_prefix("Stash on ") {
+                rest.split_whitespace().next().map(|s| s.to_string())
+            } else if let Some(rest) = message.strip_prefix("WIP on ") {
+                rest.split(':').next().map(|s| s.trim().to_string())
+            } else if let Some(rest) = message.strip_prefix("On ") {
+                rest.split(':').next().map(|s| s.trim().to_string())
+            } else {
+                None
+            };
+
+            stashes.push(GitStashInfo {
+                index,
+                name,
+                message,
+                relative_time,
+                timestamp,
+                branch,
+                files: Vec::new(),
+            });
+        }
+    }
+    Ok(stashes)
+}
+
+pub fn inspect_stash_files(work_dir: &Path, stash_index: usize) -> Vec<GitFile> {
+    let stash_ref = format!("stash@{{{stash_index}}}");
+    let numstat_output = command(work_dir, &["stash", "show", "--include-untracked", "--numstat", &stash_ref])
+        .or_else(|_| command(work_dir, &["stash", "show", "--numstat", &stash_ref]))
+        .unwrap_or_default();
+    let name_status_output = command(work_dir, &["stash", "show", "--include-untracked", "--name-status", &stash_ref])
+        .or_else(|_| command(work_dir, &["stash", "show", "--name-status", &stash_ref]))
+        .unwrap_or_default();
+
+    let mut status_map = std::collections::HashMap::new();
+    for line in name_status_output.lines() {
+        let mut parts = line.split_whitespace();
+        if let (Some(code), Some(path)) = (parts.next(), parts.next()) {
+            status_map.insert(path.trim().to_string(), code.trim().chars().next().unwrap_or('M'));
+        }
+    }
+
+    let mut files = Vec::new();
+    for line in numstat_output.lines() {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() >= 3 {
+            let additions = parts[0].trim().parse::<u32>().unwrap_or(0);
+            let deletions = parts[1].trim().parse::<u32>().unwrap_or(0);
+            let path = parts[2].trim().to_string();
+            let char_status = *status_map.get(&path).unwrap_or(&'M');
+            files.push(GitFile {
+                path: path.clone(),
+                status: char_status.to_string(),
+                index_status: char_status,
+                worktree_status: ' ',
+                staged: false,
+                unstaged: true,
+                additions,
+                deletions,
+            });
+        }
+    }
+    files
+}
+
+pub fn diff_stash_file(work_dir: &Path, stash_index: usize, file_path: &str) -> Result<String, GitError> {
+    let stash_ref = format!("stash@{{{stash_index}}}");
+    if let Ok(diff) = command(work_dir, &["diff", &format!("{stash_ref}^..{stash_ref}"), "--", file_path]) {
+        if !diff.trim().is_empty() {
+            return Ok(diff);
+        }
+    }
+    if let Ok(diff) = command(work_dir, &["diff", "4b825dc642cb6eb9a060e54bf8d69288fbee4904", &format!("{stash_ref}^3"), "--", file_path]) {
+        if !diff.trim().is_empty() {
+            return Ok(diff);
+        }
+    }
+    if let Ok(content) = command(work_dir, &["show", &format!("{stash_ref}^3:{file_path}")]) {
+        return Ok(format!("--- /dev/null\n+++ b/{file_path}\n@@ -0,0 +1,{} @@\n{}", content.lines().count(), content));
+    }
+    command(work_dir, &["diff", &format!("{stash_ref}^..{stash_ref}"), "--", file_path])
+}
+
+pub fn pop_stash(work_dir: &Path, stash_index: Option<usize>) -> Result<(), GitError> {
+    if let Some(idx) = stash_index {
+        let stash_ref = format!("stash@{{{idx}}}");
+        command(work_dir, &["stash", "pop", &stash_ref])?;
+    } else {
+        command(work_dir, &["stash", "pop"])?;
+    }
+    Ok(())
+}
+
+pub fn drop_stash(work_dir: &Path, stash_index: Option<usize>) -> Result<(), GitError> {
+    if let Some(idx) = stash_index {
+        let stash_ref = format!("stash@{{{idx}}}");
+        command(work_dir, &["stash", "drop", &stash_ref])?;
+    } else {
+        command(work_dir, &["stash", "drop"])?;
+    }
+    Ok(())
+}
+
+pub fn list_commits(work_dir: &Path, max_count: usize) -> Result<Vec<GitCommitInfo>, GitError> {
+    let count_arg = format!("-n{max_count}");
+    let output = match command(
+        work_dir,
+        &["log", &count_arg, "--format=%H%x1f%h%x1f%an%x1f%ae%x1f%cr%x1f%ct%x1f%s"],
+    ) {
+        Ok(out) => out,
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    let mut commits = Vec::new();
+    for line in output.lines() {
+        let parts: Vec<&str> = line.split(GIT_FIELD_SEPARATOR).collect();
+        if parts.len() >= 7 {
+            let sha = parts[0].trim().to_string();
+            let short_sha = parts[1].trim().to_string();
+            let author_name = parts[2].trim().to_string();
+            let author_email = parts[3].trim().to_string();
+            let relative_time = parts[4].trim().to_string();
+            let timestamp = parts[5].trim().parse::<i64>().unwrap_or(0);
+            let summary = parts[6].trim().to_string();
+
+            commits.push(GitCommitInfo {
+                sha,
+                short_sha,
+                summary,
+                body: String::new(),
+                author_name,
+                author_email,
+                relative_time,
+                timestamp,
+            });
+        }
+    }
+    Ok(commits)
+}
+
+pub fn inspect_commit_files(work_dir: &Path, sha: &str) -> Vec<GitFile> {
+    let numstat_output = command(work_dir, &["show", "--numstat", "--format=", sha]).unwrap_or_default();
+    let name_status_output = command(work_dir, &["show", "--name-status", "--format=", sha]).unwrap_or_default();
+
+    let mut status_map = std::collections::HashMap::new();
+    let mut rename_destinations = std::collections::HashMap::new();
+    for line in name_status_output.lines() {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if let (Some(code), Some(path)) = (parts.first(), parts.get(1)) {
+            let status = code.trim().chars().next().unwrap_or('M');
+            if matches!(status, 'R' | 'C') {
+                if let Some(destination) = parts.get(2) {
+                    let source = path.trim().to_string();
+                    let destination = destination.trim().to_string();
+                    rename_destinations.insert(format!("{source} => {destination}"), destination.clone());
+                    status_map.insert(destination, status);
+                }
+            } else {
+                status_map.insert(path.trim().to_string(), status);
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    for line in numstat_output.lines() {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() >= 3 {
+            let additions = parts[0].trim().parse::<u32>().unwrap_or(0);
+            let deletions = parts[1].trim().parse::<u32>().unwrap_or(0);
+            let numstat_path = parts[2].trim();
+            let path = rename_destinations
+                .get(numstat_path)
+                .cloned()
+                .unwrap_or_else(|| numstat_path.to_string());
+            let char_status = *status_map.get(&path).unwrap_or(&'M');
+            files.push(GitFile {
+                path: path.clone(),
+                status: char_status.to_string(),
+                index_status: char_status,
+                worktree_status: ' ',
+                staged: false,
+                unstaged: false,
+                additions,
+                deletions,
+            });
+        }
+    }
+    files
+}
+
+pub fn diff_commit_file(work_dir: &Path, sha: &str, file_path: &str) -> Result<String, GitError> {
+    if let Ok(diff) = command(work_dir, &["diff", &format!("{sha}^..{sha}"), "--", file_path]) {
+        if !diff.trim().is_empty() {
+            return Ok(diff);
+        }
+    }
+    command(work_dir, &["show", sha, "--", file_path])
+}
+
+pub fn discard_file_changes(work_dir: &Path, relative_path: &str) -> Result<(), GitError> {
+    validate_diff_path(work_dir, relative_path)?;
+    let full_path = work_dir.join(relative_path);
+    let in_index = command(work_dir, &["ls-files", "--error-unmatch", relative_path]).is_ok();
+    if in_index {
+        if command(work_dir, &["restore", "--staged", "--worktree", "--", relative_path]).is_err() {
+            let _ = command(work_dir, &["reset", "HEAD", "--", relative_path]);
+            command(work_dir, &["checkout", "HEAD", "--", relative_path])?;
+        }
+    } else {
+        if full_path.is_file() || full_path.is_symlink() {
+            let _ = std::fs::remove_file(&full_path);
+        } else if full_path.is_dir() {
+            let _ = std::fs::remove_dir_all(&full_path);
+        }
+        let _ = command(work_dir, &["clean", "-f", "-d", "--", relative_path]);
+    }
+    Ok(())
+}
+
+pub fn ignore_file(work_dir: &Path, relative_path: &str) -> Result<(), GitError> {
+    validate_diff_path(work_dir, relative_path)?;
+    let gitignore_path = work_dir.join(".gitignore");
+    let mut current_content = std::fs::read_to_string(&gitignore_path).unwrap_or_default();
+
+    let normalized = relative_path.replace('\\', "/");
+    let entry = format!("/{normalized}");
+
+    let lines: Vec<&str> = current_content.lines().collect();
+    if !lines.iter().any(|l| l.trim() == entry || l.trim() == normalized) {
+        if !current_content.is_empty() && !current_content.ends_with('\n') {
+            current_content.push('\n');
+        }
+        current_content.push_str(&entry);
+        current_content.push('\n');
+        std::fs::write(&gitignore_path, current_content).map_err(|e| GitError {
+            work_dir: work_dir.to_path_buf(),
+            message: format!("Failed to update .gitignore: {e}"),
+        })?;
+    }
+
+    let _ = command(work_dir, &["rm", "--cached", "-r", "--", relative_path]);
+    Ok(())
+}
+
+pub fn ignore_extension(work_dir: &Path, ext: &str) -> Result<(), GitError> {
+    let ext = ext.trim_start_matches('.');
+    let gitignore_path = work_dir.join(".gitignore");
+    let mut current_content = std::fs::read_to_string(&gitignore_path).unwrap_or_default();
+
+    let entry = format!("*.{ext}");
+
+    let lines: Vec<&str> = current_content.lines().collect();
+    if !lines.iter().any(|l| l.trim() == entry) {
+        if !current_content.is_empty() && !current_content.ends_with('\n') {
+            current_content.push('\n');
+        }
+        current_content.push_str(&entry);
+        current_content.push('\n');
+        std::fs::write(&gitignore_path, current_content).map_err(|e| GitError {
+            work_dir: work_dir.to_path_buf(),
+            message: format!("Failed to update .gitignore: {e}"),
+        })?;
+    }
+
+    let _ = command(work_dir, &["rm", "--cached", "-r", "--", &format!("*.{ext}")]);
+    Ok(())
+}
+
+pub fn reveal_in_file_manager(path: &Path) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("open").arg("-R").arg(path).spawn();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = Command::new("explorer")
+            .arg(format!("/select,{}", path.display()))
+            .spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let target = if path.is_file() {
+            path.parent().unwrap_or(path)
+        } else {
+            path
+        };
+        let _ = Command::new("xdg-open").arg(target).spawn();
+    }
 }
 
 pub fn parse_gh_pr_json(json_str: &str) -> Result<GitHubPrInfo, String> {
@@ -575,14 +1024,83 @@ pub fn inspect_pr(work_dir: &Path) -> Result<Option<GitHubPrInfo>, GitError> {
 }
 
 pub fn create_branch(work_dir: &Path, name: &str) -> Result<(), GitError> {
+    create_branch_from(work_dir, name, None)
+}
+
+pub fn create_branch_from(
+    work_dir: &Path,
+    name: &str,
+    start_point: Option<&str>,
+) -> Result<(), GitError> {
     let name = validate_branch_name(work_dir, name)?;
-    command(work_dir, &["switch", "-c", &name])?;
+    if let Some(start) = start_point.map(str::trim).filter(|s| !s.is_empty()) {
+        command(work_dir, &["switch", "-c", &name, start])?;
+    } else {
+        command(work_dir, &["switch", "-c", &name])?;
+    }
     Ok(())
 }
 
+pub fn normalize_branch_for_checkout(name: &str) -> &str {
+    let trimmed = name.trim();
+    trimmed
+        .strip_prefix("origin/")
+        .or_else(|| trimmed.strip_prefix("refs/heads/"))
+        .or_else(|| trimmed.strip_prefix("refs/remotes/origin/"))
+        .unwrap_or(trimmed)
+}
+
 pub fn checkout(work_dir: &Path, name: &str) -> Result<(), GitError> {
-    let name = validate_branch_name(work_dir, name)?;
-    command(work_dir, &["switch", &name])?;
+    let clean = normalize_branch_for_checkout(name);
+    let name = validate_branch_name(work_dir, clean)?;
+    if command(work_dir, &["switch", &name]).is_err() {
+        command(work_dir, &["checkout", &name])?;
+    }
+    Ok(())
+}
+
+pub fn checkout_with_stash(work_dir: &Path, name: &str) -> Result<(), GitError> {
+    let clean = normalize_branch_for_checkout(name);
+    let name = validate_branch_name(work_dir, clean)?;
+    let current_branch = command(work_dir, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .ok()
+        .map(|branch| branch.trim().to_owned())
+        .filter(|branch| !branch.is_empty())
+        .unwrap_or_else(|| "HEAD".to_string());
+    let stash_msg = format!("Stash on {current_branch} before switching to {name}");
+    let _ = command(work_dir, &["stash", "push", "-u", "-m", &stash_msg]);
+    if command(work_dir, &["switch", &name]).is_err() {
+        command(work_dir, &["checkout", &name])?;
+    }
+    Ok(())
+}
+
+pub fn checkout_carrying_changes(work_dir: &Path, name: &str) -> Result<(), GitError> {
+    let clean = normalize_branch_for_checkout(name);
+    let valid_name = validate_branch_name(work_dir, clean)?;
+
+    // 1. Try git switch -m (native three-way merge to bring local changes)
+    if command(work_dir, &["switch", "-m", &valid_name]).is_ok() {
+        return Ok(());
+    }
+    // 2. Try git checkout -m
+    if command(work_dir, &["checkout", "-m", &valid_name]).is_ok() {
+        return Ok(());
+    }
+    // 3. Try plain switch / checkout (if working tree has no conflicts)
+    if command(work_dir, &["switch", &valid_name]).is_ok() || command(work_dir, &["checkout", &valid_name]).is_ok() {
+        return Ok(());
+    }
+    // 4. Fallback: stash, switch, and pop
+    let stash_msg = format!("Carrying changes to {valid_name}");
+    let _ = command(work_dir, &["stash", "push", "-u", "-m", &stash_msg]);
+    if command(work_dir, &["switch", &valid_name]).is_err() {
+        if let Err(err2) = command(work_dir, &["checkout", &valid_name]) {
+            let _ = command(work_dir, &["stash", "pop"]);
+            return Err(err2);
+        }
+    }
+    command(work_dir, &["stash", "pop"])?;
     Ok(())
 }
 
@@ -678,9 +1196,19 @@ pub fn push(work_dir: &Path) -> Result<(), GitError> {
     Ok(())
 }
 
-pub fn pull(work_dir: &Path) -> Result<(), GitError> {
-    command(work_dir, &["pull", "--ff-only"])?;
-    Ok(())
+pub fn pull(work_dir: &Path) -> Result<String, GitError> {
+    command(work_dir, &["pull", "--ff-only"])
+}
+
+pub fn merge(work_dir: &Path, branch: &str) -> Result<String, GitError> {
+    let branch = branch.trim();
+    if branch.is_empty() {
+        return Err(GitError {
+            work_dir: work_dir.to_path_buf(),
+            message: "branch name to merge cannot be empty".to_owned(),
+        });
+    }
+    command(work_dir, &["merge", "--no-edit", branch])
 }
 
 pub fn stage_file(work_dir: &Path, path: &str) -> Result<(), GitError> {
@@ -880,6 +1408,8 @@ mod tests {
         let output = Command::new("git")
             .args(args)
             .current_dir(work_dir)
+            .env("GIT_CONFIG_GLOBAL", work_dir.join("git-test-global-config"))
+            .env("GIT_CONFIG_SYSTEM", work_dir.join("git-test-system-config"))
             .output()
             .unwrap();
         assert!(
@@ -1240,5 +1770,272 @@ mod tests {
         let merged_pr = parse_gh_pr_json(merged_sample).unwrap();
         assert!(!merged_pr.is_draft);
         assert_eq!(merged_pr.state, "MERGED");
+    }
+
+    #[test]
+    fn branch_lifecycle_and_merge() {
+        let dir = tempdir().unwrap();
+        run_git(dir.path(), &["init", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        fs::write(dir.path().join("base.txt"), "base\n").unwrap();
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-qm", "initial commit"]);
+
+        // Create feature branch
+        create_branch(dir.path(), "feature-1").unwrap();
+        let status = inspect(dir.path()).unwrap();
+        assert_eq!(status.branch.as_deref(), Some("feature-1"));
+
+        // Commit on feature branch
+        fs::write(dir.path().join("feature.txt"), "feature content\n").unwrap();
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-qm", "add feature"]);
+
+        // Detailed branches
+        let branches = list_branches_detailed(dir.path(), None).unwrap();
+        assert!(branches.iter().any(|b| b.name == "feature-1" && b.is_current));
+        assert!(branches.iter().any(|b| b.name == "main"));
+
+        // Switch back to main
+        checkout(dir.path(), "main").unwrap();
+        let status = inspect(dir.path()).unwrap();
+        assert_eq!(status.branch.as_deref(), Some("main"));
+
+        // Merge feature-1 into main
+        merge(dir.path(), "feature-1").unwrap();
+        assert!(dir.path().join("feature.txt").exists());
+    }
+
+    #[test]
+    fn switch_branch_with_stash_and_carry() {
+        let dir = tempdir().unwrap();
+        run_git(dir.path(), &["init", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        fs::write(dir.path().join("base.txt"), "base\n").unwrap();
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-qm", "initial commit"]);
+
+        create_branch(dir.path(), "branch-a").unwrap();
+        create_branch(dir.path(), "branch-b").unwrap();
+
+        // Switch to branch-a and create uncommitted change
+        checkout(dir.path(), "branch-a").unwrap();
+        fs::write(dir.path().join("dirty.txt"), "dirty work\n").unwrap();
+        assert!(!inspect(dir.path()).unwrap().files.is_empty());
+
+        // Stash and switch to branch-b
+        checkout_with_stash(dir.path(), "branch-b").unwrap();
+        let status_b = inspect(dir.path()).unwrap();
+        assert_eq!(status_b.branch.as_deref(), Some("branch-b"));
+        // Dirty file should have been stashed
+        assert!(status_b.files.is_empty());
+
+        // Switch carrying changes test
+        fs::write(dir.path().join("carry.txt"), "carry me\n").unwrap();
+        assert!(!inspect(dir.path()).unwrap().files.is_empty());
+        checkout_carrying_changes(dir.path(), "main").unwrap();
+        let status_main = inspect(dir.path()).unwrap();
+        assert_eq!(status_main.branch.as_deref(), Some("main"));
+        assert!(dir.path().join("carry.txt").exists());
+    }
+
+    #[test]
+    fn stash_pop_and_drop_lifecycle() {
+        let dir = tempdir().unwrap();
+        run_git(dir.path(), &["init", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        fs::write(dir.path().join("base.txt"), "base\n").unwrap();
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-qm", "initial commit"]);
+
+        create_branch(dir.path(), "feature").unwrap();
+        checkout(dir.path(), "feature").unwrap();
+
+        fs::write(dir.path().join("work.txt"), "in-progress work\n").unwrap();
+        checkout_with_stash(dir.path(), "main").unwrap();
+
+        // Switch back to feature branch
+        checkout(dir.path(), "feature").unwrap();
+        let status = inspect(dir.path()).unwrap();
+        assert!(status.current_stash.is_some());
+        let current = status.current_stash.as_ref().unwrap();
+        assert!(current.files.is_empty());
+        let files = inspect_stash_files(dir.path(), current.index);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "work.txt");
+
+        let diff = diff_stash_file(dir.path(), 0, "work.txt").unwrap();
+        assert!(diff.contains("in-progress work"));
+
+        fs::write(dir.path().join("second.txt"), "second stash\n").unwrap();
+        run_git(dir.path(), &["stash", "push", "-u", "-m", "second stash"]);
+        assert_eq!(list_stashes(dir.path()).unwrap().len(), 2);
+        drop_stash(dir.path(), Some(0)).unwrap();
+        assert_eq!(list_stashes(dir.path()).unwrap().len(), 1);
+
+        pop_stash(dir.path(), Some(0)).unwrap();
+        assert!(dir.path().join("work.txt").exists());
+        let status_after_pop = inspect(dir.path()).unwrap();
+        assert_eq!(status_after_pop.stashes.len(), 0);
+
+        fs::write(dir.path().join("third.txt"), "third stash\n").unwrap();
+        run_git(dir.path(), &["stash", "push", "-u", "-m", "third stash"]);
+        pop_stash(dir.path(), None).unwrap();
+        assert!(dir.path().join("third.txt").exists());
+        assert!(inspect(dir.path()).unwrap().stashes.is_empty());
+    }
+
+    #[test]
+    fn inspect_does_not_expose_a_stash_from_another_branch() {
+        let dir = tempdir().unwrap();
+        run_git(dir.path(), &["init", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        fs::write(dir.path().join("base.txt"), "base\n").unwrap();
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-qm", "initial"]);
+        create_branch(dir.path(), "feature").unwrap();
+        fs::write(dir.path().join("feature.txt"), "work\n").unwrap();
+        checkout_with_stash(dir.path(), "main").unwrap();
+
+        let status = inspect(dir.path()).unwrap();
+
+        assert!(status.current_stash.is_none());
+        assert_eq!(status.stashes.len(), 1);
+    }
+
+    #[test]
+    fn git_metadata_parsing_preserves_pipe_characters() {
+        let dir = tempdir().unwrap();
+        run_git(dir.path(), &["init", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test | Author"]);
+        fs::write(dir.path().join("base.txt"), "base\n").unwrap();
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-qm", "subject | detail"]);
+        run_git(dir.path(), &["branch", "topic|branch"]);
+
+        let commits = list_commits(dir.path(), 1).unwrap();
+        let branches = list_branches_detailed(dir.path(), None).unwrap();
+
+        assert_eq!(commits[0].author_name, "Test | Author");
+        assert_eq!(commits[0].summary, "subject | detail");
+        assert!(branches.iter().any(|branch| branch.name == "topic|branch"));
+    }
+
+    #[test]
+    fn stash_metadata_parsing_preserves_pipe_characters() {
+        let dir = tempdir().unwrap();
+        run_git(dir.path(), &["init", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        fs::write(dir.path().join("base.txt"), "base\n").unwrap();
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-qm", "initial"]);
+        fs::write(dir.path().join("work.txt"), "work\n").unwrap();
+        run_git(dir.path(), &["stash", "push", "-u", "-m", "message | detail"]);
+
+        let stashes = list_stashes(dir.path()).unwrap();
+
+        assert_eq!(stashes.len(), 1);
+        assert!(stashes[0].message.ends_with("message | detail"));
+    }
+
+    #[test]
+    fn commit_file_inspection_uses_the_destination_of_a_rename() {
+        let dir = tempdir().unwrap();
+        run_git(dir.path(), &["init", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        fs::write(dir.path().join("old.txt"), "contents\n").unwrap();
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-qm", "initial"]);
+        run_git(dir.path(), &["mv", "old.txt", "new.txt"]);
+        run_git(dir.path(), &["commit", "-qm", "rename file"]);
+        let sha = command(dir.path(), &["rev-parse", "HEAD"]).unwrap();
+
+        let files = inspect_commit_files(dir.path(), sha.trim());
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "new.txt");
+        assert_eq!(files[0].status_char(), 'R');
+    }
+
+    #[test]
+    fn file_mutations_reject_paths_outside_the_workspace() {
+        let dir = tempdir().unwrap();
+
+        assert!(discard_file_changes(dir.path(), "../outside.txt").is_err());
+        assert!(ignore_file(dir.path(), "../outside.txt").is_err());
+    }
+
+    #[test]
+    fn file_discard_and_ignore_lifecycle() {
+        let dir = tempdir().unwrap();
+        run_git(dir.path(), &["init", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        fs::write(dir.path().join("file1.txt"), "original\n").unwrap();
+        fs::write(dir.path().join("file2.md"), "markdown\n").unwrap();
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-qm", "initial commit"]);
+
+        // 1. Modify tracked file and discard
+        fs::write(dir.path().join("file1.txt"), "modified\n").unwrap();
+        assert_eq!(inspect(dir.path()).unwrap().files.len(), 1);
+        discard_file_changes(dir.path(), "file1.txt").unwrap();
+        assert_eq!(inspect(dir.path()).unwrap().files.len(), 0);
+        assert_eq!(fs::read_to_string(dir.path().join("file1.txt")).unwrap(), "original\n");
+
+        // 2. Create untracked file and discard
+        fs::write(dir.path().join("untracked.rs"), "fn main() {}\n").unwrap();
+        assert_eq!(inspect(dir.path()).unwrap().files.len(), 1);
+        discard_file_changes(dir.path(), "untracked.rs").unwrap();
+        assert!(!dir.path().join("untracked.rs").exists());
+        assert_eq!(inspect(dir.path()).unwrap().files.len(), 0);
+
+        // 3. Ignore file
+        fs::write(dir.path().join("secret.env"), "KEY=123\n").unwrap();
+        assert_eq!(inspect(dir.path()).unwrap().files.len(), 1);
+        ignore_file(dir.path(), "secret.env").unwrap();
+        assert!(dir.path().join(".gitignore").exists());
+        let gitignore = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        assert!(gitignore.contains("/secret.env"));
+
+        // 4. Ignore extension
+        ignore_extension(dir.path(), "log").unwrap();
+        let gitignore2 = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        assert!(gitignore2.contains("*.log"));
+    }
+
+    #[test]
+    fn commit_history_inspection() {
+        let dir = tempdir().unwrap();
+        run_git(dir.path(), &["init", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "dev@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Dev"]);
+        fs::write(dir.path().join("a.txt"), "hello world\n").unwrap();
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-qm", "feat: initial commit"]);
+
+        fs::write(dir.path().join("b.txt"), "second file\n").unwrap();
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-qm", "feat: second commit"]);
+
+        let commits = list_commits(dir.path(), 10).unwrap();
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].summary, "feat: second commit");
+        assert_eq!(commits[0].author_name, "Dev");
+        assert_eq!(commits[1].summary, "feat: initial commit");
+
+        let files = inspect_commit_files(dir.path(), &commits[0].sha);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "b.txt");
+
+        let diff = diff_commit_file(dir.path(), &commits[0].sha, "b.txt").unwrap();
+        assert!(diff.contains("second file"));
     }
 }
