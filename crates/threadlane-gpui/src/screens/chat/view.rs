@@ -667,22 +667,7 @@ impl ChatListView {
         let tool_call_id = activity.id.clone();
         let has_detail = !activity.detail.trim().is_empty();
         let row_id = SharedString::from(activity.id.clone());
-        let display_summary = {
-            let first_line = activity
-                .summary
-                .lines()
-                .next()
-                .unwrap_or(activity.summary.as_str())
-                .trim();
-            if activity.summary.lines().nth(1).is_some()
-                && !first_line.ends_with('…')
-                && !first_line.ends_with("...")
-            {
-                format!("{first_line} …")
-            } else {
-                first_line.to_string()
-            }
-        };
+        let display_summary = activity.display_summary.clone();
 
         div()
             .w_full()
@@ -3433,6 +3418,7 @@ mod hot_path_tests {
                     category: "tool".into(),
                     title: "read_file".into(),
                     summary: String::new(),
+                    display_summary: String::new(),
                     detail: String::new(),
                     is_expanded: false,
                 })

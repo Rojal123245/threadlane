@@ -57,6 +57,7 @@ pub struct ToolActivityInfo {
     pub(crate) category: String,
     pub(crate) title: String,
     pub(crate) summary: String,
+    pub(crate) display_summary: String,
     pub(crate) detail: String,
     pub(crate) is_expanded: bool,
 }
@@ -441,6 +442,7 @@ pub(crate) fn compute_full_session_projection(
 }
 
 fn tool_activity_summary(name: &str, arguments: &str) -> String {
+
     let display_name = name.replace('_', " ");
     let Ok(arguments) = serde_json::from_str::<serde_json::Value>(arguments) else {
         return display_name;
@@ -481,6 +483,18 @@ fn tool_activity_summary(name: &str, arguments: &str) -> String {
     display_name
 }
 
+fn tool_activity_display_summary(summary: &str) -> String {
+    let first_line = summary.lines().next().unwrap_or(summary).trim();
+    if summary.lines().nth(1).is_some()
+        && !first_line.ends_with('…')
+        && !first_line.ends_with("...")
+    {
+        format!("{first_line} …")
+    } else {
+        first_line.to_string()
+    }
+}
+
 fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageInfo> {
     threadlane_session::harness::project_chat_messages(&agent_messages)
         .into_iter()
@@ -499,13 +513,17 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
             tool_activities: msg
                 .tool_activities
                 .into_iter()
-                .map(|act| ToolActivityInfo {
-                    id: act.id,
-                    category: act.category,
-                    title: act.title,
-                    summary: act.summary,
-                    detail: act.detail,
-                    is_expanded: false,
+                .map(|act| {
+                    let display_summary = tool_activity_display_summary(&act.summary);
+                    ToolActivityInfo {
+                        id: act.id,
+                        category: act.category,
+                        title: act.title,
+                        summary: act.summary,
+                        display_summary,
+                        detail: act.detail,
+                        is_expanded: false,
+                    }
                 })
                 .collect(),
             streaming: false,
@@ -2558,10 +2576,13 @@ impl AppState {
                             arguments,
                         } => {
                             active_changed = true;
+                            let summary = tool_activity_summary(&name, &arguments);
+                            let display_summary = tool_activity_display_summary(&summary);
                             let activity = ToolActivityInfo {
                                 id: tool_call_id,
                                 category: "Working".into(),
-                                summary: tool_activity_summary(&name, &arguments),
+                                summary,
+                                display_summary,
                                 title: name,
                                 detail: arguments,
                                 is_expanded: false,
@@ -3064,6 +3085,19 @@ mod tests {
         let request = state.pending_hydrations.pop().unwrap();
         let projection = compute_full_session_projection(&request.session_file).unwrap();
         state.apply_session_hydration(&request.session_id, &request.session_file, projection);
+    }
+
+    #[test]
+    fn tool_activity_display_summary_is_prepared_during_projection() {
+        assert_eq!(
+            tool_activity_display_summary("read file · src/main.rs\nignored"),
+            "read file · src/main.rs …"
+        );
+        assert_eq!(
+            tool_activity_display_summary("still working...\nmore detail"),
+            "still working..."
+        );
+        assert_eq!(tool_activity_display_summary(""), "");
     }
 
     #[test]
