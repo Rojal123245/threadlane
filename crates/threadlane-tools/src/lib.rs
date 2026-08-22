@@ -593,7 +593,8 @@ fn save_memory_impl(workspace_root: &Path, args: &Value) -> Result<String, Strin
     let new_content = if mode == "overwrite" || !mem_file.exists() {
         content.trim().to_string()
     } else {
-        let existing = fs::read_to_string(&mem_file).unwrap_or_default();
+        let existing = fs::read_to_string(&mem_file)
+            .map_err(|e| format!("Error reading .threadlane/memory.md: {e}"))?;
         format!("{}\n\n{}", existing.trim(), content.trim())
     };
 
@@ -1140,6 +1141,29 @@ mod tests {
 
         let read_res = execute_tool_in_workspace("read_memory", "{}", root);
         assert!(read_res.contains("Use GPUI with threadlane state."));
+    }
+
+    #[test]
+    fn test_save_memory_fails_on_existing_non_utf8_file_and_preserves_bytes() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        let memory_dir = root.join(".threadlane");
+        fs::create_dir_all(&memory_dir).unwrap();
+        let memory_file = memory_dir.join("memory.md");
+        let original_bytes: Vec<u8> = vec![0xff, 0x00, 0xfe, b'a', b'b'];
+        fs::write(&memory_file, &original_bytes).unwrap();
+
+        let payload = json!({"content": "## Append Attempt"}).to_string();
+        let typed = try_execute_tool_in_workspace("save_memory", &payload, root)
+            .expect_err("Expected invalid UTF-8 memory file to produce read error");
+        assert!(typed.starts_with("Error reading .threadlane/memory.md:"));
+
+        let wrapped = execute_tool_in_workspace("save_memory", &payload, root);
+        assert_eq!(wrapped, typed);
+
+        let on_disk = fs::read(&memory_file).unwrap();
+        assert_eq!(on_disk, original_bytes);
     }
 
     #[test]
