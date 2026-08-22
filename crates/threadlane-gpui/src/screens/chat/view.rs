@@ -66,6 +66,28 @@ fn should_use_markdown(streaming: bool) -> bool {
     !streaming
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MarkdownUpdate<'a> {
+    Unchanged,
+    Append(&'a str),
+    Replace,
+}
+
+fn classify_markdown_update<'a>(current: &str, next: &'a str) -> MarkdownUpdate<'a> {
+    if current == next {
+        MarkdownUpdate::Unchanged
+    } else if let Some(suffix) = next.strip_prefix(current) {
+        MarkdownUpdate::Append(suffix)
+    } else {
+        MarkdownUpdate::Replace
+    }
+}
+
+struct MarkdownRenderState {
+    source: String,
+    state: Entity<TextViewState>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum TranscriptRow {
     Message(usize),
@@ -157,7 +179,7 @@ pub struct ChatListView {
     transcript_generating: bool,
     trajectory_scroll_handle: ScrollHandle,
     expanded_activity_groups: HashSet<String>,
-    markdown_states: HashMap<String, (usize, Entity<TextViewState>)>,
+    markdown_states: HashMap<String, MarkdownRenderState>,
     pasted_images: Vec<ImageAttachment>,
     last_session_key: Option<(std::path::PathBuf, String)>,
     initial_scroll_frames: u8,
@@ -1949,6 +1971,40 @@ impl ChatListView {
             .into_any_element()
     }
 
+    fn markdown_state(
+        &mut self,
+        key: String,
+        source: &str,
+        cx: &mut Context<Self>,
+    ) -> Entity<TextViewState> {
+        let entry = self
+            .markdown_states
+            .entry(key)
+            .or_insert_with(|| MarkdownRenderState {
+                source: source.to_owned(),
+                state: cx.new(|cx| TextViewState::markdown(source, cx)),
+            });
+
+        match classify_markdown_update(&entry.source, source) {
+            MarkdownUpdate::Unchanged => {}
+            MarkdownUpdate::Append(suffix) => {
+                entry.source.push_str(suffix);
+                entry
+                    .state
+                    .update(cx, |state, cx| state.push_str(suffix, cx));
+            }
+            MarkdownUpdate::Replace => {
+                entry.source.clear();
+                entry.source.push_str(source);
+                entry
+                    .state
+                    .update(cx, |state, cx| state.set_text(source, cx));
+            }
+        }
+
+        entry.state.clone()
+    }
+
     fn render_reasoning_block(
         &mut self,
         msg: &ChatMessageInfo,
@@ -2049,21 +2105,10 @@ impl ChatListView {
             if !should_use_markdown(is_streaming) {
                 return container.child(reasoning.to_string()).into_any_element();
             }
-            let entry = self
-                .markdown_states
-                .entry(format!("reasoning-{}", msg.id))
-                .or_insert_with(|| {
-                    let state = cx.new(|cx| TextViewState::markdown(reasoning, cx));
-                    (reasoning.len(), state)
-                });
-            if entry.0 != reasoning.len() {
-                entry.0 = reasoning.len();
-                entry
-                    .1
-                    .update(cx, |state, cx| state.set_text(reasoning, cx));
-            }
+            let markdown_state =
+                self.markdown_state(format!("reasoning-{}", msg.id), reasoning, cx);
             container
-                .child(TextView::new(&entry.1).selectable(true))
+                .child(TextView::new(&markdown_state).selectable(true))
                 .into_any_element()
         });
 
@@ -2096,22 +2141,9 @@ impl ChatListView {
                         .text_sm()
                         .text_color(theme.secondary_foreground)
                         .child({
-                            let entry =
-                                self.markdown_states
-                                    .entry(msg.id.clone())
-                                    .or_insert_with(|| {
-                                        let content = msg.content.clone();
-                                        let state =
-                                            cx.new(|cx| TextViewState::markdown(&content, cx));
-                                        (content.len(), state)
-                                    });
-                            if entry.0 != msg.content.len() {
-                                entry.0 = msg.content.len();
-                                entry.1.update(cx, |state, cx| {
-                                    state.set_text(&msg.content, cx);
-                                });
-                            }
-                            TextView::new(&entry.1).selectable(true)
+                            let markdown_state =
+                                self.markdown_state(msg.id.clone(), &msg.content, cx);
+                            TextView::new(&markdown_state).selectable(true)
                         })
                         .context_menu({
                             let content = msg.content.clone();
@@ -2163,25 +2195,9 @@ impl ChatListView {
                                         .child(msg.content.clone())
                                         .into_any_element()
                                 } else {
-                                    let markdown = {
-                                        let entry = self
-                                            .markdown_states
-                                            .entry(msg.id.clone())
-                                            .or_insert_with(|| {
-                                                let content = msg.content.clone();
-                                                let state = cx.new(|cx| {
-                                                    TextViewState::markdown(&content, cx)
-                                                });
-                                                (content.len(), state)
-                                            });
-                                        if entry.0 != msg.content.len() {
-                                            entry.0 = msg.content.len();
-                                            entry.1.update(cx, |state, cx| {
-                                                state.set_text(&msg.content, cx);
-                                            });
-                                        }
-                                        TextView::new(&entry.1).selectable(true)
-                                    };
+                                    let markdown_state =
+                                        self.markdown_state(msg.id.clone(), &msg.content, cx);
+                                    let markdown = TextView::new(&markdown_state).selectable(true);
                                     content_element.child(markdown).into_any_element()
                                 };
 
@@ -3407,17 +3423,51 @@ impl Render for ChatListView {
 #[cfg(test)]
 mod hot_path_tests {
     use super::{
-        build_transcript_rows, format_trajectory_raw_json, grouped_tool_activities,
-        should_use_markdown, TrajectoryCacheKey, TrajectoryMode, TranscriptRow,
+        build_transcript_rows, classify_markdown_update, format_trajectory_raw_json,
+        grouped_tool_activities, MarkdownUpdate, TrajectoryCacheKey, TrajectoryMode, TranscriptRow,
     };
     use crate::state::{
         ChatMessageInfo, MessageRole, ToolActivityInfo, TrajectoryDiagnostics, TrajectoryEntry,
     };
 
     #[test]
-    fn markdown_is_deferred_until_streaming_completes() {
-        assert!(!should_use_markdown(true));
-        assert!(should_use_markdown(false));
+    fn markdown_update_appends_only_the_new_suffix() {
+        assert_eq!(
+            classify_markdown_update("Hello", "Hello **world**"),
+            MarkdownUpdate::Append(" **world**")
+        );
+    }
+
+    #[test]
+    fn markdown_update_skips_identical_content() {
+        assert_eq!(
+            classify_markdown_update("Hello", "Hello"),
+            MarkdownUpdate::Unchanged
+        );
+    }
+
+    #[test]
+    fn markdown_update_replaces_non_append_changes() {
+        assert_eq!(
+            classify_markdown_update("Hello", "Jello"),
+            MarkdownUpdate::Replace
+        );
+        assert_eq!(
+            classify_markdown_update("Hello", "Hello there"),
+            MarkdownUpdate::Append(" there")
+        );
+        assert_eq!(
+            classify_markdown_update("Hello there", "Hello"),
+            MarkdownUpdate::Replace
+        );
+        assert_eq!(
+            classify_markdown_update("Hello", "Hello!"),
+            MarkdownUpdate::Append("!")
+        );
+        assert_eq!(
+            classify_markdown_update("Hello", "Jello there"),
+            MarkdownUpdate::Replace
+        );
     }
 
     #[test]
@@ -3495,7 +3545,6 @@ mod hot_path_tests {
             ]
         );
     }
-
 
     #[test]
     fn trajectory_raw_json_is_prepared_for_the_revision_cache() {
