@@ -90,6 +90,13 @@ fn git_result_matches_active(requested: &Path, active: &Path) -> bool {
     requested == active
 }
 
+fn active_project_git_status<'a>(
+    active_work_dir: Option<&Path>,
+    statuses: &'a HashMap<PathBuf, GitStatus>,
+) -> Option<&'a GitStatus> {
+    active_work_dir.and_then(|work_dir| statuses.get(work_dir))
+}
+
 pub struct WorkspaceView {
     model: Entity<AppState>,
     sidebar: Entity<SidebarView>,
@@ -103,7 +110,6 @@ pub struct WorkspaceView {
     bottom_panel_visible: bool,
     command_palette_open: bool,
     command_state: Entity<CommandState>,
-    git_status: Option<GitStatus>,
     last_git_work_dir: Option<PathBuf>,
     sidebar_resizable_state: Entity<ResizableState>,
     right_panel_resizable_state: Entity<ResizableState>,
@@ -218,6 +224,10 @@ impl WorkspaceView {
             })
             .detach();
 
+            let right_panel_sub = cx.observe(&right_panel, |_this: &mut Self, _panel, cx| {
+                cx.notify();
+            });
+
             Self {
                 model,
                 sidebar,
@@ -231,14 +241,13 @@ impl WorkspaceView {
                 bottom_panel_visible: false,
                 command_palette_open: false,
                 command_state,
-                git_status: None,
                 last_git_work_dir: None,
                 sidebar_resizable_state,
                 right_panel_resizable_state,
                 bottom_panel_resizable_state,
                 git_event_tx,
                 updater_tx,
-                _subscriptions: vec![sub],
+                _subscriptions: vec![sub, right_panel_sub],
             }
         });
 
@@ -281,6 +290,33 @@ impl WorkspaceView {
         self.right_panel_visible = true;
         self.right_panel.update(cx, |panel, cx| {
             panel.open_review(cx);
+        });
+        self.refresh_git_status(cx);
+        cx.notify();
+    }
+
+    fn open_git_branches(&mut self, cx: &mut Context<Self>) {
+        self.right_panel_visible = true;
+        self.right_panel.update(cx, |panel, cx| {
+            panel.open_branch_popover(cx);
+        });
+        self.refresh_git_status(cx);
+        cx.notify();
+    }
+
+    fn open_git_new_branch(&mut self, cx: &mut Context<Self>) {
+        self.right_panel_visible = true;
+        self.right_panel.update(cx, |panel, cx| {
+            panel.open_new_branch_dialog(cx);
+        });
+        self.refresh_git_status(cx);
+        cx.notify();
+    }
+
+    fn open_git_merge(&mut self, cx: &mut Context<Self>) {
+        self.right_panel_visible = true;
+        self.right_panel.update(cx, |panel, cx| {
+            panel.open_merge_dialog(cx);
         });
         self.refresh_git_status(cx);
         cx.notify();
@@ -390,6 +426,21 @@ impl WorkspaceView {
                 .detach();
             }
             "git" => self.open_git_review(cx),
+            "git_branch" => self.open_git_branches(cx),
+            "git_new_branch" => self.open_git_new_branch(cx),
+            "git_merge" => self.open_git_merge(cx),
+            "git_stash_pop" => {
+                self.open_git_review(cx);
+                self.right_panel.update(cx, |panel, cx| {
+                    panel.restore_current_stash(window, cx);
+                });
+            }
+            "git_pull" => {
+                self.open_git_review(cx);
+                self.right_panel.update(cx, |panel, cx| {
+                    panel.run_git_action(crate::screens::right_panel::GitAction::Pull, window, cx);
+                });
+            }
             "settings" => {
                 model.update(cx, |state, _cx| {
                     controller::dispatch(state, AppAction::OpenSettings);
@@ -425,7 +476,6 @@ impl WorkspaceView {
         }
 
         self.last_git_work_dir = active_work_dir.clone();
-        self.git_status = None;
 
         if let Some(work_dir) = active_work_dir {
             self.spawn_git_status_refresh(work_dir);
@@ -435,12 +485,10 @@ impl WorkspaceView {
     fn refresh_git_status(&mut self, cx: &App) {
         let Some(work_dir) = self.model.read(cx).active_work_dir.clone() else {
             self.last_git_work_dir = None;
-            self.git_status = None;
             return;
         };
 
         self.last_git_work_dir = Some(work_dir.clone());
-        self.git_status = None;
         self.spawn_git_status_refresh(work_dir);
     }
 
@@ -471,7 +519,6 @@ impl WorkspaceView {
             });
         }
 
-        self.git_status = result.ok();
         cx.notify();
     }
 
@@ -608,7 +655,7 @@ impl WorkspaceView {
         let model = self.model.clone();
         let state = model.read(cx);
 
-        let commands: [(&str, &str, &str, IconName, &[&str]); 9] = [
+        let commands: [(&str, &str, &str, IconName, &[&str]); 14] = [
             (
                 "New Task",
                 "Start a fresh session",
@@ -650,6 +697,41 @@ impl WorkspaceView {
                 "git",
                 IconName::Github,
                 &["git", "diff", "review", "commit", "stage"],
+            ),
+            (
+                "Git: Switch Branch",
+                "Switch or checkout a Git branch",
+                "git_branch",
+                IconName::Github,
+                &["git", "branch", "switch", "checkout"],
+            ),
+            (
+                "Git: New Branch",
+                "Create a new branch from current HEAD",
+                "git_new_branch",
+                IconName::Plus,
+                &["git", "branch", "new", "create"],
+            ),
+            (
+                "Git: Merge Branch",
+                "Merge another branch into current branch",
+                "git_merge",
+                IconName::Redo,
+                &["git", "merge", "branch", "integrate"],
+            ),
+            (
+                "Git: Restore Stashed Changes",
+                "Restore changes previously stashed on this branch",
+                "git_stash_pop",
+                IconName::Undo2,
+                &["git", "stash", "pop", "restore", "unstash"],
+            ),
+            (
+                "Git: Pull Origin",
+                "Pull latest commits from remote origin",
+                "git_pull",
+                IconName::Redo,
+                &["git", "pull", "origin", "fetch", "sync"],
             ),
             (
                 "Toggle Sidebar",
@@ -811,11 +893,8 @@ impl WorkspaceView {
         let state = self.model.read(cx);
         let theme = cx.theme().colors;
 
-        let fallback_status = state
-            .active_work_dir
-            .as_ref()
-            .and_then(|wd| state.git_statuses.get(wd));
-        let git_status = self.git_status.as_ref().or(fallback_status);
+        let git_status =
+            active_project_git_status(state.active_work_dir.as_deref(), &state.git_statuses);
 
         let branch = git_status
             .and_then(|s| s.branch.as_deref())
@@ -898,9 +977,9 @@ impl WorkspaceView {
                             .label(format!("{active_project} · {branch}"))
                             .ghost()
                             .xsmall()
-                            .tooltip("Browse project files")
+                            .tooltip("Switch or manage Git branches")
                             .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.open_git_files(cx);
+                                this.open_git_branches(cx);
                             })),
                     )
                     .children((dirty_count > 0).then(|| {
@@ -1090,7 +1169,6 @@ impl Render for WorkspaceView {
             let fallback = self.fallback_terminal(cx);
             (vec![fallback.clone()], 0, fallback)
         };
-        let theme = cx.theme().colors;
         let sidebar_tooltip = if self.sidebar_collapsed {
             "Expand sidebar"
         } else {
@@ -1361,6 +1439,10 @@ impl Render for WorkspaceView {
             .child(div().flex_1().min_h_0().child(page_content))
             .child(self.render_status_bar(cx));
 
+        let git_dialog_layer = self.right_panel.update(cx, |panel, cx| {
+            panel.render_git_dialog_layer(cx)
+        });
+
         div()
             .relative()
             .flex()
@@ -1441,6 +1523,7 @@ impl Render for WorkspaceView {
                 self.command_palette_open
                     .then(|| self.render_command_palette(cx)),
             )
+            .children(git_dialog_layer)
             .children(self.render_update_notice(cx))
             .children(Root::render_dialog_layer(window, cx))
             .children(Root::render_notification_layer(window, cx))
@@ -1451,8 +1534,29 @@ impl Render for WorkspaceView {
 
 #[cfg(test)]
 mod tests {
-    use super::git_result_matches_active;
-    use std::path::Path;
+    use super::{active_project_git_status, git_result_matches_active};
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use threadlane_git::GitStatus;
+
+    #[test]
+    fn status_bar_uses_shared_status_for_active_project() {
+        let active = PathBuf::from("/projects/current");
+        let mut statuses = HashMap::new();
+        statuses.insert(
+            active.clone(),
+            GitStatus {
+                branch: Some("fresh".into()),
+                ..GitStatus::default()
+            },
+        );
+
+        assert_eq!(
+            active_project_git_status(Some(active.as_path()), &statuses)
+                .and_then(|status| status.branch.as_deref()),
+            Some("fresh")
+        );
+    }
 
     #[test]
     fn git_result_is_accepted_only_for_active_work_dir() {
