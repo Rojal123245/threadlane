@@ -130,6 +130,16 @@ impl SkillSettings {
         self.save(project_root)
     }
 
+    /// Persist a disabled override for each discovered skill in one write.
+    pub fn disable_all(
+        &mut self,
+        project_root: &Path,
+        skill_ids: impl IntoIterator<Item = String>,
+    ) -> Result<(), String> {
+        self.disabled.extend(skill_ids);
+        self.save(project_root)
+    }
+
     fn save(&self, project_root: &Path) -> Result<(), String> {
         let root = canonical_or_plain(project_root)
             .ok_or_else(|| "Unable to resolve project root".to_string())?;

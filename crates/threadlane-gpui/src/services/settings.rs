@@ -108,6 +108,14 @@ pub(crate) fn set_skill_enabled(
     SkillSettings::load(project_root).set_enabled(project_root, skill_id, enabled)
 }
 
+pub(crate) fn disable_all_skills(
+    project_root: &Path,
+    skill_ids: impl IntoIterator<Item = String>,
+) -> Result<(), String> {
+    let mut settings = SkillSettings::load(project_root);
+    settings.disable_all(project_root, skill_ids)
+}
+
 fn acp_manager(project_root: Option<PathBuf>) -> AcpManager {
     AcpManager::new(default_global_threadlane_dir(), project_root)
 }

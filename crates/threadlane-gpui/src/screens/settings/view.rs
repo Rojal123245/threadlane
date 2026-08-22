@@ -2099,6 +2099,8 @@ impl SettingsView {
     fn render_skills(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().colors;
         let rows = self.skill_rows.clone();
+        let skill_ids: Vec<String> = rows.iter().map(|skill| skill.id.clone()).collect();
+        let has_enabled_skills = rows.iter().any(|skill| skill.enabled);
         let has_project = self.active_project(cx).is_some();
         div()
             .mt_5()
@@ -2107,16 +2109,42 @@ impl SettingsView {
             .gap_3()
             .children(self.render_capability_status(cx))
             .child(
-                div().flex().justify_end().child(
-                    Button::new("skills-refresh")
-                        .icon(IconName::Redo)
-                        .label("Refresh")
-                        .outline()
-                        .on_click(cx.listener(|this, _event, _window, cx| {
-                            this.refresh_skills(cx);
-                            cx.notify();
-                        })),
-                ),
+                div()
+                    .flex()
+                    .gap_2()
+                    .justify_end()
+                    .child(
+                        Button::new("skills-disable-all")
+                            .label("Disable all")
+                            .outline()
+                            .disabled(!has_project || !has_enabled_skills)
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                let Some(project) = this.active_project(cx) else {
+                                    this.capability_status =
+                                        Some("Attach a project to manage skills.".into());
+                                    cx.notify();
+                                    return;
+                                };
+                                this.capability_status =
+                                    settings::disable_all_skills(&project, skill_ids.clone()).err();
+                                this.refresh_skills(cx);
+                                this.model.update(cx, |state, cx| {
+                                    state.invalidate_capability_runtimes();
+                                    cx.notify();
+                                });
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("skills-refresh")
+                            .icon(IconName::Redo)
+                            .label("Refresh")
+                            .outline()
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.refresh_skills(cx);
+                                cx.notify();
+                            })),
+                    ),
             )
             .children(rows.into_iter().map(|skill| {
                 let view = cx.entity().downgrade();
