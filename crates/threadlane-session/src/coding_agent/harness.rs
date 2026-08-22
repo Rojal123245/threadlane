@@ -92,6 +92,12 @@ pub(crate) struct SubagentLaneIdentity {
     pub(crate) started_seq: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StartedSubagentLane {
+    pub(crate) identity: SubagentLaneIdentity,
+    pub(crate) accepted: AcceptedRun,
+}
+
 #[derive(Debug)]
 pub(crate) struct SubagentStartError {
     pub(crate) identity: Option<SubagentLaneIdentity>,
@@ -677,7 +683,7 @@ impl CodingSessionHarness {
         lane_hint: &str,
         task: &str,
         source_leaf_id: Option<&str>,
-    ) -> Result<SubagentLaneIdentity, SubagentStartError> {
+    ) -> Result<StartedSubagentLane, SubagentStartError> {
         if self.cancellation.load(Ordering::SeqCst) {
             return Err(SubagentStartError {
                 identity: None,
@@ -873,7 +879,52 @@ impl CodingSessionHarness {
                 identity: Some(identity.clone()),
                 error: error.to_string(),
             })?;
-        Ok(identity)
+        let identity = SubagentLaneIdentity {
+            started_seq: self
+                .store
+                .records()
+                .iter()
+                .find_map(|record| match record {
+                    HarnessRecord::OperationStarted { id, seq, .. } if id == &identity.run_id => {
+                        Some(*seq)
+                    }
+                    _ => None,
+                })
+                .unwrap_or(0),
+            ..identity
+        };
+        let accepted =
+            self.accepted_subagent_run(&identity)
+                .map_err(|error| SubagentStartError {
+                    identity: Some(identity.clone()),
+                    error,
+                })?;
+        Ok(StartedSubagentLane { identity, accepted })
+    }
+
+    pub(crate) fn accepted_subagent_run(
+        &self,
+        identity: &SubagentLaneIdentity,
+    ) -> Result<AcceptedRun, String> {
+        let accepted = AcceptedRun {
+            session_id: self.store.session_id().to_owned(),
+            run_id: identity.run_id.clone(),
+            lane: identity.lane_name.clone(),
+            prompt_entry_id: format!("subagent-entry-{}-0", identity.run_id),
+            assistant_entry_id: format!("entry-{}-assistant-1", identity.run_id),
+            accepted_through_seq: self
+                .store
+                .entries()
+                .iter()
+                .map(|entry| entry.seq)
+                .chain(self.store.records().iter().map(HarnessRecord::seq))
+                .max()
+                .unwrap_or(0),
+        };
+        self.store
+            .validate_accepted_run(&accepted)
+            .map_err(|error| error.to_string())?;
+        Ok(accepted)
     }
 
     pub(crate) fn finish_subagent_lane(
@@ -2984,6 +3035,53 @@ mod tests {
     }
 
     #[test]
+    fn subagent_start_returns_accepted_child_run_while_main_is_busy() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        let parent = harness
+            .begin_run("parent-run", AgentMessage::user("parent prompt", vec![]))
+            .unwrap();
+
+        let started = harness
+            .start_subagent_lane("worker", "inspect", Some(&parent.prompt_entry_id))
+            .unwrap();
+
+        assert_eq!(started.accepted.run_id, started.identity.run_id);
+        assert_eq!(started.accepted.lane, started.identity.lane_name);
+        assert!(started.accepted.accepted_through_seq >= started.identity.started_seq);
+        harness.validate_accepted_run(&started.accepted).unwrap();
+
+        let state = Reducer::reduce(harness.store.store()).unwrap();
+        assert_eq!(
+            state
+                .lane("main")
+                .and_then(|lane| lane.open_operation.as_deref()),
+            Some("parent-run")
+        );
+        assert_eq!(
+            harness
+                .store
+                .records()
+                .iter()
+                .filter(|record| matches!(
+                    record,
+                    HarnessRecord::OperationStarted { lane, .. } if lane == "main"
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            harness
+                .store
+                .entries()
+                .iter()
+                .filter(|entry| entry.lane == "main"
+                    && matches!(entry.message, AgentMessage::User { .. }))
+                .count(),
+            1
+        );
+    }
+    #[test]
     fn invalid_subagent_source_is_not_retained_for_passive_commit() {
         let (_dir, path) = temp_session();
         let mut harness = CodingSessionHarness::open(&path).unwrap();
@@ -2992,14 +3090,14 @@ mod tests {
             .start_subagent_lane("worker", "inspect", Some("node_69"))
             .unwrap();
 
-        assert!(identity.source_leaf_id.is_none());
+        assert!(identity.identity.source_leaf_id.is_none());
         assert!(harness.store.records().iter().any(|record| matches!(
             record,
             HarnessRecord::OperationStarted {
                 lane,
                 source_leaf_id: None,
                 ..
-            } if lane == &identity.lane_name
+            } if lane == &identity.identity.lane_name
         )));
     }
 

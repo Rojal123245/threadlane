@@ -1399,8 +1399,8 @@ mod tests {
             .unwrap();
         harness
             .finish_subagent_lane(
-                &child.lane_name,
-                &child.run_id,
+                &child.identity.lane_name,
+                &child.identity.run_id,
                 OperationOutcome::Completed,
                 None,
             )
@@ -1428,7 +1428,7 @@ mod tests {
         let tasks = supervisor.list_tasks_for_project("project-1");
         let subagent = tasks
             .into_iter()
-            .find(|task| task.id == child.run_id)
+            .find(|task| task.id == child.identity.run_id)
             .expect("subagent must be rebuilt from durable lifecycle records");
         assert_eq!(subagent.kind, TaskKind::Subagent);
         assert_eq!(subagent.status, TaskStatus::Completed);

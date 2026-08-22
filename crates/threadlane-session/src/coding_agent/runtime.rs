@@ -1289,14 +1289,14 @@ mod compaction_sync_tests {
             .unwrap()
             .start_subagent_lane("worker", "inspect", Some("node_69"))
             .unwrap();
-        assert!(identity.source_leaf_id.is_none());
+        assert!(identity.identity.source_leaf_id.is_none());
         agent
             .completed_subagent_lanes
             .lock()
             .unwrap()
             .push(CompletedSubagentLane {
-                lane_name: identity.lane_name,
-                run_id: identity.run_id,
+                lane_name: identity.identity.lane_name,
+                run_id: identity.identity.run_id,
                 task: "inspect".into(),
                 agent: "worker".into(),
                 status: SubagentLaneStatus::Completed,

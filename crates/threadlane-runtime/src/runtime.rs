@@ -225,12 +225,20 @@ impl AgentRuntime {
         }
     }
 
-    /// Returns the canonical messages from the harness projection.
+    /// Returns the canonical messages from the main harness projection.
     pub async fn projected_messages(&self) -> Result<Vec<AgentMessage>, AgentError> {
+        self.projected_messages_on_lane("main").await
+    }
+
+    /// Returns the canonical messages from a specific harness lane projection.
+    pub async fn projected_messages_on_lane(
+        &self,
+        lane: &str,
+    ) -> Result<Vec<AgentMessage>, AgentError> {
         let context = self
             .harness
             .store()
-            .model_context("main")
+            .model_context(lane)
             .map_err(|error| AgentError::Session(error.to_string()))?;
         let system_prompt = self.turn.lock().await.system_prompt.clone();
         Ok(std::iter::once(AgentMessage::System {
@@ -240,9 +248,14 @@ impl AgentRuntime {
         .collect())
     }
 
-    /// Syncs the in-memory turn state from the canonical harness projection.
+    /// Syncs the in-memory turn state from the canonical main harness projection.
     pub async fn sync_turn_from_model_context(&self) -> Result<(), AgentError> {
-        let messages = self.projected_messages().await?;
+        self.sync_turn_from_model_context_on_lane("main").await
+    }
+
+    /// Syncs the in-memory turn state from a specific canonical harness lane.
+    pub async fn sync_turn_from_model_context_on_lane(&self, lane: &str) -> Result<(), AgentError> {
+        let messages = self.projected_messages_on_lane(lane).await?;
         let mut turn = self.turn.lock().await;
         turn.messages = messages;
         Ok(())
@@ -329,7 +342,7 @@ impl AgentRuntime {
     /// Execute a turn loop for a pre-accepted run token.
     pub async fn run_accepted(&mut self, run_id: &str, lane: &str, accepted_through_seq: u64) {
         assert!(!run_id.is_empty(), "accepted run id must not be empty");
-        assert_eq!(lane, "main", "agent runtime currently serves main lane");
+        assert!(!lane.is_empty(), "accepted run lane must not be empty");
         assert!(
             accepted_through_seq > 0,
             "accepted run must name a committed prefix"
@@ -684,5 +697,75 @@ impl AgentRuntime {
             cached_tools_json,
         };
         driver.run_turns().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use threadlane_protocol::{RuntimeRequest, RuntimeStreamEvent};
+
+    struct UnusedProvider;
+
+    #[async_trait]
+    impl ProviderPort for UnusedProvider {
+        async fn stream_request(
+            &self,
+            _request: RuntimeRequest,
+            _events: tokio::sync::mpsc::Sender<RuntimeStreamEvent>,
+        ) {
+        }
+
+        async fn fetch_deferred(
+            &self,
+            _model: &str,
+            _handle_id: &str,
+        ) -> Result<DeferredResponse, String> {
+            Ok(DeferredResponse::Pending)
+        }
+
+        async fn cancel_deferred(&self, _model: &str, _handle_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn provider_kind(&self, _model: &str) -> &'static str {
+            "test"
+        }
+    }
+
+    #[tokio::test]
+    async fn projected_messages_can_target_a_dedicated_lane() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let store = JsonlStore::open(&path).unwrap();
+        let mut harness = AgentHarness::new(store);
+        harness
+            .accept_prompt_and_drive_on_lane(
+                "subagent-worker",
+                "child-run",
+                AgentMessage::user("child task", Vec::new()),
+            )
+            .unwrap();
+        drop(harness);
+        let runtime = AgentRuntime::new_with_provider(
+            "",
+            None,
+            "test-model",
+            Some(&path),
+            AgentConfig::default(),
+            Arc::new(UnusedProvider),
+        )
+        .unwrap();
+
+        let messages = runtime
+            .projected_messages_on_lane("subagent-worker")
+            .await
+            .unwrap();
+
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            AgentMessage::User { content } if content == "child task"
+        )));
     }
 }

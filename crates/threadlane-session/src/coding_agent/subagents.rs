@@ -2,7 +2,7 @@ use super::cancellation::AgentRunTask;
 use super::capabilities::{
     build_broker_dispatcher, create_after_tool_hook_handler, extension_before_tool_hook_handler,
 };
-use super::harness::{CodingSessionHarness, SubagentLaneIdentity, SubagentStartError};
+use super::harness::{AcceptedRun, CodingSessionHarness, SubagentLaneIdentity, SubagentStartError};
 use super::scheduler::AgentWorkScheduler;
 #[cfg(test)]
 use super::scheduler::{
@@ -196,6 +196,26 @@ pub(crate) fn format_subagent_results(
     serde_json::to_string(&sessions).unwrap_or_else(|_| "[]".to_string())
 }
 
+pub(crate) fn aggregate_subagent_results(
+    tasks: Vec<AgentRunTask>,
+    results: Vec<Result<SubagentResult, String>>,
+    lanes: Vec<CompletedSubagentLane>,
+) -> Result<(String, Vec<AgentMessage>, Vec<CompletedSubagentLane>), String> {
+    let any_succeeded = results
+        .iter()
+        .any(|result| matches!(result, Ok(result) if result.error.is_none()));
+    let thinking = results
+        .iter()
+        .filter_map(|result| result.as_ref().ok())
+        .flat_map(|result| result.thinking.clone())
+        .collect();
+    let output = format_subagent_results(tasks, results, &lanes);
+    if any_succeeded {
+        Ok((output, thinking, lanes))
+    } else {
+        Err(format!("All subagents failed: {output}"))
+    }
+}
 pub(crate) fn subagent_ui_event(event: AgentEvent, tool_call_prefix: &str) -> Option<AgentEvent> {
     match event {
         AgentEvent::AgentStart
@@ -393,32 +413,35 @@ pub(crate) async fn run_subagents_with_context(
                         parent_leaf_id.as_deref(),
                     );
                     match &result {
-                        Ok(identity) => log::info!(
+                        Ok(started) => log::info!(
                             "subagent lane started: run_id={} lane={}",
-                            identity.run_id,
-                            identity.lane_name
+                            started.identity.run_id,
+                            started.identity.lane_name
                         ),
                         Err(e) => log::warn!(
                             "subagent lane start failed: hint={lane_hint} error={}",
                             e.error
                         ),
                     }
-                    result
+                    result.map(|started| (started.identity, Some(started.accepted)))
                 }
                 None => {
                     log::warn!(
                         "subagent lane={lane_hint}: no session_file, running without harness"
                     );
-                    Ok(SubagentLaneIdentity {
-                        lane_name: lane_hint.clone(),
-                        run_id: lane_hint.clone(),
-                        source_leaf_id: parent_leaf_id.clone(),
-                        started_seq: 0,
-                    })
+                    Ok((
+                        SubagentLaneIdentity {
+                            lane_name: lane_hint.clone(),
+                            run_id: lane_hint.clone(),
+                            source_leaf_id: parent_leaf_id.clone(),
+                            started_seq: 0,
+                        },
+                        None,
+                    ))
                 }
             };
             let result = match start {
-                Ok(identity) => {
+                Ok((identity, accepted)) => {
                     let _ = event_tx.send(AgentEvent::SubagentStarted {
                         run_id,
                         task_index,
@@ -437,6 +460,7 @@ pub(crate) async fn run_subagents_with_context(
                             run_id,
                             task_index,
                             identity.clone(),
+                            accepted,
                             Vec::new(),
                         ),
                     )
@@ -525,16 +549,7 @@ pub(crate) async fn run_subagents_with_context(
     };
     let results = results.into_iter().collect::<Result<Vec<_>, String>>()?;
     let (tool_results, lanes): (Vec<_>, Vec<_>) = results.into_iter().unzip();
-    let thinking = tool_results
-        .iter()
-        .filter_map(|result| result.as_ref().ok())
-        .flat_map(|result| result.thinking.clone())
-        .collect();
-    Ok((
-        format_subagent_results(tasks, tool_results, &lanes),
-        thinking,
-        lanes,
-    ))
+    aggregate_subagent_results(tasks, tool_results, lanes)
 }
 
 pub(crate) async fn run_subagent_task(
@@ -544,6 +559,7 @@ pub(crate) async fn run_subagent_task(
     run_id: u64,
     task_index: usize,
     identity: SubagentLaneIdentity,
+    accepted: Option<AcceptedRun>,
     resume_messages: Vec<AgentMessage>,
 ) -> Result<SubagentResult, String> {
     let model = config
@@ -588,6 +604,11 @@ You are an isolated subagent working in {}. Complete only the assigned task and 
                 .filter(|message| !matches!(message, AgentMessage::System { .. }))
                 .cloned(),
         );
+    } else if context.session_file.is_some() {
+        agent
+            .sync_turn_from_model_context_on_lane(&lane_name)
+            .await
+            .map_err(|error| format!("Failed to load subagent lane context: {error}"))?;
     }
     agent.work_dir = Some(context.work_dir.clone());
 
@@ -742,19 +763,22 @@ You are an isolated subagent working in {}. Complete only the assigned task and 
         &task
     };
     if let Some(session_path) = session_file_for_checkpoint.as_deref() {
-        let mut subagent_harness = CodingSessionHarness::open(session_path)
+        let accepted_run = accepted.as_ref().ok_or_else(|| {
+            format!(
+                "Missing accepted subagent run for lane {} ({})",
+                lane_name, journal_run_id
+            )
+        })?;
+        let subagent_harness = CodingSessionHarness::open(session_path)
             .map_err(|error| format!("Failed to open subagent harness: {error}"))?;
-        let accepted = subagent_harness
-            .begin_run_text(prompt_text)
-            .map_err(|error| format!("Failed to accept subagent run: {error}"))?;
         subagent_harness
-            .validate_accepted_run(&accepted)
+            .validate_accepted_run(accepted_run)
             .map_err(|error| format!("Invalid subagent accepted run token: {error}"))?;
         agent
             .run_accepted(
-                &accepted.run_id,
-                &accepted.lane,
-                accepted.accepted_through_seq,
+                &accepted_run.run_id,
+                &accepted_run.lane,
+                accepted_run.accepted_through_seq,
             )
             .await;
     } else {
@@ -791,6 +815,7 @@ You are an isolated subagent working in {}. Complete only the assigned task and 
             run_id,
             task_index,
             identity,
+            accepted,
             resume_messages,
         ))
         .await;
@@ -867,4 +892,79 @@ You are an isolated subagent working in {}. Complete only the assigned task and 
             .filter(|message| !matches!(message, AgentMessage::System { .. }))
             .collect(),
     })
+}
+
+#[cfg(test)]
+mod result_tests {
+    use super::*;
+
+    fn task(agent: &str) -> AgentRunTask {
+        AgentRunTask {
+            agent: agent.into(),
+            task: format!("{agent} task"),
+            instructions: None,
+            tools: None,
+            model: None,
+        }
+    }
+
+    fn lane(agent: &str, status: SubagentLaneStatus) -> CompletedSubagentLane {
+        CompletedSubagentLane {
+            lane_name: format!("lane-{agent}"),
+            run_id: format!("run-{agent}"),
+            task: format!("{agent} task"),
+            agent: agent.into(),
+            status,
+            messages: Vec::new(),
+            error: None,
+        }
+    }
+
+    fn success(output: &str) -> SubagentResult {
+        SubagentResult {
+            output: output.into(),
+            thinking: Vec::new(),
+            inner_tools: Vec::new(),
+            error: None,
+            messages: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn all_failed_subagent_batch_returns_error_with_each_failure() {
+        let result = aggregate_subagent_results(
+            vec![task("worker"), task("reviewer")],
+            vec![
+                Err("worker unavailable".into()),
+                Err("review rejected".into()),
+            ],
+            vec![
+                lane("worker", SubagentLaneStatus::Failed),
+                lane("reviewer", SubagentLaneStatus::Failed),
+            ],
+        );
+
+        let error = result.unwrap_err();
+        assert!(error.contains("worker unavailable"));
+        assert!(error.contains("review rejected"));
+        assert!(error.contains("\"status\":\"failed\""));
+    }
+
+    #[test]
+    fn mixed_subagent_batch_succeeds_with_explicit_statuses() {
+        let result = aggregate_subagent_results(
+            vec![task("worker"), task("reviewer")],
+            vec![Ok(success("implemented")), Err("review rejected".into())],
+            vec![
+                lane("worker", SubagentLaneStatus::Completed),
+                lane("reviewer", SubagentLaneStatus::Failed),
+            ],
+        )
+        .unwrap();
+
+        assert!(result.0.contains("implemented"));
+        assert!(result.0.contains("review rejected"));
+        assert!(result.0.contains("\"status\":\"completed\""));
+        assert!(result.0.contains("\"status\":\"failed\""));
+    }
 }

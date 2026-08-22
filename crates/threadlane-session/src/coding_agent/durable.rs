@@ -1077,6 +1077,15 @@ impl CodingAgent {
                 .lock()
                 .ok()
                 .and_then(|observer| observer.clone());
+            let identity = SubagentLaneIdentity {
+                lane_name: lane.lane.clone(),
+                run_id: lane.run_id.clone(),
+                source_leaf_id: lane.source_leaf_id.clone(),
+                started_seq: lane.started_seq,
+            };
+            let accepted = journal
+                .accepted_subagent_run(&identity)
+                .map_err(&retrying)?;
             let result = run_subagent_task(
                 AgentDefinition {
                     name: "recovered".into(),
@@ -1109,12 +1118,8 @@ impl CodingAgent {
                 },
                 NEXT_SUBAGENT_UI_RUN_ID.fetch_add(1, Ordering::Relaxed),
                 0,
-                SubagentLaneIdentity {
-                    lane_name: lane.lane.clone(),
-                    run_id: lane.run_id.clone(),
-                    source_leaf_id: lane.source_leaf_id.clone(),
-                    started_seq: lane.started_seq,
-                },
+                identity,
+                Some(accepted),
                 resume_messages.clone(),
             )
             .await;
