@@ -332,37 +332,43 @@ fn validate_cwd_in_workspace(
 }
 
 pub fn execute_tool(name: &str, args_json: &str) -> String {
-    execute_tool_in_workspace(name, args_json, Path::new("."))
+    try_execute_tool(name, args_json).unwrap_or_else(|error| error)
 }
 
 pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &Path) -> String {
-    let args: Value = match serde_json::from_str(args_json) {
-        Ok(v) => v,
-        Err(e) => return format!("Error parsing tool arguments JSON: {e}"),
-    };
+    try_execute_tool_in_workspace(name, args_json, workspace_root).unwrap_or_else(|error| error)
+}
+
+pub fn try_execute_tool(name: &str, args_json: &str) -> Result<String, String> {
+    try_execute_tool_in_workspace(name, args_json, Path::new("."))
+}
+
+pub fn try_execute_tool_in_workspace(
+    name: &str,
+    args_json: &str,
+    workspace_root: &Path,
+) -> Result<String, String> {
+    let args: Value = serde_json::from_str(args_json)
+        .map_err(|error| format!("Error parsing tool arguments JSON: {error}"))?;
 
     match name {
-        "accept_edit" => {
-            "Error: accept_edit is deprecated; edits are applied directly via edit_file_hashline or write_file.".to_string()
-        }
+        "accept_edit" => Err("Error: accept_edit is deprecated; edits are applied directly via edit_file_hashline or write_file.".to_string()),
         "grep_search" => {
-            let pattern = match args.get("pattern").and_then(Value::as_str) {
-                Some(pattern) => pattern,
-                None => return "Error: 'pattern' parameter is required".into(),
-            };
+            let pattern = args
+                .get("pattern")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "Error: 'pattern' parameter is required".to_string())?;
             let glob = args.get("glob").and_then(Value::as_str);
-            match search::grep_search(workspace_root, pattern, glob) {
-                Ok(result) => result,
-                Err(error) => format!("Error searching workspace: {error}"),
-            }
+            search::grep_search(workspace_root, pattern, glob)
+                .map_err(|error| format!("Error searching workspace: {error}"))
         }
         "read_file" => {
             let raw_path = match args.get("path").and_then(|v| v.as_str()) {
                 Some(path) if path.starts_with("skill://") => {
-                    return read_virtual_skill(workspace_root, &path[8..]);
+                    return Ok(read_virtual_skill(workspace_root, &path[8..]));
                 }
                 Some(path) if path.starts_with("agent://") => {
-                    return read_virtual_agent(workspace_root, &path[8..]);
+                    return Ok(read_virtual_agent(workspace_root, &path[8..]));
                 }
                 Some(path)
                     if path.starts_with("pr://")
@@ -373,68 +379,53 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
                         || path.starts_with("https://gitlab.com/")
                         || path.starts_with("http://gitlab.com/") =>
                 {
-                    return virtual_read::remote_ref_path(workspace_root, path);
+                    return Ok(virtual_read::remote_ref_path(workspace_root, path));
                 }
                 Some(p) => p,
-                None => return "Error: 'path' parameter is required".into(),
+                None => return Err("Error: 'path' parameter is required".into()),
             };
-            let validated_path = match validate_path_in_workspace(raw_path, workspace_root) {
-                Ok(p) => p,
-                Err(err) => return err,
-            };
+            let validated_path = validate_path_in_workspace(raw_path, workspace_root)?;
 
-            let start = args
-                .get("start_line")
-                .and_then(|v| v.as_u64())
-                .map(|n| n as usize);
-            let end = args
-                .get("end_line")
-                .and_then(|v| v.as_u64())
-                .map(|n| n as usize);
+            let start = args.get("start_line").and_then(|v| v.as_u64()).map(|n| n as usize);
+            let end = args.get("end_line").and_then(|v| v.as_u64()).map(|n| n as usize);
 
-            match fs::read_to_string(&validated_path) {
-                Ok(content) => {
-                    let lines: Vec<&str> = content.lines().collect();
-                    let start_idx = start.unwrap_or(1).saturating_sub(1);
-                    let end_idx = end.unwrap_or(lines.len()).min(lines.len());
-                    if start_idx >= lines.len() {
-                        return format!("File only has {} lines.", lines.len());
-                    }
-                    if end_idx <= start_idx {
-                        return format!(
-                            "Invalid line range: end_line ({}) must not be before start_line ({}).",
-                            end.unwrap_or(lines.len()),
-                            start.unwrap_or(1),
-                        );
-                    }
-                    let selected = &lines[start_idx..end_idx];
-                    let formatted_lines: Vec<String> = selected
-                        .iter()
-                        .enumerate()
-                        .map(|(idx, line)| {
-                            let line_no = start_idx + idx + 1;
-                            hashline::format_line_hashline(line_no, line)
-                        })
-                        .collect();
-                    truncate_tool_output(&formatted_lines.join("\n"))
-                }
-                Err(e) => format!("Error reading file '{raw_path}': {e}"),
+            let content = fs::read_to_string(&validated_path)
+                .map_err(|e| format!("Error reading file '{raw_path}': {e}"))?;
+            let lines: Vec<&str> = content.lines().collect();
+            let start_idx = start.unwrap_or(1).saturating_sub(1);
+            let end_idx = end.unwrap_or(lines.len()).min(lines.len());
+            if start_idx >= lines.len() {
+                return Err(format!("File only has {} lines.", lines.len()));
             }
+            if end_idx <= start_idx {
+                return Err(format!(
+                    "Invalid line range: end_line ({}) must not be before start_line ({}).",
+                    end.unwrap_or(lines.len()),
+                    start.unwrap_or(1),
+                ));
+            }
+            let selected = &lines[start_idx..end_idx];
+            let formatted_lines: Vec<String> = selected
+                .iter()
+                .enumerate()
+                .map(|(idx, line)| {
+                    let line_no = start_idx + idx + 1;
+                    hashline::format_line_hashline(line_no, line)
+                })
+                .collect();
+            Ok(truncate_tool_output(&formatted_lines.join("\n")))
         }
         "write_file" => {
-            let raw_path = match args.get("path").and_then(|v| v.as_str()) {
-                Some(p) => p,
-                None => return "Error: 'path' parameter is required".into(),
-            };
-            let validated_path = match validate_path_in_workspace(raw_path, workspace_root) {
-                Ok(p) => p,
-                Err(err) => return err,
-            };
+            let raw_path = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "Error: 'path' parameter is required".to_string())?;
+            let validated_path = validate_path_in_workspace(raw_path, workspace_root)?;
 
-            let content = match args.get("content").and_then(|v| v.as_str()) {
-                Some(c) => c,
-                None => return "Error: 'content' parameter is required".into(),
-            };
+            let content = args
+                .get("content")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "Error: 'content' parameter is required".to_string())?;
 
             if let Some(parent) = validated_path.parent() {
                 if !parent.as_os_str().is_empty() {
@@ -442,98 +433,73 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
                 }
             }
 
-            match fs::write(&validated_path, content) {
-                Ok(_) => {
-                    let diag = run_post_edit_diagnostics(workspace_root, raw_path);
-                    format!(
-                        "Successfully wrote {} bytes to '{raw_path}'{diag}",
-                        content.len()
-                    )
-                }
-                Err(e) => format!("Error writing to file '{raw_path}': {e}"),
-            }
+            fs::write(&validated_path, content)
+                .map_err(|e| format!("Error writing to file '{raw_path}': {e}"))?;
+            let diag = run_post_edit_diagnostics(workspace_root, raw_path);
+            Ok(format!(
+                "Successfully wrote {} bytes to '{raw_path}'{diag}",
+                content.len()
+            ))
         }
-
         "edit_file_hashline" => {
-            let raw_path = match args.get("path").and_then(|v| v.as_str()) {
-                Some(p) => p,
-                None => return "Error: 'path' parameter is required".into(),
-            };
-            let validated_path = match validate_path_in_workspace(raw_path, workspace_root) {
-                Ok(p) => p,
-                Err(err) => return err,
-            };
+            let raw_path = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "Error: 'path' parameter is required".to_string())?;
+            let validated_path = validate_path_in_workspace(raw_path, workspace_root)?;
 
-            let edits_value = match args.get("edits") {
-                Some(e) => e,
-                None => return "Error: 'edits' parameter is required".into(),
+            let edits_value = args
+                .get("edits")
+                .ok_or_else(|| "Error: 'edits' parameter is required".to_string())?;
+            let edits: Vec<hashline::HashlineEdit> = serde_json::from_value(edits_value.clone())
+                .map_err(|err| format!("Error parsing 'edits' argument: {err}"))?;
+
+            let content = fs::read_to_string(&validated_path)
+                .map_err(|e| format!("Error reading file '{raw_path}': {e}"))?;
+            let result = hashline::apply_hashline_edits_detailed(&content, &edits, 5)
+                .map_err(|e| format!("Error applying hashline edits to '{raw_path}': {e}"))?;
+            fs::write(&validated_path, result.new_content)
+                .map_err(|e| format!("Error writing file '{raw_path}': {e}"))?;
+            let diag = run_post_edit_diagnostics(workspace_root, raw_path);
+            let diff_section = if !result.diff.is_empty() {
+                format!("\n\nDiff:\n{}", result.diff)
+            } else {
+                String::new()
             };
-
-            let edits: Vec<hashline::HashlineEdit> =
-                match serde_json::from_value(edits_value.clone()) {
-                    Ok(e) => e,
-                    Err(err) => return format!("Error parsing 'edits' argument: {err}"),
-                };
-
-            match fs::read_to_string(&validated_path) {
-                Ok(content) => match hashline::apply_hashline_edits_detailed(&content, &edits, 5) {
-                    Ok(result) => match fs::write(&validated_path, result.new_content) {
-                        Ok(_) => {
-                            let diag = run_post_edit_diagnostics(workspace_root, raw_path);
-                            let diff_section = if !result.diff.is_empty() {
-                                format!("\n\nDiff:\n{}", result.diff)
-                            } else {
-                                String::new()
-                            };
-                            let anchors_section = if !result.updated_context.is_empty() {
-                                format!("\n\nUpdated Line Hashes:\n{}", result.updated_context)
-                            } else {
-                                String::new()
-                            };
-                            format!(
-                                "Successfully applied {} hashline edit(s) to '{raw_path}'{diag}{diff_section}{anchors_section}",
-                                edits.len()
-                            )
-                        }
-                        Err(e) => format!("Error writing file '{raw_path}': {e}"),
-                    },
-                    Err(e) => format!("Error applying hashline edits to '{raw_path}': {e}"),
-                },
-                Err(e) => format!("Error reading file '{raw_path}': {e}"),
-            }
+            let anchors_section = if !result.updated_context.is_empty() {
+                format!("\n\nUpdated Line Hashes:\n{}", result.updated_context)
+            } else {
+                String::new()
+            };
+            Ok(format!(
+                "Successfully applied {} hashline edit(s) to '{raw_path}'{diag}{diff_section}{anchors_section}",
+                edits.len()
+            ))
         }
         "list_dir" => {
             let raw_path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-            let validated_path = match validate_path_in_workspace(raw_path, workspace_root) {
-                Ok(p) => p,
-                Err(err) => return err,
-            };
+            let validated_path = validate_path_in_workspace(raw_path, workspace_root)?;
 
-            match fs::read_dir(&validated_path) {
-                Ok(entries) => {
-                    let mut items = Vec::new();
-                    for entry in entries.flatten() {
-                        let name = entry.file_name().to_string_lossy().to_string();
-                        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                        let kind = if is_dir { "[DIR] " } else { "[FILE]" };
-                        items.push(format!("{kind} {name}"));
-                    }
-                    items.sort();
-                    truncate_tool_output(&items.join("\n"))
-                }
-                Err(e) => format!("Error reading directory '{raw_path}': {e}"),
+            let mut entries = Vec::new();
+            for entry in fs::read_dir(&validated_path)
+                .map_err(|e| format!("Error reading directory '{raw_path}': {e}"))?
+                .flatten()
+            {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                let kind = if is_dir { "[DIR] " } else { "[FILE]" };
+                entries.push(format!("{kind} {name}"));
             }
+            entries.sort();
+            Ok(truncate_tool_output(&entries.join("\n")))
         }
         "run_command" => {
-            let cmd_str = match args.get("command").and_then(|v| v.as_str()) {
-                Some(c) => c,
-                None => return "Error: 'command' parameter is required".into(),
-            };
+            let cmd_str = args
+                .get("command")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "Error: 'command' parameter is required".to_string())?;
             let raw_cwd = args.get("cwd").and_then(|v| v.as_str());
-            let validated_cwd = match validate_cwd_in_workspace(raw_cwd, workspace_root) {
-                Ok(p) => p,
-                Err(err) => return err,
-            };
+            let validated_cwd = validate_cwd_in_workspace(raw_cwd, workspace_root)?;
 
             let mut cmd = Command::new("sh");
             cmd.arg("-c").arg(cmd_str);
@@ -543,13 +509,17 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
                 Ok(output) => {
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    let exit = output.status;
-
-                    truncate_tool_output(&format!(
-                        "Exit Status: {exit}\n--- STDOUT ---\n{stdout}\n--- STDERR ---\n{stderr}"
-                    ))
+                    let rendered = truncate_tool_output(&format!(
+                        "Exit Status: {}\n--- STDOUT ---\n{}\n--- STDERR ---\n{}",
+                        output.status, stdout, stderr
+                    ));
+                    if output.status.success() {
+                        Ok(rendered)
+                    } else {
+                        Err(rendered)
+                    }
                 }
-                Err(e) => format!("Error executing command '{cmd_str}': {e}"),
+                Err(e) => Err(format!("Error executing command '{cmd_str}': {e}")),
             }
         }
         "get_repo_map" => {
@@ -558,24 +528,23 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
         }
 
         "manage_memory" => {
-            let action = match args.get("action").and_then(|v| v.as_str()) {
-                Some(a) => a,
-                None => {
-                    return "Error: 'action' parameter is required ('read', 'save', 'consolidate')"
-                        .into()
-                }
-            };
+            let action = args
+                .get("action")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    "Error: 'action' parameter is required ('read', 'save', 'consolidate')".to_string()
+                })?;
             match action {
                 "read" => read_memory_impl(workspace_root),
                 "save" => save_memory_impl(workspace_root, &args),
                 "consolidate" => consolidate_memory_impl(workspace_root, &args),
-                unknown => format!("Error: Unknown action '{unknown}' for manage_memory"),
+                unknown => Err(format!("Error: Unknown action '{unknown}' for manage_memory")),
             }
         }
         "read_memory" => read_memory_impl(workspace_root),
         "save_memory" => save_memory_impl(workspace_root, &args),
         "consolidate_memory" => consolidate_memory_impl(workspace_root, &args),
-        unknown => format!("Error: Unknown tool '{unknown}'"),
+        unknown => Err(format!("Error: Unknown tool '{unknown}'")),
     }
 }
 
@@ -598,32 +567,29 @@ fn truncate_tool_output(output: &str) -> String {
     }
 }
 
-fn read_memory_impl(workspace_root: &Path) -> String {
+fn read_memory_impl(workspace_root: &Path) -> Result<String, String> {
     let mem_file = workspace_root.join(".threadlane").join("memory.md");
     if mem_file.is_file() {
-        match fs::read_to_string(&mem_file) {
-            Ok(content) => truncate_tool_output(&content),
-            Err(e) => format!("Error reading .threadlane/memory.md: {e}"),
-        }
+        fs::read_to_string(&mem_file)
+            .map(|content| truncate_tool_output(&content))
+            .map_err(|e| format!("Error reading .threadlane/memory.md: {e}"))
     } else {
-        "No persistent memory found in .threadlane/memory.md yet.".to_string()
+        Ok("No persistent memory found in .threadlane/memory.md yet.".to_string())
     }
 }
 
-fn save_memory_impl(workspace_root: &Path, args: &Value) -> String {
-    let content = match args.get("content").and_then(|v| v.as_str()) {
-        Some(c) => c,
-        None => return "Error: 'content' parameter is required".into(),
-    };
+fn save_memory_impl(workspace_root: &Path, args: &Value) -> Result<String, String> {
+    let content = args
+        .get("content")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Error: 'content' parameter is required".to_string())?;
     let mode = args
         .get("mode")
         .and_then(|v| v.as_str())
         .unwrap_or("append");
 
     let dir = workspace_root.join(".threadlane");
-    if let Err(e) = fs::create_dir_all(&dir) {
-        return format!("Error creating .threadlane directory: {e}");
-    }
+    fs::create_dir_all(&dir).map_err(|e| format!("Error creating .threadlane directory: {e}"))?;
     let mem_file = dir.join("memory.md");
 
     let new_content = if mode == "overwrite" || !mem_file.exists() {
@@ -633,13 +599,12 @@ fn save_memory_impl(workspace_root: &Path, args: &Value) -> String {
         format!("{}\n\n{}", existing.trim(), content.trim())
     };
 
-    match fs::write(&mem_file, new_content) {
-        Ok(_) => "Successfully saved memory to .threadlane/memory.md".to_string(),
-        Err(e) => format!("Error writing to .threadlane/memory.md: {e}"),
-    }
+    fs::write(&mem_file, new_content)
+        .map(|_| "Successfully saved memory to .threadlane/memory.md".to_string())
+        .map_err(|e| format!("Error writing to .threadlane/memory.md: {e}"))
 }
 
-fn consolidate_memory_impl(workspace_root: &Path, args: &Value) -> String {
+fn consolidate_memory_impl(workspace_root: &Path, args: &Value) -> Result<String, String> {
     let parse_array = |key: &str| -> Vec<String> {
         args.get(key)
             .and_then(|v| v.as_array())
@@ -656,18 +621,19 @@ fn consolidate_memory_impl(workspace_root: &Path, args: &Value) -> String {
     let verification = parse_array("verification");
 
     let dir = workspace_root.join(".threadlane");
-    if let Err(e) = fs::create_dir_all(&dir) {
-        return format!("Error creating .threadlane directory: {e}");
-    }
+    fs::create_dir_all(&dir).map_err(|e| format!("Error creating .threadlane directory: {e}"))?;
     let mem_file = dir.join("memory.md");
 
-    let existing = fs::read_to_string(&mem_file).unwrap_or_default();
+    let existing = if mem_file.is_file() {
+        fs::read_to_string(&mem_file).map_err(|e| format!("Error reading .threadlane/memory.md: {e}"))?
+    } else {
+        String::new()
+    };
     let merged = consolidate_memory_entries(&existing, &architecture, &gotchas, &verification);
 
-    match fs::write(&mem_file, merged) {
-        Ok(_) => "Successfully consolidated memory entries in .threadlane/memory.md".to_string(),
-        Err(e) => format!("Error writing to .threadlane/memory.md: {e}"),
-    }
+    fs::write(&mem_file, merged)
+        .map(|_| "Successfully consolidated memory entries in .threadlane/memory.md".to_string())
+        .map_err(|e| format!("Error writing to .threadlane/memory.md: {e}"))
 }
 
 fn consolidate_memory_entries(
@@ -736,12 +702,9 @@ fn consolidate_memory_entries(
     append_section(&out, "## Verification Commands", verification)
 }
 
-fn get_repo_map_impl(workspace_root: &Path, rel_path: Option<&str>) -> String {
+fn get_repo_map_impl(workspace_root: &Path, rel_path: Option<&str>) -> Result<String, String> {
     let target_dir = match rel_path {
-        Some(path) => match validate_path_in_workspace(path, workspace_root) {
-            Ok(p) => p,
-            Err(err) => return err,
-        },
+        Some(path) => validate_path_in_workspace(path, workspace_root)?,
         None => workspace_root.to_path_buf(),
     };
 
@@ -749,9 +712,9 @@ fn get_repo_map_impl(workspace_root: &Path, rel_path: Option<&str>) -> String {
     walk_repo_skeleton(&target_dir, workspace_root, 0, &mut lines);
 
     if lines.is_empty() {
-        "No source code definitions found in repository map.".to_string()
+        Ok("No source code definitions found in repository map.".to_string())
     } else {
-        truncate_tool_output(&lines.join("\n"))
+        Ok(truncate_tool_output(&lines.join("\n")))
     }
 }
 
@@ -1287,5 +1250,71 @@ mod tests {
                 || mr_res.contains("GitLab mr #99")
                 || mr_res.contains("gitlab.com")
         );
+
     }
+    #[test]
+    fn typed_execution_marks_hashline_mismatch_as_error() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("sample.txt"), "original\n").unwrap();
+        let result = try_execute_tool_in_workspace(
+            "edit_file_hashline",
+            &serde_json::json!({
+                "path": "sample.txt",
+                "edits": [{
+                    "start_anchor": "1:bad",
+                    "action": "replace",
+                    "new_content": "changed"
+                }]
+            })
+            .to_string(),
+            dir.path(),
+        );
+
+        let error = result.expect_err("a stale hashline anchor must fail");
+        assert!(error.contains("Error applying hashline edits"), "{error}");
+        assert!(error.contains("Hashline mismatch"), "{error}");
+        assert_eq!(fs::read_to_string(dir.path().join("sample.txt")).unwrap(), "original\n");
+    }
+
+    #[test]
+    fn typed_execution_marks_invalid_arguments_as_error() {
+        let result = try_execute_tool("read_file", "{}");
+        assert_eq!(result, Err("Error: 'path' parameter is required".into()));
+    }
+
+    #[test]
+    fn typed_execution_marks_nonzero_command_exit_as_error() {
+        let dir = tempdir().unwrap();
+        let result = try_execute_tool_in_workspace(
+            "run_command",
+            r#"{"command":"printf 'out'; printf 'err' >&2; exit 7"}"#,
+            dir.path(),
+        );
+
+        let error = result.expect_err("a non-zero command exit must fail");
+        assert!(error.contains("Exit Status: exit status: 7"), "{error}");
+        assert!(error.contains(&format!("--- STDOUT ---\nout")), "{error}");
+        assert!(error.contains(&format!("--- STDERR ---\nerr")), "{error}");
+    }
+
+    #[test]
+    fn typed_execution_keeps_successful_calls_successful() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("sample.txt"), "contents").unwrap();
+
+        let read = try_execute_tool_in_workspace(
+            "read_file",
+            r#"{"path":"sample.txt"}"#,
+            dir.path(),
+        );
+        assert!(read.is_ok(), "{read:?}");
+
+        let command = try_execute_tool_in_workspace(
+            "run_command",
+            r#"{"command":"printf ok"}"#,
+            dir.path(),
+        );
+        assert!(command.is_ok(), "{command:?}");
+    }
+
 }
