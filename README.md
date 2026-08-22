@@ -19,8 +19,8 @@ Threadlane combines a GPU-accelerated desktop interface with a high-performance 
 > **Release status:** Automated release packages target Apple Silicon macOS (`.dmg`, `.app.tar.gz`) and Ubuntu 24.04 x86_64 (`.deb`). Can also be built from source on other platforms supported by GPUI.
 
 <p align="center">
-  <a href="docs/images/threadlane-workspace.png">
-    <img src="docs/images/threadlane-workspace.png" width="100%" alt="Threadlane desktop workspace showing project sessions, rendered tool output, and slash-command completion">
+  <a href="assets/images/threadlane-workspace.png">
+    <img src="assets/images/threadlane-workspace.png" width="100%" alt="Threadlane desktop workspace showing project sessions, rendered tool output, and slash-command completion">
   </a>
 </p>
 
