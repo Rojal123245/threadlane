@@ -419,6 +419,24 @@ impl<S: SessionStore> AgentHarness<S> {
         CompactionProcedure::accept(&self.store, run_id, summary, &mut self.effects)
     }
 
+    /// Checkpoints canonical context while preserving the caller's open run.
+    pub fn checkpoint_open_run_compaction(
+        &mut self,
+        lane: &str,
+        run_id: &str,
+        summary: &str,
+        reason: super::CompactionReason,
+    ) -> Result<(), ProcedureError> {
+        CompactionProcedure::checkpoint_open_run(
+            &self.store,
+            lane,
+            run_id,
+            summary,
+            reason,
+            &mut self.effects,
+        )
+    }
+
     pub fn accept_compaction_on_lane(
         &mut self,
         lane: &str,

@@ -1038,22 +1038,6 @@ impl CodingAgent {
             }
         }
 
-        if self.agent.auto_compact_history().await {
-            let state = self.agent.get_state().await;
-            if let Some(summary) = state
-                .messages
-                .iter()
-                .rev()
-                .find_map(threadlane_runtime::compaction_summary_text)
-            {
-                let retained_tail = compaction_retained_tail(&state.messages);
-                if let Err(error) = self.persist_harness_compaction(summary, &retained_tail) {
-                    let _ = self.agent.event_tx.send(AgentEvent::AgentError { error });
-                    return None;
-                }
-            }
-        }
-
         let msg = AgentMessage::user(effective_input, images);
         let harness_run_id = match self.begin_harness_run(msg.clone()).await {
             Ok(run_id) => run_id,

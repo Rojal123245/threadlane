@@ -9,19 +9,24 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::permission::PermissionTraceEvent;
+use threadlane_runtime::compaction::{
+    compact_for_budget, estimate_request_tokens, PreparedCompaction,
+};
 pub use threadlane_runtime::harness::Record as HarnessRecord;
 use threadlane_runtime::harness::{
     AbortInitiator, AbortObservation, AbortTarget, AgentHarness, BoundedText, CapabilitySnapshot,
-    DeferredResolution, Entry as HarnessEntry, ErrorCategory, HarnessEventHub, HookContext,
-    HookKind, HookRegistry, JsonlStore, OperationOutcome, PromptSnapshot, ProviderErrorSummary,
-    ProviderOutcome, ProvisionedEntry, QueueKind, Reducer, RetryPolicy, SessionIdGenerator,
-    SessionStore, Snapshot, SubagentLifecyclePhase, ToolExecutionOutcome, ToolExecutionPhase,
-    ToolReplaySafety as HarnessToolReplaySafety, ToolResult as HarnessToolResult, ToolSpec,
-    TraceString,
+    CompactionReason, DeferredResolution, Entry as HarnessEntry, ErrorCategory, HarnessEventHub,
+    HookContext, HookKind, HookRegistry, JsonlStore, OperationOutcome, PromptSnapshot,
+    ProviderErrorSummary, ProviderOutcome, ProvisionedEntry, QueueKind, Reducer, RetryPolicy,
+    SessionIdGenerator, SessionStore, Snapshot, SubagentLifecyclePhase, ToolExecutionOutcome,
+    ToolExecutionPhase, ToolReplaySafety as HarnessToolReplaySafety,
+    ToolResult as HarnessToolResult, ToolSpec, TraceString,
 };
+use threadlane_runtime::model_metadata::{context_budget, ContextBudget};
 use threadlane_runtime::{
-    AgentMessage, AgentToolResult, ImageAttachment, ProviderTraceEvent, ReasoningEffort,
-    TokenUsage, ToolExecutionTraceEvent,
+    AgentConfig, AgentMessage, AgentToolResult, ImageAttachment, ProviderBoundaryRequest,
+    ProviderBoundaryResult, ProviderTraceEvent, ReasoningEffort, TokenUsage,
+    ToolExecutionTraceEvent,
 };
 
 use threadlane_runtime::harness::{EventError, HarnessEvent, OperationIntent, Subscription};
@@ -126,6 +131,20 @@ pub struct CodingSessionHarness {
     pub(crate) cancellation: Arc<AtomicBool>,
 }
 
+fn boundary_result(
+    messages: Vec<AgentMessage>,
+    budget: ContextBudget,
+    compaction_generation: u64,
+    provisional_estimated_tokens: Option<usize>,
+) -> ProviderBoundaryResult {
+    ProviderBoundaryResult {
+        messages,
+        context_limit: budget.limit,
+        context_limit_is_estimate: budget.limit_is_estimate,
+        compaction_generation,
+        provisional_estimated_tokens,
+    }
+}
 #[allow(dead_code)]
 impl CodingSessionHarness {
     // ── Construction ──────────────────────────────────────────────────
@@ -271,6 +290,189 @@ impl CodingSessionHarness {
             .map_err(|error| error.to_string())
     }
 
+    pub fn prepare_provider_boundary(
+        &mut self,
+        run_id: &str,
+        request: ProviderBoundaryRequest,
+        config: &AgentConfig,
+    ) -> Result<ProviderBoundaryResult, String> {
+        self.ensure_fresh()?;
+        let budget = context_budget(&request.model, config);
+        let mut current = self.model_context("main")?.messages();
+        let pre_tokens =
+            estimate_request_tokens(&current, request.tool_schema_json.as_deref(), config);
+        if pre_tokens < budget.trigger_tokens && !request.overflow_recovery {
+            return Ok(boundary_result(
+                current,
+                budget,
+                self.compaction_generation(),
+                None,
+            ));
+        }
+
+        // Cancellation is checked before accepting any durable effects. Once a
+        // checkpoint is accepted, commit_prepared_compaction drives it fully.
+        if self.cancellation.load(Ordering::SeqCst) {
+            return Err("context preparation cancelled".into());
+        }
+        let reason = if request.overflow_recovery {
+            CompactionReason::OverflowRecovery
+        } else {
+            CompactionReason::AdaptiveBudget
+        };
+        let targets = [
+            budget.retained_tail_tokens,
+            budget.strict_retained_tail_tokens,
+        ];
+        for (index, target) in targets.into_iter().enumerate() {
+            let Some(prepared) = compact_for_budget(
+                &current,
+                request.tool_schema_json.as_deref(),
+                target,
+                config,
+            ) else {
+                return Err("context preparation could not drop historical messages".into());
+            };
+            self.commit_prepared_compaction(run_id, &request.model, budget, reason, prepared)?;
+            current = self.model_context("main")?.messages();
+            let post_tokens =
+                estimate_request_tokens(&current, request.tool_schema_json.as_deref(), config);
+            if post_tokens < budget.trigger_tokens {
+                return Ok(boundary_result(
+                    current,
+                    budget,
+                    self.compaction_generation(),
+                    Some(post_tokens),
+                ));
+            }
+            if index == 1 {
+                return Err(format!(
+                    "context remains above budget after strict compaction: {post_tokens}/{}",
+                    budget.trigger_tokens,
+                ));
+            }
+            self.ensure_fresh()?;
+        }
+        unreachable!()
+    }
+
+    fn compaction_generation(&self) -> u64 {
+        self.store
+            .store()
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                HarnessRecord::ContextCompacted {
+                    lane, generation, ..
+                } if lane == "main" => Some(*generation),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn checkpoint_open_run_compaction(
+        &mut self,
+        run_id: &str,
+        summary: &str,
+        reason: CompactionReason,
+    ) -> Result<(), String> {
+        self.store
+            .checkpoint_open_run_compaction("main", run_id, summary, reason)
+            .map_err(|error| error.to_string())?;
+        self.store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())
+    }
+
+    fn commit_prepared_compaction(
+        &mut self,
+        parent_run_id: &str,
+        model: &str,
+        budget: ContextBudget,
+        reason: CompactionReason,
+        prepared: PreparedCompaction,
+    ) -> Result<(), String> {
+        let result = (|| {
+            let summary = prepared
+                .messages
+                .iter()
+                .find_map(threadlane_runtime::compaction_summary_text)
+                .ok_or_else(|| "context preparation produced no durable summary".to_string())?;
+            self.checkpoint_open_run_compaction(parent_run_id, summary, reason)?;
+            for message in super::durable::compaction_retained_tail(&prepared.messages) {
+                self.append_message(message)?;
+            }
+            // Re-project before telemetry so a committed ContextCompacted record
+            // always describes the canonical context already on disk.
+            let post_tokens = prepared.post_tokens;
+            let generation = self.compaction_generation().saturating_add(1);
+            let seq = self.next_seq();
+            let record = HarnessRecord::ContextCompacted {
+                id: format!("context-compacted-{parent_run_id}-{generation}"),
+                seq,
+                lane: "main".into(),
+                timestamp: timestamp(),
+                run_id: parent_run_id.into(),
+                generation,
+                reason,
+                effective_model: TraceString::new(model)?,
+                context_limit: budget.limit,
+                context_limit_is_estimate: budget.limit_is_estimate,
+                pre_tokens: prepared.pre_tokens,
+                post_tokens,
+                retained_tail_target: prepared.retained_tail_tokens,
+                retained_tail_tokens: prepared.retained_tail_tokens,
+                compacted_messages: prepared.compacted_messages,
+            };
+            self.store
+                .append_record_gated(record)
+                .map_err(|error| error.to_string())?;
+            self.store
+                .drive_to_completion()
+                .map_err(|error| error.to_string())
+        })();
+        if result.is_err() {
+            let _ = self.ensure_fresh();
+        }
+        result
+    }
+
+    pub(crate) fn record_manual_compaction(
+        &mut self,
+        run_id: &str,
+        model: &str,
+        config: &AgentConfig,
+    ) -> Result<(), String> {
+        self.ensure_fresh()?;
+        let budget = context_budget(model, config);
+        let messages = self.model_context("main")?.messages();
+        let post_tokens = estimate_request_tokens(&messages, None, config);
+        let generation = self.compaction_generation().saturating_add(1);
+        let record = HarnessRecord::ContextCompacted {
+            id: format!("context-compacted-{run_id}-{generation}"),
+            seq: self.next_seq(),
+            lane: "main".into(),
+            timestamp: timestamp(),
+            run_id: run_id.into(),
+            generation,
+            reason: CompactionReason::Manual,
+            effective_model: TraceString::new(model)?,
+            context_limit: budget.limit,
+            context_limit_is_estimate: budget.limit_is_estimate,
+            pre_tokens: post_tokens,
+            post_tokens,
+            retained_tail_target: budget.retained_tail_tokens,
+            retained_tail_tokens: post_tokens.min(budget.retained_tail_tokens),
+            compacted_messages: 0,
+        };
+        self.store
+            .append_record_gated(record)
+            .map_err(|error| error.to_string())?;
+        self.store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())
+    }
     pub fn transcript(&self, lane: &str) -> threadlane_runtime::harness::TranscriptProjection {
         self.store.store().transcript(lane)
     }
@@ -2774,6 +2976,204 @@ mod tests {
         (dir, path)
     }
 
+    fn open_long_run(path: &Path) -> CodingSessionHarness {
+        let mut harness = CodingSessionHarness::open(path).unwrap();
+        harness
+            .begin_run("run-compact", AgentMessage::user("start", vec![]))
+            .unwrap();
+        for index in 0..28 {
+            harness
+                .append_message(AgentMessage::user(
+                    format!("history-{index}-{}", "x".repeat(16_000)),
+                    vec![],
+                ))
+                .unwrap();
+        }
+        harness
+    }
+
+    fn boundary_request(overflow_recovery: bool) -> ProviderBoundaryRequest {
+        ProviderBoundaryRequest {
+            attempt: 1,
+            model: "unknown/test-model".into(),
+            messages: Vec::new(),
+            tool_schema_json: None,
+            overflow_recovery,
+        }
+    }
+
+    #[test]
+    fn adaptive_compaction_commits_before_next_provider_attempt() {
+        let (_dir, path) = temp_session();
+        let mut harness = open_long_run(&path);
+        harness
+            .prepare_provider_boundary(
+                "run-compact",
+                boundary_request(false),
+                &AgentConfig::default(),
+            )
+            .unwrap();
+        harness
+            .record_provider_trace(
+                "run-compact",
+                ProviderTraceEvent::Started {
+                    attempt: 1,
+                    request_id: "request-after-compaction".into(),
+                    model: "unknown/test-model".into(),
+                    provider: "fake".into(),
+                },
+            )
+            .unwrap();
+        let compacted_seq = harness
+            .store
+            .records()
+            .iter()
+            .find_map(|record| match record {
+                HarnessRecord::ContextCompacted {
+                    seq,
+                    reason: CompactionReason::AdaptiveBudget,
+                    ..
+                } => Some(*seq),
+                _ => None,
+            })
+            .expect("adaptive compaction");
+        let start_seq = harness
+            .store
+            .records()
+            .iter()
+            .find_map(|record| match record {
+                HarnessRecord::ProviderRequestStarted { seq, .. } if *seq > compacted_seq => {
+                    Some(*seq)
+                }
+                _ => None,
+            })
+            .expect("provider start after compaction");
+        assert!(compacted_seq < start_seq);
+    }
+
+    #[test]
+    fn reload_uses_checkpoint_tail_but_transcript_keeps_original_entries() {
+        let (_dir, path) = temp_session();
+        let mut harness = open_long_run(&path);
+        harness
+            .prepare_provider_boundary(
+                "run-compact",
+                boundary_request(false),
+                &AgentConfig::default(),
+            )
+            .unwrap();
+        drop(harness);
+        let reloaded = CodingSessionHarness::open(&path).unwrap();
+        let context = reloaded.model_context("main").unwrap();
+        assert!(context.checkpoint.is_some());
+        assert!(reloaded.transcript("main").entries.len() > context.entries.len());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compaction_persistence_failure_blocks_provider() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_dir, path) = temp_session();
+        let mut harness = open_long_run(&path);
+        let original = fs::metadata(&path).unwrap().permissions();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+        let result = harness.prepare_provider_boundary(
+            "run-compact",
+            boundary_request(false),
+            &AgentConfig::default(),
+        );
+        fs::set_permissions(&path, original).unwrap();
+        assert!(result.is_err());
+        assert!(!harness
+            .store
+            .records()
+            .iter()
+            .any(|record| matches!(record, HarnessRecord::ProviderRequestStarted { .. })));
+    }
+
+    #[test]
+    fn ineffective_compaction_retries_once() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        harness
+            .begin_run(
+                "run-compact",
+                AgentMessage::user("x".repeat(500_000), vec![]),
+            )
+            .unwrap();
+        harness
+            .append_message(AgentMessage::user("y".repeat(500_000), vec![]))
+            .unwrap();
+        let result = harness.prepare_provider_boundary(
+            "run-compact",
+            boundary_request(false),
+            &AgentConfig::default(),
+        );
+        assert!(result.is_err());
+        let attempts = harness
+            .store
+            .records()
+            .iter()
+            .filter(|record| matches!(record, HarnessRecord::ContextCompacted { .. }))
+            .count();
+        assert!(attempts <= 2, "strict retry must be bounded");
+    }
+
+    #[test]
+    fn provider_overflow_retries_once() {
+        let (_dir, path) = temp_session();
+        let mut harness = open_long_run(&path);
+        harness
+            .prepare_provider_boundary(
+                "run-compact",
+                boundary_request(true),
+                &AgentConfig::default(),
+            )
+            .unwrap();
+        let recoveries = harness
+            .store
+            .records()
+            .iter()
+            .filter(|record| {
+                matches!(
+                    record,
+                    HarnessRecord::ContextCompacted {
+                        reason: CompactionReason::OverflowRecovery,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(recoveries, 1);
+    }
+
+    #[test]
+    fn cancellation_before_compaction_has_no_partial_operation_or_provider_start() {
+        let (_dir, path) = temp_session();
+        let mut harness = open_long_run(&path);
+        harness.request_abort().unwrap();
+        let abort_seq = harness
+            .store
+            .records()
+            .iter()
+            .find_map(|record| match record {
+                HarnessRecord::AbortRequested { seq, .. } => Some(*seq),
+                _ => None,
+            })
+            .expect("abort record");
+        assert!(harness
+            .prepare_provider_boundary(
+                "run-compact",
+                boundary_request(false),
+                &AgentConfig::default(),
+            )
+            .is_err());
+        assert!(!harness.store.records().iter().any(|record| {
+            matches!(record, HarnessRecord::ContextCompacted { seq, .. } if *seq > abort_seq)
+                || matches!(record, HarnessRecord::ProviderRequestStarted { seq, .. } if *seq > abort_seq)
+        }));
+    }
     #[tokio::test(flavor = "current_thread")]
     async fn path_scoped_async_helper_uses_blocking_worker() {
         let (_dir, path) = temp_session();

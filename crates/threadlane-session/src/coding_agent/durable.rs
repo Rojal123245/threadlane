@@ -125,6 +125,19 @@ impl CodingAgent {
                 Box::pin(async move { harness.lock().await.record_provider_trace(&run_id, event) })
             })));
         let message_harness = trace_harness.clone();
+        let boundary_harness = trace_harness.clone();
+        let boundary_run_id = run_id.clone();
+        let boundary_config = self.agent.config().clone();
+        self.agent
+            .set_provider_boundary_preparer(Some(Arc::new(move |request| {
+                let harness = boundary_harness.clone();
+                let run_id = boundary_run_id.clone();
+                let config = boundary_config.clone();
+                Box::pin(async move {
+                    let mut harness = harness.lock().await;
+                    harness.prepare_provider_boundary(&run_id, request, &config)
+                })
+            })));
         self.agent
             .set_message_recorder(Some(Arc::new(move |message| {
                 let harness = message_harness.clone();
@@ -585,6 +598,7 @@ impl CodingAgent {
         }
         self.agent.set_provider_trace_recorder(None);
         self.agent.set_message_recorder(None);
+        self.agent.set_provider_boundary_preparer(None);
         self.agent.tool_dispatcher.tool_intent_recorder = None;
         self.agent.tool_dispatcher.tool_execution_trace_recorder = None;
         self.agent.tool_dispatcher.tool_completion_recorder = None;
@@ -630,6 +644,11 @@ impl CodingAgent {
         summary: &str,
         retained_tail: &[AgentMessage],
     ) -> Result<(), String> {
+        let config = self.agent.config().clone();
+        let model = config
+            .model_roles
+            .resolve_task(&self.agent.model())
+            .to_string();
         if let Some(journal) = self.harness.as_mut() {
             journal.ensure_fresh()?;
             let run_id = journal.unique_run_id("foreground-compaction")?;
@@ -644,6 +663,7 @@ impl CodingAgent {
             for message in retained_tail {
                 journal.append_message(message.clone())?;
             }
+            journal.record_manual_compaction(&run_id, &model, &config)?;
         }
         Ok(())
     }
