@@ -105,6 +105,15 @@ fn build_transcript_rows(messages: &[ChatMessageInfo], generating: bool) -> Vec<
     rows
 }
 
+fn grouped_tool_activities(
+    messages: &[ChatMessageInfo],
+) -> impl Iterator<Item = &ToolActivityInfo> + Clone {
+    messages
+        .iter()
+        .flat_map(|message| message.tool_activities.iter())
+        .filter(|activity| activity.title != "update_plan")
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TrajectoryCacheKey {
     revision: u64,
@@ -762,21 +771,26 @@ impl ChatListView {
 
     fn render_activity_group(
         &mut self,
-        activities: &[ToolActivityInfo],
+        messages: &[ChatMessageInfo],
         cx: &mut Context<Self>,
     ) -> AnyElement {
         const RECENT_ACTIVITY_LIMIT: usize = 4;
 
         let theme = cx.theme().colors;
+        let activities = grouped_tool_activities(messages);
         let group_id = activities
-            .first()
+            .clone()
+            .next()
             .map(|activity| activity.id.clone())
             .unwrap_or_else(|| "empty".into());
         let is_expanded = self.expanded_activity_groups.contains(&group_id);
-        let hidden_count = activities.len().saturating_sub(RECENT_ACTIVITY_LIMIT);
+        let hidden_count = activities
+            .clone()
+            .count()
+            .saturating_sub(RECENT_ACTIVITY_LIMIT);
         let visible_start = if is_expanded { 0 } else { hidden_count };
-        let activity_rows = activities[visible_start..]
-            .iter()
+        let activity_rows = activities
+            .skip(visible_start)
             .map(|activity| self.render_tool_activity(activity, cx))
             .collect::<Vec<_>>();
         let button_group_id = group_id.clone();
@@ -1902,25 +1916,14 @@ impl ChatListView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let messages = Arc::clone(&self.transcript_messages);
         let content = match self.transcript_rows.get(index).cloned() {
-            Some(TranscriptRow::Message(message_index)) => self
-                .transcript_messages
+            Some(TranscriptRow::Message(message_index)) => messages
                 .get(message_index)
-                .cloned()
-                .map(|message| self.render_message(&message, cx)),
-            Some(TranscriptRow::Activities(range)) => {
-                let activities = self.transcript_messages[range]
-                    .iter()
-                    .flat_map(|message| {
-                        message
-                            .tool_activities
-                            .iter()
-                            .filter(|activity| activity.title != "update_plan")
-                            .cloned()
-                    })
-                    .collect::<Vec<_>>();
-                Some(self.render_activity_group(&activities, cx))
-            }
+                .map(|message| self.render_message(message, cx)),
+            Some(TranscriptRow::Activities(range)) => messages
+                .get(range)
+                .map(|messages| self.render_activity_group(messages, cx)),
             Some(TranscriptRow::Working) => Some(self.render_working_indicator(cx)),
             None => None,
         };
@@ -3391,8 +3394,8 @@ impl Render for ChatListView {
 #[cfg(test)]
 mod hot_path_tests {
     use super::{
-        build_transcript_rows, should_use_markdown, TrajectoryCacheKey, TrajectoryMode,
-        TranscriptRow,
+        build_transcript_rows, grouped_tool_activities, should_use_markdown, TrajectoryCacheKey,
+        TrajectoryMode, TranscriptRow,
     };
     use crate::state::{ChatMessageInfo, MessageRole, ToolActivityInfo};
 
@@ -3400,6 +3403,40 @@ mod hot_path_tests {
     fn markdown_is_deferred_until_streaming_completes() {
         assert!(!should_use_markdown(true));
         assert!(should_use_markdown(false));
+    }
+
+    #[test]
+    fn grouped_tool_activities_borrows_in_order_and_hides_plan_updates() {
+        let activity_message = |activities: &[(&str, &str)]| ChatMessageInfo {
+            id: activities[0].0.into(),
+            role: MessageRole::Assistant,
+            content: String::new(),
+            tool_activities: activities
+                .iter()
+                .map(|(id, title)| ToolActivityInfo {
+                    id: (*id).into(),
+                    category: "tool".into(),
+                    title: (*title).into(),
+                    summary: String::new(),
+                    display_summary: String::new(),
+                    detail: String::new(),
+                    is_expanded: false,
+                })
+                .collect(),
+            streaming: false,
+            reasoning_content: None,
+            reasoning_expanded: false,
+        };
+        let messages = vec![
+            activity_message(&[("tool-1", "read_file"), ("plan", "update_plan")]),
+            activity_message(&[("tool-2", "write_file")]),
+        ];
+
+        let ids = grouped_tool_activities(&messages)
+            .map(|activity| activity.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec!["tool-1", "tool-2"]);
     }
 
     #[test]
