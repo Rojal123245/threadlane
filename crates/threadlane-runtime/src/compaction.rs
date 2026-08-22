@@ -16,6 +16,15 @@ pub struct CompactionOptions {
     pub preserve_recent: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct PreparedCompaction {
+    pub messages: Vec<AgentMessage>,
+    pub pre_tokens: usize,
+    pub post_tokens: usize,
+    pub compacted_messages: usize,
+    pub retained_tail_tokens: usize,
+}
+
 impl Default for CompactionOptions {
     fn default() -> Self {
         Self {
@@ -61,6 +70,39 @@ fn estimate_context_tokens(messages: &[AgentMessage], config: &AgentConfig) -> u
         .iter()
         .map(|m| estimate_message_tokens(m, config))
         .sum()
+}
+
+pub fn estimate_request_tokens(
+    messages: &[AgentMessage],
+    tool_schema_json: Option<&str>,
+    config: &AgentConfig,
+) -> usize {
+    estimate_context_tokens(messages, config)
+        .saturating_add(tool_schema_json.map_or(0, |tools| tools.len().div_ceil(4)))
+}
+
+pub fn compact_for_budget(
+    messages: &[AgentMessage],
+    tool_schema_json: Option<&str>,
+    retained_tail_tokens: usize,
+    config: &AgentConfig,
+) -> Option<PreparedCompaction> {
+    let pre_tokens = estimate_request_tokens(messages, tool_schema_json, config);
+    let compacted = compact_messages_to_token_budget(messages, retained_tail_tokens);
+    if compacted.len() == messages.len() {
+        return None;
+    }
+    let post_tokens = estimate_request_tokens(&compacted, tool_schema_json, config);
+    let compacted_messages = messages
+        .len()
+        .saturating_sub(compacted.len().saturating_sub(1));
+    Some(PreparedCompaction {
+        messages: compacted,
+        pre_tokens,
+        post_tokens,
+        compacted_messages,
+        retained_tail_tokens,
+    })
 }
 
 pub(crate) fn should_auto_compact(messages: &[AgentMessage], config: &AgentConfig) -> bool {
@@ -123,14 +165,92 @@ pub(crate) fn compact_messages_to_token_budget(
         }
     }
 
-    // A tool result must never be sent without the assistant tool call that created it.
-    while start > 0 && matches!(messages[start], AgentMessage::Tool { .. }) {
-        start -= 1;
-    }
+    start = tool_boundary_safe_start(messages, start);
 
     compact_from_index(messages, start)
 }
 
+fn tool_boundary_safe_start(messages: &[AgentMessage], start: usize) -> usize {
+    if start >= messages.len() {
+        return start;
+    }
+
+    if matches!(messages[start], AgentMessage::Tool { .. }) {
+        let mut tool_block_start = start;
+        while tool_block_start > 0
+            && matches!(messages[tool_block_start - 1], AgentMessage::Tool { .. })
+        {
+            tool_block_start -= 1;
+        }
+        if tool_block_start > 0
+            && is_complete_tool_exchange(messages, tool_block_start - 1, tool_block_start)
+        {
+            return tool_block_start - 1;
+        }
+
+        let mut after_tools = start;
+        while after_tools < messages.len()
+            && matches!(messages[after_tools], AgentMessage::Tool { .. })
+        {
+            after_tools += 1;
+        }
+        return after_tools;
+    }
+
+    if has_tool_calls(&messages[start]) && !is_complete_tool_exchange(messages, start, start + 1) {
+        let mut after_exchange = start + 1;
+        while after_exchange < messages.len()
+            && matches!(messages[after_exchange], AgentMessage::Tool { .. })
+        {
+            after_exchange += 1;
+        }
+        return after_exchange;
+    }
+
+    start
+}
+
+fn has_tool_calls(message: &AgentMessage) -> bool {
+    matches!(
+        message,
+        AgentMessage::Assistant {
+            tool_calls: Some(calls),
+            ..
+        } if !calls.is_empty()
+    )
+}
+
+fn is_complete_tool_exchange(
+    messages: &[AgentMessage],
+    assistant_index: usize,
+    first_tool_index: usize,
+) -> bool {
+    let AgentMessage::Assistant {
+        tool_calls: Some(calls),
+        ..
+    } = &messages[assistant_index]
+    else {
+        return false;
+    };
+    if calls.is_empty() || first_tool_index >= messages.len() {
+        return false;
+    }
+
+    let tool_results = messages[first_tool_index..]
+        .iter()
+        .take_while(|message| matches!(message, AgentMessage::Tool { .. }));
+    let result_ids: Vec<&str> = tool_results
+        .filter_map(|message| match message {
+            AgentMessage::Tool { tool_call_id, .. } => Some(tool_call_id.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    result_ids.len() == calls.len()
+        && calls
+            .iter()
+            .all(|call| result_ids.contains(&call.id.as_str()))
+}
 fn compact_from_index(messages: &[AgentMessage], mut start: usize) -> Vec<AgentMessage> {
     while start < messages.len() && matches!(messages[start], AgentMessage::System { .. }) {
         start += 1;
@@ -394,7 +514,98 @@ fn extract_session_insights(messages: &[AgentMessage]) -> (Vec<String>, Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ImageAttachment;
+    use std::collections::HashSet;
+    use threadlane_protocol::{
+        RuntimeToolCall as ToolCall, RuntimeToolCallFunction as ToolCallFunction,
+    };
 
+    fn tool_exchange_fixture(historical_chars: usize) -> Vec<AgentMessage> {
+        vec![
+            AgentMessage::System {
+                content: "system".into(),
+            },
+            AgentMessage::User {
+                content: "older request".into(),
+            },
+            AgentMessage::User {
+                content: "x".repeat(historical_chars),
+            },
+            AgentMessage::Assistant {
+                content: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: "call_1".into(),
+                    r#type: "function".into(),
+                    function: ToolCallFunction {
+                        name: "read_file".into(),
+                        arguments: "{}".into(),
+                    },
+                    thought_signature: None,
+                }]),
+                stop_reason: None,
+                deferred_handle: None,
+            },
+            AgentMessage::Tool {
+                tool_call_id: "call_1".into(),
+                name: "read_file".into(),
+                content: "result".repeat(1_000),
+                is_error: false,
+                terminate: false,
+            },
+            AgentMessage::User {
+                content: "continue".into(),
+            },
+        ]
+    }
+
+    fn assert_valid_tool_pairs(messages: &[AgentMessage]) {
+        let mut pending = HashSet::new();
+        for message in messages {
+            match message {
+                AgentMessage::Assistant {
+                    tool_calls: Some(calls),
+                    ..
+                } if !calls.is_empty() => {
+                    assert!(pending.is_empty(), "tool call missing its result");
+                    pending.extend(calls.iter().map(|call| call.id.as_str()));
+                }
+                AgentMessage::Tool { tool_call_id, .. } => {
+                    assert!(
+                        pending.remove(tool_call_id.as_str()),
+                        "tool result missing its assistant tool call"
+                    );
+                }
+                _ => assert!(pending.is_empty(), "tool call missing its result"),
+            }
+        }
+        assert!(pending.is_empty(), "tool call missing its result");
+    }
+
+    #[test]
+    fn request_estimator_includes_tool_schema_and_images() {
+        let config = AgentConfig::default();
+        let messages = vec![AgentMessage::UserWithImages {
+            content: "x".repeat(400),
+            images: vec![ImageAttachment {
+                display_name: "image.png".into(),
+                data_url: "data:image/png;base64,AA==".into(),
+            }],
+        }];
+        assert_eq!(
+            estimate_request_tokens(&messages, Some(&"t".repeat(400)), &config),
+            1_400
+        );
+    }
+
+    #[test]
+    fn budget_compaction_retains_complete_tool_exchange() {
+        let messages = tool_exchange_fixture(12_000);
+        let result = compact_for_budget(&messages, None, 1_000, &AgentConfig::default()).unwrap();
+        assert!(compaction_summary_text(&result.messages[1]).is_some());
+        assert_valid_tool_pairs(&result.messages);
+        assert!(result.post_tokens < result.pre_tokens);
+        assert!(result.compacted_messages > 0);
+    }
     #[test]
     fn test_compact_messages() {
         let mut msgs = vec![AgentMessage::System {
@@ -428,7 +639,15 @@ mod tests {
         });
         msgs.push(AgentMessage::Assistant {
             content: None,
-            tool_calls: Some(vec![]),
+            tool_calls: Some(vec![ToolCall {
+                id: "call_1".into(),
+                r#type: "function".into(),
+                function: ToolCallFunction {
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                },
+                thought_signature: None,
+            }]),
             stop_reason: None,
             deferred_handle: None,
         });
@@ -443,6 +662,7 @@ mod tests {
         let compacted = compact_messages_to_token_budget(&msgs, 1);
         assert!(matches!(compacted[2], AgentMessage::Assistant { .. }));
         assert!(matches!(compacted[3], AgentMessage::Tool { .. }));
+        assert_valid_tool_pairs(&compacted);
     }
 
     #[test]
