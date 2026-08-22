@@ -1196,7 +1196,20 @@ mod compaction_sync_tests {
         MAX_PERSISTED_SYSTEM_PROMPT_BYTES,
     };
     use crate::system_prompt::SystemPromptConfig;
-    use threadlane_runtime::{harness::JsonlStore, AgentMessage};
+    use crate::CodingSessionHarness;
+    use async_trait::async_trait;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use threadlane_protocol::{
+        DeferredResponse, ProviderPort, RuntimeRequest, RuntimeStreamEvent, RuntimeToolCall,
+        RuntimeToolCallFunction, RuntimeUsage,
+    };
+    use threadlane_runtime::{
+        harness::{AgentHarness, CompactionReason, JsonlStore},
+        AgentConfig, AgentMessage, AgentRuntime, Record,
+    };
 
     fn summary() -> AgentMessage {
         AgentMessage::Custom {
@@ -1304,5 +1317,177 @@ mod compaction_sync_tests {
             .entries()
             .iter()
             .all(|entry| entry.parent_id.as_deref() != Some("node_69")));
+    }
+
+    struct LongToolLoopProvider {
+        attempts: AtomicUsize,
+        max_request_estimate: AtomicUsize,
+        context_budget: usize,
+    }
+
+    impl LongToolLoopProvider {
+        fn attempts(&self) -> usize {
+            self.attempts.load(Ordering::SeqCst)
+        }
+
+        fn max_request_estimate(&self) -> usize {
+            self.max_request_estimate.load(Ordering::SeqCst)
+        }
+
+        fn context_budget(&self) -> usize {
+            self.context_budget
+        }
+    }
+
+    #[async_trait]
+    impl ProviderPort for LongToolLoopProvider {
+        async fn stream_request(
+            &self,
+            request: RuntimeRequest,
+            events: tokio::sync::mpsc::Sender<RuntimeStreamEvent>,
+        ) {
+            let estimate = request.messages.to_string().len().div_ceil(4)
+                + request.tools.to_string().len().div_ceil(4);
+            self.max_request_estimate
+                .fetch_max(estimate, Ordering::SeqCst);
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            let tool_calls = if attempt < 102 {
+                vec![RuntimeToolCall {
+                    id: format!("loop-{attempt}"),
+                    r#type: "function".into(),
+                    function: RuntimeToolCallFunction {
+                        name: "reported_session_shape_tool".into(),
+                        arguments: serde_json::json!({
+                            "cached_result": "x".repeat(8_192),
+                            "attempt": attempt,
+                        })
+                        .to_string(),
+                    },
+                    thought_signature: None,
+                }]
+            } else {
+                Vec::new()
+            };
+            if tool_calls.is_empty() {
+                let _ = events
+                    .send(RuntimeStreamEvent::ContentToken("complete".into()))
+                    .await;
+            }
+            let _ = events
+                .send(RuntimeStreamEvent::Finished {
+                    tool_calls,
+                    usage: RuntimeUsage::default(),
+                })
+                .await;
+        }
+
+        async fn fetch_deferred(
+            &self,
+            _model: &str,
+            _handle_id: &str,
+        ) -> Result<DeferredResponse, String> {
+            Ok(DeferredResponse::Pending)
+        }
+
+        async fn cancel_deferred(&self, _model: &str, _handle_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn provider_kind(&self, _model: &str) -> &'static str {
+            "test"
+        }
+    }
+
+    #[tokio::test]
+    async fn long_cached_tool_loop_compacts_before_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reported-session-shape.jsonl");
+        let durable_harness = CodingSessionHarness::open(&path).unwrap();
+        let run_id = format!(
+            "foreground-{}",
+            durable_harness.store.store().next_sequence()
+        );
+        let runtime_harness = AgentHarness::with_events_and_hooks(
+            durable_harness.store.store().clone(),
+            durable_harness.events.clone(),
+            durable_harness.hooks.clone(),
+        );
+        drop(durable_harness);
+
+        let provider = Arc::new(LongToolLoopProvider {
+            attempts: AtomicUsize::new(0),
+            max_request_estimate: AtomicUsize::new(0),
+            context_budget: 128_000,
+        });
+        let mut runtime = AgentRuntime::from_harness_with_provider(
+            "",
+            None,
+            "reported-session-shape-model",
+            runtime_harness,
+            AgentConfig::default(),
+            provider.clone(),
+        );
+        let trace_harness = Arc::new(tokio::sync::Mutex::new(
+            CodingSessionHarness::open(&path).unwrap(),
+        ));
+        let boundary_harness = trace_harness.clone();
+        let boundary_run_id = run_id.clone();
+        runtime.set_provider_boundary_preparer(Some(Arc::new(move |request| {
+            let harness = boundary_harness.clone();
+            let run_id = boundary_run_id.clone();
+            Box::pin(async move {
+                harness.lock().await.prepare_provider_boundary(
+                    &run_id,
+                    request,
+                    &AgentConfig::default(),
+                )
+            })
+        })));
+        let provider_harness = trace_harness.clone();
+        let provider_run_id = run_id.clone();
+        runtime.set_provider_trace_recorder(Some(Arc::new(move |event| {
+            let harness = provider_harness.clone();
+            let run_id = provider_run_id.clone();
+            Box::pin(async move { harness.lock().await.record_provider_trace(&run_id, event) })
+        })));
+        let message_harness = trace_harness.clone();
+        runtime.set_message_recorder(Some(Arc::new(move |message| {
+            let harness = message_harness.clone();
+            Box::pin(async move { harness.lock().await.append_message(message).map(|_| ()) })
+        })));
+
+        runtime.prompt("continue the cached tool loop").await;
+        drop(runtime);
+        drop(trace_harness);
+
+        let store = JsonlStore::open(&path).unwrap();
+        assert_eq!(provider.attempts(), 102);
+        assert!(provider.max_request_estimate() < provider.context_budget());
+        assert!(store.records().iter().any(|record| matches!(
+            record,
+            Record::ContextCompacted {
+                reason: CompactionReason::AdaptiveBudget,
+                ..
+            }
+        )));
+        let compaction_seq = store
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                Record::ContextCompacted { seq, .. } => Some(*seq),
+                _ => None,
+            })
+            .next()
+            .unwrap();
+        let next_provider_start_seq = store
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                Record::ProviderRequestStarted { seq, .. } if *seq > compaction_seq => Some(*seq),
+                _ => None,
+            })
+            .next()
+            .unwrap();
+        assert!(compaction_seq < next_provider_start_seq);
     }
 }

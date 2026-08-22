@@ -3382,21 +3382,33 @@ mod tests {
     }
 
     #[test]
-    fn context_window_uses_latest_manifest_not_cumulative_usage() {
+    fn reported_session_shape_keeps_total_processed_separate() {
         let path = context_fixture_path();
         let projection = compute_full_session_projection(&path).unwrap();
         let mut state = AppState::load_from_registry(Vec::new());
         activate_test_session(&mut state, "context-session", &path);
         state.apply_session_hydration("context-session", &path, projection);
-        let context = state.active_context_window().unwrap();
-        assert_eq!(context.current_tokens, 103_732);
-        assert_eq!(context.context_limit, 1_000_000);
-        assert_eq!(context.effective_model, "gpt-5.6-sol");
-        assert!(!context.context_limit_is_estimate);
-        assert_eq!(
-            state.active_session_metrics().billed_input_tokens(),
-            11_734_912
-        );
+
+        let projected_context = state.active_context_window().unwrap();
+        let projected_metrics = state.active_session_metrics();
+        assert!(projected_metrics.billed_input_tokens() > projected_context.context_limit);
+        assert!(projected_context.current_tokens < projected_context.context_limit);
+        assert_eq!(projected_context.current_tokens, 103_732);
+        assert_eq!(projected_context.context_limit, 1_000_000);
+        assert_eq!(projected_context.effective_model, "gpt-5.6-sol");
+        assert!(!projected_context.context_limit_is_estimate);
+
+        let reloaded = compute_session_messages(&path).unwrap();
+        assert!(reloaded.iter().any(|message| {
+            message.role == MessageRole::ContextMarker
+                && message.content == "Context compacted · 742k → 118k"
+        }));
+        assert!(reloaded
+            .iter()
+            .any(|message| { message.role == MessageRole::User && message.content == "before" }));
+        assert!(reloaded.iter().any(|message| {
+            message.role == MessageRole::Assistant && message.content == "after"
+        }));
         std::fs::remove_file(path).ok();
     }
 
