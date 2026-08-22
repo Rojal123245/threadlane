@@ -46,6 +46,7 @@ pub enum MessageRole {
     System,
     Advisor(threadlane_session::AdvisorSeverity),
     Error,
+    ContextMarker,
 }
 
 #[derive(Clone, Debug)]
@@ -136,6 +137,18 @@ impl SessionMetricsInfo {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ContextWindowInfo {
+    pub(crate) current_tokens: u64,
+    pub(crate) context_limit: u64,
+    pub(crate) context_limit_is_estimate: bool,
+    pub(crate) effective_model: String,
+    pub(crate) compaction_generation: u64,
+    pub(crate) last_compacted_at: Option<u64>,
+    pub(crate) provisional: bool,
+    pub(crate) estimating: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct ChatMessageInfo {
     pub(crate) id: String,
@@ -194,6 +207,7 @@ pub(crate) struct SessionProjectionResult {
     pub(crate) diagnostics: threadlane_session::harness::SessionDiagnostics,
     pub(crate) metrics: SessionMetricsInfo,
     pub(crate) token_usage: TokenUsage,
+    pub(crate) context_window: Option<ContextWindowInfo>,
 }
 
 pub struct AppState {
@@ -214,6 +228,7 @@ pub struct AppState {
     trajectory_revision: u64,
     diagnostics_by_session: HashMap<String, threadlane_session::harness::SessionDiagnostics>,
     session_metrics: HashMap<String, SessionMetricsInfo>,
+    context_windows: HashMap<String, ContextWindowInfo>,
     stashed_prompts: HashMap<String, String>,
     pub(crate) pending_permissions: HashMap<String, threadlane_session::PermissionRequest>,
     pub(crate) pending_hydrations: Vec<SessionHydrationRequest>,
@@ -395,10 +410,64 @@ pub fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
 pub(crate) fn compute_session_messages(
     session_file: &Path,
 ) -> Result<Vec<ChatMessageInfo>, String> {
-    let store = JsonlStore::open_read_only(session_file).map_err(|error| error.to_string())?;
-    // UI history remains the complete durable chronological transcript. It is
-    // distinct from the compacted branch used as model context.
-    Ok(project_agent_messages(store.transcript("main").messages()))
+    use threadlane_session::harness::{read_transcript_page, TranscriptItem};
+
+    // The durable pager is the single transcript source, but exhaust it here:
+    // GPUI state continues to expose complete chronological history.
+    let mut cursor = None;
+    let mut pages = Vec::new();
+    loop {
+        let page =
+            read_transcript_page(session_file, cursor, 40).map_err(|error| error.to_string())?;
+        let has_older = page.has_older;
+        cursor = page.next_cursor;
+        pages.push(page.items);
+        if !has_older {
+            break;
+        }
+    }
+    pages.reverse();
+    let items = pages.into_iter().flatten().collect::<Vec<_>>();
+    let mut rows = Vec::new();
+    let mut messages = Vec::new();
+    let mut segment_start = 0usize;
+    let flush = |messages: &mut Vec<AgentMessage>, rows: &mut Vec<ChatMessageInfo>, start| {
+        for (index, mut row) in project_agent_messages(std::mem::take(messages))
+            .into_iter()
+            .enumerate()
+        {
+            row.id = format!("history-{start}-{index}-{}", row.id);
+            rows.push(row);
+        }
+    };
+    for (item_index, item) in items.into_iter().enumerate() {
+        match item {
+            TranscriptItem::Message(message) => {
+                if messages.is_empty() {
+                    segment_start = item_index;
+                }
+                messages.push(message);
+            }
+            TranscriptItem::ContextCompacted(marker) => {
+                flush(&mut messages, &mut rows, segment_start);
+                rows.push(ChatMessageInfo {
+                    id: format!("history-context-{}", marker.seq),
+                    role: MessageRole::ContextMarker,
+                    content: format!(
+                        "Context compacted · {} → {}",
+                        format_context_marker_tokens(marker.pre_tokens),
+                        format_context_marker_tokens(marker.post_tokens),
+                    ),
+                    tool_activities: Vec::new(),
+                    streaming: false,
+                    reasoning_content: None,
+                    reasoning_expanded: false,
+                });
+            }
+        }
+    }
+    flush(&mut messages, &mut rows, segment_start);
+    Ok(rows)
 }
 
 /// Opens a session JSONL once and builds every UI projection required after hydration.
@@ -408,13 +477,15 @@ pub(crate) fn compute_full_session_projection(
     let store = JsonlStore::open_read_only(session_file).map_err(|error| error.to_string())?;
     let diagnostics = threadlane_session::harness::project_session_diagnostics(&store, "main")
         .map_err(|error| error.to_string())?;
-    let (trajectory, metrics, token_usage) = AppState::project_trajectory_from_store(&store);
+    let (trajectory, metrics, token_usage, context_window) =
+        AppState::project_trajectory_from_store(&store);
     Ok(SessionProjectionResult {
         plan: store.plan(),
         trajectory,
         diagnostics,
         metrics,
         token_usage,
+        context_window,
     })
 }
 
@@ -469,6 +540,11 @@ fn tool_activity_display_summary(summary: &str) -> String {
     } else {
         first_line.to_string()
     }
+}
+
+fn format_context_marker_tokens(tokens: usize) -> String {
+    let formatted = crate::model_catalog::format_tokens(tokens.min(u32::MAX as usize) as u32);
+    formatted.replace(".0k", "k").replace(".0M", "M")
 }
 
 fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageInfo> {
@@ -704,6 +780,7 @@ impl AppState {
             trajectory_revision: 0,
             diagnostics_by_session: HashMap::new(),
             session_metrics: HashMap::new(),
+            context_windows: HashMap::new(),
             stashed_prompts: HashMap::new(),
             selected_model,
             model_roles: threadlane_session::ModelRoles::default(),
@@ -1281,6 +1358,12 @@ impl AppState {
         self.trajectory_revision = self.trajectory_revision.wrapping_add(1);
         self.session_metrics
             .insert(session_id.into(), result.metrics);
+        if let Some(context_window) = result.context_window {
+            self.context_windows
+                .insert(session_id.into(), context_window);
+        } else {
+            self.context_windows.remove(session_id);
+        }
         self.session_token_usage
             .insert(session_id.into(), result.token_usage);
         Ok(())
@@ -1289,7 +1372,12 @@ impl AppState {
     /// Projects trajectory entries, token usage, and metrics from an already-open store.
     fn project_trajectory_from_store(
         store: &JsonlStore,
-    ) -> (Vec<TrajectoryEntry>, SessionMetricsInfo, TokenUsage) {
+    ) -> (
+        Vec<TrajectoryEntry>,
+        SessionMetricsInfo,
+        TokenUsage,
+        Option<ContextWindowInfo>,
+    ) {
         let mut trajectory: Vec<TrajectoryEntry> = Vec::new();
         let mut metrics = SessionMetricsInfo::default();
         let mut durable_usage = TokenUsage::default();
@@ -2104,7 +2192,122 @@ impl AppState {
             }
         }
 
-        (trajectory, metrics, durable_usage)
+        let context_window = Self::project_context_window(store);
+        (trajectory, metrics, durable_usage, context_window)
+    }
+
+    fn project_context_window(store: &JsonlStore) -> Option<ContextWindowInfo> {
+        use threadlane_session::harness::Record;
+        let manifest = store
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                Record::ContextManifestCaptured {
+                    seq,
+                    lane,
+                    run_id,
+                    attempt,
+                    request_id,
+                    total_estimated_tokens,
+                    effective_model,
+                    context_limit,
+                    context_limit_is_estimate,
+                    compaction_generation,
+                    ..
+                } if lane == "main" => Some((
+                    *seq,
+                    run_id,
+                    *attempt,
+                    request_id.as_str(),
+                    *total_estimated_tokens,
+                    effective_model.as_ref().map(|value| value.as_str()),
+                    *context_limit,
+                    *context_limit_is_estimate,
+                    *compaction_generation,
+                )),
+                _ => None,
+            })
+            .max_by_key(|value| value.0)?;
+        let compaction = store
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                Record::ContextCompacted {
+                    seq,
+                    lane,
+                    timestamp,
+                    generation,
+                    effective_model,
+                    context_limit,
+                    context_limit_is_estimate,
+                    post_tokens,
+                    ..
+                } if lane == "main" => Some((
+                    *generation,
+                    *seq,
+                    *timestamp,
+                    effective_model.as_str(),
+                    *context_limit,
+                    *context_limit_is_estimate,
+                    *post_tokens,
+                )),
+                _ => None,
+            })
+            .max_by_key(|value| (value.0, value.1));
+        let (
+            manifest_seq,
+            run_id,
+            attempt,
+            request_id,
+            token_estimate,
+            persisted_model,
+            persisted_limit,
+            persisted_limit_estimate,
+            manifest_generation,
+        ) = manifest;
+        let effective_model = persisted_model
+            .map(str::to_owned)
+            .or_else(|| {
+                store.records().iter().find_map(|record| match record {
+                    Record::ProviderRequestStarted {
+                        run_id: candidate_run,
+                        attempt: candidate_attempt,
+                        request_id: Some(candidate_request),
+                        model,
+                        ..
+                    } if candidate_run == run_id
+                        && *candidate_attempt == attempt
+                        && candidate_request.as_str() == request_id =>
+                    {
+                        Some(model.as_str().to_owned())
+                    }
+                    _ => None,
+                })
+            })
+            .unwrap_or_default();
+        let mut info = ContextWindowInfo {
+            current_tokens: u64::from(token_estimate.unwrap_or_default()),
+            context_limit: persisted_limit.map(|value| value.min(u64::MAX as usize) as u64)
+                .unwrap_or_else(|| u64::from(crate::model_catalog::model_context_window(&effective_model))),
+            context_limit_is_estimate: persisted_limit.is_none() || persisted_limit_estimate,
+            effective_model,
+            compaction_generation: manifest_generation,
+            last_compacted_at: compaction.map(|value| value.2),
+            provisional: false,
+            estimating: store.records().iter().any(|record| matches!(record,
+                Record::ProviderRequestStarted { seq, lane, .. } if lane == "main" && *seq > manifest_seq)),
+        };
+        if let Some((generation, _, _, model, limit, estimated, post_tokens)) = compaction {
+            if generation > manifest_generation {
+                info.current_tokens = post_tokens.min(u64::MAX as usize) as u64;
+                info.context_limit = limit.min(u64::MAX as usize) as u64;
+                info.context_limit_is_estimate = estimated;
+                info.effective_model = model.to_owned();
+                info.compaction_generation = generation;
+                info.provisional = true;
+            }
+        }
+        Some(info)
     }
 
     /// Applies a completed background projection if its session remains active.
@@ -2141,6 +2344,12 @@ impl AppState {
             .insert(session_id.to_owned(), result.diagnostics);
         self.session_metrics
             .insert(session_id.to_owned(), result.metrics);
+        if let Some(context_window) = result.context_window {
+            self.context_windows
+                .insert(session_id.to_owned(), context_window);
+        } else {
+            self.context_windows.remove(session_id);
+        }
         self.session_token_usage
             .insert(session_id.to_owned(), result.token_usage);
     }
@@ -2380,6 +2589,12 @@ impl AppState {
             .and_then(|id| self.session_metrics.get(id))
             .cloned()
             .unwrap_or_default()
+    }
+
+    pub(crate) fn active_context_window(&self) -> Option<&ContextWindowInfo> {
+        self.active_session_id
+            .as_ref()
+            .and_then(|id| self.context_windows.get(id))
     }
 
     pub(crate) fn chat_stream_pending(&self) -> bool {
@@ -3004,6 +3219,241 @@ mod tests {
     use threadlane_session::harness::{
         OperationIntent, OperationOutcome, ProviderOutcome, Record, SessionStore, TraceString,
     };
+
+    fn context_fixture_path() -> PathBuf {
+        use threadlane_session::harness::{CompactionReason, Entry, SurfaceOperation, UsageCause};
+        let path = std::env::temp_dir().join(format!(
+            "threadlane-gpui-context-{}-{}.jsonl",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut store = JsonlStore::open(&path).unwrap();
+        store
+            .append_record(Record::OperationStarted {
+                id: "run".into(),
+                seq: 0,
+                lane: "main".into(),
+                timestamp: 0,
+                source_leaf_id: None,
+                intent: OperationIntent::Run,
+            })
+            .unwrap();
+        store
+            .append_entry(Entry {
+                id: "user".into(),
+                parent_id: None,
+                lane: "main".into(),
+                seq: 1,
+                timestamp: 1,
+                message: AgentMessage::User {
+                    content: "before".into(),
+                },
+                surface_op: SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
+        store
+            .append_record(Record::ContextCompacted {
+                id: "compact".into(),
+                seq: 2,
+                lane: "main".into(),
+                timestamp: 20,
+                run_id: "run".into(),
+                generation: 1,
+                reason: CompactionReason::AdaptiveBudget,
+                effective_model: TraceString::new("gpt-5.6-sol").unwrap(),
+                context_limit: 1_000_000,
+                context_limit_is_estimate: false,
+                pre_tokens: 742_000,
+                post_tokens: 118_000,
+                retained_tail_target: 0,
+                retained_tail_tokens: 0,
+                compacted_messages: 1,
+            })
+            .unwrap();
+        store
+            .append_entry(Entry {
+                id: "assistant".into(),
+                parent_id: Some("user".into()),
+                lane: "main".into(),
+                seq: 3,
+                timestamp: 3,
+                message: AgentMessage::Assistant {
+                    content: Some("after".into()),
+                    tool_calls: None,
+                    stop_reason: None,
+                    deferred_handle: None,
+                },
+                surface_op: SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
+        store
+            .append_record(Record::ProviderRequestStarted {
+                id: "provider".into(),
+                seq: 4,
+                lane: "main".into(),
+                timestamp: 4,
+                run_id: "run".into(),
+                attempt: 1,
+                provider: TraceString::new("openai").unwrap(),
+                model: TraceString::new("gpt-5.6-sol").unwrap(),
+                request_id: Some(TraceString::new("req").unwrap()),
+            })
+            .unwrap();
+        store
+            .append_record(Record::ContextManifestCaptured {
+                id: "manifest".into(),
+                seq: 5,
+                lane: "main".into(),
+                timestamp: 5,
+                run_id: "run".into(),
+                attempt: 1,
+                request_id: TraceString::new("req").unwrap(),
+                total_estimated_tokens: Some(103_732),
+                effective_model: Some(TraceString::new("gpt-5.6-sol").unwrap()),
+                context_limit: Some(1_000_000),
+                context_limit_is_estimate: false,
+                compaction_generation: 1,
+                items: Vec::new(),
+            })
+            .unwrap();
+        store
+            .append_record(Record::Usage {
+                id: "usage".into(),
+                seq: 6,
+                lane: "main".into(),
+                timestamp: 6,
+                run_id: Some("run".into()),
+                cause: UsageCause::Provider,
+                entry_id: None,
+                tool_call_id: None,
+                attempt: Some(1),
+                usage: TokenUsage {
+                    input_tokens: 11_734_912,
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        path
+    }
+
+    #[test]
+    fn context_window_uses_latest_manifest_not_cumulative_usage() {
+        let path = context_fixture_path();
+        let projection = compute_full_session_projection(&path).unwrap();
+        let mut state = AppState::load_from_registry(Vec::new());
+        state.active_session_id = Some("context-session".into());
+        state.apply_session_hydration("context-session", &path, projection);
+        let context = state.active_context_window().unwrap();
+        assert_eq!(context.current_tokens, 103_732);
+        assert_eq!(context.context_limit, 1_000_000);
+        assert_eq!(context.effective_model, "gpt-5.6-sol");
+        assert!(!context.context_limit_is_estimate);
+        assert_eq!(
+            state.active_session_metrics().billed_input_tokens(),
+            11_734_912
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn model_switch_estimation_keeps_latest_manifest_model() {
+        let path = context_fixture_path();
+        let mut store = JsonlStore::open(&path).unwrap();
+        store
+            .append_record(Record::ProviderRequestStarted {
+                id: "next-provider".into(),
+                seq: 7,
+                lane: "main".into(),
+                timestamp: 7,
+                run_id: "run".into(),
+                attempt: 2,
+                provider: TraceString::new("openai").unwrap(),
+                model: TraceString::new("unused-new-model").unwrap(),
+                request_id: Some(TraceString::new("next-request").unwrap()),
+            })
+            .unwrap();
+        drop(store);
+        let context = compute_full_session_projection(&path)
+            .unwrap()
+            .context_window
+            .unwrap();
+        assert!(context.estimating);
+        assert_eq!(context.effective_model, "gpt-5.6-sol");
+        assert_eq!(context.context_limit, 1_000_000);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn transcript_marker_survives_reload_without_summary_content() {
+        let path = context_fixture_path();
+        let first = compute_session_messages(&path).unwrap();
+        let second = compute_session_messages(&path).unwrap();
+        let marker = first
+            .iter()
+            .find(|message| message.role == MessageRole::ContextMarker)
+            .unwrap();
+        assert_eq!(marker.content, "Context compacted · 742k → 118k");
+        assert_eq!(
+            first.iter().map(|row| &row.id).collect::<Vec<_>>(),
+            second.iter().map(|row| &row.id).collect::<Vec<_>>()
+        );
+        assert!(!first
+            .iter()
+            .any(|message| message.content.contains("Summary of prior conversation")));
+        assert_eq!(
+            first
+                .iter()
+                .map(|row| row.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["before", "Context compacted · 742k → 118k", "after"]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn legacy_session_without_compaction_has_no_fabricated_marker() {
+        let path = std::env::temp_dir().join(format!(
+            "threadlane-gpui-legacy-{}.jsonl",
+            std::process::id()
+        ));
+        let mut store = JsonlStore::open(&path).unwrap();
+        store
+            .append_record(Record::ContextManifestCaptured {
+                id: "manifest".into(),
+                seq: 1,
+                lane: "main".into(),
+                timestamp: 1,
+                run_id: "legacy".into(),
+                attempt: 1,
+                request_id: TraceString::new("request").unwrap(),
+                total_estimated_tokens: Some(99),
+                effective_model: None,
+                context_limit: None,
+                context_limit_is_estimate: false,
+                compaction_generation: 0,
+                items: Vec::new(),
+            })
+            .unwrap();
+        drop(store);
+        assert!(compute_session_messages(&path)
+            .unwrap()
+            .iter()
+            .all(|message| message.role != MessageRole::ContextMarker));
+        assert_eq!(
+            compute_full_session_projection(&path)
+                .unwrap()
+                .context_window
+                .unwrap()
+                .last_compacted_at,
+            None
+        );
+        std::fs::remove_file(path).ok();
+    }
 
     fn apply_pending_hydration(state: &mut AppState) {
         let request = state.pending_hydrations.pop().unwrap();

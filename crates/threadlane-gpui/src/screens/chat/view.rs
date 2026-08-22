@@ -2319,27 +2319,31 @@ impl ChatListView {
                             }),
                     )
             }
-            MessageRole::System => div().flex().justify_center().my_2().child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(msg.content.clone())
-                    .context_menu({
-                        let content = msg.content.clone();
-                        move |menu, _window, _cx| {
-                            let text = content.clone();
-                            menu.item(PopupMenuItem::new("Copy Message").on_click(
-                                move |_event, window, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-                                    window.push_notification(
-                                        Notification::info("Copied to clipboard"),
-                                        cx,
-                                    );
-                                },
-                            ))
-                        }
-                    }),
-            ),
+            MessageRole::System | MessageRole::ContextMarker => {
+                div().flex().justify_center().my_2().child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(msg.content.clone())
+                        .context_menu({
+                            let content = msg.content.clone();
+                            move |menu, _window, _cx| {
+                                let text = content.clone();
+                                menu.item(PopupMenuItem::new("Copy Message").on_click(
+                                    move |_event, window, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            text.clone(),
+                                        ));
+                                        window.push_notification(
+                                            Notification::info("Copied to clipboard"),
+                                            cx,
+                                        );
+                                    },
+                                ))
+                            }
+                        }),
+                )
+            }
             MessageRole::Advisor(severity) => {
                 let (badge_text, bg_color, border_color, text_color) = match severity {
                     threadlane_session::AdvisorSeverity::Aside => (
