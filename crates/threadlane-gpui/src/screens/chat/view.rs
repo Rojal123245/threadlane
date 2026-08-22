@@ -62,10 +62,6 @@ enum TrajectoryInspectorTab {
     Source,
 }
 
-fn should_use_markdown(streaming: bool) -> bool {
-    !streaming
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MarkdownUpdate<'a> {
     Unchanged,
@@ -2102,9 +2098,6 @@ impl ChatListView {
                 .text_xs()
                 .text_color(theme.muted_foreground)
                 .overflow_y_scrollbar();
-            if !should_use_markdown(is_streaming) {
-                return container.child(reasoning.to_string()).into_any_element();
-            }
             let markdown_state =
                 self.markdown_state(format!("reasoning-{}", msg.id), reasoning, cx);
             container
@@ -2188,18 +2181,14 @@ impl ChatListView {
                             .gap_2()
                             .children(reasoning_element)
                             .children(if !msg.content.is_empty() {
-                                let content_element =
-                                    div().w_full().text_sm().text_color(theme.foreground);
-                                let content_element = if !should_use_markdown(msg.streaming) {
-                                    content_element
-                                        .child(msg.content.clone())
-                                        .into_any_element()
-                                } else {
-                                    let markdown_state =
-                                        self.markdown_state(msg.id.clone(), &msg.content, cx);
-                                    let markdown = TextView::new(&markdown_state).selectable(true);
-                                    content_element.child(markdown).into_any_element()
-                                };
+                                let markdown_state =
+                                    self.markdown_state(msg.id.clone(), &msg.content, cx);
+                                let content_element = div()
+                                    .w_full()
+                                    .text_sm()
+                                    .text_color(theme.foreground)
+                                    .child(TextView::new(&markdown_state).selectable(true))
+                                    .into_any_element();
 
                                 Some(if msg.streaming {
                                     div()
