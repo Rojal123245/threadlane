@@ -187,6 +187,7 @@ impl TranscriptPage {
 const TRANSCRIPT_READ_CHUNK_BYTES: usize = 64 * 1024;
 const ATOMIC_FRAME_SENTINEL: &str = "#!threadlane-atomic-v1 ";
 const TORN_EOF_SENTINEL: &str = "#!threadlane-torn-eof-v1";
+const LEGACY_ATOMIC_FRAME_PREFIX: &str = "{\"atomic_batch\":[";
 
 /// Reads one chronological page of main-lane transcript items by scanning
 /// backward from an opaque byte cursor. This deliberately avoids opening a
@@ -1030,8 +1031,9 @@ fn prepare_append_boundary(file: &mut fs::File) -> io::Result<()> {
         return Ok(());
     }
     let tail = data.rsplit(|byte| *byte == b'\n').next().unwrap_or(&data);
-    if serde_json::from_slice::<serde_json::Value>(tail).is_err()
-        && !tail.starts_with(ATOMIC_FRAME_SENTINEL.as_bytes())
+    let payload = atomic_frame_payload(tail).unwrap_or(tail);
+    if serde_json::from_slice::<serde_json::Value>(payload).is_err()
+        && is_atomic_frame_fragment(tail)
     {
         file.write_all(TORN_EOF_SENTINEL.as_bytes())?;
     }
@@ -1247,6 +1249,14 @@ fn atomic_frame_payload(bytes: &[u8]) -> Option<&[u8]> {
     bytes.strip_prefix(ATOMIC_FRAME_SENTINEL.as_bytes())
 }
 
+fn is_atomic_frame_fragment(bytes: &[u8]) -> bool {
+    !bytes.is_empty()
+        && (ATOMIC_FRAME_SENTINEL.as_bytes().starts_with(bytes)
+            || bytes.starts_with(ATOMIC_FRAME_SENTINEL.as_bytes())
+            || LEGACY_ATOMIC_FRAME_PREFIX.as_bytes().starts_with(bytes)
+            || bytes.starts_with(LEGACY_ATOMIC_FRAME_PREFIX.as_bytes()))
+}
+
 fn read_strict<T: DeserializeOwned>(path: &Path) -> io::Result<Vec<T>> {
     if !path.exists() {
         return Ok(Vec::new());
@@ -1258,18 +1268,15 @@ fn read_strict<T: DeserializeOwned>(path: &Path) -> io::Result<Vec<T>> {
         if line.trim().is_empty() {
             continue;
         }
-        let is_torn_tail = index == count - 1 && !data.ends_with('\n');
+        let is_physical_eof = index == count - 1 && !data.ends_with('\n');
         let payload = line.strip_prefix(ATOMIC_FRAME_SENTINEL).unwrap_or(line);
         match serde_json::from_str(payload) {
             Ok(value) => values.push(value),
-            Err(_error) if is_torn_tail => break,
-            // Quarantine only the reserved atomic envelope, including every
-            // possible partial sentinel. Unrelated malformed lines stay fatal.
+            Err(_error) if is_physical_eof && is_atomic_frame_fragment(line.as_bytes()) => break,
             Err(_error)
-                if ATOMIC_FRAME_SENTINEL.starts_with(line)
-                    || line.starts_with(ATOMIC_FRAME_SENTINEL)
-                    || line.ends_with(TORN_EOF_SENTINEL)
-                    || line.starts_with("{\"atomic_batch\":[") =>
+                if line
+                    .strip_suffix(TORN_EOF_SENTINEL)
+                    .is_some_and(|fragment| is_atomic_frame_fragment(fragment.as_bytes())) =>
             {
                 continue
             }
@@ -1291,6 +1298,7 @@ mod tests {
     use super::{
         append_atomic_batch_line, read_entries, read_transcript_page, AtomicBatchItem,
         AtomicBatchLine, SyncPolicy, TranscriptCursor, TranscriptItem, ATOMIC_FRAME_SENTINEL,
+        LEGACY_ATOMIC_FRAME_PREFIX, TORN_EOF_SENTINEL,
     };
     use crate::harness::{
         AgentHarness, CompactionReason, ContextItemSource, ContextItemStatus, ContextManifestItem,
@@ -1591,6 +1599,41 @@ mod tests {
         .unwrap();
 
         assert!(JsonlStore::open(&path).is_err());
+    }
+
+    fn assert_completed_malformed_line_is_rejected(name: &str, line: &[u8]) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(name);
+        let mut bytes = line.to_vec();
+        bytes.push(b'\n');
+        std::fs::write(&path, bytes).unwrap();
+        assert!(JsonlStore::open(&path).is_err());
+    }
+
+    #[test]
+    fn strict_open_rejects_completed_partial_atomic_sentinel_prefix() {
+        assert_completed_malformed_line_is_rejected(
+            "partial-sentinel.jsonl",
+            &ATOMIC_FRAME_SENTINEL.as_bytes()[..10],
+        );
+    }
+
+    #[test]
+    fn strict_open_rejects_completed_full_atomic_sentinel_junk() {
+        let line = format!("{ATOMIC_FRAME_SENTINEL}junk");
+        assert_completed_malformed_line_is_rejected("sentinel-junk.jsonl", line.as_bytes());
+    }
+
+    #[test]
+    fn strict_open_rejects_completed_arbitrary_torn_eof_suffix() {
+        let line = format!("junk{TORN_EOF_SENTINEL}");
+        assert_completed_malformed_line_is_rejected("torn-suffix.jsonl", line.as_bytes());
+    }
+
+    #[test]
+    fn strict_open_rejects_completed_legacy_atomic_json_prefix() {
+        let line = format!("{LEGACY_ATOMIC_FRAME_PREFIX}junk");
+        assert_completed_malformed_line_is_rejected("legacy-prefix.jsonl", line.as_bytes());
     }
 
     #[cfg(unix)]

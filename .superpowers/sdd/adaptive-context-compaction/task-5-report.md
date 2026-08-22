@@ -141,3 +141,20 @@ Final verification (2026-08-22):
 - `git diff --check` — PASS.
 
 Unchanged warnings: one unused session test import and five GPUI dead-code warnings.
+
+## Strict JSONL recovery-boundary closure
+
+- `read_strict` now quarantines malformed atomic fragments only when they are the unterminated physical EOF tail or carry the reserved torn-EOF continuation marker and match the modern/legacy atomic framing prefix. Newline-terminated malformed lines that merely resemble a framing sentinel, suffix, or legacy prefix are rejected.
+- Append-boundary sealing now validates the payload behind the modern sentinel and marks only recognizable malformed atomic fragments. This preserves append-only recovery and makes every modern frame cut explicit before a later append.
+- Four negative fixtures cover completed partial-sentinel, full-sentinel junk, arbitrary torn-suffix, and legacy atomic-prefix lines. The exhaustive every-byte-cut fixture still proves later append/reopen recovery and preservation of every prior byte.
+
+Verification:
+
+- `cargo test -p threadlane-runtime harness::jsonl::tests:: -- --nocapture` — PASS, 23 tests.
+- `cargo test -p threadlane-runtime` — PASS, 95 tests; 2 performance and 2 doc tests ignored.
+- `cargo test -p threadlane-session` — PASS, 119 tests.
+- `cargo check -p threadlane-gpui` — PASS.
+- `cargo fmt --all -- --check` — PASS.
+- `git diff --check` — PASS.
+
+Warnings remain unchanged: one unused session test import and five GPUI dead-code warnings.
