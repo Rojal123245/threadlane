@@ -80,9 +80,42 @@ pub struct SettingsView {
     capability_status: Option<String>,
     auth_tx: Sender<ProviderAuthEvent>,
     settings_tx: Sender<SettingsEvent>,
-    auth_message: Option<String>,
+    auth_message: Option<AuthStatusMessage>,
     providers_snapshot: Option<ProvidersStatusSnapshot>,
     _subscriptions: Vec<Subscription>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum AuthStatusKind {
+    Info,
+    Success,
+    Error,
+}
+
+#[derive(Clone)]
+struct AuthStatusMessage {
+    text: String,
+    kind: AuthStatusKind,
+}
+
+impl AuthStatusMessage {
+    fn new(text: impl Into<String>, kind: AuthStatusKind) -> Self {
+        Self {
+            text: text.into(),
+            kind,
+        }
+    }
+
+    /// Classifies a legacy free-form status string from `AppState` by content.
+    fn from_legacy(text: String) -> Self {
+        let lower = text.to_lowercase();
+        let kind = if lower.contains("failed") || lower.contains("error") {
+            AuthStatusKind::Error
+        } else {
+            AuthStatusKind::Info
+        };
+        Self { text, kind }
+    }
 }
 
 impl SettingsView {
@@ -136,9 +169,15 @@ impl SettingsView {
                 for event in events {
                     let credentials_changed = matches!(event, ProviderAuthEvent::Connected(_));
                     this.auth_message = Some(match event {
-                        ProviderAuthEvent::Status(message)
-                        | ProviderAuthEvent::Connected(message)
-                        | ProviderAuthEvent::Error(message) => message,
+                        ProviderAuthEvent::Status(message) => {
+                            AuthStatusMessage::new(message, AuthStatusKind::Info)
+                        }
+                        ProviderAuthEvent::Connected(message) => {
+                            AuthStatusMessage::new(message, AuthStatusKind::Success)
+                        }
+                        ProviderAuthEvent::Error(message) => {
+                            AuthStatusMessage::new(message, AuthStatusKind::Error)
+                        }
                     });
                     if credentials_changed {
                         auth_model.update(cx, |state, cx| {
@@ -1130,11 +1169,18 @@ impl SettingsView {
                                     };
                                     let disconnected = result.is_ok();
                                     this.auth_message = Some(match result {
-                                        Ok(()) if antigravity => {
-                                            "Disconnected Google Antigravity.".to_string()
-                                        }
-                                        Ok(()) => "Disconnected ChatGPT.".to_string(),
-                                        Err(error) => format!("Failed to disconnect: {error}"),
+                                        Ok(()) if antigravity => AuthStatusMessage::new(
+                                            "Disconnected Google Antigravity.",
+                                            AuthStatusKind::Success,
+                                        ),
+                                        Ok(()) => AuthStatusMessage::new(
+                                            "Disconnected ChatGPT.",
+                                            AuthStatusKind::Success,
+                                        ),
+                                        Err(error) => AuthStatusMessage::new(
+                                            format!("Failed to disconnect: {error}"),
+                                            AuthStatusKind::Error,
+                                        ),
                                     });
                                     if disconnected {
                                         model.update(cx, |state, cx| {
@@ -1149,11 +1195,17 @@ impl SettingsView {
                                         provider_auth::start_chatgpt_login(this.auth_tx.clone())
                                     };
                                     this.auth_message = Some(match result {
-                                        Ok(()) if antigravity => {
-                                            "Opening Google Antigravity sign-in...".to_string()
+                                        Ok(()) if antigravity => AuthStatusMessage::new(
+                                            "Opening Google Antigravity sign-in...",
+                                            AuthStatusKind::Info,
+                                        ),
+                                        Ok(()) => AuthStatusMessage::new(
+                                            "Starting ChatGPT sign-in...",
+                                            AuthStatusKind::Info,
+                                        ),
+                                        Err(error) => {
+                                            AuthStatusMessage::new(error, AuthStatusKind::Error)
                                         }
-                                        Ok(()) => "Starting ChatGPT sign-in...".to_string(),
-                                        Err(error) => error,
                                     });
                                 }
                                 cx.notify();
@@ -1255,14 +1307,22 @@ impl SettingsView {
                             if connected {
                                 let result = provider_auth::disconnect_github();
                                 this.auth_message = Some(match result {
-                                    Ok(()) => "Disconnected GitHub.".to_string(),
-                                    Err(err) => format!("Failed to disconnect GitHub: {err}"),
+                                    Ok(()) => AuthStatusMessage::new(
+                                        "Disconnected GitHub.",
+                                        AuthStatusKind::Success,
+                                    ),
+                                    Err(err) => AuthStatusMessage::new(
+                                        format!("Failed to disconnect GitHub: {err}"),
+                                        AuthStatusKind::Error,
+                                    ),
                                 });
                             } else {
                                 let result = provider_auth::connect_github_cli(tx);
                                 if let Err(err) = result {
-                                    this.auth_message =
-                                        Some(format!("GitHub CLI connection: {err}"));
+                                    this.auth_message = Some(AuthStatusMessage::new(
+                                        format!("GitHub CLI connection: {err}"),
+                                        AuthStatusKind::Error,
+                                    ));
                                 }
                             }
                             this.refresh_providers_snapshot();
@@ -1306,8 +1366,10 @@ impl SettingsView {
                                 let _ = view.update(cx, |this, cx| {
                                     if val.trim().is_empty() {
                                         let _ = provider_auth::disconnect_github();
-                                        this.auth_message =
-                                            Some("Cleared GitHub token.".to_string());
+                                        this.auth_message = Some(AuthStatusMessage::new(
+                                            "Cleared GitHub token.",
+                                            AuthStatusKind::Success,
+                                        ));
                                     } else {
                                         let _ = provider_auth::save_github_pat(&val, tx);
                                     }
@@ -1405,8 +1467,14 @@ impl SettingsView {
                             if connected {
                                 let result = provider_auth::disconnect_gitlab();
                                 this.auth_message = Some(match result {
-                                    Ok(()) => "Disconnected GitLab.".to_string(),
-                                    Err(err) => format!("Failed to disconnect GitLab: {err}"),
+                                    Ok(()) => AuthStatusMessage::new(
+                                        "Disconnected GitLab.",
+                                        AuthStatusKind::Success,
+                                    ),
+                                    Err(err) => AuthStatusMessage::new(
+                                        format!("Failed to disconnect GitLab: {err}"),
+                                        AuthStatusKind::Error,
+                                    ),
                                 });
                                 this.refresh_providers_snapshot();
                             }
@@ -1544,10 +1612,14 @@ impl SettingsView {
                                                 let result =
                                                     provider_auth::start_chatgpt_login(auth_tx.clone());
                                                 this.auth_message = Some(match result {
-                                                    Ok(()) => {
-                                                        "Starting sign-in for additional account...".to_string()
-                                                    }
-                                                    Err(error) => error,
+                                                    Ok(()) => AuthStatusMessage::new(
+                                                        "Starting sign-in for additional account...",
+                                                        AuthStatusKind::Info,
+                                                    ),
+                                                    Err(error) => AuthStatusMessage::new(
+                                                        error,
+                                                        AuthStatusKind::Error,
+                                                    ),
                                                 });
                                                 cx.notify();
                                             });
@@ -1795,7 +1867,12 @@ impl SettingsView {
 
     fn render_providers(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().colors;
-        let state_status = self.model.read(cx).auth_status_msg.clone();
+        let state_status = self
+            .model
+            .read(cx)
+            .auth_status_msg
+            .clone()
+            .map(AuthStatusMessage::from_legacy);
         let status = self.auth_message.clone().or(state_status);
         let antigravity_connected = self
             .providers_snapshot
@@ -1813,14 +1890,29 @@ impl SettingsView {
             .bg(theme.title_bar)
             .px_4()
             .children(status.map(|status| {
+                let (bg, border, fg) = match status.kind {
+                    AuthStatusKind::Success => (
+                        theme.success.opacity(0.12),
+                        theme.success.opacity(0.4),
+                        theme.success,
+                    ),
+                    AuthStatusKind::Error => (
+                        theme.danger.opacity(0.12),
+                        theme.danger.opacity(0.4),
+                        theme.danger,
+                    ),
+                    AuthStatusKind::Info => (theme.muted, theme.border, theme.foreground),
+                };
                 div()
                     .mt_4()
                     .rounded_md()
-                    .bg(theme.muted)
+                    .border_1()
+                    .border_color(border)
+                    .bg(bg)
                     .p_3()
                     .text_xs()
-                    .text_color(theme.foreground)
-                    .child(TextView::markdown("provider-auth-status", status).selectable(true))
+                    .text_color(fg)
+                    .child(TextView::markdown("provider-auth-status", status.text).selectable(true))
             }))
             .child(self.render_chatgpt_connections(cx))
             .child(self.render_provider_connection(

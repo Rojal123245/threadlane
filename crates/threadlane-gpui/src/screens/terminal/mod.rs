@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
+use gpui_component::ThemeMode;
 use gpui_component::{ActiveTheme, ElementExt, Icon, IconName, Sizable};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
@@ -353,6 +354,19 @@ impl TerminalView {
             return;
         }
 
+        // Platform copy shortcut: copy the selection when one exists, otherwise
+        // fall through so the keystroke still sends ^C to the shell.
+        if modifiers.platform && key.eq_ignore_ascii_case("c") {
+            if let Some(text) = self.selected_text() {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                cx.stop_propagation();
+                return;
+            }
+            self.send(&[0x03]);
+            cx.stop_propagation();
+            return;
+        }
+
         let bytes: Option<Vec<u8>> = if modifiers.control {
             match key.to_ascii_lowercase().as_str() {
                 "v" if !modifiers.platform => cx
@@ -560,25 +574,35 @@ fn rgb_to_hsla(r: u8, g: u8, b: u8) -> Hsla {
     hsla(h, s, l, 1.0)
 }
 
-fn ansi_index_to_hsla(idx: u8) -> Hsla {
+fn ansi_index_to_hsla(idx: u8, is_light_theme: bool) -> Hsla {
+    // The base palette is tuned for dark backgrounds. On light themes the
+    // achromatic entries are inverted and bright chromatic colors are darkened
+    // so they stay legible against a light terminal background.
+    let adjust = |color: Hsla| -> Hsla {
+        if is_light_theme {
+            hsla(color.h, color.s, (color.l - 0.18).max(0.0), color.a)
+        } else {
+            color
+        }
+    };
     match idx {
         // Standard 16 ANSI colors
-        0 => hsla(0.0, 0.0, 0.15, 1.0),    // Black
-        1 => hsla(0.0, 0.75, 0.60, 1.0),   // Red
-        2 => hsla(0.35, 0.65, 0.55, 1.0),  // Green
-        3 => hsla(0.12, 0.80, 0.60, 1.0),  // Yellow
-        4 => hsla(0.60, 0.75, 0.65, 1.0),  // Blue
-        5 => hsla(0.82, 0.65, 0.65, 1.0),  // Magenta
-        6 => hsla(0.50, 0.75, 0.60, 1.0),  // Cyan
-        7 => hsla(0.0, 0.0, 0.85, 1.0),    // White (Dim)
-        8 => hsla(0.0, 0.0, 0.45, 1.0),    // Bright Black (Gray)
-        9 => hsla(0.0, 0.85, 0.70, 1.0),   // Bright Red
-        10 => hsla(0.35, 0.75, 0.65, 1.0), // Bright Green
-        11 => hsla(0.12, 0.90, 0.70, 1.0), // Bright Yellow
-        12 => hsla(0.60, 0.85, 0.75, 1.0), // Bright Blue
-        13 => hsla(0.82, 0.75, 0.75, 1.0), // Bright Magenta
-        14 => hsla(0.50, 0.85, 0.70, 1.0), // Bright Cyan
-        15 => hsla(0.0, 0.0, 0.98, 1.0),   // Bright White
+        0 => hsla(0.0, 0.0, if is_light_theme { 0.95 } else { 0.15 }, 1.0), // Black
+        1 => adjust(hsla(0.0, 0.75, 0.60, 1.0)),                            // Red
+        2 => adjust(hsla(0.35, 0.65, 0.55, 1.0)),                           // Green
+        3 => adjust(hsla(0.12, 0.80, 0.60, 1.0)),                           // Yellow
+        4 => adjust(hsla(0.60, 0.75, 0.65, 1.0)),                           // Blue
+        5 => adjust(hsla(0.82, 0.65, 0.65, 1.0)),                           // Magenta
+        6 => adjust(hsla(0.50, 0.75, 0.60, 1.0)),                           // Cyan
+        7 => hsla(0.0, 0.0, if is_light_theme { 0.25 } else { 0.85 }, 1.0), // White (Dim)
+        8 => hsla(0.0, 0.0, if is_light_theme { 0.55 } else { 0.45 }, 1.0), // Bright Black (Gray)
+        9 => adjust(hsla(0.0, 0.85, 0.70, 1.0)),                            // Bright Red
+        10 => adjust(hsla(0.35, 0.75, 0.65, 1.0)),                          // Bright Green
+        11 => adjust(hsla(0.12, 0.90, 0.70, 1.0)),                          // Bright Yellow
+        12 => adjust(hsla(0.60, 0.85, 0.75, 1.0)),                          // Bright Blue
+        13 => adjust(hsla(0.82, 0.75, 0.75, 1.0)),                          // Bright Magenta
+        14 => adjust(hsla(0.50, 0.85, 0.70, 1.0)),                          // Bright Cyan
+        15 => hsla(0.0, 0.0, if is_light_theme { 0.05 } else { 0.98 }, 1.0), // Bright White
         // 216 Color cube: 16..=231
         16..=231 => {
             let n = idx - 16;
@@ -596,10 +620,10 @@ fn ansi_index_to_hsla(idx: u8) -> Hsla {
     }
 }
 
-fn ansi_to_hsla(color: vt100::Color, default_fg: Hsla) -> Option<Hsla> {
+fn ansi_to_hsla(color: vt100::Color, default_fg: Hsla, is_light_theme: bool) -> Option<Hsla> {
     match color {
         vt100::Color::Default => Some(default_fg),
-        vt100::Color::Idx(idx) => Some(ansi_index_to_hsla(idx)),
+        vt100::Color::Idx(idx) => Some(ansi_index_to_hsla(idx, is_light_theme)),
         vt100::Color::Rgb(r, g, b) => Some(rgb_to_hsla(r, g, b)),
     }
 }
@@ -613,6 +637,7 @@ impl Focusable for TerminalView {
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
+        let is_light_theme = cx.theme().mode == ThemeMode::Light;
         let terminal_resize = cx.entity().clone();
         let terminal_actions = cx.entity().clone();
         let is_focused = self.focus_handle.is_focused(window);
@@ -672,7 +697,7 @@ impl Render for TerminalView {
                     } else if is_cursor {
                         Some(theme.background)
                     } else {
-                        ansi_to_hsla(cell.fgcolor(), theme.foreground)
+                        ansi_to_hsla(cell.fgcolor(), theme.foreground, is_light_theme)
                     };
 
                     let bg = if is_selected {
@@ -682,7 +707,7 @@ impl Render for TerminalView {
                     } else {
                         match cell.bgcolor() {
                             vt100::Color::Default => None,
-                            other => ansi_to_hsla(other, theme.background),
+                            other => ansi_to_hsla(other, theme.background, is_light_theme),
                         }
                     };
 

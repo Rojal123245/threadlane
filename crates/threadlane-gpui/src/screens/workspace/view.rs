@@ -8,6 +8,7 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandGroup, CommandItem, CommandState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::resizable::{h_resizable, resizable_panel, v_resizable, ResizableState};
+use gpui_component::scroll::ScrollableElement;
 use gpui_component::status_bar::StatusBar;
 use gpui_component::{v_flex, ActiveTheme, Icon, IconName, Root, Selectable, Sizable};
 
@@ -54,6 +55,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-,", OpenSettings, None),
         KeyBinding::new("ctrl-,", OpenSettings, None),
         KeyBinding::new("escape", CancelActiveGeneration, None),
+        KeyBinding::new("cmd-s", crate::screens::editor::SaveFile, None),
+        KeyBinding::new("ctrl-s", crate::screens::editor::SaveFile, None),
     ]);
 }
 
@@ -579,10 +582,15 @@ impl WorkspaceView {
                 "Installing update".to_string(),
                 "Threadlane will relaunch when installation finishes.".to_string(),
             ),
-            UpdateStatus::Error(error) => (
-                "Update failed".to_string(),
-                error.chars().take(160).collect(),
-            ),
+            UpdateStatus::Error(error) => {
+                let truncated: String = error.chars().take(160).collect();
+                let suffix = if error.chars().count() > 160 {
+                    "…"
+                } else {
+                    ""
+                };
+                ("Update failed".to_string(), format!("{truncated}{suffix}"))
+            }
             _ => return None,
         };
 
@@ -854,7 +862,7 @@ impl WorkspaceView {
             .id("command-palette-backdrop")
             .absolute()
             .inset_0()
-            .bg(hsla(0.0, 0.0, 0.0, 0.5))
+            .bg(theme.background.opacity(0.5))
             .flex()
             .items_start()
             .justify_center()
@@ -932,8 +940,8 @@ impl WorkspaceView {
             active_project_git_status(state.active_work_dir.as_deref(), &state.git_statuses);
 
         let branch = git_status
-            .and_then(|s| s.branch.as_deref())
-            .unwrap_or("main");
+            .and_then(|s| s.branch.clone())
+            .unwrap_or_else(|| "no branch".to_string());
         let (additions, deletions) = git_status.map_or((0, 0), |s| {
             s.files
                 .iter()
@@ -1431,7 +1439,7 @@ impl Render for WorkspaceView {
                             .items_center()
                             .px_2()
                             .gap_2()
-                            .overflow_x_hidden()
+                            .overflow_x_scrollbar()
                             .bg(theme.tab_bar)
                             .border_b_1()
                             .border_color(theme.border)
@@ -1485,9 +1493,9 @@ impl Render for WorkspaceView {
             .child(div().flex_1().min_h_0().child(page_content))
             .child(self.render_status_bar(cx));
 
-        let git_dialog_layer = self.right_panel.update(cx, |panel, cx| {
-            panel.render_git_dialog_layer(cx)
-        });
+        let git_dialog_layer = self
+            .right_panel
+            .update(cx, |panel, cx| panel.render_git_dialog_layer(cx));
 
         div()
             .relative()

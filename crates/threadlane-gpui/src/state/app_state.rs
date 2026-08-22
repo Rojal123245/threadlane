@@ -14,7 +14,7 @@ use crate::services::sessions::{ExecutionMode, SessionRuntime, SessionRuntimeSta
 
 pub type AttachedProject = threadlane_session::ProjectRecord;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SessionHealth {
     Healthy,
     Working,

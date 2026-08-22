@@ -150,7 +150,55 @@ fn format_time_ago(timestamp: u64, now: u64) -> String {
 pub struct SidebarView {
     model: Entity<AppState>,
     search_input: Entity<InputState>,
+    /// Hash of the model state the sidebar renders; lets the observer skip
+    /// notifications for streaming updates that cannot change any row.
+    history_fingerprint: u64,
+    /// Grouped, sorted sessions cached per fingerprint so repeated renders
+    /// (theme changes, unrelated notifies) do not re-clone and re-sort rows.
+    history_cache: Option<(u64, Vec<(DateGroup, Vec<SessionInfo>)>)>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// Hash of every piece of `AppState` the sidebar renders. Streaming deltas
+/// mutate messages, plans, and usage without touching any of these fields, so
+/// an unchanged hash lets the observer skip `cx.notify()` entirely. The minute
+/// bucket keeps relative timestamps fresh without firing every second.
+fn sidebar_fingerprint(state: &AppState) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    state.active_work_dir.hash(&mut hasher);
+    state.active_session_id.hash(&mut hasher);
+    state.search_query.hash(&mut hasher);
+    state.is_generating.hash(&mut hasher);
+    (now_unix_secs() / 60).hash(&mut hasher);
+    for project in &state.projects {
+        project.name.hash(&mut hasher);
+        project.work_dir.hash(&mut hasher);
+        for session in &project.sessions {
+            session.id.hash(&mut hasher);
+            session.title.hash(&mut hasher);
+            session.work_dir.hash(&mut hasher);
+            session.session_file.hash(&mut hasher);
+            session.updated_at.hash(&mut hasher);
+            session.health.hash(&mut hasher);
+        }
+    }
+    let mut git_work_dirs: Vec<&std::path::PathBuf> = state.git_statuses.keys().collect();
+    git_work_dirs.sort();
+    for work_dir in git_work_dirs {
+        work_dir.hash(&mut hasher);
+        if let Some(pr) = state.git_statuses[work_dir].pr.as_ref() {
+            pr.number.hash(&mut hasher);
+            pr.state.hash(&mut hasher);
+            pr.is_draft.hash(&mut hasher);
+            pr.total_checks.hash(&mut hasher);
+            pr.failing_checks.hash(&mut hasher);
+            pr.pending_checks.hash(&mut hasher);
+            pr.passing_checks.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
 }
 
 impl SidebarView {
@@ -161,8 +209,12 @@ impl SidebarView {
     ) -> Self {
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
 
-        let sub1 = cx.observe(&model, |_this, _model, cx| {
-            cx.notify();
+        let sub1 = cx.observe(&model, |this, model, cx| {
+            let fingerprint = sidebar_fingerprint(model.read(cx));
+            if this.history_fingerprint != fingerprint {
+                this.history_fingerprint = fingerprint;
+                cx.notify();
+            }
         });
 
         let model_clone = model.clone();
@@ -180,9 +232,12 @@ impl SidebarView {
             },
         );
 
+        let history_fingerprint = sidebar_fingerprint(model.read(cx));
         Self {
             model,
             search_input,
+            history_fingerprint,
+            history_cache: None,
             _subscriptions: vec![sub1, sub2],
         }
     }
@@ -938,16 +993,16 @@ impl SidebarView {
         )
     }
 
-    fn render_history(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().colors;
-        let state = self.model.read(cx);
-        let query = state.search_query.trim().to_lowercase();
-        let active_work_dir = state.active_work_dir.clone();
-        let active_session_id = state.active_session_id.clone();
-        let now = now_unix_secs();
-
-        // Filter by reference and clone only rows that will render. Grouping
-        // before sorting is equivalent to the previous global sort because
+    /// Filter, group, and sort sessions for the history list. Only runs when
+    /// `sidebar_fingerprint` changes; `render_history` otherwise reuses the
+    /// cached result instead of cloning and sorting every row per frame.
+    fn build_history_groups(
+        &self,
+        state: &AppState,
+        query: &str,
+        now: u64,
+    ) -> Vec<(DateGroup, Vec<SessionInfo>)> {
+        // Grouping before sorting is equivalent to a global sort because
         // bucket insertion preserves scan order.
         let mut grouped: Vec<(DateGroup, Vec<SessionInfo>)> = vec![
             (DateGroup::Today, Vec::new()),
@@ -961,8 +1016,8 @@ impl SidebarView {
             .flat_map(|project| project.sessions.iter())
         {
             if !query.is_empty()
-                && !session.title.to_lowercase().contains(&query)
-                && !session.id.to_lowercase().contains(&query)
+                && !session.title.to_lowercase().contains(query)
+                && !session.id.to_lowercase().contains(query)
             {
                 continue;
             }
@@ -986,9 +1041,34 @@ impl SidebarView {
                     .then_with(|| left.title.cmp(&right.title))
             });
         }
+        grouped
+    }
+
+    fn render_history(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().colors;
+        let state = self.model.read(cx);
+        let query = state.search_query.trim().to_lowercase();
+        let active_work_dir = state.active_work_dir.clone();
+        let active_session_id = state.active_session_id.clone();
+        let now = now_unix_secs();
+
+        let fingerprint = sidebar_fingerprint(state);
+        self.history_fingerprint = fingerprint;
+        let cache_matches = self
+            .history_cache
+            .as_ref()
+            .is_some_and(|(cached, _)| *cached == fingerprint);
+        if !cache_matches {
+            let grouped = self.build_history_groups(state, &query, now);
+            self.history_cache = Some((fingerprint, grouped));
+        }
+        let grouped = match self.history_cache.as_ref() {
+            Some((_, grouped)) => grouped,
+            None => unreachable!("history cache populated above"),
+        };
 
         let mut children = Vec::new();
-        for (group, sessions) in grouped {
+        for (group, sessions) in grouped.iter() {
             if sessions.is_empty() {
                 continue;
             }
@@ -998,7 +1078,7 @@ impl SidebarView {
                     .items_center()
                     .gap_2()
                     .px_3()
-                    .pt(if group == DateGroup::Today {
+                    .pt(if *group == DateGroup::Today {
                         px(4.0)
                     } else {
                         px(12.0)

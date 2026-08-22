@@ -157,6 +157,10 @@ const INPUT_KEY_CONTEXT: &str = "Input";
 const CHAT_CONTENT_MAX_WIDTH: f32 = 1040.0;
 const USER_BUBBLE_MAX_WIDTH: f32 = 680.0;
 
+/// Context-window usage thresholds where the meter shifts to warning/danger colors.
+const CONTEXT_METER_WARN_PCT: f64 = 80.0;
+const CONTEXT_METER_DANGER_PCT: f64 = 95.0;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum CentralTab {
     #[default]
@@ -1617,7 +1621,7 @@ impl ChatListView {
                             Button::new("copy-trajectory-row")
                                 .ghost()
                                 .xsmall()
-                                .label("📋")
+                                .icon(IconName::Copy)
                                 .tooltip("Copy trajectory entry")
                                 .on_click({
                                     let text = format!(
@@ -1638,7 +1642,7 @@ impl ChatListView {
                             Button::new("close-trajectory-inspector")
                                 .ghost()
                                 .xsmall()
-                                .label("×")
+                                .icon(IconName::Close)
                                 .tooltip("Close inspector")
                                 .on_click(move |_, _, cx| {
                                     close_view.update(cx, |this, cx| {
@@ -3215,9 +3219,9 @@ impl ChatListView {
         let displayed_percent = meter.percent.unwrap_or_default();
         let meter_color = if meter.percent.is_none() || displayed_percent == 0.0 {
             theme.muted_foreground
-        } else if displayed_percent >= 95.0 {
+        } else if displayed_percent >= CONTEXT_METER_DANGER_PCT {
             theme.danger
-        } else if displayed_percent >= 80.0 {
+        } else if displayed_percent >= CONTEXT_METER_WARN_PCT {
             theme.warning
         } else {
             theme.accent
@@ -3381,8 +3385,8 @@ impl ChatListView {
             let restore_session_id = stash_session_id.clone();
             let dismiss_model = stash_model.clone();
             let dismiss_session_id = stash_session_id.clone();
-            let preview_text = if draft.len() > 60 {
-                format!("{}…", &draft[..60])
+            let preview_text = if draft.chars().count() > 60 {
+                format!("{}…", draft.chars().take(60).collect::<String>())
             } else {
                 draft.clone()
             };
@@ -3540,7 +3544,11 @@ impl ChatListView {
                                 Button::new("send-btn")
                                     .w(px(40.0))
                                     .h(px(40.0))
-                                    .label(if is_generating { "■" } else { "↑" })
+                                    .icon(if is_generating {
+                                        IconName::CircleX
+                                    } else {
+                                        IconName::ArrowUp
+                                    })
                                     .tooltip(if is_generating {
                                         "Stop generation"
                                     } else {
