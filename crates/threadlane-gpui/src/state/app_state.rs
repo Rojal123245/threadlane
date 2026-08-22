@@ -3442,6 +3442,141 @@ mod tests {
         assert_eq!(projected_context.effective_model, "gpt-4o");
         assert!(!projected_context.context_limit_is_estimate);
 
+        // Inspect the production journal again, independently of the GPUI projection above.
+        use threadlane_session::harness::{read_transcript_page, CompactionReason, TranscriptItem};
+
+        let store = JsonlStore::open(&path).unwrap();
+        let records = store.records();
+        let provider_starts = records
+            .iter()
+            .filter_map(|record| match record {
+                Record::ProviderRequestStarted { seq, .. } => Some(*seq),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(provider_starts.len(), 102);
+
+        let adaptive_compactions = records
+            .iter()
+            .filter_map(|record| match record {
+                Record::ContextCompacted {
+                    seq,
+                    generation,
+                    reason: CompactionReason::AdaptiveBudget,
+                    ..
+                } => Some((*seq, *generation)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(adaptive_compactions.len(), 3);
+
+        let mut checkpoint_sequences = HashSet::new();
+        for (compaction_seq, generation) in adaptive_compactions {
+            let (checkpoint_seq, summary) = store
+                .entries()
+                .iter()
+                .filter_map(|entry| match &entry.message {
+                    AgentMessage::Custom {
+                        custom_type,
+                        payload,
+                    } if custom_type == "compaction_summary" && entry.seq < compaction_seq => {
+                        payload
+                            .get("summary")
+                            .and_then(serde_json::Value::as_str)
+                            .map(|summary| (entry.seq, summary))
+                    }
+                    _ => None,
+                })
+                .next_back()
+                .expect("durable summary checkpoint before adaptive compaction");
+            assert!(!summary.is_empty());
+            assert!(
+                checkpoint_sequences.insert(checkpoint_seq),
+                "adaptive compactions must have distinct durable checkpoints"
+            );
+
+            let next_start_seq = provider_starts
+                .iter()
+                .copied()
+                .find(|seq| *seq > compaction_seq)
+                .expect("provider request after adaptive compaction");
+            let (manifest_seq, manifest_generation) = records
+                .iter()
+                .filter_map(|record| match record {
+                    Record::ContextManifestCaptured {
+                        seq,
+                        compaction_generation,
+                        ..
+                    } if *seq < next_start_seq => Some((*seq, *compaction_generation)),
+                    _ => None,
+                })
+                .next_back()
+                .expect("latest manifest before post-compaction provider request");
+            assert_eq!(manifest_generation, generation);
+            assert!(
+                checkpoint_seq < compaction_seq
+                    && compaction_seq < manifest_seq
+                    && manifest_seq < next_start_seq,
+                "checkpoint={checkpoint_seq}, compaction={compaction_seq}, manifest={manifest_seq}, provider_start={next_start_seq}"
+            );
+        }
+        assert_eq!(checkpoint_sequences.len(), 3);
+
+        let page = read_transcript_page(&path, None, 1_000).unwrap();
+        assert!(!page.has_older);
+        let transcript_messages = page
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                TranscriptItem::Message(message) => Some(message),
+                TranscriptItem::ContextCompacted(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let mut call_ids = Vec::new();
+        let mut call_positions = HashMap::new();
+        let mut result_ids = Vec::new();
+        let mut result_positions = HashMap::new();
+        for (position, message) in transcript_messages.iter().enumerate() {
+            match message {
+                AgentMessage::Assistant {
+                    tool_calls: Some(calls),
+                    ..
+                } => {
+                    for call in calls {
+                        assert!(
+                            call_positions.insert(call.id.clone(), position).is_none(),
+                            "duplicate tool call {}",
+                            call.id
+                        );
+                        call_ids.push(call.id.clone());
+                    }
+                }
+                AgentMessage::Tool { tool_call_id, .. } => {
+                    assert!(
+                        result_positions
+                            .insert(tool_call_id.clone(), position)
+                            .is_none(),
+                        "duplicate tool result {tool_call_id}"
+                    );
+                    result_ids.push(tool_call_id.clone());
+                }
+                _ => {}
+            }
+        }
+        let expected_loop_ids = (1..=101)
+            .map(|index| format!("loop-{index}"))
+            .collect::<Vec<_>>();
+        assert_eq!(call_ids, expected_loop_ids);
+        assert_eq!(result_ids, expected_loop_ids);
+        assert_eq!(call_positions.len(), 101);
+        assert_eq!(result_positions.len(), 101);
+        for call_id in &expected_loop_ids {
+            assert!(
+                call_positions[call_id] < result_positions[call_id],
+                "tool call {call_id} must precede its matching result"
+            );
+        }
+
         let reloaded = compute_session_messages(&path).unwrap();
         assert_eq!(
             reloaded
@@ -3460,14 +3595,14 @@ mod tests {
         assert!(reloaded.iter().any(|message| {
             message.role == MessageRole::Assistant && message.content == "complete"
         }));
+        let projected_tool_ids = reloaded
+            .iter()
+            .flat_map(|message| &message.tool_activities)
+            .map(|activity| activity.id.clone())
+            .collect::<Vec<_>>();
         assert_eq!(
-            reloaded
-                .iter()
-                .flat_map(|message| &message.tool_activities)
-                .filter(|activity| activity.id == "loop-1")
-                .count(),
-            1,
-            "retained compaction tail must not duplicate visible tool activity"
+            projected_tool_ids, expected_loop_ids,
+            "projected tool activities must contain every loop exactly once and in order"
         );
         std::fs::remove_file(path).ok();
     }
