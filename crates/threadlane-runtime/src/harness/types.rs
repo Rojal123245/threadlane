@@ -443,6 +443,7 @@ pub enum ContextItemSource {
     Skill,
     Memory,
     Message,
+    ToolResult,
     ToolSchema,
     Other,
 }

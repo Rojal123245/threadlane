@@ -142,7 +142,7 @@ pub(crate) struct ContextWindowInfo {
     pub(crate) context_limit_is_estimate: bool,
     pub(crate) effective_model: String,
     pub(crate) compaction_generation: u64,
-    pub(crate) last_compacted_at: Option<u64>,
+    pub(crate) last_compaction_seq: Option<u64>,
     pub(crate) provisional: bool,
     pub(crate) estimating: bool,
 }
@@ -2335,7 +2335,7 @@ impl AppState {
             context_limit_is_estimate: persisted_limit.is_none() || persisted_limit_estimate,
             effective_model,
             compaction_generation: manifest_generation,
-            last_compacted_at: compaction.map(|value| value.2),
+            last_compaction_seq: compaction.map(|value| value.2),
             provisional: false,
             estimating,
         };
@@ -3507,17 +3507,17 @@ mod tests {
                         seq,
                         compaction_generation,
                         ..
-                    } if *seq < next_start_seq => Some((*seq, *compaction_generation)),
+                    } if *seq > next_start_seq => Some((*seq, *compaction_generation)),
                     _ => None,
                 })
-                .next_back()
-                .expect("latest manifest before post-compaction provider request");
+                .next()
+                .expect("manifest after post-compaction provider request start");
             assert_eq!(manifest_generation, generation);
             assert!(
                 checkpoint_seq < compaction_seq
-                    && compaction_seq < manifest_seq
-                    && manifest_seq < next_start_seq,
-                "checkpoint={checkpoint_seq}, compaction={compaction_seq}, manifest={manifest_seq}, provider_start={next_start_seq}"
+                    && compaction_seq < next_start_seq
+                    && next_start_seq < manifest_seq,
+                "checkpoint={checkpoint_seq}, compaction={compaction_seq}, provider_start={next_start_seq}, manifest={manifest_seq}"
             );
         }
         assert_eq!(checkpoint_sequences.len(), 3);
@@ -3848,7 +3848,7 @@ mod tests {
                 .unwrap()
                 .context_window
                 .unwrap()
-                .last_compacted_at,
+                .last_compaction_seq,
             None
         );
         std::fs::remove_file(path).ok();

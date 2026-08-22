@@ -1531,8 +1531,8 @@ mod compaction_sync_tests {
         assert_eq!(manifest_generation, generation);
         assert!(manifest_tokens.unwrap() < emitted_context_limit as u32);
 
-        // The checkpoint summary, compaction telemetry, request manifest, and
-        // provider start are all recovered from the durable journal in order.
+        // The checkpoint summary, compaction telemetry, provider start, and
+        // request manifest are all recovered from the durable journal in order.
         let checkpoint_seq = store
             .entries()
             .iter()
@@ -1548,9 +1548,9 @@ mod compaction_sync_tests {
             .expect("durable checkpoint preceding adaptive compaction");
         assert!(
             checkpoint_seq < compaction_seq
-                && compaction_seq < manifest_seq
-                && manifest_seq < next_provider_start_seq,
-            "checkpoint={checkpoint_seq}, compaction={compaction_seq}, manifest={manifest_seq}, provider_start={next_provider_start_seq}"
+                && compaction_seq < next_provider_start_seq
+                && next_provider_start_seq < manifest_seq,
+            "checkpoint={checkpoint_seq}, compaction={compaction_seq}, provider_start={next_provider_start_seq}, manifest={manifest_seq}"
         );
 
         // The reopened branch selects the latest durable checkpoint and a descendant leaf.

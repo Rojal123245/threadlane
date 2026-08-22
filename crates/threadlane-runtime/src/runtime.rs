@@ -761,7 +761,10 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use sha2::Digest;
-    use threadlane_protocol::{RuntimeRequest, RuntimeStreamEvent, RuntimeUsage};
+    use threadlane_protocol::{
+        RuntimeRequest, RuntimeStreamEvent, RuntimeToolCall as ToolCall,
+        RuntimeToolCallFunction as ToolCallFunction, RuntimeUsage,
+    };
 
     use crate::provider::{ProviderBoundaryRequest, ProviderBoundaryResult};
 
@@ -1018,12 +1021,97 @@ mod tests {
 
         assert_eq!(
             &*order.lock().unwrap(),
-            &["prepared", "manifest", "started", "sent"]
+            &["prepared", "started", "manifest", "sent"]
         );
         assert_eq!(
             *prepared_tools.lock().unwrap(),
             *request_tools.lock().unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn context_manifest_uses_complete_serialized_messages_and_image_cost() {
+        let provider = Arc::new(RecordingProvider {
+            order: Arc::new(std::sync::Mutex::new(Vec::new())),
+            message_counts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            request_tools: Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+        let config = AgentConfig::builder().estimated_image_tokens(321).build();
+        let messages = vec![
+            AgentMessage::Assistant {
+                content: Some("calling".into()),
+                tool_calls: Some(vec![ToolCall {
+                    id: "call-1".into(),
+                    r#type: "function".into(),
+                    function: ToolCallFunction {
+                        name: "read_file".into(),
+                        arguments: "{\"path\":\"README.md\"}".into(),
+                    },
+                    thought_signature: None,
+                }]),
+                stop_reason: Some("tool_use".into()),
+                deferred_handle: None,
+            },
+            AgentMessage::Tool {
+                tool_call_id: "call-1".into(),
+                name: "read_file".into(),
+                content: "contents".into(),
+                is_error: false,
+                terminate: false,
+            },
+            AgentMessage::UserWithImages {
+                content: "inspect".into(),
+                images: vec![crate::types::ImageAttachment {
+                    display_name: "screen.png".into(),
+                    data_url: "data:image/png;base64,AA==".into(),
+                }],
+            },
+        ];
+        let mut runtime =
+            AgentRuntime::new_with_provider("", None, "test-model", None, config.clone(), provider)
+                .unwrap();
+        runtime.turn.lock().await.messages = messages.clone();
+        let expected = messages.clone();
+        runtime.set_provider_trace_recorder(Some(Arc::new(move |event| {
+            let expected = expected.clone();
+            let config = config.clone();
+            Box::pin(async move {
+                if let crate::provider::ProviderTraceEvent::ContextManifest {
+                    items,
+                    total_estimated_tokens,
+                    ..
+                } = event
+                {
+                    let message_items = items
+                        .iter()
+                        .filter(|item| item.source != crate::harness::ContextItemSource::ToolSchema)
+                        .collect::<Vec<_>>();
+                    assert_eq!(message_items.len(), expected.len());
+                    for (item, message) in message_items.iter().zip(&expected) {
+                        let serialized = serde_json::to_vec(message).unwrap();
+                        assert_eq!(
+                            item.digest_sha256.as_str(),
+                            format!("{:x}", sha2::Sha256::digest(&serialized))
+                        );
+                        assert_eq!(
+                            item.token_estimate as usize,
+                            crate::compaction::estimate_message_tokens(message, &config)
+                        );
+                    }
+                    assert_eq!(
+                        message_items[1].source,
+                        crate::harness::ContextItemSource::ToolResult
+                    );
+                    assert_eq!(
+                        total_estimated_tokens.map(|value| value as usize),
+                        Some(items.iter().map(|item| item.token_estimate as usize).sum())
+                    );
+                }
+                Ok(())
+            })
+        })));
+
+        runtime.run_turns().await;
     }
 
     #[tokio::test]
@@ -1061,6 +1149,10 @@ mod tests {
                     crate::provider::ProviderTraceEvent::ContextManifest { .. } => {
                         Err("manifest disk full".into())
                     }
+                    crate::provider::ProviderTraceEvent::Finished { .. } => {
+                        trace_order.lock().unwrap().push("finished");
+                        Ok(())
+                    }
                     _ => Ok(()),
                 }
             })
@@ -1068,7 +1160,7 @@ mod tests {
 
         runtime.run_turns().await;
 
-        assert!(order.lock().unwrap().is_empty());
+        assert_eq!(&*order.lock().unwrap(), &["started", "finished"]);
     }
 
     #[tokio::test]
@@ -1116,20 +1208,22 @@ mod tests {
         assert!(order.lock().unwrap().is_empty());
     }
 
-    struct OverflowOnceProvider {
+    struct RateLimitOnceProvider {
+        models: Arc<std::sync::Mutex<Vec<String>>>,
         calls: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     #[async_trait]
-    impl ProviderPort for OverflowOnceProvider {
+    impl ProviderPort for RateLimitOnceProvider {
         async fn stream_request(
             &self,
-            _request: RuntimeRequest,
+            request: RuntimeRequest,
             events: tokio::sync::mpsc::Sender<RuntimeStreamEvent>,
         ) {
+            self.models.lock().unwrap().push(request.model);
             let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let event = if call == 0 {
-                RuntimeStreamEvent::Error("maximum context length exceeded".into())
+                RuntimeStreamEvent::Error("rate limit exceeded".into())
             } else {
                 RuntimeStreamEvent::Finished {
                     tool_calls: Vec::new(),
@@ -1157,7 +1251,132 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overflow_recovery_is_true_only_on_overflow_retry() {
+    async fn rate_limit_fallback_is_installed_across_boundary_manifest_and_network() {
+        let network_models = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = Arc::new(RateLimitOnceProvider {
+            models: network_models.clone(),
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let roles = crate::types::ModelRoles {
+            task: Some("primary-model".into()),
+            fallback_chain: vec!["primary-model".into(), "fallback-model".into()],
+            ..Default::default()
+        };
+        let config = AgentConfig::builder().model_roles(roles).build();
+        let mut runtime =
+            AgentRuntime::new_with_provider("", None, "base-model", None, config, provider)
+                .unwrap();
+        runtime
+            .turn
+            .lock()
+            .await
+            .messages
+            .push(AgentMessage::user("unchanged request", Vec::new()));
+
+        let prepared_models = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let preparer_models = prepared_models.clone();
+        runtime.set_provider_boundary_preparer(Some(Arc::new(move |request| {
+            let preparer_models = preparer_models.clone();
+            Box::pin(async move {
+                preparer_models.lock().unwrap().push(request.model.clone());
+                let budget =
+                    crate::model_metadata::context_budget(&request.model, &AgentConfig::default());
+                Ok(ProviderBoundaryResult {
+                    messages: request.messages,
+                    context_limit: budget.limit,
+                    context_limit_is_estimate: budget.limit_is_estimate,
+                    compaction_generation: 0,
+                    provisional_estimated_tokens: None,
+                })
+            })
+        })));
+        let started_models = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let manifest_models = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let started_capture = started_models.clone();
+        let manifest_capture = manifest_models.clone();
+        runtime.set_provider_trace_recorder(Some(Arc::new(move |event| {
+            let started_capture = started_capture.clone();
+            let manifest_capture = manifest_capture.clone();
+            Box::pin(async move {
+                match event {
+                    crate::provider::ProviderTraceEvent::Started { model, .. } => {
+                        started_capture.lock().unwrap().push(model);
+                    }
+                    crate::provider::ProviderTraceEvent::ContextManifest { model, .. } => {
+                        manifest_capture.lock().unwrap().push(model);
+                    }
+                    _ => {}
+                }
+                Ok(())
+            })
+        })));
+
+        runtime.run_turns().await;
+
+        let expected = vec!["primary-model".to_string(), "fallback-model".to_string()];
+        assert_eq!(*prepared_models.lock().unwrap(), expected);
+        assert_eq!(*started_models.lock().unwrap(), expected);
+        assert_eq!(*manifest_models.lock().unwrap(), expected);
+        assert_eq!(*network_models.lock().unwrap(), expected);
+        assert_eq!(
+            runtime.turn.lock().await.messages.len(),
+            1,
+            "no routing reminder"
+        );
+    }
+    struct OverflowOnceProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ProviderPort for OverflowOnceProvider {
+        async fn stream_request(
+            &self,
+            _request: RuntimeRequest,
+            events: tokio::sync::mpsc::Sender<RuntimeStreamEvent>,
+        ) {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let event = match call {
+                0 => RuntimeStreamEvent::Error("maximum context length exceeded".into()),
+                1 => RuntimeStreamEvent::Finished {
+                    tool_calls: vec![ToolCall {
+                        id: "call-after-overflow".into(),
+                        r#type: "function".into(),
+                        function: ToolCallFunction {
+                            name: "missing_test_tool".into(),
+                            arguments: "{}".into(),
+                        },
+                        thought_signature: None,
+                    }],
+                    usage: RuntimeUsage::default(),
+                },
+                _ => RuntimeStreamEvent::Finished {
+                    tool_calls: Vec::new(),
+                    usage: RuntimeUsage::default(),
+                },
+            };
+            let _ = events.send(event).await;
+        }
+
+        async fn fetch_deferred(
+            &self,
+            _model: &str,
+            _handle_id: &str,
+        ) -> Result<DeferredResponse, String> {
+            Ok(DeferredResponse::Pending)
+        }
+
+        async fn cancel_deferred(&self, _model: &str, _handle_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn provider_kind(&self, _model: &str) -> &'static str {
+            "test"
+        }
+    }
+
+    #[tokio::test]
+    async fn overflow_success_with_tool_continuation_marks_only_immediate_retry() {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let provider = Arc::new(OverflowOnceProvider {
             calls: calls.clone(),
@@ -1198,8 +1417,17 @@ mod tests {
 
         runtime.run_turns().await;
 
-        assert_eq!(&*recovery_values.lock().unwrap(), &[false, true]);
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(&*recovery_values.lock().unwrap(), &[false, true, false]);
+        assert_eq!(
+            recovery_values
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|value| **value)
+                .count(),
+            1
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 
     #[tokio::test]

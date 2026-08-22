@@ -23,6 +23,9 @@ pub struct PreparedCompaction {
     pub pre_tokens: usize,
     pub post_tokens: usize,
     pub compacted_messages: usize,
+    /// Policy input used to choose the retained tail.
+    pub retained_tail_target: usize,
+    /// Measured serialized tokens actually retained after boundary adjustment.
     pub retained_tail_tokens: usize,
 }
 
@@ -35,9 +38,12 @@ impl Default for CompactionOptions {
     }
 }
 
-fn estimate_message_tokens(message: &AgentMessage, config: &AgentConfig) -> usize {
-    let serialized_tokens =
-        serde_json::to_vec(message).map_or(0, |serialized| serialized.len().div_ceil(4));
+pub(crate) fn serialized_message(message: &AgentMessage) -> Vec<u8> {
+    serde_json::to_vec(message).unwrap_or_default()
+}
+
+pub(crate) fn estimate_message_tokens(message: &AgentMessage, config: &AgentConfig) -> usize {
+    let serialized_tokens = serialized_message(message).len().div_ceil(4);
     let image_tokens = match message {
         AgentMessage::UserWithImages { images, .. } => {
             images.len().saturating_mul(config.estimated_image_tokens)
@@ -66,12 +72,12 @@ pub fn estimate_request_tokens(
 pub fn compact_for_budget(
     messages: &[AgentMessage],
     tool_schema_json: Option<&str>,
-    retained_tail_tokens: usize,
+    retained_tail_target: usize,
     config: &AgentConfig,
 ) -> Option<PreparedCompaction> {
     let pre_tokens = estimate_request_tokens(messages, tool_schema_json, config);
     let compacted =
-        compact_messages_to_token_budget_with_config(messages, retained_tail_tokens, config);
+        compact_messages_to_token_budget_with_config(messages, retained_tail_target, config);
     if compacted.len() == messages.len() {
         return None;
     }
@@ -79,11 +85,18 @@ pub fn compact_for_budget(
     let compacted_messages = messages
         .len()
         .saturating_sub(compacted.len().saturating_sub(1));
+    let retained_tail_tokens = compacted
+        .iter()
+        .skip_while(|message| compaction_summary_text(message).is_none())
+        .skip(1)
+        .map(|message| estimate_message_tokens(message, config))
+        .sum();
     Some(PreparedCompaction {
         messages: compacted,
         pre_tokens,
         post_tokens,
         compacted_messages,
+        retained_tail_target,
         retained_tail_tokens,
     })
 }
@@ -695,6 +708,8 @@ mod tests {
         assert_valid_tool_pairs(&result.messages);
         assert!(result.post_tokens < result.pre_tokens);
         assert!(result.compacted_messages > 0);
+        assert_eq!(result.retained_tail_target, 1_000);
+        assert_ne!(result.retained_tail_tokens, result.retained_tail_target);
     }
     #[test]
     fn test_compact_messages() {

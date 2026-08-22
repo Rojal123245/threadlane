@@ -31,7 +31,7 @@ struct ContextMeterContext {
     context_limit: u64,
     context_limit_is_estimate: bool,
     effective_model: String,
-    last_compacted_at: Option<u64>,
+    last_compaction_seq: Option<u64>,
     provisional: bool,
     estimating: bool,
 }
@@ -52,7 +52,7 @@ struct ContextMeterViewModel {
     total_processed_label: String,
     cache_hit_label: Option<String>,
     effective_model: Option<String>,
-    last_compacted_at: Option<u64>,
+    last_compaction_seq: Option<u64>,
     provisional: bool,
 }
 
@@ -107,7 +107,7 @@ fn context_meter_view_model(
             total_processed_label: format_meter_tokens(total_processed),
             cache_hit_label,
             effective_model: None,
-            last_compacted_at: None,
+            last_compaction_seq: None,
             provisional: false,
         };
     };
@@ -142,7 +142,7 @@ fn context_meter_view_model(
         cache_hit_label,
         effective_model: (!context.effective_model.is_empty())
             .then(|| context.effective_model.clone()),
-        last_compacted_at: context.last_compacted_at,
+        last_compaction_seq: context.last_compaction_seq,
         provisional: context.provisional,
     }
 }
@@ -2832,7 +2832,7 @@ impl ChatListView {
                     context_limit: context.context_limit,
                     context_limit_is_estimate: context.context_limit_is_estimate,
                     effective_model: context.effective_model.clone(),
-                    last_compacted_at: context.last_compacted_at,
+                    last_compaction_seq: context.last_compaction_seq,
                     provisional: context.provisional,
                     estimating: context.estimating,
                 });
@@ -3289,7 +3289,7 @@ impl ChatListView {
                                 .child(cache_hit),
                         )
                     })
-                    .when_some(meter.last_compacted_at, |card, sequence| {
+                    .when_some(meter.last_compaction_seq, |card, sequence| {
                         card.child(
                             div()
                                 .flex()
@@ -3712,7 +3712,7 @@ mod hot_path_tests {
             context_limit: 0,
             context_limit_is_estimate: false,
             effective_model: "new-model".into(),
-            last_compacted_at: None,
+            last_compaction_seq: None,
             provisional: false,
             estimating: true,
         }
@@ -3729,7 +3729,7 @@ mod hot_path_tests {
                 context_limit: projected_context.context_limit,
                 context_limit_is_estimate: projected_context.context_limit_is_estimate,
                 effective_model: projected_context.effective_model.clone(),
-                last_compacted_at: projected_context.last_compacted_at,
+                last_compaction_seq: projected_context.last_compaction_seq,
                 provisional: projected_context.provisional,
                 estimating: projected_context.estimating,
             }),
@@ -3788,7 +3788,7 @@ mod hot_path_tests {
                 context_limit: 100_000,
                 context_limit_is_estimate: true,
                 effective_model: "model".into(),
-                last_compacted_at: Some(42),
+                last_compaction_seq: Some(42),
                 provisional: true,
                 estimating: false,
             }),
@@ -3797,7 +3797,7 @@ mod hot_path_tests {
         assert_eq!(view.percent, Some(120.0));
         assert_eq!(view.bar_percent, 100.0);
         assert_eq!(view.current_label, "120.0k / ~100.0k");
-        assert_eq!(view.last_compacted_at, Some(42));
+        assert_eq!(view.last_compaction_seq, Some(42));
         assert!(view.provisional);
     }
 

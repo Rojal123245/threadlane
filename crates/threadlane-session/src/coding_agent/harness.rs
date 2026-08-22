@@ -468,7 +468,7 @@ impl CodingSessionHarness {
                 context_limit_is_estimate: budget.limit_is_estimate,
                 pre_tokens: prepared.pre_tokens,
                 post_tokens,
-                retained_tail_target: prepared.retained_tail_tokens,
+                retained_tail_target: prepared.retained_tail_target,
                 retained_tail_tokens: prepared.retained_tail_tokens,
                 compacted_messages: prepared.compacted_messages,
             };
@@ -3290,6 +3290,7 @@ mod tests {
                     pre_tokens: 100,
                     post_tokens: 20,
                     compacted_messages: 1,
+                    retained_tail_target: 12,
                     retained_tail_tokens: 10,
                 },
             )
@@ -3299,6 +3300,20 @@ mod tests {
         assert_eq!(context.len(), 3);
         assert_eq!(context[1], repeated);
         assert_eq!(context[2], repeated);
+        let compacted = harness
+            .store
+            .records()
+            .iter()
+            .find_map(|record| match record {
+                HarnessRecord::ContextCompacted {
+                    retained_tail_target,
+                    retained_tail_tokens,
+                    ..
+                } => Some((*retained_tail_target, *retained_tail_tokens)),
+                _ => None,
+            })
+            .expect("compaction telemetry");
+        assert_eq!(compacted, (12, 10));
         let tail_entries = harness
             .store
             .entries()
