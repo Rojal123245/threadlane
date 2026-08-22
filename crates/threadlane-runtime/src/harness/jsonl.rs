@@ -185,6 +185,8 @@ impl TranscriptPage {
 }
 
 const TRANSCRIPT_READ_CHUNK_BYTES: usize = 64 * 1024;
+const ATOMIC_FRAME_SENTINEL: &str = "#!threadlane-atomic-v1 ";
+const TORN_EOF_SENTINEL: &str = "#!threadlane-torn-eof-v1";
 
 /// Reads one chronological page of main-lane transcript items by scanning
 /// backward from an opaque byte cursor. This deliberately avoids opening a
@@ -250,16 +252,21 @@ pub fn read_transcript_page(
             }
             let line_start = chunk_start + newline as u64 + 1;
             next_offset = line_start.saturating_sub(1);
-            if let Some(item) = transcript_item(path, line_start, &line)? {
+            let line_items = transcript_items(path, line_start, &line)?;
+            // A journal line is the smallest cursor-addressable unit. Expand an
+            // atomic frame completely so no visible sibling is stranded.
+            let mut stop_after_line = false;
+            for item in line_items.into_iter().rev() {
                 let starts_turn =
                     matches!(&item, TranscriptItem::Message(message) if message.is_user());
                 if matches!(item, TranscriptItem::Message(_)) {
                     message_count += 1;
                 }
                 items.push(item);
-                if message_count >= minimum_messages && starts_turn {
-                    break 'chunks;
-                }
+                stop_after_line |= message_count >= minimum_messages && starts_turn;
+            }
+            if stop_after_line {
+                break 'chunks;
             }
         }
 
@@ -271,9 +278,7 @@ pub fn read_transcript_page(
 
     if scan_end == 0 && !suffix.is_empty() {
         next_offset = 0;
-        if let Some(item) = transcript_item(path, 0, &suffix)? {
-            items.push(item);
-        }
+        items.extend(transcript_items(path, 0, &suffix)?.into_iter().rev());
     }
 
     items.reverse();
@@ -309,20 +314,26 @@ fn complete_jsonl_end(file: &mut fs::File, end: u64) -> io::Result<u64> {
     Ok(0)
 }
 
-fn transcript_item(path: &Path, offset: u64, line: &[u8]) -> io::Result<Option<TranscriptItem>> {
-    let invalid = |error: &dyn std::fmt::Display| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("{} byte {offset}: {error}", path.display()),
-        )
-    };
-    let line = std::str::from_utf8(line).map_err(|error| invalid(&error))?;
-    let parsed: SessionLine = serde_json::from_str(line).map_err(|error| invalid(&error))?;
-    Ok(match parsed {
+fn transcript_items(path: &Path, offset: u64, bytes: &[u8]) -> io::Result<Vec<TranscriptItem>> {
+    if bytes.ends_with(TORN_EOF_SENTINEL.as_bytes())
+        || ATOMIC_FRAME_SENTINEL.as_bytes().starts_with(bytes)
+    {
+        return Ok(Vec::new());
+    }
+    let payload = atomic_frame_payload(bytes).unwrap_or(bytes);
+    let line: SessionLine = serde_json::from_slice(payload)
+        .map_err(|error| invalid_line(path, offset as usize, error))?;
+    Ok(match line {
         SessionLine::AtomicBatch(batch) => batch
             .atomic_batch
-            .iter()
-            .find_map(|item| match item {
+            .into_iter()
+            .filter_map(|item| match item {
+                AtomicBatchItem::Entry(entry) if entry.lane == "main" => match entry.message {
+                    crate::types::AgentMessage::Custom {
+                        ref custom_type, ..
+                    } if custom_type == "compaction_summary" => None,
+                    message => Some(TranscriptItem::Message(message)),
+                },
                 AtomicBatchItem::Record(Record::ContextCompacted {
                     seq,
                     lane,
@@ -335,35 +346,25 @@ fn transcript_item(path: &Path, offset: u64, line: &[u8]) -> io::Result<Option<T
                     ..
                 }) if lane == "main" => {
                     Some(TranscriptItem::ContextCompacted(ContextCompactedMarker {
-                        seq: *seq,
-                        timestamp: *timestamp,
-                        pre_tokens: *pre_tokens,
-                        post_tokens: *post_tokens,
-                        reason: *reason,
+                        seq,
+                        timestamp,
+                        pre_tokens,
+                        post_tokens,
+                        reason,
                         effective_model: effective_model.as_str().to_owned(),
-                        context_limit: *context_limit,
+                        context_limit,
                     }))
                 }
                 _ => None,
             })
-            .or_else(|| {
-                batch.atomic_batch.into_iter().find_map(|item| match item {
-                    AtomicBatchItem::Entry(entry) if entry.lane == "main" => match entry.message {
-                        crate::types::AgentMessage::Custom {
-                            ref custom_type, ..
-                        } if custom_type == "compaction_summary" => None,
-                        message => Some(TranscriptItem::Message(message)),
-                    },
-                    _ => None,
-                })
-            }),
+            .collect(),
         SessionLine::Entry(entry) if entry.lane == "main" => match entry.message {
             crate::types::AgentMessage::Custom {
                 ref custom_type, ..
-            } if custom_type == "compaction_summary" => None,
-            message => Some(TranscriptItem::Message(message)),
+            } if custom_type == "compaction_summary" => Vec::new(),
+            message => vec![TranscriptItem::Message(message)],
         },
-        SessionLine::Legacy(node) => Some(TranscriptItem::Message(node.message)),
+        SessionLine::Legacy(node) => vec![TranscriptItem::Message(node.message)],
         SessionLine::Record(Record::ContextCompacted {
             seq,
             lane,
@@ -374,7 +375,7 @@ fn transcript_item(path: &Path, offset: u64, line: &[u8]) -> io::Result<Option<T
             effective_model,
             context_limit,
             ..
-        }) if lane == "main" => Some(TranscriptItem::ContextCompacted(ContextCompactedMarker {
+        }) if lane == "main" => vec![TranscriptItem::ContextCompacted(ContextCompactedMarker {
             seq,
             timestamp,
             pre_tokens,
@@ -382,8 +383,8 @@ fn transcript_item(path: &Path, offset: u64, line: &[u8]) -> io::Result<Option<T
             reason,
             effective_model: effective_model.as_str().to_owned(),
             context_limit,
-        })),
-        _ => None,
+        })],
+        _ => Vec::new(),
     })
 }
 
@@ -1003,17 +1004,38 @@ fn append_session_json_line_with_policy<T: serde::Serialize>(
         .map_err(|error| io::Error::other(error.to_string()))?;
     let mut file = fs::OpenOptions::new()
         .create(true)
+        .read(true)
         .append(true)
         .open(path)?;
     // The separator also quarantines a crash-torn atomic batch if ordinary
     // session traffic is the first append after recovery.
-    file.write_all(b"\n")?;
+    prepare_append_boundary(&mut file)?;
     serde_json::to_writer(&mut file, value).map_err(io::Error::other)?;
     file.write_all(b"\n")?;
     match sync_policy {
         SyncPolicy::All => file.sync_all(),
         SyncPolicy::Data => file.sync_data(),
     }
+}
+
+fn prepare_append_boundary(file: &mut fs::File) -> io::Result<()> {
+    let len = file.metadata()?.len();
+    if len == 0 {
+        return Ok(());
+    }
+    file.seek(SeekFrom::Start(0))?;
+    let mut data = Vec::with_capacity(len as usize);
+    file.read_to_end(&mut data)?;
+    if data.last() == Some(&b'\n') {
+        return Ok(());
+    }
+    let tail = data.rsplit(|byte| *byte == b'\n').next().unwrap_or(&data);
+    if serde_json::from_slice::<serde_json::Value>(tail).is_err()
+        && !tail.starts_with(ATOMIC_FRAME_SENTINEL.as_bytes())
+    {
+        file.write_all(TORN_EOF_SENTINEL.as_bytes())?;
+    }
+    file.write_all(b"\n")
 }
 
 fn file_len(path: &Path) -> io::Result<u64> {
@@ -1043,10 +1065,12 @@ fn append_atomic_batch_line(path: &Path, value: &AtomicBatchLine) -> Result<(), 
         .map_err(|error| ReduceError::Storage(error.to_string()))?;
     let mut file = fs::OpenOptions::new()
         .create(true)
+        .read(true)
         .append(true)
         .open(path)
         .map_err(|error| ReduceError::Storage(error.to_string()))?;
-    file.write_all(b"\n")
+    prepare_append_boundary(&mut file)
+        .and_then(|_| file.write_all(ATOMIC_FRAME_SENTINEL.as_bytes()))
         .and_then(|_| file.write_all(&encoded))
         .and_then(|_| file.write_all(b"\n"))
         .and_then(|_| file.sync_all())
@@ -1219,6 +1243,10 @@ fn validate_harness_records(records: &[Record], path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+fn atomic_frame_payload(bytes: &[u8]) -> Option<&[u8]> {
+    bytes.strip_prefix(ATOMIC_FRAME_SENTINEL.as_bytes())
+}
+
 fn read_strict<T: DeserializeOwned>(path: &Path) -> io::Result<Vec<T>> {
     if !path.exists() {
         return Ok(Vec::new());
@@ -1231,13 +1259,20 @@ fn read_strict<T: DeserializeOwned>(path: &Path) -> io::Result<Vec<T>> {
             continue;
         }
         let is_torn_tail = index == count - 1 && !data.ends_with('\n');
-        match serde_json::from_str(line) {
+        let payload = line.strip_prefix(ATOMIC_FRAME_SENTINEL).unwrap_or(line);
+        match serde_json::from_str(payload) {
             Ok(value) => values.push(value),
             Err(_error) if is_torn_tail => break,
-            // Atomic batches reserve this prefix specifically so a subsequent
-            // append can quarantine a crash-torn frame without truncating the
-            // canonical journal. Other malformed complete lines remain fatal.
-            Err(_error) if line.starts_with("{\"atomic_batch\":[") => continue,
+            // Quarantine only the reserved atomic envelope, including every
+            // possible partial sentinel. Unrelated malformed lines stay fatal.
+            Err(_error)
+                if ATOMIC_FRAME_SENTINEL.starts_with(line)
+                    || line.starts_with(ATOMIC_FRAME_SENTINEL)
+                    || line.ends_with(TORN_EOF_SENTINEL)
+                    || line.starts_with("{\"atomic_batch\":[") =>
+            {
+                continue
+            }
             Err(error) => return Err(invalid_line(path, index + 1, error)),
         }
     }
@@ -1253,7 +1288,10 @@ fn invalid_line(path: &Path, line: usize, error: impl std::fmt::Display) -> io::
 
 #[cfg(test)]
 mod tests {
-    use super::{read_entries, read_transcript_page, SyncPolicy, TranscriptCursor, TranscriptItem};
+    use super::{
+        append_atomic_batch_line, read_entries, read_transcript_page, AtomicBatchItem,
+        AtomicBatchLine, SyncPolicy, TranscriptCursor, TranscriptItem, ATOMIC_FRAME_SENTINEL,
+    };
     use crate::harness::{
         AgentHarness, CompactionReason, ContextItemSource, ContextItemStatus, ContextManifestItem,
         HarnessEventHub, JsonlStore, Record, Reducer, SessionStore, TraceString,
@@ -1986,49 +2024,154 @@ mod tests {
     }
 
     #[test]
-    fn torn_atomic_frame_is_quarantined_without_truncating_canonical_bytes() {
-        use std::io::Write as _;
+    fn every_atomic_frame_cut_is_quarantined_without_rewriting_prior_bytes() {
+        let frame = AtomicBatchLine {
+            atomic_batch: vec![AtomicBatchItem::Entry(transcript_entry(
+                2,
+                assistant("framed"),
+            ))],
+        };
+        let mut encoded = ATOMIC_FRAME_SENTINEL.as_bytes().to_vec();
+        encoded.extend(serde_json::to_vec(&frame).unwrap());
 
+        for cut in 0..encoded.len() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(format!("atomic-cut-{cut}.jsonl"));
+            let mut store = JsonlStore::open(&path).unwrap();
+            store.append_entry(user_entry("root", "main")).unwrap();
+            drop(store);
+            let canonical = std::fs::read(&path).unwrap();
+            let mut bytes = canonical.clone();
+            bytes.extend_from_slice(&encoded[..cut]);
+            std::fs::write(&path, &bytes).unwrap();
+
+            let mut recovered = JsonlStore::open(&path).unwrap();
+            recovered
+                .append_record(Record::FactSet {
+                    id: "fact-after-crash".into(),
+                    seq: 0,
+                    lane: "main".into(),
+                    timestamp: 1,
+                    run_id: None,
+                    key: "recovered".into(),
+                    value: "true".into(),
+                })
+                .unwrap();
+            drop(recovered);
+
+            let durable = std::fs::read(&path).unwrap();
+            assert_eq!(
+                &durable[..canonical.len()],
+                canonical.as_slice(),
+                "cut {cut}"
+            );
+            assert_eq!(
+                &durable[canonical.len()..canonical.len() + cut],
+                &encoded[..cut],
+                "cut {cut}"
+            );
+            assert!(
+                JsonlStore::open(&path)
+                    .unwrap()
+                    .records()
+                    .iter()
+                    .any(|record| record.id() == "fact-after-crash"),
+                "cut {cut}"
+            );
+        }
+
+        // Compatibility with frames written before the sentinel contract: an
+        // arbitrary invalid EOF fragment is sealed with a reserved suffix.
+        for fragment in [b"{".as_slice(), b"{\"at".as_slice()] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("legacy-cut.jsonl");
+            let mut store = JsonlStore::open(&path).unwrap();
+            store.append_entry(user_entry("root", "main")).unwrap();
+            drop(store);
+            let canonical = std::fs::read(&path).unwrap();
+            let mut bytes = canonical.clone();
+            bytes.extend_from_slice(fragment);
+            std::fs::write(&path, bytes).unwrap();
+            let mut recovered = JsonlStore::open(&path).unwrap();
+            recovered
+                .append_record(Record::FactSet {
+                    id: "later".into(),
+                    seq: 0,
+                    lane: "main".into(),
+                    timestamp: 1,
+                    run_id: None,
+                    key: "k".into(),
+                    value: "v".into(),
+                })
+                .unwrap();
+            drop(recovered);
+            let durable = std::fs::read(&path).unwrap();
+            assert_eq!(&durable[..canonical.len()], canonical.as_slice());
+            assert_eq!(
+                &durable[canonical.len()..canonical.len() + fragment.len()],
+                fragment
+            );
+            JsonlStore::open(&path).unwrap();
+        }
+    }
+
+    #[test]
+    fn transcript_paging_losslessly_expands_multi_visible_atomic_frame() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("atomic-torn.jsonl");
-        let mut store = JsonlStore::open(&path).unwrap();
-        store.append_entry(user_entry("root", "main")).unwrap();
-        drop(store);
+        let path = dir.path().join("atomic-transcript.jsonl");
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                serde_json::to_string(&transcript_entry(
+                    1,
+                    AgentMessage::user("older", Vec::new())
+                ))
+                .unwrap()
+            ),
+        )
+        .unwrap();
+        let frame = AtomicBatchLine {
+            atomic_batch: vec![
+                AtomicBatchItem::Entry(transcript_entry(
+                    2,
+                    AgentMessage::user("new turn", Vec::new()),
+                )),
+                AtomicBatchItem::Record(Record::ContextCompacted {
+                    id: "marker".into(),
+                    seq: 3,
+                    lane: "main".into(),
+                    timestamp: 3,
+                    run_id: "run".into(),
+                    generation: 1,
+                    reason: CompactionReason::AdaptiveBudget,
+                    effective_model: TraceString::new("model").unwrap(),
+                    context_limit: 100,
+                    context_limit_is_estimate: false,
+                    pre_tokens: 90,
+                    post_tokens: 40,
+                    retained_tail_target: 20,
+                    retained_tail_tokens: 20,
+                    compacted_messages: 2,
+                }),
+                AtomicBatchItem::Entry(transcript_entry(4, assistant("answer"))),
+            ],
+        };
+        append_atomic_batch_line(&path, &frame).unwrap();
 
-        let canonical = std::fs::read(&path).unwrap();
-        let torn = b"{\"atomic_batch\":[{\"Entry\":{";
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .unwrap();
-        file.write_all(torn).unwrap();
-        file.sync_all().unwrap();
-        drop(file);
+        let newest = read_transcript_page(&path, None, 1).unwrap();
+        assert_eq!(newest.items.len(), 3);
+        assert!(matches!(&newest.items[0], TranscriptItem::Message(message) if message.is_user()));
+        assert!(matches!(
+            &newest.items[1],
+            TranscriptItem::ContextCompacted(_)
+        ));
+        assert!(matches!(&newest.items[2], TranscriptItem::Message(message) if !message.is_user()));
+        assert_eq!(newest.messages().len(), 2);
+        assert!(newest.has_older);
 
-        let mut recovered = JsonlStore::open(&path).unwrap();
-        recovered
-            .append_record(Record::FactSet {
-                id: "fact-after-crash".into(),
-                seq: 0,
-                lane: "main".into(),
-                timestamp: 1,
-                run_id: None,
-                key: "recovered".into(),
-                value: "true".into(),
-            })
-            .unwrap();
-        drop(recovered);
-
-        let durable = std::fs::read(&path).unwrap();
-        assert!(durable.starts_with(&canonical));
-        assert_eq!(
-            &durable[canonical.len()..canonical.len() + torn.len()],
-            torn
-        );
-        let reopened = JsonlStore::open(&path).unwrap();
-        assert!(reopened
-            .records()
-            .iter()
-            .any(|record| record.id() == "fact-after-crash"));
+        let older = read_transcript_page(&path, newest.next_cursor, 1).unwrap();
+        assert_eq!(older.messages().len(), 1);
+        assert!(!older.has_older);
     }
 }

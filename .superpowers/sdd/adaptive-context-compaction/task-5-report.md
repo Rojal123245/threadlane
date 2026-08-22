@@ -125,3 +125,19 @@ Final verification:
 - `git diff --check` — PASS.
 
 Known unrelated warnings remain unchanged: the session test target's unused `Duration` import and five GPUI dead-code warnings.
+
+## Final blocker closure
+
+- Atomic frames now use a reserved `#!threadlane-atomic-v1 ` envelope. Recovery recognizes every partial envelope cut; pre-envelope arbitrary EOF fragments (including `{` and `{"at`) are append-only quarantined with an explicit torn-EOF suffix. Completed unrelated malformed legacy lines remain errors. The exhaustive fixture tests every byte cut, appends a later durable record, reopens, and verifies the complete prior byte prefix is unchanged.
+- Accepted-run validation now proves the durable `OperationStarted`, user prompt identity/lane/ancestry, and attempt-1 assistant reservation identity/run/lane all lie within `accepted_through_seq` and the current durable prefix. Compact accepted tokens execute the same proof, preventing assistant-proof bypass. Malformed assistant, cross-run, and forged-prefix fixtures pass.
+- Transcript paging expands every visible entry and compaction marker in an atomic frame, preserving frame order while counting all messages and stopping only after the whole cursor-addressable line. A cross-page multi-visible frame fixture passes.
+
+Final verification (2026-08-22):
+
+- `cargo test -p threadlane-runtime` — PASS, 91 tests; 2 performance and 2 doc tests ignored.
+- `cargo test -p threadlane-session` — PASS, 119 tests.
+- `cargo check -p threadlane-gpui` — PASS.
+- `cargo fmt --all -- --check` — PASS.
+- `git diff --check` — PASS.
+
+Unchanged warnings: one unused session test import and five GPUI dead-code warnings.

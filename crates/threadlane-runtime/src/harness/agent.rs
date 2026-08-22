@@ -365,18 +365,13 @@ impl<S: SessionStore> AgentHarness<S> {
                 accepted.lane, lane.open_operation, accepted.run_id
             )));
         }
-        let has_prompt = self
-            .store
-            .entries()
-            .iter()
-            .any(|e| e.id == accepted.prompt_entry_id && e.lane == accepted.lane);
-        if !has_prompt {
-            return Err(ReduceError::InvalidLane(format!(
-                "prompt entry {} not found in store for lane {}",
-                accepted.prompt_entry_id, accepted.lane
-            )));
-        }
-        Ok(())
+        self.validate_acceptance_proof(
+            &accepted.run_id,
+            &accepted.lane,
+            &accepted.prompt_entry_id,
+            &accepted.assistant_entry_id,
+            accepted.accepted_through_seq,
+        )
     }
 
     /// Validates the public, compact accepted-run token against committed state.
@@ -416,11 +411,86 @@ impl<S: SessionStore> AgentHarness<S> {
             )));
         }
         let prompt_id = format!("entry-{run_id}-user");
-        if !self.store.entries().iter().any(|entry| {
-            entry.id == prompt_id && entry.lane == lane_name && entry.seq <= accepted_through_seq
-        }) {
+        let assistant_id = format!("entry-{run_id}-assistant-1");
+        self.validate_acceptance_proof(
+            run_id,
+            lane_name,
+            &prompt_id,
+            &assistant_id,
+            accepted_through_seq,
+        )
+    }
+
+    fn validate_acceptance_proof(
+        &self,
+        run_id: &str,
+        lane_name: &str,
+        prompt_id: &str,
+        assistant_id: &str,
+        accepted_through_seq: u64,
+    ) -> Result<(), ReduceError> {
+        let durable_max = self
+            .store
+            .entries()
+            .iter()
+            .map(|entry| entry.seq)
+            .chain(self.store.records().iter().map(|record| record.seq()))
+            .max()
+            .unwrap_or(0);
+        if accepted_through_seq > durable_max {
             return Err(ReduceError::InvalidLane(format!(
-                "accepted prompt {prompt_id} is absent from committed prefix {accepted_through_seq}"
+                "accepted prefix {accepted_through_seq} exceeds committed sequence {durable_max}"
+            )));
+        }
+        let source_leaf = self
+            .store
+            .records()
+            .iter()
+            .find_map(|record| match record {
+                super::Record::OperationStarted {
+                    id,
+                    seq,
+                    lane,
+                    source_leaf_id,
+                    intent: super::OperationIntent::Run,
+                    ..
+                } if id == run_id && lane == lane_name && *seq <= accepted_through_seq => {
+                    source_leaf_id.clone().into()
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                ReduceError::InvalidLane(format!(
+            "accepted run {run_id} has no matching start in committed prefix {accepted_through_seq}"
+        ))
+            })?;
+        let prompt = self
+            .store
+            .entries()
+            .iter()
+            .find(|entry| {
+                entry.id == prompt_id
+                    && entry.lane == lane_name
+                    && entry.seq <= accepted_through_seq
+            })
+            .ok_or_else(|| {
+                ReduceError::InvalidLane(format!(
+            "accepted prompt {prompt_id} is absent from committed prefix {accepted_through_seq}"
+        ))
+            })?;
+        if !prompt.message.is_user() || prompt.parent_id != source_leaf {
+            return Err(ReduceError::InvalidLane(format!(
+                "accepted prompt {prompt_id} does not match run {run_id} ancestry or role"
+            )));
+        }
+        let has_assistant_reservation = self.store.records().iter().any(|record| matches!(record,
+            super::Record::StepAttempt { seq, lane, run_id: proof_run, attempt: 1, result_entry_id, .. }
+                if lane == lane_name && proof_run == run_id && result_entry_id == assistant_id
+                    && *seq <= accepted_through_seq
+        ));
+        if !has_assistant_reservation {
+            return Err(ReduceError::InvalidLane(format!(
+                "assistant reservation {assistant_id} is absent from accepted run {run_id} prefix {accepted_through_seq}"
             )));
         }
         Ok(())
@@ -1020,5 +1090,40 @@ impl<S: SessionStore> SessionStore for AgentHarness<S> {
             None,
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod accepted_run_proof_tests {
+    use super::AgentHarness;
+    use crate::harness::MemoryStore;
+    use crate::types::AgentMessage;
+
+    #[test]
+    fn accepted_run_rejects_malformed_assistant_cross_run_and_forged_prefix() {
+        let mut harness = AgentHarness::new(MemoryStore::new("session"));
+        let accepted = harness
+            .accept_prompt_and_drive("run-a", AgentMessage::user("hello", Vec::new()))
+            .unwrap();
+        harness.validate_accepted_run(&accepted).unwrap();
+
+        let mut malformed = accepted.clone();
+        malformed.assistant_entry_id = "entry-run-a-assistant-99".into();
+        assert!(harness.validate_accepted_run(&malformed).is_err());
+
+        let mut cross_run = accepted.clone();
+        cross_run.assistant_entry_id = "entry-run-b-assistant-1".into();
+        assert!(harness.validate_accepted_run(&cross_run).is_err());
+
+        let mut oversized_prefix = accepted.clone();
+        oversized_prefix.accepted_through_seq += 1;
+        assert!(harness.validate_accepted_run(&oversized_prefix).is_err());
+
+        let mut forged_prefix = accepted.clone();
+        forged_prefix.accepted_through_seq -= 1;
+        assert!(harness.validate_accepted_run(&forged_prefix).is_err());
+        assert!(harness
+            .validate_accepted_run_token("run-a", "main", forged_prefix.accepted_through_seq)
+            .is_err());
     }
 }
