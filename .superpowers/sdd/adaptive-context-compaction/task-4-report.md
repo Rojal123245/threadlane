@@ -90,7 +90,7 @@ A focused scope correction was completed after review:
 
 - Removed the premature GPUI paged-history state and behavior (`HistoryPageResult`, transcript cursor/file/page serial state, older-page loading, and newest-page-only hydration).
 - Restored complete durable transcript loading for startup, session switching, and refresh hydration. The GPUI projection remains message-only until the later task can integrate `ContextCompacted` markers coherently rather than adding and immediately discarding a premature marker projection.
-- Added `session_messages_include_complete_durable_history`, covering a 45-message history (larger than the former 40-message page) from first through last message.
+- Correction to the prior claim: the original `session_messages_include_complete_durable_history` wrote 45 entries and checked the complete loader, but did not exercise the former 40-message helper, so the report overstated how directly the fixture proved the page-boundary regression. The restored `session_messages_include_complete_durable_history_beyond_legacy_page` now proves the same durable fixture yields only 40 messages plus `has_older` through the former helper, while real GPUI session loading returns all 45 from `message-0` through `message-44`.
 - Reverted the unrelated open-operation-specific parent selection in `CodingSessionHarness::append_message_inner` and removed its behavior-specific test. No Task 4 telemetry/checkpoint requirement depends on that parent-selection policy.
 - Preserved the core Task 4 telemetry, checkpoint, JSONL paging, and transcript-marker implementation.
 
@@ -102,8 +102,52 @@ A focused scope correction was completed after review:
 - `cargo test -p threadlane-runtime` — PASS (85 passed, 2 benchmark tests ignored, 2 doc tests ignored).
 - `cargo test -p threadlane-session coding_agent::harness::tests -- --nocapture` — PASS (18 passed).
 - `cargo test -p threadlane-session` — PASS (110 passed); pre-existing unused-import warning in `supervisor.rs` only.
-- `cargo test -p threadlane-gpui state::app_state::tests::session_messages_include_complete_durable_history -- --nocapture` — PASS (1 passed).
+- `cargo test -p threadlane-gpui state::app_state::tests::session_messages_include_complete_durable_history_beyond_legacy_page -- --nocapture` — PASS (1 passed).
 - `cargo test -p threadlane-gpui state::app_state::tests` — PASS (14 passed); pre-existing dead-code warnings only.
 - `cargo check -p threadlane-gpui` — PASS; pre-existing dead-code warnings only.
 - `cargo fmt -- <touched Rust files>` — PASS.
 - `git diff --check` — PASS.
+
+
+## Remaining quality-finding validation
+
+TDD relevance check (temporary assertion that the former helper returned all 45):
+
+```text
+$ cargo test -p threadlane-gpui state::app_state::tests::session_messages_include_complete_durable_history_beyond_legacy_page -- --nocapture
+assertion `left == right` failed
+  left: 40
+ right: 45
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 42 filtered out
+```
+
+Final focused regression:
+
+```text
+$ cargo test -p threadlane-gpui state::app_state::tests::session_messages_include_complete_durable_history_beyond_legacy_page -- --nocapture
+test state::app_state::tests::session_messages_include_complete_durable_history_beyond_legacy_page ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 42 filtered out
+```
+
+Required validation:
+
+```text
+$ cargo test -p threadlane-gpui state::app_state::tests
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+$ cargo check -p threadlane-gpui
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.54s
+
+$ cargo test -p threadlane-runtime harness::jsonl::tests -- --nocapture
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 68 filtered out
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out
+
+$ cargo fmt -- crates/threadlane-gpui/src/state/app_state.rs
+(exit 0)
+
+$ git diff --check
+(exit 0)
+```
+
+The GPUI commands emitted only the pre-existing dead-code warnings recorded above.

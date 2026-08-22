@@ -3982,8 +3982,9 @@ mod tests {
     }
 
     #[test]
-    fn session_messages_include_complete_durable_history() {
-        const CHAT_HISTORY_PAGE_SIZE_FOR_TEST: usize = 45;
+    fn session_messages_include_complete_durable_history_beyond_legacy_page() {
+        const LEGACY_PAGE_SIZE: usize = 40;
+        const MESSAGE_COUNT: usize = 45;
         let unique = std::time::SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -3996,7 +3997,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let mut store = threadlane_session::harness::JsonlStore::open(&path).unwrap();
         let mut parent_id = None;
-        for index in 0..CHAT_HISTORY_PAGE_SIZE_FOR_TEST {
+        for index in 0..MESSAGE_COUNT {
             let id = format!("node_{index}");
             store
                 .append_entry(threadlane_session::harness::Entry {
@@ -4016,8 +4017,16 @@ mod tests {
         }
         drop(store);
 
+        // Keep the fixture tied to the regression: the former GPUI helper loaded
+        // only this newest page, omitting the first five durable messages.
+        let legacy_page =
+            threadlane_session::harness::read_transcript_page(&path, None, LEGACY_PAGE_SIZE)
+                .unwrap();
+        assert_eq!(legacy_page.items.len(), LEGACY_PAGE_SIZE);
+        assert!(legacy_page.has_older);
+
         let messages = load_session_messages(&path);
-        assert_eq!(messages.len(), CHAT_HISTORY_PAGE_SIZE_FOR_TEST);
+        assert_eq!(messages.len(), MESSAGE_COUNT);
         assert_eq!(messages.first().unwrap().content, "message-0");
         assert_eq!(messages.last().unwrap().content, "message-44");
 
