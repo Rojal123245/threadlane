@@ -23,6 +23,96 @@ use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable, WindowExt
 use crate::app::{actions::AppAction, controller};
 use crate::screens::editor::EditorView;
 use crate::state::{AppState, ChatMessageInfo, MessageRole, ToolActivityInfo, TrajectoryEntry};
+
+#[derive(Clone, Debug)]
+struct ContextMeterContext {
+    current_tokens: u64,
+    context_limit: u64,
+    context_limit_is_estimate: bool,
+    effective_model: String,
+    last_compacted_at: Option<u64>,
+    provisional: bool,
+    estimating: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ContextMeterMetrics {
+    billed_input_tokens: u64,
+    output_tokens: u64,
+    cache_hit_percent: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ContextMeterViewModel {
+    percent: Option<f64>,
+    bar_percent: f64,
+    current_label: String,
+    total_processed_label: String,
+    cache_hit_label: Option<String>,
+    effective_model: Option<String>,
+    last_compacted_at: Option<u64>,
+    provisional: bool,
+}
+
+fn format_meter_tokens(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.1}k", tokens as f64 / 1_000.0)
+    } else {
+        tokens.to_string()
+    }
+}
+
+fn context_meter_view_model(
+    context: Option<&ContextMeterContext>,
+    metrics: &ContextMeterMetrics,
+) -> ContextMeterViewModel {
+    let total_processed = metrics
+        .billed_input_tokens
+        .saturating_add(metrics.output_tokens);
+    let cache_hit_label = metrics.cache_hit_percent.map(|value| format!("{value}%"));
+
+    let Some(context) = context else {
+        return ContextMeterViewModel {
+            percent: None,
+            bar_percent: 0.0,
+            current_label: "Estimating…".into(),
+            total_processed_label: format_meter_tokens(total_processed),
+            cache_hit_label,
+            effective_model: None,
+            last_compacted_at: None,
+            provisional: false,
+        };
+    };
+
+    let percent = (!context.estimating && context.context_limit > 0)
+        .then(|| context.current_tokens as f64 / context.context_limit as f64 * 100.0);
+    let limit_prefix = if context.context_limit_is_estimate {
+        "~"
+    } else {
+        ""
+    };
+    ContextMeterViewModel {
+        percent,
+        bar_percent: percent.unwrap_or_default().clamp(0.0, 100.0),
+        current_label: if context.estimating {
+            "Estimating…".into()
+        } else {
+            format!(
+                "{} / {limit_prefix}{}",
+                format_meter_tokens(context.current_tokens),
+                format_meter_tokens(context.context_limit)
+            )
+        },
+        total_processed_label: format_meter_tokens(total_processed),
+        cache_hit_label,
+        effective_model: (!context.effective_model.is_empty())
+            .then(|| context.effective_model.clone()),
+        last_compacted_at: context.last_compacted_at,
+        provisional: context.provisional,
+    }
+}
 use threadlane_session::commands::{available_slash_commands, SlashCommandInfo};
 use threadlane_session::{ImageAttachment, PlanItemStatus, ReasoningEffort, SessionPlan};
 
@@ -2319,31 +2409,35 @@ impl ChatListView {
                             }),
                     )
             }
-            MessageRole::System | MessageRole::ContextMarker => {
-                div().flex().justify_center().my_2().child(
+            MessageRole::ContextMarker => {
+                div().w_full().flex().justify_center().my_2().px_4().child(
                     div()
                         .text_xs()
                         .text_color(theme.muted_foreground)
-                        .child(msg.content.clone())
-                        .context_menu({
-                            let content = msg.content.clone();
-                            move |menu, _window, _cx| {
-                                let text = content.clone();
-                                menu.item(PopupMenuItem::new("Copy Message").on_click(
-                                    move |_event, window, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            text.clone(),
-                                        ));
-                                        window.push_notification(
-                                            Notification::info("Copied to clipboard"),
-                                            cx,
-                                        );
-                                    },
-                                ))
-                            }
-                        }),
+                        .child(msg.content.clone()),
                 )
             }
+            MessageRole::System => div().flex().justify_center().my_2().child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(msg.content.clone())
+                    .context_menu({
+                        let content = msg.content.clone();
+                        move |menu, _window, _cx| {
+                            let text = content.clone();
+                            menu.item(PopupMenuItem::new("Copy Message").on_click(
+                                move |_event, window, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                                    window.push_notification(
+                                        Notification::info("Copied to clipboard"),
+                                        cx,
+                                    );
+                                },
+                            ))
+                        }
+                    }),
+            ),
             MessageRole::Advisor(severity) => {
                 let (badge_text, bg_color, border_color, text_color) = match severity {
                     threadlane_session::AdvisorSeverity::Aside => (
@@ -2686,7 +2780,21 @@ impl ChatListView {
                 state.active_session_id.clone(),
             )
         };
-        let metrics = self.model.read(cx).active_session_metrics();
+        let (metrics, context_window) = {
+            let state = self.model.read(cx);
+            let context_window = state
+                .active_context_window()
+                .map(|context| ContextMeterContext {
+                    current_tokens: context.current_tokens,
+                    context_limit: context.context_limit,
+                    context_limit_is_estimate: context.context_limit_is_estimate,
+                    effective_model: context.effective_model.clone(),
+                    last_compacted_at: context.last_compacted_at,
+                    provisional: context.provisional,
+                    estimating: context.estimating,
+                });
+            (state.active_session_metrics(), context_window)
+        };
         let lane_count = self
             .model
             .read(cx)
@@ -2993,121 +3101,156 @@ impl ChatListView {
             div().into_any_element()
         };
 
-        let token_usage = self.model.read(cx).current_session_token_usage();
-        let context_max = crate::model_catalog::model_context_window(&selected_model);
-        let percent = if context_max > 0 {
-            ((token_usage.total_tokens as f64 / context_max as f64) * 100.0).clamp(0.0, 100.0)
-        } else {
-            0.0
-        };
-
-        let meter_color = if percent == 0.0 {
+        let meter = context_meter_view_model(
+            context_window.as_ref(),
+            &ContextMeterMetrics {
+                billed_input_tokens: metrics.billed_input_tokens(),
+                output_tokens: metrics.output_tokens,
+                cache_hit_percent: metrics.cache_hit_percent(),
+            },
+        );
+        let displayed_percent = meter.percent.unwrap_or_default();
+        let meter_color = if meter.percent.is_none() || displayed_percent == 0.0 {
             theme.muted_foreground
-        } else if percent >= 95.0 {
+        } else if displayed_percent >= 95.0 {
             theme.danger
-        } else if percent >= 80.0 {
+        } else if displayed_percent >= 80.0 {
             theme.warning
         } else {
             theme.accent
         };
-        let context_metrics = self.model.read(cx).active_session_metrics();
-        let total_processed = context_metrics
-            .billed_input_tokens()
-            .saturating_add(context_metrics.output_tokens)
-            .min(u64::from(u32::MAX)) as u32;
-        let context_used = crate::model_catalog::format_tokens(token_usage.total_tokens);
-        let context_limit = crate::model_catalog::format_tokens(context_max);
-        let processed = crate::model_catalog::format_tokens(total_processed);
-        let context_meter =
-            HoverCard::new("context-window-hover-card")
-                .anchor(Anchor::BottomRight)
-                .open_delay(Duration::from_millis(200))
-                .close_delay(Duration::from_millis(300))
-                .trigger(
-                    div()
-                        .id("context-meter-badge")
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .size(px(32.0))
-                        .rounded_full()
-                        .hover(|style| style.bg(theme.accent.opacity(0.1)))
-                        .cursor_pointer()
-                        .child(
-                            ProgressCircle::new("context-meter-circle")
-                                .value(percent as f32)
-                                .color(meter_color)
-                                .size(px(24.0)),
-                        ),
-                )
-                .content(move |_state, _window, _cx| {
-                    let bar_width = ((percent / 100.0) * 308.0).clamp(0.0, 308.0);
-                    div()
-                        .w(px(340.0))
-                        .p_4()
-                        .rounded_xl()
-                        .border_1()
-                        .border_color(theme.border)
-                        .bg(theme.background)
-                        .shadow_lg()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .child(
+        let context_meter = HoverCard::new("context-window-hover-card")
+            .anchor(Anchor::BottomRight)
+            .open_delay(Duration::from_millis(200))
+            .close_delay(Duration::from_millis(300))
+            .trigger(
+                div()
+                    .id("context-meter-badge")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(32.0))
+                    .rounded_full()
+                    .hover(|style| style.bg(theme.accent.opacity(0.1)))
+                    .cursor_pointer()
+                    .child(
+                        ProgressCircle::new("context-meter-circle")
+                            .value(meter.bar_percent as f32)
+                            .color(meter_color)
+                            .size(px(24.0)),
+                    ),
+            )
+            .content(move |_state, _window, _cx| {
+                let bar_width = meter.bar_percent / 100.0 * 308.0;
+                let current_summary = match meter.percent {
+                    Some(percent) => format!(
+                        "{percent:.0}% · {}{}",
+                        meter.current_label,
+                        if meter.provisional {
+                            " · provisional"
+                        } else {
+                            ""
+                        }
+                    ),
+                    None => meter.current_label.clone(),
+                };
+                div()
+                    .w(px(340.0))
+                    .p_4()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.background)
+                    .shadow_lg()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.foreground)
+                                    .child("Current context"),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child(current_summary),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .h(px(5.0))
+                            .rounded_full()
+                            .bg(theme.border)
+                            .child(
+                                div()
+                                    .h_full()
+                                    .w(px(bar_width as f32))
+                                    .rounded_full()
+                                    .bg(meter_color),
+                            ),
+                    )
+                    .when_some(meter.effective_model.clone(), |card, effective_model| {
+                        card.child(
                             div()
                                 .flex()
                                 .justify_between()
                                 .items_center()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(theme.foreground)
-                                        .child("Context Window"),
-                                )
-                                .child(div().text_sm().text_color(theme.muted_foreground).child(
-                                    format!("{percent:.0}% · {context_used}/{context_limit}"),
-                                )),
-                        )
-                        .child(
-                            div()
-                                .w_full()
-                                .h(px(5.0))
-                                .rounded_full()
-                                .bg(theme.border)
-                                .child(
-                                    div()
-                                        .h_full()
-                                        .w(px(bar_width as f32))
-                                        .rounded_full()
-                                        .bg(meter_color),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .justify_between()
-                                .items_center()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(theme.muted_foreground)
-                                        .child("Total processed"),
-                                )
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(theme.muted_foreground)
-                                        .child(processed.clone()),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
+                                .text_sm()
                                 .text_color(theme.muted_foreground)
-                                .child("Context is automatically compacted when needed."),
+                                .child("Model")
+                                .child(effective_model),
                         )
-                });
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .items_center()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child("Total processed")
+                            .child(meter.total_processed_label.clone()),
+                    )
+                    .when_some(meter.cache_hit_label.clone(), |card, cache_hit| {
+                        card.child(
+                            div()
+                                .flex()
+                                .justify_between()
+                                .items_center()
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child("Cache hit")
+                                .child(cache_hit),
+                        )
+                    })
+                    .when_some(meter.last_compacted_at, |card, sequence| {
+                        card.child(
+                            div()
+                                .flex()
+                                .justify_between()
+                                .items_center()
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child("Last compacted")
+                                .child(format!("Record #{sequence}")),
+                        )
+                    })
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("Context is compacted automatically when needed."),
+                    )
+            });
 
         let stashed_draft = active_session_id
             .as_ref()
@@ -3478,12 +3621,97 @@ impl Render for ChatListView {
 mod hot_path_tests {
     use super::{
         build_trajectory_rows, build_transcript_rows, classify_markdown_update,
-        format_trajectory_raw_json, grouped_tool_activities, summarize_trajectory, MarkdownUpdate,
+        context_meter_view_model, format_trajectory_raw_json, grouped_tool_activities,
+        summarize_trajectory, ContextMeterContext, ContextMeterMetrics, MarkdownUpdate,
         TrajectoryCacheKey, TrajectoryMode, TrajectoryRow, TranscriptRow,
     };
     use crate::state::{
         ChatMessageInfo, MessageRole, ToolActivityInfo, TrajectoryDiagnostics, TrajectoryEntry,
     };
+
+    fn metrics_with_usage(
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_tokens: u64,
+        cache_write_tokens: u64,
+    ) -> ContextMeterMetrics {
+        let billed_input_tokens = input_tokens
+            .saturating_add(cache_read_tokens)
+            .saturating_add(cache_write_tokens);
+        ContextMeterMetrics {
+            billed_input_tokens,
+            output_tokens,
+            cache_hit_percent: (billed_input_tokens > 0).then(|| {
+                cache_read_tokens
+                    .saturating_mul(100)
+                    .saturating_add(billed_input_tokens / 2)
+                    / billed_input_tokens
+            }),
+        }
+    }
+
+    fn estimating_context() -> ContextMeterContext {
+        ContextMeterContext {
+            current_tokens: 0,
+            context_limit: 0,
+            context_limit_is_estimate: false,
+            effective_model: "new-model".into(),
+            last_compacted_at: None,
+            provisional: false,
+            estimating: true,
+        }
+    }
+
+    #[test]
+    fn meter_separates_current_context_from_total_processed() {
+        let view = context_meter_view_model(
+            Some(&ContextMeterContext {
+                current_tokens: 103_732,
+                context_limit: 1_000_000,
+                context_limit_is_estimate: false,
+                effective_model: "gpt-5.6-sol".into(),
+                last_compacted_at: None,
+                provisional: false,
+                estimating: false,
+            }),
+            &metrics_with_usage(266_614, 30_285, 11_734_912, 0),
+        );
+        assert_eq!(view.percent, Some(10.3732));
+        assert_eq!(view.bar_percent, 10.3732);
+        assert_eq!(view.current_label, "103.7k / 1.0M");
+        assert_eq!(view.total_processed_label, "12.0M");
+        assert_eq!(view.cache_hit_label.as_deref(), Some("98%"));
+    }
+
+    #[test]
+    fn meter_estimating_context_has_no_false_percentage() {
+        let view =
+            context_meter_view_model(Some(&estimating_context()), &ContextMeterMetrics::default());
+        assert_eq!(view.percent, None);
+        assert_eq!(view.current_label, "Estimating…");
+        assert_eq!(view.bar_percent, 0.0);
+    }
+
+    #[test]
+    fn meter_labels_estimated_limit_and_clamps_only_bar() {
+        let view = context_meter_view_model(
+            Some(&ContextMeterContext {
+                current_tokens: 120_000,
+                context_limit: 100_000,
+                context_limit_is_estimate: true,
+                effective_model: "model".into(),
+                last_compacted_at: Some(42),
+                provisional: true,
+                estimating: false,
+            }),
+            &ContextMeterMetrics::default(),
+        );
+        assert_eq!(view.percent, Some(120.0));
+        assert_eq!(view.bar_percent, 100.0);
+        assert_eq!(view.current_label, "120.0k / ~100.0k");
+        assert_eq!(view.last_compacted_at, Some(42));
+        assert!(view.provisional);
+    }
 
     #[test]
     fn markdown_update_appends_only_the_new_suffix() {
