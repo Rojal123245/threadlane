@@ -7,12 +7,13 @@ use std::time::Duration;
 use base64::Engine as _;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::button::{Button, ButtonVariants, Toggle, ToggleVariants};
 use gpui_component::collapsible::Collapsible;
 use gpui_component::hover_card::HoverCard;
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::notification::Notification;
+use gpui_component::popover::Popover;
 use gpui_component::progress::ProgressCircle;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::tag::{Tag, TagVariant};
@@ -47,11 +48,35 @@ struct ContextMeterViewModel {
     percent: Option<f64>,
     bar_percent: f64,
     current_label: String,
+    detail_label: String,
     total_processed_label: String,
     cache_hit_label: Option<String>,
     effective_model: Option<String>,
     last_compacted_at: Option<u64>,
     provisional: bool,
+}
+
+#[derive(IntoElement)]
+struct ContextMeterTrigger {
+    toggle: Toggle,
+    selected: bool,
+}
+
+impl Selectable for ContextMeterTrigger {
+    fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    fn is_selected(&self) -> bool {
+        self.selected
+    }
+}
+
+impl RenderOnce for ContextMeterTrigger {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        self.toggle.checked(self.selected)
+    }
 }
 
 fn format_meter_tokens(tokens: u64) -> String {
@@ -78,6 +103,7 @@ fn context_meter_view_model(
             percent: None,
             bar_percent: 0.0,
             current_label: "Estimating…".into(),
+            detail_label: "Context usage details, estimating usage".into(),
             total_processed_label: format_meter_tokens(total_processed),
             cache_hit_label,
             effective_model: None,
@@ -86,25 +112,32 @@ fn context_meter_view_model(
         };
     };
 
-    let percent = (!context.estimating && context.context_limit > 0)
-        .then(|| context.current_tokens as f64 / context.context_limit as f64 * 100.0);
+    let unknown = context.estimating || context.context_limit == 0;
+    let percent =
+        (!unknown).then(|| context.current_tokens as f64 / context.context_limit as f64 * 100.0);
     let limit_prefix = if context.context_limit_is_estimate {
         "~"
     } else {
         ""
     };
+    let current_label = if unknown {
+        "Estimating…".into()
+    } else {
+        format!(
+            "{} / {limit_prefix}{}",
+            format_meter_tokens(context.current_tokens),
+            format_meter_tokens(context.context_limit)
+        )
+    };
+    let detail_label = percent.map_or_else(
+        || "Context usage details, estimating usage".into(),
+        |percent| format!("Context usage details, {percent:.0}% used"),
+    );
     ContextMeterViewModel {
         percent,
         bar_percent: percent.unwrap_or_default().clamp(0.0, 100.0),
-        current_label: if context.estimating {
-            "Estimating…".into()
-        } else {
-            format!(
-                "{} / {limit_prefix}{}",
-                format_meter_tokens(context.current_tokens),
-                format_meter_tokens(context.context_limit)
-            )
-        },
+        current_label,
+        detail_label,
         total_processed_label: format_meter_tokens(total_processed),
         cache_hit_label,
         effective_model: (!context.effective_model.is_empty())
@@ -366,6 +399,7 @@ pub struct ChatListView {
         std::time::Instant,
         Vec<SlashCommandInfo>,
     )>,
+    context_meter_open: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -535,6 +569,7 @@ impl ChatListView {
             trajectory_cache: None,
             trajectory_raw_json: None,
             slash_command_cache: None,
+            context_meter_open: false,
             _subscriptions: vec![sub1, sub2, sub3, sub_editor],
         }
     }
@@ -3119,27 +3154,41 @@ impl ChatListView {
         } else {
             theme.accent
         };
-        let context_meter = HoverCard::new("context-window-hover-card")
+        let context_meter_open = self.context_meter_open;
+        let toggle_context_meter = cx.entity();
+        let sync_context_meter = cx.entity();
+        let context_meter = Popover::new("context-window-popover")
             .anchor(Anchor::BottomRight)
-            .open_delay(Duration::from_millis(200))
-            .close_delay(Duration::from_millis(300))
-            .trigger(
-                div()
-                    .id("context-meter-badge")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(32.0))
+            .appearance(false)
+            .open(context_meter_open)
+            .on_open_change(move |open, _window, cx| {
+                sync_context_meter.update(cx, |this, cx| {
+                    if this.context_meter_open != *open {
+                        this.context_meter_open = *open;
+                        cx.notify();
+                    }
+                });
+            })
+            .trigger(ContextMeterTrigger {
+                selected: context_meter_open,
+                toggle: Toggle::new("context-meter-badge")
+                    .ghost()
                     .rounded_full()
-                    .hover(|style| style.bg(theme.accent.opacity(0.1)))
-                    .cursor_pointer()
+                    .size(px(32.0))
+                    .tooltip(meter.detail_label.clone())
                     .child(
                         ProgressCircle::new("context-meter-circle")
                             .value(meter.bar_percent as f32)
                             .color(meter_color)
                             .size(px(24.0)),
-                    ),
-            )
+                    )
+                    .on_click(move |open, _window, cx| {
+                        toggle_context_meter.update(cx, |this, cx| {
+                            this.context_meter_open = *open;
+                            cx.notify();
+                        });
+                    }),
+            })
             .content(move |_state, _window, _cx| {
                 let bar_width = meter.bar_percent / 100.0 * 308.0;
                 let current_summary = match meter.percent {
@@ -3642,10 +3691,8 @@ mod hot_path_tests {
             billed_input_tokens,
             output_tokens,
             cache_hit_percent: (billed_input_tokens > 0).then(|| {
-                cache_read_tokens
-                    .saturating_mul(100)
-                    .saturating_add(billed_input_tokens / 2)
-                    / billed_input_tokens
+                (((cache_read_tokens as u128) * 100 + (billed_input_tokens as u128) / 2)
+                    / billed_input_tokens as u128) as u64
             }),
         }
     }
@@ -3681,6 +3728,7 @@ mod hot_path_tests {
         assert_eq!(view.current_label, "103.7k / 1.0M");
         assert_eq!(view.total_processed_label, "12.0M");
         assert_eq!(view.cache_hit_label.as_deref(), Some("98%"));
+        assert_eq!(view.detail_label, "Context usage details, 10% used");
     }
 
     #[test]
@@ -3690,6 +3738,29 @@ mod hot_path_tests {
         assert_eq!(view.percent, None);
         assert_eq!(view.current_label, "Estimating…");
         assert_eq!(view.bar_percent, 0.0);
+        assert_eq!(view.detail_label, "Context usage details, estimating usage");
+    }
+
+    #[test]
+    fn meter_treats_zero_context_limit_as_unknown_even_when_not_estimating() {
+        let mut context = estimating_context();
+        context.current_tokens = 42;
+        context.estimating = false;
+
+        let view = context_meter_view_model(Some(&context), &ContextMeterMetrics::default());
+
+        assert_eq!(view.percent, None);
+        assert_eq!(view.current_label, "Estimating…");
+        assert_eq!(view.bar_percent, 0.0);
+        assert_eq!(view.detail_label, "Context usage details, estimating usage");
+    }
+
+    #[test]
+    fn meter_cache_hit_rounding_uses_wide_intermediates_at_u64_max() {
+        let metrics = metrics_with_usage(0, 0, u64::MAX, 0);
+
+        assert_eq!(metrics.billed_input_tokens, u64::MAX);
+        assert_eq!(metrics.cache_hit_percent, Some(100));
     }
 
     #[test]

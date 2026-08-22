@@ -114,10 +114,8 @@ impl SessionMetricsInfo {
     pub(crate) fn cache_hit_percent(&self) -> Option<u64> {
         let billed_input = self.billed_input_tokens();
         (billed_input > 0).then(|| {
-            self.cache_read_tokens
-                .saturating_mul(100)
-                .saturating_add(billed_input / 2)
-                / billed_input
+            (((self.cache_read_tokens as u128) * 100 + (billed_input as u128) / 2)
+                / billed_input as u128) as u64
         })
     }
 
@@ -3250,6 +3248,17 @@ mod tests {
     use threadlane_session::harness::{
         OperationIntent, OperationOutcome, ProviderOutcome, Record, SessionStore, TraceString,
     };
+
+    #[test]
+    fn cache_hit_rounding_uses_wide_intermediates_at_u64_max() {
+        let metrics = SessionMetricsInfo {
+            cache_read_tokens: u64::MAX,
+            ..SessionMetricsInfo::default()
+        };
+
+        assert_eq!(metrics.billed_input_tokens(), u64::MAX);
+        assert_eq!(metrics.cache_hit_percent(), Some(100));
+    }
 
     fn context_fixture_path() -> PathBuf {
         use threadlane_session::harness::{CompactionReason, Entry, SurfaceOperation, UsageCause};
