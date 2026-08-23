@@ -1,5 +1,5 @@
-use gpui::prelude::FluentBuilder;
 use gpui::InteractiveElement;
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
@@ -163,15 +163,14 @@ pub struct SidebarView {
 /// mutate messages, plans, and usage without touching any of these fields, so
 /// an unchanged hash lets the observer skip `cx.notify()` entirely. The minute
 /// bucket keeps relative timestamps fresh without firing every second.
-fn sidebar_fingerprint(state: &AppState) -> u64 {
+fn sidebar_fingerprint(state: &AppState, now: u64) -> u64 {
     use std::hash::{Hash, Hasher};
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     state.active_work_dir.hash(&mut hasher);
     state.active_session_id.hash(&mut hasher);
-    state.search_query.hash(&mut hasher);
-    state.is_generating.hash(&mut hasher);
-    (now_unix_secs() / 60).hash(&mut hasher);
+    state.search_query.trim().to_lowercase().hash(&mut hasher);
+    (now / 60).hash(&mut hasher);
     for project in &state.projects {
         project.name.hash(&mut hasher);
         project.work_dir.hash(&mut hasher);
@@ -182,6 +181,9 @@ fn sidebar_fingerprint(state: &AppState) -> u64 {
             session.session_file.hash(&mut hasher);
             session.updated_at.hash(&mut hasher);
             session.health.hash(&mut hasher);
+            state
+                .session_is_generating(&session.session_file)
+                .hash(&mut hasher);
         }
     }
     let mut git_work_dirs: Vec<&std::path::PathBuf> = state.git_statuses.keys().collect();
@@ -207,10 +209,10 @@ impl SidebarView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search tasks…"));
 
         let sub1 = cx.observe(&model, |this, model, cx| {
-            let fingerprint = sidebar_fingerprint(model.read(cx));
+            let fingerprint = sidebar_fingerprint(model.read(cx), now_unix_secs());
             if this.history_fingerprint != fingerprint {
                 this.history_fingerprint = fingerprint;
                 cx.notify();
@@ -232,7 +234,7 @@ impl SidebarView {
             },
         );
 
-        let history_fingerprint = sidebar_fingerprint(model.read(cx));
+        let history_fingerprint = sidebar_fingerprint(model.read(cx), now_unix_secs());
         Self {
             model,
             search_input,
@@ -1046,13 +1048,14 @@ impl SidebarView {
 
     fn render_history(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().colors;
+        let model = self.model.clone();
         let state = self.model.read(cx);
         let query = state.search_query.trim().to_lowercase();
         let active_work_dir = state.active_work_dir.clone();
         let active_session_id = state.active_session_id.clone();
         let now = now_unix_secs();
 
-        let fingerprint = sidebar_fingerprint(state);
+        let fingerprint = sidebar_fingerprint(state, now);
         self.history_fingerprint = fingerprint;
         let cache_matches = self
             .history_cache
@@ -1107,15 +1110,32 @@ impl SidebarView {
         if children.is_empty() {
             children.push(
                 div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_3()
                     .px_4()
                     .py_6()
                     .text_sm()
                     .text_color(theme.muted_foreground)
                     .child(if query.is_empty() {
-                        "No tasks yet. Start a new task above."
+                        "No tasks yet. Start your first task."
                     } else {
                         "No matching tasks."
                     })
+                    .children(query.is_empty().then(|| {
+                        Button::new("empty-history-new-task")
+                            .icon(IconName::Plus)
+                            .label("New Task")
+                            .ghost()
+                            .small()
+                            .on_click(move |_event, _window, cx| {
+                                model.update(cx, |state, cx| {
+                                    controller::dispatch(state, AppAction::BeginNewTask);
+                                    cx.notify();
+                                });
+                            })
+                    }))
                     .into_any_element(),
             );
         }

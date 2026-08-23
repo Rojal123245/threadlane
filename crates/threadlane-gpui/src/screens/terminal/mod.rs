@@ -990,8 +990,8 @@ mod tests {
 
     #[test]
     fn xterm_color_cube_uses_standard_channel_levels() {
-        assert_eq!(ansi_index_to_hsla(17), rgb_to_hsla(0, 0, 95));
-        assert_eq!(ansi_index_to_hsla(67), rgb_to_hsla(95, 135, 175));
+        assert_eq!(ansi_index_to_hsla(17, false), rgb_to_hsla(0, 0, 95));
+        assert_eq!(ansi_index_to_hsla(67, false), rgb_to_hsla(95, 135, 175));
     }
 
     #[test]

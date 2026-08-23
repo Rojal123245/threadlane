@@ -60,7 +60,7 @@ pub struct ToolActivityInfo {
     pub(crate) is_expanded: bool,
 }
 
-#[derive(Clone, Debug, Default, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct TrajectoryDiagnostics {
     pub(crate) status: Option<String>,
     pub(crate) duration_ms: Option<u64>,
@@ -79,7 +79,7 @@ pub struct TrajectoryDiagnostics {
     pub(crate) is_anomaly: bool,
 }
 
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct TrajectoryEntry {
     pub(crate) seq: Option<u64>,
     pub(crate) run_id: Option<String>,
@@ -256,6 +256,7 @@ pub struct AppState {
     trajectory_by_session: HashMap<SessionProjectionKey, Vec<TrajectoryEntry>>,
     subagents_by_session: HashMap<SessionProjectionKey, Vec<SubagentActivityInfo>>,
     trajectory_revision: u64,
+    diagnostics_revision: u64,
     diagnostics_by_session:
         HashMap<SessionProjectionKey, threadlane_session::harness::SessionDiagnostics>,
     session_metrics: HashMap<SessionProjectionKey, SessionMetricsInfo>,
@@ -939,6 +940,7 @@ impl AppState {
             trajectory_by_session: HashMap::new(),
             subagents_by_session: HashMap::new(),
             trajectory_revision: 0,
+            diagnostics_revision: 0,
             diagnostics_by_session: HashMap::new(),
             session_metrics: HashMap::new(),
             context_windows: HashMap::new(),
@@ -1560,6 +1562,7 @@ impl AppState {
         let key = Self::projection_key(session_id, session_file);
         self.diagnostics_by_session
             .insert(key.clone(), result.diagnostics);
+        self.diagnostics_revision = self.diagnostics_revision.wrapping_add(1);
         self.trajectory_by_session
             .insert(key.clone(), result.trajectory);
         self.subagents_by_session
@@ -2592,6 +2595,7 @@ impl AppState {
         self.trajectory_revision = self.trajectory_revision.wrapping_add(1);
         self.diagnostics_by_session
             .insert(key.clone(), result.diagnostics);
+        self.diagnostics_revision = self.diagnostics_revision.wrapping_add(1);
         self.session_metrics.insert(key.clone(), result.metrics);
         if let Some(context_window) = result.context_window {
             self.context_windows.insert(key.clone(), context_window);
@@ -3040,6 +3044,10 @@ impl AppState {
 
     pub(crate) fn trajectory_revision(&self) -> u64 {
         self.trajectory_revision
+    }
+
+    pub(crate) fn diagnostics_revision(&self) -> u64 {
+        self.diagnostics_revision
     }
 
     pub(crate) fn session_trajectory(&self, session_id: &str) -> &[TrajectoryEntry] {

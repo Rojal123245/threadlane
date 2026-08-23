@@ -318,6 +318,31 @@ fn format_trajectory_raw_json(entry: &TrajectoryEntry) -> String {
     serde_json::to_string_pretty(entry).unwrap_or_else(|_| entry.detail.clone())
 }
 
+fn reconcile_trajectory_entries(
+    mut cached: Vec<TrajectoryEntry>,
+    source: &[TrajectoryEntry],
+) -> Vec<TrajectoryEntry> {
+    if source.starts_with(&cached) {
+        cached.extend_from_slice(&source[cached.len()..]);
+        cached
+    } else {
+        source.to_vec()
+    }
+}
+
+fn contains_case_insensitive(haystack: &str, lowercase_query: &str) -> bool {
+    if lowercase_query.is_empty() {
+        return true;
+    }
+    if lowercase_query.is_ascii() && haystack.is_ascii() {
+        return haystack
+            .as_bytes()
+            .windows(lowercase_query.len())
+            .any(|window| window.eq_ignore_ascii_case(lowercase_query.as_bytes()));
+    }
+    haystack.to_lowercase().contains(lowercase_query)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TrajectoryCacheKey {
     revision: u64,
@@ -1403,7 +1428,14 @@ impl ChatListView {
     }
 
     fn render_trajectory(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let revision = self.model.read(cx).trajectory_revision();
+        let revision = match self.trajectory_mode {
+            TrajectoryMode::Execution | TrajectoryMode::Requests => {
+                self.model.read(cx).trajectory_revision()
+            }
+            TrajectoryMode::ModelContext
+            | TrajectoryMode::DurableEvents
+            | TrajectoryMode::Recovery => self.model.read(cx).diagnostics_revision(),
+        };
         let key = TrajectoryCacheKey {
             revision,
             mode: self.trajectory_mode,
@@ -1416,17 +1448,28 @@ impl ChatListView {
             .as_ref()
             .is_none_or(|cache| cache.key != key)
         {
+            let cached_entries = self
+                .trajectory_cache
+                .as_mut()
+                .map(|cache| std::mem::take(&mut cache.all_entries))
+                .unwrap_or_default();
             let all_entries = match self.trajectory_mode {
                 TrajectoryMode::Execution | TrajectoryMode::Requests => {
-                    self.model.read(cx).active_trajectory().to_vec()
+                    let state = self.model.read(cx);
+                    reconcile_trajectory_entries(cached_entries, state.active_trajectory())
                 }
                 TrajectoryMode::ModelContext => {
-                    self.model.read(cx).active_model_context_diagnostics()
+                    let source = self.model.read(cx).active_model_context_diagnostics();
+                    reconcile_trajectory_entries(cached_entries, &source)
                 }
                 TrajectoryMode::DurableEvents => {
-                    self.model.read(cx).active_durable_event_diagnostics()
+                    let source = self.model.read(cx).active_durable_event_diagnostics();
+                    reconcile_trajectory_entries(cached_entries, &source)
                 }
-                TrajectoryMode::Recovery => self.model.read(cx).active_recovery_diagnostics(),
+                TrajectoryMode::Recovery => {
+                    let source = self.model.read(cx).active_recovery_diagnostics();
+                    reconcile_trajectory_entries(cached_entries, &source)
+                }
             };
             let mut categories = all_entries
                 .iter()
@@ -1452,16 +1495,15 @@ impl ChatListView {
                             .lane
                             .as_ref()
                             .is_none_or(|lane| entry.lane.as_ref() == Some(lane))
-                        && (key.query.is_empty()
-                            || [
-                                entry.category.as_str(),
-                                entry.summary.as_str(),
-                                entry.detail.as_str(),
-                                entry.lane.as_deref().unwrap_or(""),
-                                entry.correlation_id.as_deref().unwrap_or(""),
-                            ]
-                            .iter()
-                            .any(|value| value.to_lowercase().contains(&key.query)))
+                        && [
+                            entry.category.as_str(),
+                            entry.summary.as_str(),
+                            entry.detail.as_str(),
+                            entry.lane.as_deref().unwrap_or(""),
+                            entry.correlation_id.as_deref().unwrap_or(""),
+                        ]
+                        .iter()
+                        .any(|value| contains_case_insensitive(value, &key.query))
                 })
                 .map(|(index, _)| index)
                 .collect::<Vec<_>>();
@@ -4272,13 +4314,27 @@ mod hot_path_tests {
         ChatLinkTarget, ContextMeterContext, ContextMeterMetrics, MarkdownUpdate,
         TrajectoryCacheKey, TrajectoryMode, TrajectoryRow, TranscriptRow, build_trajectory_rows,
         build_transcript_rows, classify_chat_link, classify_markdown_update,
-        context_meter_view_model, format_trajectory_raw_json, grouped_tool_activities,
-        summarize_trajectory,
+        contains_case_insensitive, context_meter_view_model, format_trajectory_raw_json,
+        grouped_tool_activities, reconcile_trajectory_entries, summarize_trajectory,
     };
     use crate::state::{
         ChatMessageInfo, MessageRole, ToolActivityInfo, TrajectoryDiagnostics, TrajectoryEntry,
         reported_session_shape_state,
     };
+
+    #[test]
+    fn trajectory_search_matches_ascii_without_case_sensitivity() {
+        assert!(contains_case_insensitive("Read File", "read"));
+        assert!(contains_case_insensitive("TOOL-CALL-42", "call-42"));
+        assert!(!contains_case_insensitive("Write File", "read"));
+    }
+
+    #[test]
+    fn trajectory_search_preserves_unicode_lowercase_matching() {
+        assert!(contains_case_insensitive("CAFÉ output", "café"));
+        assert!(contains_case_insensitive("Kelvin", "kelvin"));
+        assert!(!contains_case_insensitive("CAFÉ output", "résumé"));
+    }
 
     #[test]
     fn chat_link_classifies_web_urls_as_external() {
@@ -4593,6 +4649,25 @@ mod hot_path_tests {
             correlation_id: None,
             diagnostics: TrajectoryDiagnostics::default(),
         }
+    }
+
+    #[test]
+    fn trajectory_cache_reuses_entries_for_append_only_updates() {
+        let cached = vec![trajectory_entry("Input", Some(1), Some(1))];
+        let source = vec![
+            cached[0].clone(),
+            trajectory_entry("Tool", Some(1), Some(1)),
+        ];
+
+        assert_eq!(reconcile_trajectory_entries(cached, &source), source);
+    }
+
+    #[test]
+    fn trajectory_cache_replaces_entries_when_existing_data_changes() {
+        let cached = vec![trajectory_entry("Input", Some(1), Some(1))];
+        let source = vec![trajectory_entry("Assistant", Some(1), Some(1))];
+
+        assert_eq!(reconcile_trajectory_entries(cached, &source), source);
     }
 
     #[test]

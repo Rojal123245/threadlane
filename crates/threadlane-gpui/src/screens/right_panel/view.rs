@@ -1047,6 +1047,7 @@ impl RightPanelView {
                                         .small()
                                         .ghost()
                                         .icon(IconName::Close)
+                                        .tooltip("Close document")
                                         .on_click(cx.listener(|this, _event, _window, cx| {
                                             this.close_document(cx);
                                         })),
