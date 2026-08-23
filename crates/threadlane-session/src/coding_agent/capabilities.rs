@@ -1,12 +1,12 @@
 use super::broker::{
-    HostCapabilityHandler, ManagedProcessRegistry, MAX_BROKER_CONTINUATION_ROUNDS,
+    HostCapabilityHandler, MAX_BROKER_CONTINUATION_ROUNDS, ManagedProcessRegistry,
 };
 use super::cancellation::AgentRunTask;
 use super::scheduler::AgentWorkScheduler;
 use super::subagents::{AgentRunner, MAX_SUBAGENT_TASKS};
-use crate::agents::{discover_agents, AgentScope};
+use crate::agents::{AgentScope, discover_agents};
 use crate::extension_broker::{
-    BrokerError, CapabilityDispatcher, HostBrokerRequest, BROKER_API_VERSION,
+    BROKER_API_VERSION, BrokerError, CapabilityDispatcher, HostBrokerRequest,
 };
 use crate::permission::{PermissionHandle, PermissionManager};
 use crate::plan::{GeneratePlanToolExecutor, SessionPlanStore, UpdatePlanToolExecutor};
@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use threadlane_mcp::McpManager;
 use threadlane_protocol::ProviderPort;
-use threadlane_runtime::harness::{HookContext, HookEffect, HookHandler, HookKind};
 use threadlane_runtime::Capability;
+use threadlane_runtime::harness::{HookContext, HookEffect, HookHandler, HookKind};
 use threadlane_runtime::{
     AgentConfig, AgentEvent, AgentToolCall, AgentToolDefinition, ToolExecutor, TurnState,
 };
@@ -153,7 +153,7 @@ fn subagent_tool_definition() -> AgentToolDefinition {
     AgentToolDefinition {
         name: SUBAGENT_TOOL_NAME.to_string(),
         description: Some(
-            "Delegate one or more tasks to subagents in parallel or sequentially to complete work faster. Model can specify agent role, task prompt, custom instructions/system prompt, tool whitelist, and model override.".to_string(),
+            "Delegate one or more tasks to subagents in parallel or sequentially. Choose the role, task, instructions, and tools; project settings control child model and reasoning.".to_string(),
         ),
         parameters: serde_json::json!({
             "type": "object",
@@ -183,7 +183,7 @@ fn subagent_tool_definition() -> AgentToolDefinition {
                             },
                             "model": {
                                 "type": "string",
-                                "description": "Optional model override. Omit this field to inherit the parent session's active model (strongly recommended)."
+                                "description": "Deprecated compatibility field. Accepted but ignored; project settings select the child model, falling back to the parent session model."
                             }
                         },
                         "required": ["agent", "task"]
@@ -197,6 +197,22 @@ fn subagent_tool_definition() -> AgentToolDefinition {
             "required": ["tasks"]
         }),
         strict: None,
+    }
+}
+
+#[cfg(test)]
+mod subagent_definition_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_model_argument_is_explicitly_ignored() {
+        let definition = subagent_tool_definition();
+        let description = definition.parameters["properties"]["tasks"]["items"]["properties"]
+            ["model"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(description.contains("Accepted but ignored"));
+        assert!(description.contains("project settings"));
     }
 }
 

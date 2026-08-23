@@ -58,6 +58,7 @@ pub enum AgentEvent {
         lane: String,
         agent: String,
         task: String,
+        model: String,
     },
     SubagentUpdate {
         run_id: u64,

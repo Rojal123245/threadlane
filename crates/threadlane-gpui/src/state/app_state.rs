@@ -182,6 +182,7 @@ pub struct SubagentActivityInfo {
     pub(crate) lane: Option<String>,
     pub(crate) agent: String,
     pub(crate) task: String,
+    pub(crate) model: Option<String>,
     pub(crate) status: SubagentActivityStatus,
     pub(crate) messages: Vec<ChatMessageInfo>,
     pub(crate) error: Option<String>,
@@ -546,6 +547,7 @@ fn project_subagents_from_store(store: &impl SessionStore) -> Vec<SubagentActivi
         let mut run_id = String::new();
         let mut agent = lane.clone();
         let mut task = String::new();
+        let mut model = None;
         let mut status = SubagentActivityStatus::Running;
         let mut error = None;
         let mut messages = Vec::new();
@@ -570,6 +572,10 @@ fn project_subagents_from_store(store: &impl SessionStore) -> Vec<SubagentActivi
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or_default()
                         .to_owned();
+                    model = payload
+                        .get("model")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned);
                     error = payload
                         .get("error")
                         .and_then(serde_json::Value::as_str)
@@ -631,6 +637,7 @@ fn project_subagents_from_store(store: &impl SessionStore) -> Vec<SubagentActivi
             lane: Some(lane),
             agent,
             task,
+            model,
             status,
             messages: project_agent_messages(messages),
             error,
@@ -782,6 +789,9 @@ fn coding_agent_options(
     let (api_key, account_id) = provider_credentials(&model);
     let mut agent_config = threadlane_session::AgentConfig::default();
     agent_config.model_roles = model_roles;
+    let subagent_settings = crate::services::subagent_settings::load(&work_dir);
+    agent_config.subagent_model = subagent_settings.model;
+    agent_config.subagent_reasoning_effort = subagent_settings.reasoning_effort;
     agent_config.needle_enabled = crate::services::settings::load_needle_enabled();
 
     threadlane_session::CodingAgentOptions {
@@ -2614,6 +2624,7 @@ impl AppState {
                     lane: None,
                     agent: agent.clone(),
                     task: task.clone(),
+                    model: None,
                     status: SubagentActivityStatus::Queued,
                     messages: Vec::new(),
                     error: None,
@@ -2626,6 +2637,7 @@ impl AppState {
                 lane,
                 agent,
                 task,
+                model,
             } => {
                 let Some(subagents) = self.active_subagents_mut() else {
                     return;
@@ -2637,6 +2649,7 @@ impl AppState {
                     subagent.lane = Some(lane.clone());
                     subagent.agent = agent.clone();
                     subagent.task = task.clone();
+                    subagent.model = Some(model.clone());
                     subagent.status = SubagentActivityStatus::Running;
                 }
             }
@@ -5074,6 +5087,7 @@ mod tests {
             lane: "child-lane".into(),
             agent: "scout".into(),
             task: "inspect".into(),
+            model: "gpt-5.6-luna".into(),
         });
         state.record_subagent_activity(&AgentEvent::SubagentUpdate {
             run_id: 1,
@@ -5090,6 +5104,7 @@ mod tests {
         assert_eq!(subagent.status, SubagentActivityStatus::Running);
         assert_eq!(subagent.agent, "scout");
         assert_eq!(subagent.task, "inspect");
+        assert_eq!(subagent.model.as_deref(), Some("gpt-5.6-luna"));
         assert_eq!(subagent.messages[0].content, "live progress");
     }
 

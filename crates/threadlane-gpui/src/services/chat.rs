@@ -1,6 +1,6 @@
 use std::path::PathBuf;
-use std::sync::mpsc::Sender;
 use std::sync::Arc;
+use std::sync::mpsc::Sender;
 
 use threadlane_provider::ProviderClient;
 use threadlane_session::harness::{JsonlStore, SessionStore};

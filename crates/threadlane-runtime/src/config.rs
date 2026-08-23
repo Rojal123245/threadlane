@@ -3,7 +3,7 @@
 //! All tunable parameters for the agent execution loop, compaction, and
 //! stream rules live here rather than as scattered `const` items.
 
-use crate::types::ModelRoles;
+use crate::types::{ModelRoles, ReasoningEffort};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -50,6 +50,16 @@ pub struct AgentConfig {
     #[serde(default)]
     pub model_roles: ModelRoles,
 
+    /// Project-selected model for delegated subagents. `None` inherits the
+    /// active parent session model.
+    #[serde(default)]
+    pub subagent_model: Option<String>,
+
+    /// Project-selected reasoning effort for delegated subagents. `None`
+    /// inherits the active parent turn's reasoning effort.
+    #[serde(default)]
+    pub subagent_reasoning_effort: Option<ReasoningEffort>,
+
     // ── Tool Execution ──────────────────────────────────────────────────
     /// Enable local Needle tool routing when compiled with the `needle` feature.
     #[serde(default)]
@@ -84,6 +94,8 @@ impl Default for AgentConfig {
             stream_rule_max_window_bytes: 4096,
             default_system_prompt: "You are threadlane AI coding agent.".into(),
             model_roles: ModelRoles::default(),
+            subagent_model: None,
+            subagent_reasoning_effort: None,
             needle_enabled: false,
             tool_execution_timeout: None,
             max_tool_output_bytes: None,

@@ -1,11 +1,11 @@
-use super::cancellation::{recover_v2_subagent_records, AgentRunTask};
+use super::cancellation::{AgentRunTask, recover_v2_subagent_records};
 use super::capabilities::dispatch_hook_requests;
 use super::harness::{
     CodingSessionHarness, InterruptedSubagentRecoveryState, SubagentLaneIdentity,
 };
 use super::runtime::CodingAgent;
 use super::subagents::{
-    run_subagent_task, SubagentLaneStatus, SubagentRunContext, NEXT_SUBAGENT_UI_RUN_ID,
+    NEXT_SUBAGENT_UI_RUN_ID, SubagentLaneStatus, SubagentRunContext, run_subagent_task,
 };
 use crate::agents::AgentDefinition;
 use crate::commands::{execute_slash_command, parse_slash_command};
@@ -14,8 +14,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use threadlane_runtime::harness::{
     HookContext, HookKind, JsonlStore, OperationOutcome, PromptSnapshot, Record as HarnessRecord,
     Reducer, SessionStore,
@@ -855,6 +855,7 @@ impl CodingAgent {
                     "run_id": lane.run_id,
                     "agent": lane.agent,
                     "task": lane.task,
+                    "model": lane.model,
                     "status": status,
                     "error": lane.error,
                 }),
@@ -1176,7 +1177,11 @@ impl CodingAgent {
                 SubagentRunContext {
                     api_key: self.agent.api_key.clone(),
                     account_id: self.agent.account_id.clone(),
-                    parent_model: model,
+                    child_model: self.agent_config.subagent_model.clone().unwrap_or(model),
+                    child_reasoning_effort: self
+                        .agent_config
+                        .subagent_reasoning_effort
+                        .unwrap_or_else(|| self.agent.reasoning_effort()),
                     parent_session_id: self.session_id.clone(),
                     work_dir: self.work_dir.clone(),
                     extensions: self.wasi_extensions.clone(),

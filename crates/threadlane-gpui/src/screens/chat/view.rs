@@ -3062,6 +3062,16 @@ impl ChatListView {
                                         div().flex_none().text_xs().text_color(color).child(status),
                                     ),
                             )
+                            .children(item.model.as_ref().map(|model| {
+                                div()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(
+                                        crate::model_catalog::label_for(model)
+                                            .unwrap_or_else(|| model.clone()),
+                                    )
+                            }))
                             .child(
                                 div()
                                     .truncate()
@@ -3194,6 +3204,18 @@ impl ChatListView {
                                     .child(status),
                             ),
                     )
+                    .when_some(item.model.as_ref(), |header, model| {
+                        header.child(
+                            div()
+                                .text_xs()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.muted_foreground)
+                                .child(
+                                    crate::model_catalog::label_for(model)
+                                        .unwrap_or_else(|| model.clone()),
+                                ),
+                        )
+                    })
                     .when(!item.task.is_empty(), |header| {
                         header.child(
                             div()
@@ -3654,6 +3676,7 @@ impl ChatListView {
                     .child(
                         ProgressCircle::new("context-meter-circle")
                             .value(meter.bar_percent as f32)
+                            .loading(is_generating && meter.bar_percent == 0.0)
                             .color(meter_color)
                             .size(px(24.0)),
                     )

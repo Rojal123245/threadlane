@@ -56,6 +56,7 @@ pub(crate) struct CompletedSubagentLane {
     pub(crate) run_id: String,
     pub(crate) task: String,
     pub(crate) agent: String,
+    pub(crate) model: String,
     pub(crate) status: SubagentLaneStatus,
     pub(crate) messages: Vec<AgentMessage>,
     pub(crate) error: Option<String>,
@@ -65,7 +66,8 @@ pub(crate) struct CompletedSubagentLane {
 pub(crate) struct SubagentRunContext {
     pub(crate) api_key: String,
     pub(crate) account_id: Option<String>,
-    pub(crate) parent_model: String,
+    pub(crate) child_model: String,
+    pub(crate) child_reasoning_effort: threadlane_runtime::ReasoningEffort,
     pub(crate) parent_session_id: String,
     pub(crate) work_dir: PathBuf,
     pub(crate) extensions: Arc<WasiExtensionManager>,
@@ -385,7 +387,7 @@ pub(crate) async fn run_subagents_with_context(
                     name: task.agent.clone(),
                     description: format!("Dynamic subagent for {}", task.agent),
                     tools: task.tools.clone(),
-                    model: task.model.clone(),
+                    model: None,
                     system_prompt: sys_prompt,
                     source: crate::agents::AgentSource::Project,
                     file_path: context.work_dir.clone(),
@@ -397,9 +399,6 @@ pub(crate) async fn run_subagents_with_context(
         }
         if let Some(t) = &task.tools {
             config.tools = Some(t.clone());
-        }
-        if let Some(m) = &task.model {
-            config.model = Some(m.clone());
         }
 
         let context = context.clone();
@@ -455,6 +454,7 @@ pub(crate) async fn run_subagents_with_context(
                     ))
                 }
             };
+            let resolved_model = context.child_model.clone();
             let result = match start {
                 Ok((identity, accepted)) => {
                     let _ = event_tx.send(AgentEvent::SubagentStarted {
@@ -464,6 +464,7 @@ pub(crate) async fn run_subagents_with_context(
                         lane: identity.lane_name.clone(),
                         agent: lane_agent.clone(),
                         task: lane_task.clone(),
+                        model: resolved_model.clone(),
                     });
                     #[cfg(test)]
                     if let Some(observer) = context.child_work_observer.as_ref() {
@@ -519,6 +520,7 @@ pub(crate) async fn run_subagents_with_context(
                 run_id: identity.run_id,
                 task: lane_task,
                 agent: lane_agent,
+                model: resolved_model,
                 status: if succeeded {
                     SubagentLaneStatus::Completed
                 } else {
@@ -580,10 +582,7 @@ pub(crate) async fn run_subagent_task(
     accepted: Option<AcceptedRun>,
     resume_messages: Vec<AgentMessage>,
 ) -> Result<SubagentResult, String> {
-    let model = config
-        .model
-        .clone()
-        .unwrap_or_else(|| context.parent_model.clone());
+    let model = context.child_model.clone();
     let lane_name = identity.lane_name.clone();
     let journal_run_id = identity.run_id.clone();
     let subagent_session = context
@@ -602,6 +601,9 @@ pub(crate) async fn run_subagent_task(
         )),
     )
     .unwrap();
+    agent
+        .set_reasoning_effort(context.child_reasoning_effort)
+        .await;
 
     if let Some(tools) = config.tools.clone() {
         agent.set_allowed_tool_names(Some(tools.into_iter().collect()));
@@ -832,22 +834,6 @@ You are an isolated subagent working in {}. Complete only the assigned task and 
             error = Some(message);
         }
     }
-    if error.is_some() && config.model.is_some() && model != context.parent_model {
-        let mut fallback_config = config.clone();
-        fallback_config.model = None;
-        return Box::pin(run_subagent_task(
-            fallback_config,
-            task,
-            context,
-            run_id,
-            task_index,
-            identity,
-            accepted,
-            resume_messages,
-        ))
-        .await;
-    }
-
     let state = agent.get_state().await;
     let output = state
         .messages
@@ -941,6 +927,7 @@ mod result_tests {
             run_id: format!("run-{agent}"),
             task: format!("{agent} task"),
             agent: agent.into(),
+            model: "test-model".into(),
             status,
             messages: Vec::new(),
             error: None,

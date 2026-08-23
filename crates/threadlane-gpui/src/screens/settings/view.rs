@@ -6,6 +6,7 @@ use gpui::*;
 use gpui_component::alert::{Alert, AlertVariant};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::switch::Switch;
 use gpui_component::tag::{Tag, TagVariant};
@@ -28,6 +29,7 @@ enum SettingsPage {
     Appearance,
     Keybindings,
     Providers,
+    Subagents,
     Skills,
     Extensions,
     AcpAgents,
@@ -157,43 +159,45 @@ impl SettingsView {
 
         let (auth_tx, auth_rx) = mpsc::channel();
         let auth_model = model.clone();
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(100))
-                .await;
-            let events = auth_rx.try_iter().collect::<Vec<_>>();
-            if events.is_empty() {
-                continue;
-            }
-            let _ = this.update(cx, |this, cx| {
-                for event in events {
-                    let credentials_changed = matches!(event, ProviderAuthEvent::Connected(_));
-                    this.auth_message = Some(match event {
-                        ProviderAuthEvent::Status(message) => {
-                            AuthStatusMessage::new(message, AuthStatusKind::Info)
-                        }
-                        ProviderAuthEvent::Connected(message) => {
-                            AuthStatusMessage::new(message, AuthStatusKind::Success)
-                        }
-                        ProviderAuthEvent::Error(message) => {
-                            AuthStatusMessage::new(message, AuthStatusKind::Error)
-                        }
-                    });
-                    if credentials_changed {
-                        auth_model.update(cx, |state, cx| {
-                            state.reconcile_selected_model();
-                            cx.notify();
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                let events = auth_rx.try_iter().collect::<Vec<_>>();
+                if events.is_empty() {
+                    continue;
+                }
+                let _ = this.update(cx, |this, cx| {
+                    for event in events {
+                        let credentials_changed = matches!(event, ProviderAuthEvent::Connected(_));
+                        this.auth_message = Some(match event {
+                            ProviderAuthEvent::Status(message) => {
+                                AuthStatusMessage::new(message, AuthStatusKind::Info)
+                            }
+                            ProviderAuthEvent::Connected(message) => {
+                                AuthStatusMessage::new(message, AuthStatusKind::Success)
+                            }
+                            ProviderAuthEvent::Error(message) => {
+                                AuthStatusMessage::new(message, AuthStatusKind::Error)
+                            }
                         });
+                        if credentials_changed {
+                            auth_model.update(cx, |state, cx| {
+                                state.reconcile_selected_model();
+                                cx.notify();
+                            });
+                        }
                     }
-                }
-                if this.page == SettingsPage::Providers {
-                    // Auth flows report completion through this pump; keep the
-                    // Providers page snapshot current without re-reading
-                    // credentials on unrelated frames.
-                    this.refresh_providers_snapshot();
-                }
-                cx.notify();
-            });
+                    if this.page == SettingsPage::Providers {
+                        // Auth flows report completion through this pump; keep the
+                        // Providers page snapshot current without re-reading
+                        // credentials on unrelated frames.
+                        this.refresh_providers_snapshot();
+                    }
+                    cx.notify();
+                });
+            }
         })
         .detach();
 
@@ -242,22 +246,24 @@ impl SettingsView {
                 }
             },
         );
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(100))
-                .await;
-            let events = settings_rx.try_iter().collect::<Vec<_>>();
-            if events.is_empty() {
-                continue;
-            }
-            let _ = this.update(cx, |this, cx| {
-                for event in events {
-                    match event {
-                        SettingsEvent::AcpRefreshed(records) => this.acp_rows = records,
-                    }
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                let events = settings_rx.try_iter().collect::<Vec<_>>();
+                if events.is_empty() {
+                    continue;
                 }
-                cx.notify();
-            });
+                let _ = this.update(cx, |this, cx| {
+                    for event in events {
+                        match event {
+                            SettingsEvent::AcpRefreshed(records) => this.acp_rows = records,
+                        }
+                    }
+                    cx.notify();
+                });
+            }
         })
         .detach();
 
@@ -437,6 +443,27 @@ impl SettingsView {
                             })),
                     )
                     .child(
+                        Button::new("settings-subagents")
+                            .child(
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_start()
+                                    .gap_2()
+                                    .child(IconName::Bot)
+                                    .child("Subagents"),
+                            )
+                            .ghost()
+                            .selected(self.page == SettingsPage::Subagents)
+                            .w_full()
+                            .justify_start()
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.page = SettingsPage::Subagents;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
                         Button::new("settings-skills")
                             .child(
                                 div()
@@ -531,6 +558,155 @@ impl SettingsView {
                         }),
                 ),
             )
+    }
+
+    fn render_subagents(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().colors;
+        let state = self.model.read(cx);
+        let Some(project) = state.active_work_dir.clone() else {
+            return Self::empty_state("Attach a project to configure subagents.", theme);
+        };
+        let preferences = crate::services::subagent_settings::load(&project);
+        let selected_model = preferences.model.clone();
+        let selected_reasoning = preferences.reasoning_effort;
+        let model_label = selected_model
+            .as_deref()
+            .and_then(crate::model_catalog::label_for)
+            .unwrap_or_else(|| "Same as parent".into());
+        let reasoning_label = selected_reasoning
+            .map(|effort| effort.label())
+            .unwrap_or("Same as parent");
+        let available = crate::model_catalog::available_models_for_project(Some(&project));
+        let model_entity = self.model.clone();
+        let project_for_models = project.clone();
+        let model_picker = Button::new("subagent-model-picker")
+            .label(model_label)
+            .dropdown_caret(true)
+            .dropdown_menu(move |menu, _, _| {
+                let model_entity_for_parent = model_entity.clone();
+                let project_for_parent = project_for_models.clone();
+                available.iter().cloned().fold(
+                    menu.item(
+                        PopupMenuItem::new("Same as parent").on_click(move |_, _, cx| {
+                            let mut settings =
+                                crate::services::subagent_settings::load(&project_for_parent);
+                            settings.model = None;
+                            if crate::services::subagent_settings::save(
+                                &project_for_parent,
+                                &settings,
+                            )
+                            .is_ok()
+                            {
+                                model_entity_for_parent.update(cx, |state, cx| {
+                                    state.invalidate_capability_runtimes();
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                    ),
+                    |menu, option| {
+                        let model_entity = model_entity.clone();
+                        let project = project_for_models.clone();
+                        menu.item(
+                            PopupMenuItem::new(option.label)
+                                .icon(Icon::default().path(option.provider.icon_path()))
+                                .on_click(move |_, _, cx| {
+                                    let mut settings =
+                                        crate::services::subagent_settings::load(&project);
+                                    settings.model = Some(option.id.clone());
+                                    if crate::services::subagent_settings::save(&project, &settings)
+                                        .is_ok()
+                                    {
+                                        model_entity.update(cx, |state, cx| {
+                                            state.invalidate_capability_runtimes();
+                                            cx.notify();
+                                        });
+                                    }
+                                }),
+                        )
+                    },
+                )
+            });
+        let reasoning_entity = self.model.clone();
+        let project_for_reasoning = project.clone();
+        let reasoning_picker = Button::new("subagent-reasoning-picker")
+            .label(reasoning_label)
+            .dropdown_caret(true)
+            .dropdown_menu(move |menu, _, _| {
+                let entity = reasoning_entity.clone();
+                let project = project_for_reasoning.clone();
+                [
+                    None,
+                    Some(threadlane_runtime::ReasoningEffort::Minimal),
+                    Some(threadlane_runtime::ReasoningEffort::Low),
+                    Some(threadlane_runtime::ReasoningEffort::Medium),
+                    Some(threadlane_runtime::ReasoningEffort::High),
+                ]
+                .into_iter()
+                .fold(menu, |menu, effort| {
+                    let entity = entity.clone();
+                    let project = project.clone();
+                    menu.item(
+                        PopupMenuItem::new(
+                            effort
+                                .map(|value| value.label())
+                                .unwrap_or("Same as parent"),
+                        )
+                        .on_click(move |_, _, cx| {
+                            let mut settings = crate::services::subagent_settings::load(&project);
+                            settings.reasoning_effort = effort;
+                            if crate::services::subagent_settings::save(&project, &settings).is_ok()
+                            {
+                                entity.update(cx, |state, cx| {
+                                    state.invalidate_capability_runtimes();
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                    )
+                })
+            });
+        let row = |title: &'static str, description: &'static str, control: AnyElement| {
+            div()
+                .rounded_xl()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.title_bar)
+                .p_4()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_4()
+                .child(
+                    div()
+                        .flex_1()
+                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))
+                        .child(
+                            div()
+                                .mt_1()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(description),
+                        ),
+                )
+                .child(control)
+        };
+        div()
+            .mt_5()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(row(
+                "Model",
+                "Default model for every delegated child.",
+                model_picker.into_any_element(),
+            ))
+            .child(row(
+                "Reasoning effort",
+                "Default reasoning effort for every delegated child.",
+                reasoning_picker.into_any_element(),
+            ))
+            .into_any_element()
     }
 
     fn render_general(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -2586,6 +2762,11 @@ impl Render for SettingsView {
                 "Models & Providers",
                 "Configure model providers, cloud authentication, and API credentials.",
                 self.render_providers(cx),
+            ),
+            SettingsPage::Subagents => (
+                "Subagents",
+                "Choose project defaults for delegated child model and reasoning.",
+                self.render_subagents(cx),
             ),
             SettingsPage::Skills => (
                 "Skills Catalog",
